@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+# Ignorar arquivos temporários
+*.tmp*
+.DS_Store
+Thumbs.db
+repomix-*.xml
+*.bak
+*.swp
+*.log
+
+# Defesa em profundidade: impede commit de metadados .git/ aninhados em qualquer subdiretório
+# (ex.: se /github.com/ for futuramente unignorado por engano, .git/ aninhados não serão stagedos).
+**/.git/
+
+# Ignorar artefatos do Rust
+#Cargo.lock
+/target
+
+# Ignorar diretório de scratch (artefatos de debug/protótipos temporários)
+scratch/
+scratch
+scratch.rs
+
+# Binários e scripts de debug compilados ad-hoc na raiz
+/test_*
+!/tests/
+
+# Proptest regression files (gerados automaticamente)
+*.proptest-regressions
+
+# Fuzzing (cargo-fuzz)
+# Mantemos apenas os targets e a configuração. Ignoramos o corpus evoluído e artefatos de crash.
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/Cargo.lock
+
+# Artefatos do cargo-mutants
+.mutants/
+.out/
+mutants.out.old/
+
+# Build artifacts do render tool C++
+/build/
+
+# Artefatos de bytecode Python (scripts de fixtures/utilitários)
+__pycache__/
+*.pyc
+
+# Artefatos de ferramentas locais de IDE:
+/.kilo/

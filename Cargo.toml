@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+[package]
+name = "nam-plug"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/fabiohl/NAM-Plug"
+description = "NAM CLAP plugin — high-performance Neural Amp Modeler (NAM) inference in CLAP (CLever Audio Plug-in) format."
+readme = "README.md"
+authors = ["Fábio Henrique de Lima Silva <fhl.bsb@gmail.com>"]
+keywords = ["audio", "dsp", "nam", "neural-amp-modeler", "clap", "plugin"]
+categories = ["multimedia::audio", "multimedia"]
+
+[dependencies]
+NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs", default-features = false, features = [
+    "stereo",
+] }
+clack-common = "0.1"
+clack-plugin = "0.1"
+clack-extensions = { version = "0.1", features = [
+    "audio-ports",
+    "audio-ports-activation",
+    "clack-plugin",
+    "gui",
+    "latency",
+    "log",
+    "params",
+    "state",
+    "raw-window-handle_05",
+    "thread-check",
+    "track-info",
+    "remote-controls",
+    "param-indication",
+    "clack-host",
+    "preset-discovery",
+    "render",
+    "state-context",
+    "tail",
+] }
+egui = "0.34.3"
+egui_glow = "0.34.3"
+glow = "0.17.0"
+baseview = { version = "0.1.4", features = ["opengl"] }
+rfd = "0.17.2"
+keyboard-types = { version = "0.6", default-features = false }
+clack-host = { version = "0.1", features = ["clack-plugin"] }
+arboard = "3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+anyhow = "1.0"
+thiserror = "2.0"
+rtrb = "0.3"
+libc = "0.2"
+sha2 = "0.10"
+
+[dev-dependencies]
+NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs", features = [
+    "testing",
+] }
+nam-plug = { path = ".", features = ["testing"] }
+clack-host = { version = "0.1", features = ["clack-plugin"] }
+clap-sys = "0.5"
+criterion = { version = "0.8", default-features = false }
+proptest = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bench]]
+name = "clap_bench"
+harness = false
+
+[[bin]]
+name = "pgo_profiling_workload"
+path = "src/bin/pgo_profiling_workload.rs"
+required-features = ["testing"]
+
+[features]
+default = ["stereo"]
+testing = ["NeuralAmpModeler-rs/testing"]
+stereo = ["NeuralAmpModeler-rs/stereo"]
+heap-audit = []
+
+[lib]
+name = "nam_plug"
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+strip = true
+lto = "fat"
+opt-level = 3
+codegen-units = 1
+panic = "unwind"
+
+[profile.dist]
+inherits = "release"
+panic = "abort"
+
+[profile.dev]
+debug = 1
+opt-level = 0
+incremental = true
+split-debuginfo = "unpacked"
+
+[lints.clippy]
+allow_attributes = "warn"
+
+[package.metadata.docs.rs]
+features = ["testing"]
+rustdoc-args = ["--cfg", "docsrs"]
