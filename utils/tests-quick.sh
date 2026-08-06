@@ -45,8 +45,38 @@ echo -e "${BLUE}${BOLD}========================================${NC}"
 echo -e "${BLUE}${BOLD}        NAM-Plug Quick QA Suite         ${NC}"
 echo -e "${BLUE}${BOLD}========================================${NC}"
 
+# Helper: Ensure required CLAP plugin shared library artifact exists before testing
+ensure_clap_artifact() {
+    local profile="${1:-debug}"
+    local flag=""
+    if [ "$profile" = "release" ]; then
+        flag="--release"
+    fi
+
+    if [ -n "${CLAP_PLUGIN_PATH:-}" ] && [ -f "$CLAP_PLUGIN_PATH" ]; then
+        return 0
+    fi
+
+    local target_dir="${CARGO_TARGET_DIR:-target}"
+    local debug_path="$target_dir/debug/libnam_plug.so"
+    local release_path="$target_dir/release/libnam_plug.so"
+
+    if [ "$profile" = "debug" ]; then
+        if [ ! -f "$debug_path" ] && [ ! -f "$release_path" ]; then
+            echo -e "${YELLOW}ⓘ CLAP plugin artifact not found. Pre-building debug artifact...${NC}"
+            cargo build
+        fi
+    elif [ "$profile" = "release" ]; then
+        if [ ! -f "$release_path" ]; then
+            echo -e "${YELLOW}ⓘ CLAP plugin release artifact not found. Pre-building release artifact...${NC}"
+            cargo build --release
+        fi
+    fi
+}
+
 # ── Phase 1: Structural unit & integration tests (debug) ─────────────────────
 phase "Structural: unit & integration tests (debug)..."
+ensure_clap_artifact debug
 cargo test --features testing --lib \
     --test clap \
     --test clap_e2_proptest \
@@ -55,6 +85,7 @@ cargo test --features testing --lib \
 
 # ── Phase 2: Release verification (release) ─────────────────────────────────
 phase "Release verification: unit & integration tests (release)..."
+ensure_clap_artifact release
 cargo test --features testing --lib \
     --test clap \
     --test clap_e2_proptest \
