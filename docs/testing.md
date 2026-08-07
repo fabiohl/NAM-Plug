@@ -120,9 +120,6 @@ All test and benchmark execution commands **must be executed inside `./NAM-Plug/
 
 # 2. Agile first line of defense QA suite (cargo test in debug & release)
 ./utils/tests-quick.sh
-
-# 3. TDD RED suite for regression containment (clap_e0_containment_test)
-./utils/tests-red.sh
 ```
 
 ### 5.2 Direct Cargo Commands

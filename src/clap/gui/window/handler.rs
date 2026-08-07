@@ -88,8 +88,8 @@ impl WindowHandler for NamPluginWindow {
             let hold_l_before = self.state.peak_l_hold;
             let hold_r_before = self.state.peak_r_hold;
 
-            let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| {
+            let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     crate::clap::gui::ui::draw_ui(ui, shared, &self.host, &mut self.state);
                 });
             });
@@ -153,11 +153,13 @@ impl WindowHandler for NamPluginWindow {
                     screen_size,
                     full_output.pixels_per_point,
                     &clipped_primitives,
-                    &full_output.textures_delta,
+                    &mut full_output.textures_delta,
                 );
 
                 gl_ctx.swap_buffers();
                 self.last_paint_time = std::time::Instant::now();
+            } else {
+                full_output.textures_delta.clear();
             }
 
             self.dirty = false;
@@ -204,11 +206,7 @@ impl WindowHandler for NamPluginWindow {
             }
             Event::Mouse(mouse_event) => {
                 match mouse_event {
-                    MouseEvent::CursorMoved {
-                        position,
-                        modifiers,
-                    } => {
-                        self.raw_input.modifiers = map_modifiers(modifiers);
+                    MouseEvent::CursorMoved { position, .. } => {
                         let egui_pos = egui::pos2(position.x as f32, position.y as f32);
                         self.last_mouse_pos = egui_pos;
                         self.raw_input
@@ -216,7 +214,6 @@ impl WindowHandler for NamPluginWindow {
                             .push(egui::Event::PointerMoved(egui_pos));
                     }
                     MouseEvent::ButtonPressed { button, modifiers } => {
-                        self.raw_input.modifiers = map_modifiers(modifiers);
                         if let Some(egui_button) = map_mouse_button(button) {
                             self.raw_input.events.push(egui::Event::PointerButton {
                                 pos: self.last_mouse_pos,
@@ -227,7 +224,6 @@ impl WindowHandler for NamPluginWindow {
                         }
                     }
                     MouseEvent::ButtonReleased { button, modifiers } => {
-                        self.raw_input.modifiers = map_modifiers(modifiers);
                         if let Some(egui_button) = map_mouse_button(button) {
                             self.raw_input.events.push(egui::Event::PointerButton {
                                 pos: self.last_mouse_pos,
@@ -238,7 +234,6 @@ impl WindowHandler for NamPluginWindow {
                         }
                     }
                     MouseEvent::WheelScrolled { delta, modifiers } => {
-                        self.raw_input.modifiers = map_modifiers(modifiers);
                         let (unit, delta_vec) = match delta {
                             ScrollDelta::Lines { x, y } => (
                                 egui::MouseWheelUnit::Line,

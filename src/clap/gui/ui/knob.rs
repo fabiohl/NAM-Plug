@@ -60,7 +60,7 @@ pub fn knob_widget(
             sum_y
         });
         if scroll_y != 0.0 {
-            let ctrl_held = ui.input(|i| i.modifiers.ctrl);
+            let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
             let sensitivity = if ctrl_held {
                 range_len / 10000.0
             } else {
@@ -74,12 +74,22 @@ pub fn knob_widget(
     if response.has_focus() {
         let mut step = 0.0;
         ui.input(|i| {
-            let ctrl_held = i.modifiers.ctrl;
-            let step_size = if ctrl_held { 0.1 } else { 1.0 };
-            if i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::ArrowRight) {
-                step = step_size;
-            } else if i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::ArrowLeft) {
-                step = -step_size;
+            for event in &i.events {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                {
+                    let ctrl_held = modifiers.ctrl || modifiers.command;
+                    let step_size = if ctrl_held { 0.1 } else { 1.0 };
+                    if *key == egui::Key::ArrowUp || *key == egui::Key::ArrowRight {
+                        step = step_size;
+                    } else if *key == egui::Key::ArrowDown || *key == egui::Key::ArrowLeft {
+                        step = -step_size;
+                    }
+                }
             }
         });
         if step != 0.0 {

@@ -37,6 +37,11 @@ fn make_dummy_host() -> HostSharedHandle<'static> {
     unsafe { HostSharedHandle::from_raw(std::ptr::NonNull::from(&DUMMY_CLAP_HOST.0)) }
 }
 
+fn run_test_ui(ctx: &egui::Context, raw_input: egui::RawInput, run: impl FnMut(&mut egui::Ui)) {
+    let mut output = ctx.run_ui(raw_input, run);
+    output.textures_delta.clear();
+}
+
 #[test]
 fn test_track_color_conversion_and_fallback() {
     // 1. Fallback (alpha == 0)
@@ -135,8 +140,8 @@ fn test_ui_load_error_visual_feedback() {
     let ctx = egui::Context::default();
     let host = make_dummy_host();
 
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             draw_ui(ui, &shared, &host, &mut state);
         });
     });
@@ -150,8 +155,8 @@ fn test_ui_load_error_visual_feedback() {
 
     // 3. If we set error_expiration to the past, the next draw_ui should reset/clear it.
     state.error_expiration = Some(Instant::now() - Duration::from_secs(1));
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             draw_ui(ui, &shared, &host, &mut state);
         });
     });
@@ -162,8 +167,8 @@ fn test_ui_load_error_visual_feedback() {
 #[test]
 fn test_knob_tooltip_suffixes() {
     let ctx = egui::Context::default();
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let value = 0.0;
             let range = -10.0..=10.0;
             let size = egui::vec2(50.0, 50.0);
@@ -266,8 +271,8 @@ fn test_knob_keyboard_navigation() {
     let accent_color = egui::Color32::GREEN;
 
     // Frame 1: Render and request focus
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let (_, val) = knob_widget(
                 ui,
                 id,
@@ -294,8 +299,8 @@ fn test_knob_keyboard_navigation() {
         modifiers: egui::Modifiers::default(),
         repeat: false,
     });
-    let _ = ctx.run_ui(input_up, |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, input_up, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let (_, val) = knob_widget(
                 ui,
                 id,
@@ -309,25 +314,26 @@ fn test_knob_keyboard_navigation() {
                 " dB",
             );
             state = val;
+            ui.memory_mut(|mem| mem.request_focus(id));
         });
     });
     assert_eq!(state, 1.0);
 
     // Frame 3: Ctrl + ArrowDown should decrement value by 0.1
     let mut input_down_ctrl = egui::RawInput::default();
-    input_down_ctrl.modifiers.ctrl = true;
     input_down_ctrl.events.push(egui::Event::Key {
         key: egui::Key::ArrowDown,
         physical_key: None,
         pressed: true,
         modifiers: egui::Modifiers {
             ctrl: true,
+            command: true,
             ..Default::default()
         },
         repeat: false,
     });
-    let _ = ctx.run_ui(input_down_ctrl, |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, input_down_ctrl, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let (_, val) = knob_widget(
                 ui,
                 id,
@@ -363,8 +369,8 @@ fn test_bypass_keyboard_trigger() {
     let offset = BYPASS_INDEX as u32 * BITS_PER_PARAM;
 
     // Frame 1: Render and request focus
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             handle_bypass(
                 ui,
                 id,
@@ -390,8 +396,8 @@ fn test_bypass_keyboard_trigger() {
         modifiers: egui::Modifiers::default(),
         repeat: false,
     });
-    let _ = ctx.run_ui(input_space, |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, input_space, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             handle_bypass(
                 ui,
                 id,
@@ -423,8 +429,8 @@ fn test_tab_order_navigation() {
     let host = make_dummy_host();
 
     // Frame 1: Initial render, no focus
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             draw_ui(ui, &shared, &host, &mut state);
         });
     });
@@ -439,8 +445,8 @@ fn test_tab_order_navigation() {
         modifiers: egui::Modifiers::default(),
         repeat: false,
     });
-    let _ = ctx.run_ui(tab_input, |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, tab_input, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             draw_ui(ui, &shared, &host, &mut state);
         });
     });
@@ -456,8 +462,8 @@ fn test_tab_order_navigation() {
         modifiers: egui::Modifiers::default(),
         repeat: false,
     });
-    let _ = ctx.run_ui(tab_input2, |ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    run_test_ui(&ctx, tab_input2, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             draw_ui(ui, &shared, &host, &mut state);
         });
     });

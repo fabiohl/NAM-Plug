@@ -165,7 +165,8 @@ fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    Ok(format!("{:x}", hasher.finalize()))
+    let hash = hasher.finalize();
+    Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Returns canonical search directories for portable model/IR lookup (S6-E6-T02).

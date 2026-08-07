@@ -7,7 +7,6 @@
 # Division of responsibility among QA scripts:
 #   * utils/lints.sh       — Static quality gate (fmt, SPDX, cargo check, clippy).
 #   * utils/tests-quick.sh — THIS script. Agile green test suite (cargo test).
-#   * utils/tests-red.sh   — TDD RED suite for known bug containment (clap_e0_containment_test).
 #
 # NAM-Plug is a CLAP plugin crate with unit tests in src/ and integration tests in tests/.
 #
@@ -79,6 +78,7 @@ phase "Structural: unit & integration tests (debug)..."
 ensure_clap_artifact debug
 cargo test --features testing --lib \
     --test clap \
+    --test clap_e0_containment_test \
     --test clap_e2_proptest \
     --test processor_bypass_test \
     -- --skip ignored
@@ -88,6 +88,7 @@ phase "Release verification: unit & integration tests (release)..."
 ensure_clap_artifact release
 cargo test --features testing --lib \
     --test clap \
+    --test clap_e0_containment_test \
     --test clap_e2_proptest \
     --test processor_bypass_test \
     --release -- --nocapture

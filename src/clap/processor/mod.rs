@@ -263,11 +263,13 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     )
                 };
 
-                // CabSimAdapter: rebuild if buffer size OR sample rate changed.
+                // CabSimAdapter: rebuild if buffer size OR sample rate changed, or if not yet built.
                 // Rate changes require resampling ir_raw_samples to the new host rate.
                 let cabsim_adapter =
-                    if deact.cabsim_adapter.is_some() && (!buf_matches || !rate_matches) {
-                        #[cfg(test)]
+                    if deact.cabsim_adapter.is_some() && buf_matches && rate_matches {
+                        deact.cabsim_adapter
+                    } else {
+                        #[cfg(any(test, feature = "testing"))]
                         {
                             build_cab_sim_from_raw_samples(
                                 shared,
@@ -275,12 +277,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                                 host_rate,
                             )?
                         }
-                        #[cfg(not(test))]
+                        #[cfg(not(any(test, feature = "testing")))]
                         {
                             None
                         }
-                    } else {
-                        deact.cabsim_adapter
                     };
 
                 // Oversample engines: reuse only if the factor hasn't changed
@@ -329,7 +329,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     })?,
                 );
 
-                #[cfg(test)]
+                #[cfg(any(test, feature = "testing"))]
                 let cabsim_adapter = {
                     build_cab_sim_from_raw_samples(
                         shared,
@@ -337,7 +337,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         host_rate,
                     )?
                 };
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "testing")))]
                 let cabsim_adapter = None;
 
                 let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
@@ -403,7 +403,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // 5. Report initial latency to shared state
             let mut initial_latency = resampler.latency_samples(audio_config.sample_rate as u32);
             initial_latency += os_l.latency_samples() as u32;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             {
                 if let Some(ref adapter) = cabsim_adapter {
                     initial_latency += adapter.latency_samples() as u32;
@@ -577,12 +577,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
             // S5-E5-T01: Per-instance activation precision via TLS.
             // Activation updates within process() (host events, SPSC, GUI sync, offline↔realtime)
-            // call set_activation_tls() to reflect the new value. The scope guard clears TLS on
-            // return so the next invocation re-arms from self.params.activation_precision.
-            let _activation_guard =
-                neural_amp_modeler_rs::math::activations::set_thread_local_activation_precision(
-                    Some(self.params.activation_precision),
-                );
+            // call set_activation_tls() to reflect the new value.
+            neural_amp_modeler_rs::math::activations::set_activation_tls(
+                self.params.activation_precision,
+            );
 
             let should_measure = self.cycles_since_telemetry & 0xF == 0;
             self.cycles_since_telemetry = self.cycles_since_telemetry.wrapping_add(1);
@@ -659,7 +657,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 fn build_cab_sim_from_raw_samples(
     shared: &NamClapShared,
     partition_size: usize,

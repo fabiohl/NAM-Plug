@@ -86,7 +86,8 @@ impl<'a> NamClapMainThread<'a> {
             Ok(bytes) => {
                 let mut hasher = Sha256::new();
                 hasher.update(&bytes);
-                Some(format!("{:x}", hasher.finalize()))
+                let hash = hasher.finalize();
+                Some(hash.iter().map(|b| format!("{b:02x}")).collect())
             }
             Err(e) => {
                 log::warn!("NAM-rs: Failed to compute model hash ({path:?}): {e}");

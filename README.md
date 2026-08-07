@@ -3,13 +3,13 @@ SPDX-License-Identifier: GPL-3.0-or-later
 Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 -->
 
-# NAM-Plug 0.1.0
+# NAM-Plug
 
 ![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-egui%20%7C%20Glow-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20%7C%20AVX--512-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
 
 **NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs.
 
-It directly embeds `NeuralAmpModeler-rs` as its core neural DSP engine, inheriting all of its real-time guarantees: **zero heap allocations**, **zero locks**, and **zero blocking system calls** on the real-time audio thread, `x86-64-v3` (AVX2/FMA) baseline SIMD vectorization, and exact numerical parity against canonical C++ NAMCore and double-precision f64 reference oracles.
+It directly embeds [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) as its core neural DSP engine, inheriting all of its real-time guarantees: **zero heap allocations**, **zero locks**, and **zero blocking system calls** on the real-time audio thread, `x86-64-v3` (AVX2/FMA) baseline SIMD vectorization, and exact numerical parity against canonical C++ NAMCore and double-precision f64 reference oracles.
 
 Designed for seamless integration into modern Linux digital audio workstations (DAWs) such as Bitwig Studio, REAPER, Ardour, Tracktion Waveform, and Harrison Mixbus, NAM-Plug offers a vector-rendered `egui` GUI for loading `.nam` neural amp models and `.wav` impulse responses (IRs), gain staging, noise gating, oversampling, anti-aliasing filter configuration, and real-time DSP performance telemetry.
 
@@ -28,7 +28,7 @@ Designed for seamless integration into modern Linux digital audio workstations (
 ## ⚡ Key Strengths & Architectural Highlights
 
 * **Native CLAP Standard Integration:** Built on top of the `clack` framework, exposing a clean, robust implementation of the CLever Audio Plug-in (CLAP) standard with zero translation overhead and full DAW parameter automation.
-* **Inherited Neural Engine Excellence:** Powered by `NeuralAmpModeler-rs`, supporting WaveNet (A1/A2 standard & lite profiles), LSTM (1-layer and 2-layer topologies), ConvNet, Linear FIR, and partitioned FFT cabinet impulse responses (.wav).
+* **Inherited Neural Engine Excellence:** Powered by [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs), supporting WaveNet (A1/A2 standard & lite profiles), LSTM (1-layer and 2-layer topologies), ConvNet, Linear FIR, and partitioned FFT cabinet impulse responses (.wav).
 * **Zero-Allocation RT Safety:** The audio callback thread runs with strict real-time determinism — no heap allocations, no mutex locks, and no blocking I/O on the hot path. Model loading, IR loading, and quality parameter changes pass through lock-free SPSC channels with garbage collection (GC) cascades.
 * **Hardware-Accelerated egui + Glow GUI:** Vector-rendered OpenGL UI (`egui_glow` + `baseview`), responsive and framerate-independent, providing real-time metering, control knobs, status feedback, and DSP diagnostics.
 * **Half-Band Anti-Aliasing Oversampling:** Optional `2x` and `4x` polyphase oversampling centered around the neural inference stage to eliminate high-frequency aliasing foldover in high-gain amp models.
@@ -115,7 +115,7 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 3. **Phase 3 — PGO-Optimized Compilation:** Recompiles `libnam_plug.so` using `-Cprofile-use=merged.profdata` and relocation symbols (`-Clink-arg=-Wl,-q`), allowing LLVM to optimize hot loops, inline activation functions, and unroll vector SIMD loops.
 4. **Phase 4 — LLVM BOLT Machine Code Reordering:** Reorders machine code instructions via `llvm-bolt` to minimize Instruction Cache (I-Cache) misses and TLB pressure during real-time processing.
 5. **Phase 4.5 — Assembly Hotspot Disassembly Report:** Outputs an AI-ready disassembly report at `target/dsp_hotpath.asm`.
-6. **Phase 5 — Automated Deployment & Archiving:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap` and generates a release distribution archive at `~/nam-plug-v0.1.0-linux-x86_64-v3.tar.zst`.
+6. **Phase 5 — Automated Deployment & Archiving:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap` and generates a release distribution archive at `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst`.
 
 ---
 
@@ -163,8 +163,7 @@ The `./utils/` directory contains maintainer tools and standard scripts for code
 |:-------------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`utils/lints.sh`](utils/lints.sh)                 | **Static Analysis Gate:** Runs `cargo fmt`, compilation checks (`cargo check`), strict `cargo clippy` across feature combinations (`--all-features`, `--no-default-features`), validates SPDX license headers, and checks anti-patterns.       |
 | [`utils/tests-quick.sh`](utils/tests-quick.sh)     | **Consolidated QA Suite:** Executes unit tests, host-harness tests, and CLAP plugin compliance checks in both debug and release modes.                                                                                                         |
-| [`utils/tests-red.sh`](utils/tests-red.sh)         | **Regression & Boundary Gate:** Executes targeted negative tests and error-handling boundary validations.                                                                                                                                      |
-| [`utils/build-release.sh`](utils/build-release.sh) | **Compiler Optimization Pipeline:** Multi-stage release builder using PGO and LLVM BOLT, outputting assembly report `target/dsp_hotpath.asm`, binary `~/.clap/nam_plug.clap`, and release archive `~/nam-plug-v0.1.0-linux-x86_64-v3.tar.zst`. |
+| [`utils/build-release.sh`](utils/build-release.sh) | **Compiler Optimization Pipeline:** Multi-stage release builder using PGO and LLVM BOLT, outputting assembly report `target/dsp_hotpath.asm`, binary `~/.clap/nam_plug.clap`, and release archive `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst`. |
 
 ---
 

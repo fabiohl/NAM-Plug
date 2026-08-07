@@ -38,7 +38,8 @@ fn test_compute_file_hash_known_content() {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(content);
-    let expected = format!("{:x}", hasher.finalize());
+    let hash_bytes = hasher.finalize();
+    let expected: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
 
     assert_eq!(
         hash, expected,

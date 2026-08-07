@@ -43,6 +43,56 @@ pub(crate) fn process_sub_block(
     gain_lut: &GainLUT,
     cabsim_tail_remaining: &mut usize,
 ) -> (usize, GateState) {
+    if n_samples > neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF {
+        let mut total_out = 0;
+        let mut last_gate = GateState::Open;
+        let mut curr_offset = offset;
+        let mut curr_out_offset = output_offset;
+        let mut remaining = n_samples;
+
+        while remaining > 0 {
+            let chunk = remaining.min(neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF);
+            let (c_out, c_gate) = process_sub_block(
+                curr_offset,
+                chunk,
+                out_l,
+                out_r,
+                curr_out_offset,
+                ctx,
+                bypass,
+                process_mono,
+                crossfader,
+                buf_xfade_dry_l,
+                buf_xfade_dry_r,
+                input_clipped,
+                smoother_in,
+                smoother_out,
+                buf_host_l,
+                buf_host_r,
+                buf_mid_l,
+                buf_mid_r,
+                buf_out_l,
+                buf_out_r,
+                buf_model_l,
+                buf_model_r,
+                buf_os_in_l,
+                buf_os_in_r,
+                buf_os_model_l,
+                buf_os_model_r,
+                model_output_mult_adj,
+                shared_sample_rate,
+                gain_lut,
+                cabsim_tail_remaining,
+            );
+            total_out += c_out;
+            last_gate = c_gate;
+            curr_offset += chunk;
+            curr_out_offset += c_out;
+            remaining -= chunk;
+        }
+        return (total_out, last_gate);
+    }
+
     if crossfader.active {
         return process_crossfade_sub_block(
             offset,

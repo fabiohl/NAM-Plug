@@ -26,7 +26,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 ┌─────────────────────────────┐  ┌─────────────────────────┐  ┌────────────────────────┐
 │        Main Thread          │  │    Audio Thread (RT)    │  │       GUI Thread       │
 │  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - baseview Event Loop │
-│  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - egui v0.34 / glow   │
+│  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - egui v0.36 / glow   │
 │  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - OpenGL 3.3 Render   │
 │  - Background Model Loading │  │  - Zero Blocking I/O    │  │  - Async rfd File Dialog│
 │  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - 5-Zone UI Layout    │

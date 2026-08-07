@@ -80,6 +80,8 @@ pub fn resolve_plugin_artifact_path() -> PathBuf {
         // 3-6. Standard cargo target dirs relative to manifest
         ("target/release", "libnam_plug.so"),
         ("target/debug", "libnam_plug.so"),
+        ("target/release/deps", "libnam_plug.so"),
+        ("target/debug/deps", "libnam_plug.so"),
         ("target/clap/release", "libnam_plug.so"),
         ("target/clap/debug", "libnam_plug.so"),
     ];
@@ -148,7 +150,8 @@ pub fn compute_sha256(path: &Path) -> String {
         }
         hasher.update(&buf[..n]);
     }
-    format!("{:x}", hasher.finalize())
+    let hash = hasher.finalize();
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

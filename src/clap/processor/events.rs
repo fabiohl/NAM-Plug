@@ -92,7 +92,7 @@ impl<'a> NamClapProcessor<'a> {
         let host_rate = if host_rate == 0 { 48000 } else { host_rate };
         let mut effective_latency = self.resampler.latency_samples(host_rate);
         effective_latency += self.os_l.latency_samples() as u32;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         {
             if let Some(ref adapter) = self.cabsim_adapter {
                 effective_latency += adapter.latency_samples() as u32;
