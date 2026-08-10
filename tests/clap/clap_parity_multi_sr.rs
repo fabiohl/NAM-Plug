@@ -8,7 +8,7 @@
 //! contra o oráculo C++ NAMcore com métricas ESR/SNR/MR-STFT.
 //!
 //! // Measured: F-11 (2026-07-30) — cross-implementation floor against
-//! // real C++ oracle + LUT-based gain (BossWN-standard @ 48 kHz):
+//! // real C++ oracle + LUT-based gain (wavenet_a1_standard @ 48 kHz):
 //! //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (after loudness calibration compensation).
 //! // Conservative gates: ESR < 1e-8, SNR > 80 dB.
 //! Critério de aceite: ESR < 1e-8 e SNR > 80 dB em todas as taxas.
@@ -320,7 +320,7 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
         return;
     }
 
-    let model_path = neural_amp_modeler_rs::testing::fixtures::model_path(model_name);
+    let model_path = crate::common::fixtures::model_path(model_name);
 
     let (input_mult_adj, output_mult_adj) =
         neural_amp_modeler_rs::testing::fixtures::calibration_multipliers_from_model_json(
@@ -382,7 +382,7 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
         };
 
         // Measured: F-11 (2026-07-30) — cross-implementation floor
-        // against real C++ oracle + LUT-based gain (BossWN-standard @ 48 kHz):
+        // against real C++ oracle + LUT-based gain (wavenet_a1_standard @ 48 kHz):
         //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (after loudness calibration compensation).
         // Conservative gates: ESR < 1e-8, SNR > 80 dB.
         let esr_gate = 1e-8;
@@ -429,7 +429,7 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
 #[ignore = "requires NAMCore C++ render + release CLAP .so"]
 fn test_clap_parity_multi_rate() {
     run_multi_rate_parity(
-        "BossWN-standard.nam",
+        "wavenet_a1_standard.nam",
         &[48000.0],
         0.5, // 0.5s stress signal
     );
@@ -440,7 +440,7 @@ fn test_clap_parity_multi_rate() {
 /// NAMCore C++ dependency.
 #[test]
 fn test_clap_parity_smoke() {
-    let model_path = neural_amp_modeler_rs::testing::fixtures::model_path("BossWN-standard.nam");
+    let model_path = crate::common::fixtures::model_path("wavenet_a1_standard.nam");
 
     let stress = generate_stress_signal(48000.0, 0.1);
     assert!(!stress.is_empty());

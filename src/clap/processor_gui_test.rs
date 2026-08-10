@@ -87,7 +87,7 @@ mod tests {
             max_frames_count: 512,
         };
 
-        let model_dir = neural_amp_modeler_rs::testing::fixtures::model_path("BossWN-nano.nam");
+        let model_dir = crate::clap::test_util::model_path("lstm.nam");
 
         let params = test_util::make_default_params(Some(model_dir));
         test_util::load_plugin_state(&mut plugin_instance, &params);
@@ -97,7 +97,7 @@ mod tests {
         // Check model name basename was updated
         {
             let name_guard = shared.cold.ui_model_name.lock().unwrap();
-            assert_eq!(*name_guard, "BossWN-nano.nam");
+            assert_eq!(*name_guard, "lstm.nam");
         }
 
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
@@ -194,10 +194,11 @@ mod tests {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
-        let model_path = neural_amp_modeler_rs::testing::fixtures::model_path("mock_a2.nam");
+        let invalid_path = std::env::temp_dir().join("nam_plug_gui_invalid.nam");
+        test_util::write_invalid_model_fixture(&invalid_path);
 
         if let Ok(mut pending_guard) = shared.cold.ui_pending_model.lock() {
-            *pending_guard = Some(model_path);
+            *pending_guard = Some(invalid_path);
         }
         shared.cold.ui_loading.store(true, Ordering::Relaxed);
 

@@ -108,6 +108,34 @@ pub fn make_default_params(model_path: Option<PathBuf>) -> ProcessingParams {
     }
 }
 
+// ── Local fixture resolution (NAM-Plug owned; not engine registry paths) ──
+
+/// Resolves a test model under NAM-Plug's own fixture tree.
+///
+/// Search order:
+/// 1. `NAM_FIXTURES_DIR/{name}` when set
+/// 2. `{CARGO_MANIFEST_DIR}/tests/fixtures/models/{name}`
+pub fn model_path(name: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("NAM_FIXTURES_DIR") {
+        let p = PathBuf::from(dir).join(name);
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/models")
+        .join(name)
+}
+
+/// Writes a minimal invalid `.nam` that exists on disk but fails model build.
+pub fn write_invalid_model_fixture(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        br#"{"version":"0.5.0","architecture":"WaveNet","config":{},"weights":[]}"#,
+    )
+    .expect("write invalid model fixture");
+}
+
 // ── Shared pointer extraction ──
 
 /// Extracts a raw pointer to `NamClapShared` from a `PluginInstance<TestHost>`.

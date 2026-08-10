@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 fn model_fixture(name: &str) -> PathBuf {
-    neural_amp_modeler_rs::testing::fixtures::model_path(name)
+    crate::common::fixtures::model_path(name)
 }
 
 /// Minimal audio process helper — verifies DSP is alive and produces finite output.
@@ -145,10 +145,10 @@ fn test_missing_model_path_is_rejected_and_keeps_old_dsp() {
     let shared = unsafe { &*shared_ptr };
 
     // Load valid model first
-    let model_a = model_fixture("BossWN-nano.nam");
+    let model_a = model_fixture("wavenet_a1_standard.nam");
     let params_a = ProcessingParams {
         model_path: Some(model_a),
-        model_basename: Some("BossWN-nano.nam".to_string()),
+        model_basename: Some("wavenet_a1_standard.nam".to_string()),
         input_gain_db: 0.0,
         output_gain_db: 0.0,
         gate_threshold_db: -90.0,
@@ -212,7 +212,7 @@ fn test_missing_model_path_is_rejected_and_keeps_old_dsp() {
 
 #[test]
 fn test_corrupted_model_weights_rejected_gracefully() {
-    let original = model_fixture("BossWN-nano.nam");
+    let original = model_fixture("wavenet_a1_standard.nam");
     let bytes = std::fs::read(&original).expect("failed to read model fixture");
     let mut corrupted = bytes.clone();
     let start = (bytes.len() / 3).max(1);
@@ -225,10 +225,10 @@ fn test_corrupted_model_weights_rejected_gracefully() {
     let shared_ptr = test_util::extract_shared(&mut instance);
     let shared = unsafe { &*shared_ptr };
 
-    let model_a = model_fixture("BossWN-lite.nam");
+    let model_a = model_fixture("lstm.nam");
     let params_a = ProcessingParams {
         model_path: Some(model_a),
-        model_basename: Some("BossWN-lite.nam".to_string()),
+        model_basename: Some("lstm.nam".to_string()),
         ..Default::default()
     };
 
@@ -279,7 +279,7 @@ fn test_corrupted_model_weights_rejected_gracefully() {
 
 #[test]
 fn test_truncated_model_file_rejected_gracefully() {
-    let original = model_fixture("BossWN-nano.nam");
+    let original = model_fixture("wavenet_a1_standard.nam");
     let bytes = std::fs::read(&original).unwrap();
     let truncated = &bytes[..100.min(bytes.len())];
     let truncated_path = std::env::temp_dir().join("nam_s6e6t05_truncated.nam");
@@ -328,7 +328,7 @@ fn test_zero_byte_model_file_rejected_gracefully() {
 
 #[test]
 fn test_cross_machine_restore_via_basename_search_succeeds() {
-    let model_dir = model_fixture("BossWN-nano.nam")
+    let model_dir = model_fixture("wavenet_a1_standard.nam")
         .parent()
         .unwrap()
         .to_path_buf();
@@ -337,8 +337,10 @@ fn test_cross_machine_restore_via_basename_search_succeeds() {
     let shared_ptr = test_util::extract_shared(&mut instance);
 
     let cross_params = ProcessingParams {
-        model_path: Some(PathBuf::from("/home/otheruser/models/BossWN-nano.nam")),
-        model_basename: Some("BossWN-nano.nam".to_string()),
+        model_path: Some(PathBuf::from(
+            "/home/otheruser/models/wavenet_a1_standard.nam",
+        )),
+        model_basename: Some("wavenet_a1_standard.nam".to_string()),
         model_search_paths: vec![model_dir],
         input_gain_db: 0.0,
         output_gain_db: 0.0,
@@ -361,7 +363,7 @@ fn test_cross_machine_restore_via_basename_search_succeeds() {
     let shared = unsafe { &*shared_ptr };
     assert!(shared.cold.model_load_counter.load(Ordering::Relaxed) > 0);
     let ui_name = shared.cold.ui_model_name.lock().unwrap();
-    assert_eq!(ui_name.as_str(), "BossWN-nano.nam");
+    assert_eq!(ui_name.as_str(), "wavenet_a1_standard.nam");
 }
 
 #[test]
@@ -396,7 +398,7 @@ fn test_cross_machine_basename_not_found_is_rejected() {
 
 #[test]
 fn test_bad_model_hash_is_rejected() {
-    let model_dir = model_fixture("BossWN-nano.nam")
+    let model_dir = model_fixture("wavenet_a1_standard.nam")
         .parent()
         .unwrap()
         .to_path_buf();
@@ -406,7 +408,7 @@ fn test_bad_model_hash_is_rejected() {
 
     let bad_hash_params = ProcessingParams {
         model_path: None,
-        model_basename: Some("BossWN-nano.nam".to_string()),
+        model_basename: Some("wavenet_a1_standard.nam".to_string()),
         model_hash: Some(
             "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
         ),
@@ -428,10 +430,10 @@ fn test_state_load_after_failed_restore_still_works() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let shared_ptr = test_util::extract_shared(&mut instance);
 
-    let model_a = model_fixture("BossWN-nano.nam");
+    let model_a = model_fixture("wavenet_a1_standard.nam");
     let params_a = ProcessingParams {
         model_path: Some(model_a),
-        model_basename: Some("BossWN-nano.nam".to_string()),
+        model_basename: Some("wavenet_a1_standard.nam".to_string()),
         ..Default::default()
     };
 
@@ -458,10 +460,10 @@ fn test_state_load_after_failed_restore_still_works() {
     }
 
     // Valid restore afterward
-    let valid_b = model_fixture("BossWN-lite.nam");
+    let valid_b = model_fixture("lstm.nam");
     let valid_params = ProcessingParams {
         model_path: Some(valid_b),
-        model_basename: Some("BossWN-lite.nam".to_string()),
+        model_basename: Some("lstm.nam".to_string()),
         input_gain_db: 2.5,
         ..Default::default()
     };
@@ -479,7 +481,7 @@ fn test_state_load_after_failed_restore_still_works() {
     let shared = unsafe { &*shared_ptr };
     assert!(shared.cold.model_load_counter.load(Ordering::Relaxed) > 0);
     let ui_name = shared.cold.ui_model_name.lock().unwrap();
-    assert_eq!(ui_name.as_str(), "BossWN-lite.nam");
+    assert_eq!(ui_name.as_str(), "lstm.nam");
 }
 
 #[test]
@@ -488,10 +490,10 @@ fn test_all_failure_modes_preserve_dsp_and_produce_finite_output() {
     let shared_ptr = test_util::extract_shared(&mut instance);
     let shared = unsafe { &*shared_ptr };
 
-    let model_a = model_fixture("BossWN-nano.nam");
+    let model_a = model_fixture("wavenet_a1_standard.nam");
     let params_a = ProcessingParams {
         model_path: Some(model_a),
-        model_basename: Some("BossWN-nano.nam".to_string()),
+        model_basename: Some("wavenet_a1_standard.nam".to_string()),
         ..Default::default()
     };
 

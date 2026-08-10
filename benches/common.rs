@@ -176,9 +176,17 @@ pub fn make_wavenet_a2_dyn_data() -> NamModelData {
     }
 }
 
-/// Resolves the path to a model fixture via the core fixture accessor.
+/// Resolves the path to a model fixture under NAM-Plug `tests/fixtures/models/`.
 pub fn model_path(filename: &str) -> PathBuf {
-    neural_amp_modeler_rs::testing::fixtures::model_path(filename)
+    if let Ok(dir) = std::env::var("NAM_FIXTURES_DIR") {
+        let p = PathBuf::from(dir).join(filename);
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/models")
+        .join(filename)
 }
 
 /// Loads and prewarms a model fixture (2048 samples). Returns `None` if the

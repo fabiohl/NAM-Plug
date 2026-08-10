@@ -36,9 +36,10 @@ mod tests {
     fn test_heap_audit_trigger() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
-        let model_dir = neural_amp_modeler_rs::testing::fixtures::model_path("mock_a2.nam");
+        let invalid_path = std::env::temp_dir().join("nam_plug_heap_audit_invalid.nam");
+        test_util::write_invalid_model_fixture(&invalid_path);
 
-        let params = test_util::make_default_params(Some(model_dir));
+        let params = test_util::make_default_params(Some(invalid_path));
         let state_bytes = serde_json::to_vec(&params).unwrap();
         let state_ext = test_util::get_state_ext(&mut plugin_instance);
         let mut handle = plugin_instance.plugin_handle();
@@ -46,7 +47,7 @@ mod tests {
 
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
-        // mock_a2.nam fails to build (model_l = None post-build).
+        // Invalid fixture fails to build (model_l = None post-build).
         // load_model now rejects this — counter stays at 0.
         assert_eq!(
             shared.cold.model_load_counter.load(Ordering::Relaxed),
@@ -118,13 +119,13 @@ mod tests {
                 .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC)
         );
 
-        // Verifies the RT_STATUS_MODEL_LOAD_FAILED flag was set (as mock_a2.nam fails to build)
+        // Verifies the RT_STATUS_MODEL_LOAD_FAILED flag was set (invalid fixture fails to build)
         assert!(
             shared
                 .cold
                 .rt_status
                 .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED),
-            "Expected RT_STATUS_MODEL_LOAD_FAILED to be set because mock_a2.nam fails to build"
+            "Expected RT_STATUS_MODEL_LOAD_FAILED to be set because invalid fixture fails to build"
         );
     }
 }

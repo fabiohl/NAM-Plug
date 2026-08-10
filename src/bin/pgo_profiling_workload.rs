@@ -97,54 +97,15 @@ fn resolve_workload_models() -> Vec<PathBuf> {
         if let Ok(dir) = std::env::var("NAM_FIXTURES_DIR") {
             dirs.push(PathBuf::from(dir));
         }
-        dirs.push(PathBuf::from("../third-party/nam_t3k"));
-        dirs.push(PathBuf::from(
-            "../NeuralAmpModeler-rs/tests/fixtures/models",
-        ));
+        dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models"));
         dirs.push(PathBuf::from("tests/fixtures/models"));
         dirs
     };
 
     let topology_categories: &[(&str, &[&str])] = &[
-        (
-            "WaveNet A1 Standard",
-            &[
-                "BossWN-standard.nam",
-                "wavenet_a1_standard.nam",
-                "BossWN-lite.nam",
-                "wavenet.nam",
-            ],
-        ),
-        (
-            "WaveNet A2 / SlimmableContainer",
-            &[
-                "wavenet_a2_container.nam",
-                "a2_example.nam",
-                "slimmable_container.nam",
-                "wavenet_a2_max.nam",
-                "wavenet_a2_full.nam",
-            ],
-        ),
-        (
-            "LSTM 1x16",
-            &[
-                "BossLSTM-1x16.nam",
-                "lstm_1x16.nam",
-                "lstm.nam",
-                "lstm_3x8.nam",
-                "BossLSTM-2x8.nam",
-            ],
-        ),
-        (
-            "WaveNet Custom",
-            &[
-                "APP-EVH-Stealth100-Dialled-xSTD.nam",
-                "EVH-5150-Lite.nam",
-                "BossWN-feather.nam",
-                "wavenet_official.nam",
-                "SLAMMIN_MARSHALL_J45_VN9_TREBLEBOOSTER_P4_C.nam",
-            ],
-        ),
+        ("WaveNet A1 Standard", &["wavenet_a1_standard.nam"]),
+        ("WaveNet A2 / SlimmableContainer", &["a2_example.nam"]),
+        ("LSTM", &["lstm.nam"]),
     ];
 
     for (cat_name, candidates) in topology_categories {

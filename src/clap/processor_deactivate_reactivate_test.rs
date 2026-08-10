@@ -28,7 +28,7 @@ mod tests {
     }
 
     fn model_path(name: &str) -> PathBuf {
-        neural_amp_modeler_rs::testing::fixtures::model_path(name)
+        crate::clap::test_util::model_path(name)
     }
 
     fn process_block(
@@ -89,7 +89,7 @@ mod tests {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
         // Load a small model before activate so both cycles start with it.
-        let params = test_util::make_default_params(Some(model_path("BossWN-nano.nam")));
+        let params = test_util::make_default_params(Some(model_path("lstm.nam")));
         test_util::load_plugin_state(&mut plugin_instance, &params);
 
         let config = audio_config(SR_48K, N as u32);
@@ -180,7 +180,7 @@ mod tests {
     fn test_sample_rate_change_no_crash() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
-        let params = test_util::make_default_params(Some(model_path("BossWN-nano.nam")));
+        let params = test_util::make_default_params(Some(model_path("lstm.nam")));
         test_util::load_plugin_state(&mut plugin_instance, &params);
 
         // Cycle 1: 48 kHz
@@ -215,7 +215,7 @@ mod tests {
     fn test_buffer_size_change_no_crash() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
-        let params = test_util::make_default_params(Some(model_path("BossWN-nano.nam")));
+        let params = test_util::make_default_params(Some(model_path("lstm.nam")));
         test_util::load_plugin_state(&mut plugin_instance, &params);
 
         // Cycle 1: buffer 256
@@ -250,7 +250,7 @@ mod tests {
     fn test_multiple_deactivate_reactivate_cycles() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
-        let params = test_util::make_default_params(Some(model_path("BossWN-nano.nam")));
+        let params = test_util::make_default_params(Some(model_path("lstm.nam")));
         test_util::load_plugin_state(&mut plugin_instance, &params);
 
         let config = audio_config(SR_48K, N as u32);
@@ -289,7 +289,7 @@ mod tests {
     fn test_model_preserved_across_cycle() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
-        let params = test_util::make_default_params(Some(model_path("BossWN-nano.nam")));
+        let params = test_util::make_default_params(Some(model_path("lstm.nam")));
         test_util::load_plugin_state(&mut plugin_instance, &params);
 
         let config = audio_config(SR_48K, N as u32);

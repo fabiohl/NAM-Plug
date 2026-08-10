@@ -121,15 +121,11 @@ mod tests {
 
     #[test]
     fn test_metadata_extraction_from_nam_file() {
-        let model_path =
-            neural_amp_modeler_rs::testing::fixtures::model_path("BossWN-standard.nam");
+        let model_path = crate::clap::test_util::model_path("lstm.nam");
 
         if model_path.exists() {
             let meta = extract_model_metadata(&model_path);
-            assert!(
-                meta.is_some(),
-                "Should extract metadata from BossWN-standard.nam"
-            );
+            assert!(meta.is_some(), "Should extract metadata from lstm.nam");
             let m = meta.unwrap();
             assert!(
                 m.name.is_some() || m.modeled_by.is_some(),

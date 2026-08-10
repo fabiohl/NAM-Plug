@@ -17,7 +17,7 @@ fn test_preset_load_integration() {
         .get_extension::<PluginPresetLoad>()
         .expect("PluginPresetLoad extension not found");
 
-    let model_path = neural_amp_modeler_rs::testing::fixtures::model_path("BossWN-nano.nam");
+    let model_path = crate::clap::test_util::model_path("lstm.nam");
     let path_str = model_path.to_str().expect("Invalid model path");
     let path_cstr = CString::new(path_str).expect("Invalid CString");
 

@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn model_fixture(name: &str) -> PathBuf {
-    neural_amp_modeler_rs::testing::fixtures::model_path(name)
+    test_util::model_path(name)
 }
 
 fn make_synthetic_ir(len: usize) -> Vec<f32> {
@@ -184,12 +184,12 @@ fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
-    let model_a = model_fixture("BossWN-nano.nam");
+    let model_a = model_fixture("lstm.nam");
 
     // ── Step 1: Load valid model A via state ──
     let params_a = ProcessingParams {
         model_path: Some(model_a),
-        model_basename: Some("BossWN-nano.nam".into()),
+        model_basename: Some("lstm.nam".into()),
         input_gain_db: 0.0,
         output_gain_db: 0.0,
         gate_threshold_db: -90.0,

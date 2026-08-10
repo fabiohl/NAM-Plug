@@ -853,7 +853,7 @@ mod diagnostics_logging_tests {
         log::set_max_level(LevelFilter::Debug);
         logger.set_max_level(LevelFilter::Debug);
 
-        let model_path = neural_amp_modeler_rs::testing::fixtures::model_path("BossWN-nano.nam");
+        let model_path = crate::clap::test_util::model_path("lstm.nam");
 
         use neural_amp_modeler_rs::common::params::ProcessingParams;
         let params = ProcessingParams {
@@ -861,7 +861,7 @@ mod diagnostics_logging_tests {
             input_gain_db: 1.0,
             output_gain_db: -2.0,
             gate_threshold_db: -50.0,
-            model_basename: Some("BossWN-nano.nam".to_string()),
+            model_basename: Some("lstm.nam".to_string()),
             model_search_paths: vec![],
             model_hash: None,
             bypass: false,

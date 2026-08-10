@@ -18,7 +18,7 @@ fn test_state_context_roundtrip() {
 
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
-    let model_path = neural_amp_modeler_rs::testing::fixtures::model_path("BossWN-nano.nam");
+    let model_path = crate::clap::test_util::model_path("lstm.nam");
 
     use neural_amp_modeler_rs::common::params::ProcessingParams;
     let params = ProcessingParams {
@@ -26,7 +26,7 @@ fn test_state_context_roundtrip() {
         input_gain_db: 3.5,
         output_gain_db: -4.0,
         gate_threshold_db: -45.0,
-        model_basename: Some("BossWN-nano.nam".to_string()),
+        model_basename: Some("lstm.nam".to_string()),
         model_search_paths: vec![],
         model_hash: None,
         bypass: false,
@@ -126,7 +126,7 @@ fn test_state_context_roundtrip() {
 
     // --- Load: ForProject context (full state, with model_path) ---
     let project_with_path = format!(
-        r#"{{"input_gain_db":5.0,"output_gain_db":-8.0,"gate_threshold_db":-60.0,"model_path":"{}","model_basename":"BossWN-nano.nam","model_search_paths":[],"bypass":true,"adaptive_compute":"Aggressive"}}"#,
+        r#"{{"input_gain_db":5.0,"output_gain_db":-8.0,"gate_threshold_db":-60.0,"model_path":"{}","model_basename":"lstm.nam","model_search_paths":[],"bypass":true,"adaptive_compute":"Aggressive"}}"#,
         model_path.to_str().unwrap()
     );
     let mut handle = plugin_instance.plugin_handle();
@@ -182,7 +182,7 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
 
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
-    let model_path = neural_amp_modeler_rs::testing::fixtures::model_path("BossWN-nano.nam");
+    let model_path = crate::clap::test_util::model_path("lstm.nam");
     let model_dir = model_path.parent().unwrap().to_path_buf();
 
     // ── Load model via state.load (full params) ──
@@ -191,7 +191,7 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
         input_gain_db: 2.0,
         output_gain_db: -3.5,
         gate_threshold_db: -55.0,
-        model_basename: Some("BossWN-nano.nam".to_string()),
+        model_basename: Some("lstm.nam".to_string()),
         model_hash: None,
         model_search_paths: vec![model_dir],
         bypass: true,
@@ -331,7 +331,7 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
     );
 
     let ui_name = shared.cold.ui_model_name.lock().unwrap();
-    assert_eq!(ui_name.as_str(), "BossWN-nano.nam");
+    assert_eq!(ui_name.as_str(), "lstm.nam");
 
     // ── Verify pass 2: ForPreset blob loaded via state.load on fresh instance with model in canonical dir ──
     // This part requires the model to be reachable via canonical_search_dirs().

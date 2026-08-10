@@ -107,12 +107,7 @@ mod tests {
 
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
-        let models = [
-            "BossWN-nano.nam",
-            "BossWN-feather.nam",
-            "BossWN-standard.nam",
-            "wavenet_a2_lite.nam",
-        ];
+        let models = ["wavenet_a1_standard.nam", "lstm.nam", "a2_example.nam"];
 
         let n = 64;
         let mut bufs = StereoTestBuffers::new(n, 0.0, 0.0);
@@ -121,7 +116,7 @@ mod tests {
         for i in 0..1000 {
             if i % 50 == 0 {
                 let model_name = models[(i / 50) % models.len()];
-                let path = neural_amp_modeler_rs::testing::fixtures::model_path(model_name);
+                let path = crate::clap::test_util::model_path(model_name);
 
                 let params = test_util::make_default_params(Some(path));
                 let state_bytes = serde_json::to_vec(&params).unwrap();

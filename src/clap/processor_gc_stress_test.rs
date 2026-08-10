@@ -23,12 +23,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
-        let models = [
-            "BossWN-nano.nam",
-            "BossWN-feather.nam",
-            "BossWN-standard.nam",
-            "wavenet_a2_lite.nam",
-        ];
+        let models = ["wavenet_a1_standard.nam", "lstm.nam", "a2_example.nam"];
 
         let n = 64;
         let mut bufs = StereoTestBuffers::new(n, 0.0, 0.0);
@@ -44,7 +39,7 @@ mod tests {
         // Total items pushed for 24 swaps (i = 0 to 23) is exactly 1 + 23 * 2 = 47 items.
         for i in 0..24 {
             let model_name = models[i % models.len()];
-            let path = neural_amp_modeler_rs::testing::fixtures::model_path(model_name);
+            let path = crate::clap::test_util::model_path(model_name);
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
@@ -104,7 +99,7 @@ mod tests {
         // buffer is still far from full.
         {
             let model_name = models[24 % models.len()];
-            let path = neural_amp_modeler_rs::testing::fixtures::model_path(model_name);
+            let path = crate::clap::test_util::model_path(model_name);
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
@@ -196,7 +191,7 @@ mod tests {
         // so no overflow should occur during this loop.
         for i in 25..1000 {
             let model_name = models[i % models.len()];
-            let path = neural_amp_modeler_rs::testing::fixtures::model_path(model_name);
+            let path = crate::clap::test_util::model_path(model_name);
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
@@ -300,11 +295,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
-        let models = [
-            "BossWN-nano.nam",
-            "BossWN-feather.nam",
-            "BossWN-standard.nam",
-        ];
+        let models = ["wavenet_a1_standard.nam", "lstm.nam", "a2_example.nam"];
 
         let n = 64;
         let mut bufs = StereoTestBuffers::new(n, 0.0, 0.0);
@@ -315,7 +306,7 @@ mod tests {
         // to accumulate items in the GC-cascade channels.
         for i in 0..5 {
             let model_name = models[i % models.len()];
-            let path = neural_amp_modeler_rs::testing::fixtures::model_path(model_name);
+            let path = crate::clap::test_util::model_path(model_name);
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
