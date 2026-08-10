@@ -192,7 +192,8 @@ impl<'a> NamClapProcessor<'a> {
         if let Some(ref model) = self.model_l
             && let StaticModel::WavenetDyn(w) = model.as_ref()
         {
-            self.adaptive_compute.set_wavenet_full_ch(w.ch);
+            self.adaptive_compute
+                .set_wavenet_full_ch(w.ch, model.is_slimmable_capable());
         }
     }
 
