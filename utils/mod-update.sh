@@ -15,26 +15,26 @@ echo -e "${BLUE}${BOLD}           NAM-Plug Supply Chain Update Pipeline         
 echo -e "${BLUE}${BOLD}================================================================${NC}"
 
 # 1. Update Rust Toolchain
-phase "Atualizando a toolchain ativa do Rust (rustup)..."
+phase "Updating active Rust toolchain (rustup)..."
 if command -v rustup &>/dev/null; then
     rustup update
 else
-    echo -e "${YELLOW}Aviso: rustup não encontrado. Pulando atualização da toolchain.${NC}"
+    warn "rustup not found. Skipping toolchain update."
 fi
 
 # 2. Upgrade dependencies in Cargo.toml
-phase "Atualizando definições de dependências (Cargo.toml)..."
+phase "Upgrading dependency definitions (Cargo.toml)..."
 if cargo --list | grep -q "upgrade"; then
     cargo upgrade --verbose
 else
-    echo -e "${YELLOW}Aviso: cargo-edit (cargo-upgrade) não encontrado.${NC}"
-    echo -e "${YELLOW}Instale com: cargo install cargo-edit${NC}"
+    warn "cargo-edit (cargo-upgrade) not found."
+    warn "Install with: cargo install cargo-edit"
 fi
 
 # 3. Update Cargo.lock
-phase "Atualizando versões resolvidas no Cargo.lock..."
+phase "Updating resolved versions in Cargo.lock..."
 cargo update --verbose
 
 echo -e "${GREEN}${BOLD}================================================================${NC}"
-echo -e "${GREEN}${BOLD}          Toda a cadeia de suprimentos foi atualizada!          ${NC}"
+echo -e "${GREEN}${BOLD}          Supply chain updated successfully!                    ${NC}"
 echo -e "${GREEN}${BOLD}================================================================${NC}"

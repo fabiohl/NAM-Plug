@@ -26,14 +26,14 @@ source "$SCRIPT_DIR/_lib.sh"
 if [ "${NAM_LOW_PRIORITY:-0}" != "1" ] && [ "${NAM_NO_LOW_PRIORITY:-0}" != "1" ]; then
     export NAM_LOW_PRIORITY=1
     CMD_PREFIX=""
-    if command -v nice >/dev/null 2>&1; then
+    if command -v nice > /dev/null 2>&1; then
         CMD_PREFIX="nice -n 19"
     fi
-    if command -v ionice >/dev/null 2>&1; then
+    if command -v ionice > /dev/null 2>&1; then
         CMD_PREFIX="$CMD_PREFIX ionice -c 3"
     fi
     if [ -n "$CMD_PREFIX" ]; then
-        echo -e "${YELLOW}ⓘ Restarting script with low priority (CPU/IO) to prevent system overload...${NC}"
+        warn "Restarting script with low priority (CPU/IO) to prevent system overload..."
         exec $CMD_PREFIX "$SCRIPT_PATH" "$@"
     fi
 fi
@@ -44,7 +44,12 @@ echo -e "${BLUE}${BOLD}========================================${NC}"
 echo -e "${BLUE}${BOLD}        NAM-Plug Quick QA Suite         ${NC}"
 echo -e "${BLUE}${BOLD}========================================${NC}"
 
-# Helper: Ensure required CLAP plugin shared library artifact exists before testing
+# Helper: Ensure the CLAP plugin shared library artifact for the requested
+# profile is present before running integration tests that dlopen it.
+#
+# Accepts profile "debug" or "release". Checks for the exact profile artifact
+# first; does NOT silently fall back to the other profile, since that could
+# mask build-time failures specific to debug assertions or release codegen.
 ensure_clap_artifact() {
     local profile="${1:-debug}"
     local flag=""
@@ -52,31 +57,30 @@ ensure_clap_artifact() {
         flag="--release"
     fi
 
-    if [ -n "${CLAP_PLUGIN_PATH:-}" ] && [ -f "$CLAP_PLUGIN_PATH" ]; then
-        return 0
+    # If the caller explicitly pointed to a pre-built artifact, honour it only
+    # when the file actually exists — never silently accept a stale path.
+    if [ -n "${CLAP_PLUGIN_PATH:-}" ]; then
+        if [ -f "$CLAP_PLUGIN_PATH" ]; then
+            return 0
+        else
+            warn "CLAP_PLUGIN_PATH set but file not found: $CLAP_PLUGIN_PATH. Rebuilding..."
+        fi
     fi
 
     local target_dir="${CARGO_TARGET_DIR:-target}"
-    local debug_path="$target_dir/debug/libnam_plug.so"
-    local release_path="$target_dir/release/libnam_plug.so"
+    local artifact_path="$target_dir/$profile/libnam_plug.so"
 
-    if [ "$profile" = "debug" ]; then
-        if [ ! -f "$debug_path" ] && [ ! -f "$release_path" ]; then
-            echo -e "${YELLOW}ⓘ CLAP plugin artifact not found. Pre-building debug artifact...${NC}"
-            cargo build
-        fi
-    elif [ "$profile" = "release" ]; then
-        if [ ! -f "$release_path" ]; then
-            echo -e "${YELLOW}ⓘ CLAP plugin release artifact not found. Pre-building release artifact...${NC}"
-            cargo build --release
-        fi
+    if [ ! -f "$artifact_path" ]; then
+        warn "CLAP plugin ($profile) artifact not found. Pre-building..."
+        # shellcheck disable=SC2086
+        cargo build $flag
     fi
 }
 
 # ── Phase 1: Structural unit & integration tests (debug) ─────────────────────
 phase "Structural: unit & integration tests (debug)..."
 ensure_clap_artifact debug
-cargo test --features testing --lib \
+timeout 300 cargo test --features testing --lib \
     --test clap \
     --test clap_e0_containment_test \
     --test clap_e2_proptest \
@@ -86,12 +90,12 @@ cargo test --features testing --lib \
 # ── Phase 2: Release verification (release) ─────────────────────────────────
 phase "Release verification: unit & integration tests (release)..."
 ensure_clap_artifact release
-cargo test --features testing --lib \
+timeout 300 cargo test --features testing --lib \
     --test clap \
     --test clap_e0_containment_test \
     --test clap_e2_proptest \
     --test processor_bypass_test \
-    --release -- --nocapture
+    --release -- --skip ignored --test-threads=1 --nocapture
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo -e "${GREEN}${BOLD}========================================${NC}"

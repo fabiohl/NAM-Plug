@@ -13,21 +13,17 @@
 
 set -euo pipefail
 
-# Style helpers
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+# Import shared style helpers and utilities from _lib.sh.
+# NAM_LIB_NO_CD=1 prevents _lib.sh from cding — we manage our own working
+# directory below after computing PROJECT_DIR from SCRIPT_DIR.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+NAM_LIB_NO_CD=1 source "$SCRIPT_DIR/_lib.sh"
 
 echo -e "${BLUE}${BOLD}========================================================================${NC}"
 echo -e "${BLUE}${BOLD}   NAM-Plug Unified Release Build & Optimization Pipeline               ${NC}"
 echo -e "${BLUE}${BOLD}========================================================================${NC}"
 
 # Ensure execution from the subproject root directory
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 # State tracking for signal safety and cleanup
@@ -211,8 +207,8 @@ export LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw"
 echo -e "  Using RUSTFLAGS: ${BOLD}$RUSTFLAGS${NC}"
 
 echo -e "  Compiling and running real-world PGO profiling workload (pgo_profiling_workload)..."
-cargo run --profile dist --features testing --bin pgo_profiling_workload || {
-    echo -e "${RED}Error: pgo_profiling_workload failed. Cannot generate PGO profiles.${NC}"
+timeout 120 cargo run --profile dist --features testing --bin pgo_profiling_workload || {
+    echo -e "${RED}Error: pgo_profiling_workload failed (or timed out after 120s). Cannot generate PGO profiles.${NC}"
     exit 1
 }
 
@@ -399,7 +395,7 @@ fi
 
 # Gate: validate the SHIPPED CLAP distribution artifact
 echo -e "  Validating shipped CLAP artifact integrity..."
-if ! nm -D "$CLAP_TARGET" | grep "clap_entry" >/dev/null; then
+if ! nm -D "$CLAP_TARGET" | grep -w "clap_entry" > /dev/null; then
     echo -e "${RED}Error: Missing 'clap_entry' symbol in distributed CLAP artifact!${NC}"
     exit 1
 fi
@@ -425,9 +421,9 @@ echo -e "\n${BLUE}${BOLD}[Phase 6/6] Generating distribution tarball...${NC}"
 
 VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys, json; print(json.load(sys.stdin)['packages'][0]['version'])")
 ARCHIVE_NAME="nam-plug-v${VERSION}-linux-x86_64-v3"
+# mktemp creates a unique temporary directory — do not destroy it immediately;
+# simply create the archive subdirectory inside it.
 PKG_DIR="$(mktemp -d -t nam-plug-pkg.XXXXXX)"
-
-rm -rf "$PKG_DIR"
 mkdir -p "$PKG_DIR/$ARCHIVE_NAME"
 
 cp "$CLAP_TARGET" "$PKG_DIR/$ARCHIVE_NAME/nam_plug.clap"
