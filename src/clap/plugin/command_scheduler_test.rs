@@ -208,7 +208,7 @@ fn stress_10k_param_burst_no_loss_no_deadlock() {
             total_drained += drained;
 
             if drained > 0 {
-                consumer.ack_latest(&next_seq);
+                consumer.ack_processed();
             }
 
             let current = next_seq.load(Ordering::Relaxed);
@@ -341,5 +341,38 @@ fn producer_without_consumer_returns_full_on_overflow() {
     assert!(
         full_count > 0,
         "SPSC should have returned Full after saturation"
+    );
+}
+
+#[test]
+fn try_push_command_returns_payload_on_full() {
+    let next_seq = Arc::new(AtomicU64::new(0));
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (tx, _rx) = rtrb::RingBuffer::new(4);
+    let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
+
+    // Saturate the ring with 4 non-coalescable commands.
+    for _ in 0..4 {
+        producer
+            .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+            .expect("first 4 pushes should succeed");
+    }
+
+    // The 5th push must fail and return the command back (fail-closed),
+    // instead of dropping it.
+    let err = producer
+        .try_push_command(ClapParamPayload::LoadCabIr { adapter: None })
+        .expect_err("5th push must saturate the ring");
+    assert!(
+        matches!(err, (PushError::Full, ClapParamPayload::LoadCabIr { .. })),
+        "try_push_command must return (Full, payload) so the caller can retain it"
+    );
+
+    // No sequence gap: only the 4 successful pushes may have consumed
+    // sequence numbers, keeping the FIFO item↔sequence mapping gapless.
+    assert_eq!(
+        next_seq.load(Ordering::Relaxed),
+        4,
+        "sequence counter must equal the number of successfully pushed items"
     );
 }

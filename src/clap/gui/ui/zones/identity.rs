@@ -131,7 +131,11 @@ pub(crate) fn draw_zone1_identity(
                 shared.cold.ui_loading.store(true, Ordering::Relaxed);
                 dialog_state_arc.active.store(true, Ordering::Relaxed);
                 let host_static = GuiHostBridge::new(host).as_static();
-                let handle = spawn_file_dialog(Arc::clone(dialog_state_arc), host_static);
+                let handle = spawn_file_dialog(
+                    Arc::clone(dialog_state_arc),
+                    host_static,
+                    Arc::clone(&shared.cold.alive_fence),
+                );
                 if let Ok(mut guard) = shared.cold.dialog_handle_sink.lock() {
                     *guard = Some(handle);
                 }
@@ -295,7 +299,11 @@ pub(crate) fn draw_zone1_identity(
                 shared.cold.ui_ir_loading.store(true, Ordering::Relaxed);
                 ir_dialog_state_arc.active.store(true, Ordering::Relaxed);
                 let host_static = GuiHostBridge::new(host).as_static();
-                let handle = spawn_ir_file_dialog(Arc::clone(ir_dialog_state_arc), host_static);
+                let handle = spawn_ir_file_dialog(
+                    Arc::clone(ir_dialog_state_arc),
+                    host_static,
+                    Arc::clone(&shared.cold.alive_fence),
+                );
                 if let Ok(mut guard) = shared.cold.ir_dialog_handle_sink.lock() {
                     *guard = Some(handle);
                 }
@@ -349,8 +357,13 @@ pub(crate) fn draw_zone1_identity(
 
                 if clear_ir_clicked {
                     shared.cold.ui_clear_ir.store(true, Ordering::Relaxed);
-                    let host_static = GuiHostBridge::new(host).as_static();
-                    host_static.request_callback();
+                    // R-09: fence-gate the host notification — a stale
+                    // request_callback after destroy would dispatch to a
+                    // freed clap_plugin_t.
+                    if shared.cold.alive_fence.load(Ordering::Acquire) {
+                        let host_static = GuiHostBridge::new(host).as_static();
+                        host_static.request_callback();
+                    }
                 }
             }
 

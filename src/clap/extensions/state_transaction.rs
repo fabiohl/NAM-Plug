@@ -16,12 +16,15 @@ use crate::clap::plugin::ClapParamPayload;
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::plugin::NamModelMetadata;
 use crate::clap::plugin::PendingModel;
+use crate::clap::plugin::command_scheduler::PushError;
 use crate::clap::plugin::debug_assert_main_thread;
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::{ModelInfo, NamDiagnostic, NamErrorCode};
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
-use neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
+use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::loader::load_and_build_model;
 use neural_amp_modeler_rs::models::NamModel;
@@ -30,15 +33,6 @@ use neural_amp_modeler_rs::models::slimmable::clone_wavenet_for_slimmable_storag
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-
-#[cfg(test)]
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
-
-#[cfg(test)]
-use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
-
-#[cfg(test)]
-use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 
 struct ModelResources {
     model_l: Option<Box<StaticModel>>,
@@ -51,7 +45,6 @@ struct ModelResources {
     model_hash: String,
 }
 
-#[cfg(test)]
 struct IrResources {
     adapter: Option<CabSimAdapter>,
     samples: Vec<f32>,
@@ -66,9 +59,7 @@ struct ValidatedRestore {
     model_basename: Option<String>,
     model_search_path_to_add: Option<PathBuf>,
     model_hash: Option<String>,
-    #[cfg(test)]
     ir: Option<IrResources>,
-    #[cfg(test)]
     ir_path_on_disk: Option<String>,
 }
 
@@ -139,7 +130,6 @@ fn validate_and_build(
 
     let params = loaded_params.clone();
 
-    #[cfg(test)]
     let (maybe_ir, ir_path_on_disk) = validate_ir(loaded_params, host_rate, buffer_size, sys)?;
 
     Ok(ValidatedRestore {
@@ -149,9 +139,7 @@ fn validate_and_build(
         model_basename: maybe_model.2,
         model_search_path_to_add: maybe_model.3,
         model_hash: maybe_model.4,
-        #[cfg(test)]
         ir: maybe_ir,
-        #[cfg(test)]
         ir_path_on_disk,
     })
 }
@@ -455,7 +443,6 @@ fn validate_model_from_basename(
 }
 
 /// Builds IR resources from a filesystem path without side-effects.
-#[cfg(test)]
 fn build_ir_resources(
     path: &Path,
     host_rate: u32,
@@ -497,7 +484,6 @@ fn build_ir_resources(
     })
 }
 
-#[cfg(test)]
 fn validate_ir(
     loaded_params: &ProcessingParams,
     host_rate: u32,
@@ -561,29 +547,42 @@ fn commit(validated: ValidatedRestore, main_thread: &mut NamClapMainThread, mode
             *info_guard = Some(model_info);
         }
 
-        main_thread
-            .shared
-            .cold
-            .model_load_counter
-            .fetch_add(1, Ordering::Relaxed);
-
-        if buffer_size > 0 {
-            if main_thread
+        // Deliver the model to the audio thread, retaining it on saturation
+        // instead of dropping it (R-10). The UI is only advanced once the
+        // model is delivered (or deferred pre-activation, where no audio path
+        // is active to desync from).
+        let delivered = if buffer_size > 0 {
+            match main_thread
                 .cmd_producer
-                .push_command(ClapParamPayload::LoadModel {
+                .try_push_command(ClapParamPayload::LoadModel {
                     model_l,
                     new_resampler,
                     input_mult_adj,
                     output_mult_adj,
-                })
-                .is_err()
-            {
-                log::error!("NAM-rs: Failed to send restored model to audio thread (SPSC full)");
-                main_thread
-                    .shared
-                    .cold
-                    .rt_status
-                    .set_flag(RT_STATUS_MODEL_LOAD_FAILED);
+                }) {
+                Ok(_seq) => true,
+                Err((PushError::Full, payload)) => {
+                    if let ClapParamPayload::LoadModel {
+                        model_l,
+                        new_resampler,
+                        input_mult_adj,
+                        output_mult_adj,
+                    } = payload
+                    {
+                        drop(new_resampler); // rebuilt by flush_pending_model()
+                        if let Ok(mut pending_guard) = main_thread.shared.cold.pending_model.lock()
+                        {
+                            *pending_guard = Some(PendingModel {
+                                model: model_l,
+                                model_rate,
+                                input_mult_adj,
+                                output_mult_adj,
+                            });
+                        }
+                    }
+                    main_thread.host.request_callback();
+                    false
+                }
             }
         } else {
             if let Ok(mut pending_guard) = main_thread.shared.cold.pending_model.lock() {
@@ -594,19 +593,28 @@ fn commit(validated: ValidatedRestore, main_thread: &mut NamClapMainThread, mode
                     output_mult_adj,
                 });
             }
-        }
+            true
+        };
 
-        if let Some(ref basename) = validated.model_basename {
-            if let Ok(mut name_guard) = main_thread.shared.cold.ui_model_name.lock() {
-                *name_guard = basename.clone();
+        if delivered {
+            main_thread
+                .shared
+                .cold
+                .model_load_counter
+                .fetch_add(1, Ordering::Relaxed);
+
+            if let Some(ref basename) = validated.model_basename {
+                if let Ok(mut name_guard) = main_thread.shared.cold.ui_model_name.lock() {
+                    *name_guard = basename.clone();
+                }
+                log::info!(
+                    "Model restored: {:?}",
+                    validated
+                        .model_path_on_disk
+                        .as_deref()
+                        .unwrap_or(Path::new(""))
+                );
             }
-            log::info!(
-                "Model restored: {:?}",
-                validated
-                    .model_path_on_disk
-                    .as_deref()
-                    .unwrap_or(Path::new(""))
-            );
         }
 
         if let Some(mut state_ext) = main_thread
@@ -618,7 +626,6 @@ fn commit(validated: ValidatedRestore, main_thread: &mut NamClapMainThread, mode
     }
 
     // ── Commit IR ──
-    #[cfg(test)]
     if let Some(ir) = validated.ir {
         if let Some(ref ir_path_str) = validated.ir_path_on_disk
             && let Ok(mut ir_guard) = main_thread.shared.cold.ir_path.lock()
@@ -634,22 +641,46 @@ fn commit(validated: ValidatedRestore, main_thread: &mut NamClapMainThread, mode
             .ir_raw_sample_rate
             .store(ir.sample_rate, Ordering::Relaxed);
 
-        if main_thread
-            .cmd_producer
-            .push_command(ClapParamPayload::LoadCabIr {
-                adapter: ir.adapter,
-            })
-            .is_err()
-        {
-            log::error!("NAM-rs: Failed to send restored IR to audio thread (SPSC full)");
-        }
-    } else {
-        #[cfg(test)]
-        {
-            let _ = main_thread
+        // When already active, deliver the adapter immediately. When not yet
+        // active (buffer_size == 0), skip the push: `activate()` rebuilds the
+        // adapter from `ir_raw_samples` with the correct host partition size.
+        // Pushing the pre-activation adapter (built with a 256-sample fallback
+        // partition) would overwrite the correctly-sized activate-built one.
+        if buffer_size > 0 {
+            match main_thread
                 .cmd_producer
-                .push_command(ClapParamPayload::LoadCabIr { adapter: None });
+                .try_push_command(ClapParamPayload::LoadCabIr {
+                    adapter: ir.adapter,
+                }) {
+                Ok(_) => {}
+                Err((_, payload)) => {
+                    // R-10: retain the restored adapter for retry via
+                    // ui_pending_ir / housekeeping. ir_path and
+                    // ir_raw_samples are already stored so activate()
+                    // can rebuild if the plugin is not yet processing.
+                    log::warn!("NAM-rs: restored IR channel full — will retry on next callback");
+                    if let Some(ref ir_path_str) = validated.ir_path_on_disk
+                        && let Ok(mut pending) = main_thread.shared.cold.ui_pending_ir.lock()
+                    {
+                        *pending = Some(PathBuf::from(ir_path_str));
+                    }
+                    let _ = payload;
+                    main_thread.host.request_callback();
+                }
+            }
         }
+    } else if buffer_size > 0
+        && main_thread
+            .cmd_producer
+            .try_push_command(ClapParamPayload::LoadCabIr { adapter: None })
+            .is_err()
+    {
+        main_thread
+            .shared
+            .cold
+            .ui_clear_ir
+            .store(true, Ordering::Relaxed);
+        main_thread.host.request_callback();
     }
 
     // ── Commit params ──

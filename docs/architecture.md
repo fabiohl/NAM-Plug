@@ -153,7 +153,7 @@ To prevent loading 8 atomic floats on every audio block when parameters are stat
 
 ### 5.3 Three-Tier Real-Time Garbage Collection Cascade
 
-Deallocating complex DSP structures (`Box<StaticModel>`, `Box<NamResampler>`, `ConvEngine`, `OversampleEngine`) on the audio thread causes kernel allocator locks and priority inversion. Disposal cascades through three lock-free tiers (`gc_cascade` in `src/common/spsc/gc.rs`):
+Deallocating complex DSP structures (`Box<StaticModel>`, `Box<NamResampler>`, `ConvEngine`, `OversampleEngine`) on the audio thread causes kernel allocator locks and priority inversion. Disposal cascades through three lock-free tiers (`gc_cascade` in `NeuralAmpModeler-rs/src/common/spsc/gc.rs`):
 
 ```text
 RT Thread (Replaced Asset)
@@ -162,14 +162,15 @@ RT Thread (Replaced Asset)
 [Tier 1: SPSC gc_tx (32 slots)] ──────► Drained by Main Thread (housekeeping)
        │ (if full)
        ▼
-[Tier 2: Processor Parking Lot (16 slots)] ──► Retried next block on RT
+[Tier 2: Processor Parking Lot (16 slots)] ──► Flushed back to SPSC next block;
+       │                                          single-owner handoff on deactivate
        │ (if full)
        ▼
 [Tier 3: GcOverflowBuffer Atomic Ring] ────► Controlled Leak + Sets RT_STATUS_GC_OVERFLOW
 ```
 
-1. **Tier 1 (SPSC GC Queue):** Push to `gc_tx` (32 slots). Main thread drains and drops objects during periodic `housekeeping()`.
-2. **Tier 2 (Processor Parking Lot):** Fixed array `[Option<GcItem>; 16]` inside `PluginAudioProcessor`. Retried on subsequent audio blocks.
+1. **Tier 1 (SPSC GC Queue):** Push to `gc_tx` (32 slots). Main thread drains and drops objects during periodic `housekeeping()` via `drain_gc_channels(consumer, overflow, parking_lot, rt_status)`.
+2. **Tier 2 (Processor Parking Lot):** Fixed array `[Option<GcItem>; 16]` inside `PluginAudioProcessor`. `gc_cascade` flushes items parked in previous cycles back to the SPSC whenever capacity frees, and the processor retries once per audio block (`drain_parking_lot`), so parked items reach the off-RT drain during normal operation. At teardown the lot is never dropped with the processor: `deactivate()` hands `&mut parking_lot` to `drain_gc_final()` (single-owner handoff after the audio thread stopped), so one canonical drain releases SPSC + overflow + the 16 slots on the main thread.
 3. **Tier 3 (`GcOverflowBuffer`):** Atomic ring buffer (`SPSC_CAPACITY`). Overwrites oldest slot if completely saturated, setting `RT_STATUS_GC_OVERFLOW` to preserve RT deadline execution.
 
 ### 5.4 FFI Lifetime Safety & Panic Guard
@@ -184,7 +185,7 @@ When DAW state is restored prior to `activate()`, the host buffer size (`max_fra
 
 ### 5.6 Channel Preservation on `deactivate()`
 
-Calling `deactivate()` returns SPSC channel consumers (`param_rx`, `gc_tx`, `slimmable_rx`) back into `ColdShared`, allowing hosts to stop and restart audio processing without instance recreation or memory reallocation.
+Calling `deactivate()` returns SPSC channel consumers (`param_rx`, `gc_tx`, `slimmable_rx`) back into `ColdShared`, allowing hosts to stop and restart audio processing without instance recreation or memory reallocation. Before the processor drops, `deactivate()` also performs the GC parking-lot handoff (see §5.3): the 16-slot RT array is passed by mutable reference to `drain_gc_final()` so every in-flight `GcItem` is released off-RT through the canonical drain.
 
 ---
 
@@ -338,11 +339,11 @@ Integration tests dynamic-link against the compiled `.so` binary using `PluginEn
 
 ### 9.3 Headless GUI Testing (Xvfb)
 
-Floating window lifecycle (`create` $\to$ `set_transient` $\to$ `destroy`) and clipboard integration (`arboard`) are validated under a headless virtual X11 display (`Xvfb :99`) with Mesa software rendering (`llvmpipe`), integrated into `utils/tests-long.sh` Phase 5.
+Floating window lifecycle (`create` $\to$ `set_transient` $\to$ `destroy`) and clipboard integration (`arboard`) are validated under a headless virtual X11 display (`Xvfb :99`) with Mesa software rendering (`llvmpipe`), executed on-demand (manually or in extended CI) since they require the Xvfb headless display stack.
 
 ### 9.4 E2E CLAP vs NAMCore Parity (`tests/clap/clap_parity_multi_sr.rs`)
 
-Loads `.so`, loads target models via CLAP state, processes stress signals across irregular buffer sizes, and compares output against the reference C++ NAMCore oracle (`ESR < 1e-11`, `SNR > 110 dB`).
+Loads `.so`, loads target models via CLAP state, processes stress signals across irregular buffer sizes, and compares output against the reference C++ NAMCore oracle with conservative gates `ESR < 1e-8`, `SNR > 80 dB` (measured 2026-08-13: ESR ≈ 7.9e-12 / 111 dB). Runs under `utils/tests-quick.sh` Phase 2 (release-only scope, S6-T04 / RES-04) when the C++ render binary, the release `.so` and the model fixture are present; otherwise reported as an explicit GAP.
 
 ---
 

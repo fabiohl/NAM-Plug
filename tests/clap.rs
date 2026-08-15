@@ -27,6 +27,8 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 
 #[path = "clap/artifact_validator.rs"]
 mod artifact_validator;
+#[path = "clap/clap_cabsim_ir.rs"]
+mod clap_cabsim_ir;
 #[path = "clap/clap_cross_machine.rs"]
 mod clap_cross_machine;
 #[path = "clap/clap_lifecycle_test.rs"]

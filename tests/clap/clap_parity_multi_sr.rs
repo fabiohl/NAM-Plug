@@ -30,6 +30,16 @@ fn project_root() -> PathBuf {
 }
 
 fn render_bin() -> PathBuf {
+    // S5-T01 — Self-contained sibling resolution. Search order:
+    //   1. Formal environment contract NAM_CORE_RENDER_BIN.
+    //   2. This repo's own `build/namcore_render` (self-contained clone).
+    //   3. The `neural_amp_modeler_rs` testing fixture helper, which resolves
+    //      the sibling build dir when the dependency is linked as a local path.
+    //   4. Sibling `../NeuralAmpModeler-rs/build/namcore_render` — pure
+    //      development convenience for the local monorepo workspace. This is
+    //      NOT a structural assumption: standalone clones MUST use
+    //      NAM_CORE_RENDER_BIN or their own build/namcore_render; when the
+    //      sibling is absent this probe is skipped silently.
     if let Ok(val) = std::env::var("NAM_CORE_RENDER_BIN") {
         let p = PathBuf::from(val);
         if p.exists() {
@@ -62,9 +72,38 @@ fn render_bin() -> PathBuf {
         }
     }
 
+    // Local path dependency helper: resolves the sibling repo's build dir when
+    // neural_amp_modeler_rs is linked as a path dependency (monorepo workspace).
     let core_path = neural_amp_modeler_rs::testing::fixtures::render_bin_path();
     if core_path.exists() {
         return core_path;
+    }
+
+    // Sibling-repo fallback — development convenience only. When the dependency
+    // is the crates.io registry copy (no build dir shipped) but the sibling repo
+    // is present as a local checkout, the helper above cannot find the binary;
+    // this last-resort probe recovers it without any structural assumption.
+    let sibling_build = root.join("../NeuralAmpModeler-rs/build/namcore_render");
+    if sibling_build.exists() {
+        for candidate in &["tools/render", "Release/render", "Debug/render"] {
+            let p = sibling_build.join(candidate);
+            if p.exists() {
+                return p;
+            }
+        }
+        for entry in std::fs::read_dir(&sibling_build)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let p = entry.path();
+            if p.is_dir() {
+                let c = p.join("render");
+                if c.exists() {
+                    return c;
+                }
+            }
+        }
     }
 
     root.join("build/namcore_render/tools/render")

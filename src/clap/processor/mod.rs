@@ -202,6 +202,20 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 ))
             })?;
 
+            // 2d. WaveNet crossfade scratch buffers (0.5.0 run_inference): used
+            // as the second-pass output when processing is chunked, so it must
+            // not alias any accumulated output buffer. MAX_RESAMP_BUF each.
+            let buf_xfd_scratch_l = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32).map_err(|e| {
+                leak_error_msg(format!(
+                    "pre-allocation of crossfade scratch buffer failed: {e:?}"
+                ))
+            })?;
+            let buf_xfd_scratch_r = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32).map_err(|e| {
+                leak_error_msg(format!(
+                    "pre-allocation of crossfade scratch buffer failed: {e:?}"
+                ))
+            })?;
+
             // 3. DSP component initialization
             let model_rate = shared.cold.model_sample_rate.load(Ordering::Relaxed);
             let model_rate = if model_rate == 0 { 48000 } else { model_rate };
@@ -269,18 +283,11 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     if deact.cabsim_adapter.is_some() && buf_matches && rate_matches {
                         deact.cabsim_adapter
                     } else {
-                        #[cfg(any(test, feature = "testing"))]
-                        {
-                            build_cab_sim_from_raw_samples(
-                                shared,
-                                audio_config.max_frames_count as usize,
-                                host_rate,
-                            )?
-                        }
-                        #[cfg(not(any(test, feature = "testing")))]
-                        {
-                            None
-                        }
+                        build_cab_sim_from_raw_samples(
+                            shared,
+                            audio_config.max_frames_count as usize,
+                            host_rate,
+                        )?
                     };
 
                 // Oversample engines: reuse only if the factor hasn't changed
@@ -329,7 +336,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     })?,
                 );
 
-                #[cfg(any(test, feature = "testing"))]
                 let cabsim_adapter = {
                     build_cab_sim_from_raw_samples(
                         shared,
@@ -337,9 +343,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         host_rate,
                     )?
                 };
-                #[cfg(not(any(test, feature = "testing")))]
-                let cabsim_adapter = None;
-
                 let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
                     |e| leak_error_msg(format!("Failed to create oversample engine (L): {:?}", e)),
                 )?);
@@ -403,11 +406,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // 5. Report initial latency to shared state
             let mut initial_latency = resampler.latency_samples(audio_config.sample_rate as u32);
             initial_latency += os_l.latency_samples() as u32;
-            #[cfg(any(test, feature = "testing"))]
-            {
-                if let Some(ref adapter) = cabsim_adapter {
-                    initial_latency += adapter.latency_samples() as u32;
-                }
+            if let Some(ref adapter) = cabsim_adapter {
+                initial_latency += adapter.latency_samples() as u32;
             }
             shared
                 .rt_to_ui
@@ -455,6 +455,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 buf_os_model_r,
                 buf_xfade_dry_l,
                 buf_xfade_dry_r,
+                buf_xfd_scratch_l,
+                buf_xfd_scratch_r,
                 silence_hyst,
                 mono_hyst,
                 process_mono: true,
@@ -499,7 +501,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         }
     }
 
-    fn deactivate(self, _main_thread: &mut NamClapMainThread<'a>) {
+    fn deactivate(mut self, _main_thread: &mut NamClapMainThread<'a>) {
         // S5-E5-T03: isolate panics during cleanup.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut param_rx_guard = self
@@ -549,7 +551,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(deactivated);
 
-            _main_thread.drain_gc_final();
+            // R-04: handoff single-owner do parking lot RT para o drain final
+            // off-RT. A thread de áudio já parou (o host chama deactivate()
+            // depois do stop_processing) e o processador ainda não foi
+            // dropado — uma única chamada a drain_gc_channels libera SPSC +
+            // overflow + os 16 slots no main thread, nunca no RT.
+            _main_thread.drain_gc_final(&mut self.parking_lot);
         }));
         if let Err(err) = result {
             // Deactivate panicked — resources may leak but crash report
@@ -657,7 +664,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
 fn build_cab_sim_from_raw_samples(
     shared: &NamClapShared,
     partition_size: usize,

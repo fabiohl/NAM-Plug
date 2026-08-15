@@ -250,8 +250,18 @@ impl DefaultPluginFactory for NamClapPlugin {
                 let host_nn: std::ptr::NonNull<()> =
                     unsafe { std::mem::transmute_copy(&handle_copy) };
                 let host_addr = host_nn.as_ptr() as usize;
+                // R-09: the sink outlives the plugin (registered in the
+                // global NamLogger), so every dereference of the stored
+                // host pointer must be gated by the alive_fence (Acquire).
+                // Once the fence drops, log forwarding becomes a no-op.
+                let fence = Arc::clone(&shared.cold.alive_fence);
 
                 let sink: Arc<HostLogFn> = Arc::new(move |severity_str, msg| {
+                    if !fence.load(Ordering::Acquire) {
+                        // R-09: plugin destroyed — never dereference the
+                        // host handle from a dead instance's sink.
+                        return;
+                    }
                     let severity = match severity_str {
                         "ERROR" => LogSeverity::Error,
                         "WARN" => LogSeverity::Warning,
@@ -262,7 +272,8 @@ impl DefaultPluginFactory for NamClapPlugin {
                     let cmsg = CString::new(msg).unwrap_or_default();
                     // SAFETY: host_addr was obtained from a valid
                     // HostSharedHandle during init. The pointer is
-                    // valid for the plugin's lifetime.
+                    // valid for the plugin's lifetime — guarded above
+                    // by the alive_fence (R-09).
                     let ptr = host_addr as *mut ();
                     let nn = unsafe { std::ptr::NonNull::new_unchecked(ptr) };
                     let host_shared: HostSharedHandle<'static> =

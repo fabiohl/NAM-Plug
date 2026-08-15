@@ -24,7 +24,16 @@ pub const GUI_HEIGHT: u32 = 275;
 /// deactivated only after all plugin instances are destroyed. This struct
 /// wraps the raw host pointer and documents the invariant that the host
 /// remains valid for the plugin's entire lifetime (including any spawned
-/// GUI threads that are joined before the plugin is destroyed).
+/// GUI threads).
+///
+/// # R-09 fence protocol
+///
+/// GUI threads only dereference this bridge (or `NamClapShared`) while the
+/// `alive_fence` is up: `NamClapMainThread::drop` lowers the fence and
+/// bounded-joins every GUI/dialog thread before the plugin instance's shared
+/// state is released. Window event loops are fence-gated no-ops during
+/// destruction, so the `'static` handle is never dereferenced after the
+/// plugin is destroyed.
 ///
 /// Unlike the previous `extend_host_lifetime()` unsafe transmute, this
 /// struct encapsulates the pointer with explicit safety documentation at
@@ -42,8 +51,8 @@ impl GuiHostBridge {
     /// The host pointer encapsulated here is valid for the lifetime of the
     /// plugin. The caller must ensure:
     /// 1. The host outlives the plugin (CLAP spec guarantee).
-    /// 2. Any GUI thread holding this bridge is joined before the plugin
-    ///    instance is destroyed.
+    /// 2. Any GUI thread holding this bridge dereferences it only while the
+    ///    `alive_fence` is up (fence-gated event loops, R-09).
     #[inline]
     pub fn new(host: &clack_plugin::host::HostSharedHandle<'_>) -> Self {
         // HostSharedHandle is repr(transparent) over NonNull<clap_host>.
@@ -60,7 +69,8 @@ impl GuiHostBridge {
     ///
     /// The returned handle is only valid while the host is alive — which the
     /// CLAP spec guarantees is longer than the plugin's lifetime. Callers must
-    /// not cache this handle beyond the plugin's `destroy()` call.
+    /// not cache this handle beyond the plugin's `destroy()` call, and every
+    /// dereference from a GUI thread must be fenced by `alive_fence` (R-09).
     #[inline]
     pub fn as_static(&self) -> clack_plugin::host::HostSharedHandle<'static> {
         // SAFETY: HostSharedHandle is repr(transparent) over NonNull<()>.

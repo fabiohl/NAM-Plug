@@ -206,6 +206,8 @@ impl<'a> NamClapProcessor<'a> {
                             &mut self.bypass_xfade,
                             &mut self.buf_xfade_dry_l,
                             &mut self.buf_xfade_dry_r,
+                            &mut self.buf_xfd_scratch_l,
+                            &mut self.buf_xfd_scratch_r,
                             &mut input_clipped,
                             &mut self.smoother_in,
                             &mut self.smoother_out,

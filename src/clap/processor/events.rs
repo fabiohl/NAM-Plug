@@ -6,7 +6,6 @@
 
 use super::NamClapProcessor;
 use crate::clap::plugin::ClapParamPayload;
-#[cfg(test)]
 use clack_extensions::tail::HostTail;
 use clack_plugin::prelude::OutputEvents;
 use neural_amp_modeler_rs::common::spsc::GcItem;
@@ -40,7 +39,6 @@ impl<'a> NamClapProcessor<'a> {
                     input_mult_adj,
                     output_mult_adj,
                 } => self.cold_load_model(model_l, new_resampler, input_mult_adj, output_mult_adj),
-                #[cfg(test)]
                 ClapParamPayload::LoadCabIr { adapter } => {
                     self.cold_load_cabsim(adapter);
                 }
@@ -56,7 +54,7 @@ impl<'a> NamClapProcessor<'a> {
         }
 
         if drained_count > 0 {
-            self.cmd_consumer.ack_latest(&self.shared.cold.cmd_next_seq);
+            self.cmd_consumer.ack_processed();
         }
 
         // Sync parameters changed via GUI that were not echoed as input events by the host.
@@ -92,11 +90,8 @@ impl<'a> NamClapProcessor<'a> {
         let host_rate = if host_rate == 0 { 48000 } else { host_rate };
         let mut effective_latency = self.resampler.latency_samples(host_rate);
         effective_latency += self.os_l.latency_samples() as u32;
-        #[cfg(any(test, feature = "testing"))]
-        {
-            if let Some(ref adapter) = self.cabsim_adapter {
-                effective_latency += adapter.latency_samples() as u32;
-            }
+        if let Some(ref adapter) = self.cabsim_adapter {
+            effective_latency += adapter.latency_samples() as u32;
         }
         if effective_latency != self.shared.rt_to_ui.current_latency.load(Ordering::Relaxed) {
             self.shared
@@ -198,7 +193,6 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     #[cold]
-    #[cfg(test)]
     fn cold_load_cabsim(
         &mut self,
         adapter: Option<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter>,

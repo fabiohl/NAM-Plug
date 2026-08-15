@@ -23,6 +23,8 @@ pub(crate) fn process_sub_block(
     crossfader: &mut BypassCrossfader,
     buf_xfade_dry_l: &mut [f32],
     buf_xfade_dry_r: &mut [f32],
+    buf_xfd_scratch_l: &mut [f32],
+    buf_xfd_scratch_r: &mut [f32],
     input_clipped: &mut bool,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
@@ -64,6 +66,8 @@ pub(crate) fn process_sub_block(
                 crossfader,
                 buf_xfade_dry_l,
                 buf_xfade_dry_r,
+                buf_xfd_scratch_l,
+                buf_xfd_scratch_r,
                 input_clipped,
                 smoother_in,
                 smoother_out,
@@ -105,6 +109,8 @@ pub(crate) fn process_sub_block(
             crossfader,
             buf_xfade_dry_l,
             buf_xfade_dry_r,
+            buf_xfd_scratch_l,
+            buf_xfd_scratch_r,
             input_clipped,
             smoother_in,
             smoother_out,
@@ -194,12 +200,18 @@ pub(crate) fn process_sub_block(
         buf_os_in_r,
         buf_os_model_l,
         buf_os_model_r,
+        buf_xfd_scratch_l,
+        buf_xfd_scratch_r,
     );
 
     if let Some(ref mut conv) = ctx.conv
         && !conv.is_passthrough()
     {
-        conv.process_variable(&buf_out_l[..n_out], &mut buf_model_l[..n_out]);
+        conv.process_variable(
+            &buf_out_l[..n_out],
+            &mut buf_model_l[..n_out],
+            Some(ctx.rt_status),
+        );
         unsafe {
             core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), n_out);
         }
@@ -274,7 +286,11 @@ fn process_tail_drain(
     if let Some(ref mut conv) = ctx.conv
         && !conv.is_passthrough()
     {
-        conv.process_variable(&buf_out_l[..drain], &mut buf_model_l[..drain]);
+        conv.process_variable(
+            &buf_out_l[..drain],
+            &mut buf_model_l[..drain],
+            Some(ctx.rt_status),
+        );
         unsafe {
             core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), drain);
             core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), drain);
@@ -330,6 +346,8 @@ fn process_crossfade_sub_block(
     crossfader: &mut BypassCrossfader,
     buf_xfade_dry_l: &mut [f32],
     buf_xfade_dry_r: &mut [f32],
+    buf_xfd_scratch_l: &mut [f32],
+    buf_xfd_scratch_r: &mut [f32],
     input_clipped: &mut bool,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
@@ -383,7 +401,11 @@ fn process_crossfade_sub_block(
                 && !conv.is_passthrough()
             {
                 buf_out_l[..drain].fill(0.0);
-                conv.process_variable(&buf_out_l[..drain], &mut buf_model_l[..drain]);
+                conv.process_variable(
+                    &buf_out_l[..drain],
+                    &mut buf_model_l[..drain],
+                    Some(ctx.rt_status),
+                );
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         buf_model_l.as_ptr(),
@@ -440,12 +462,18 @@ fn process_crossfade_sub_block(
             buf_os_in_r,
             buf_os_model_l,
             buf_os_model_r,
+            buf_xfd_scratch_l,
+            buf_xfd_scratch_r,
         );
 
         if let Some(ref mut conv) = ctx.conv
             && !conv.is_passthrough()
         {
-            conv.process_variable(&buf_out_l[..n_o], &mut buf_model_l[..n_o]);
+            conv.process_variable(
+                &buf_out_l[..n_o],
+                &mut buf_model_l[..n_o],
+                Some(ctx.rt_status),
+            );
             unsafe {
                 core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), n_o);
             }

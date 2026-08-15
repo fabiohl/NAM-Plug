@@ -18,7 +18,17 @@ impl WindowHandler for NamPluginWindow {
         // Unlike `new()`, `on_frame()` is called repeatedly by the baseview
         // rendering loop (C ABI). A panic here would cross the FFI boundary and
         // cause UB in C++ hosts. We use a silent early-return as a safe fallback.
-        if self.close_signal.load(Ordering::Relaxed) {
+        //
+        // Exit conditions:
+        // - the close signal was set (window closed by the user or teardown);
+        // - the alive fence is down (plugin destruction in progress — R-09:
+        //   the event loop must become a no-op and stop dereferencing shared
+        //   state and the host handle);
+        // - the window is a degraded stub (GL initialization failed — R-11).
+        if self.close_signal.load(Ordering::Relaxed)
+            || !self.alive_fence.load(Ordering::Acquire)
+            || self.painter.is_none()
+        {
             if let Some(gl_ctx) = window.gl_context() {
                 // SAFETY: FFI call, host pointer transmute, or raw graphics context access with verified lifetimes.
                 unsafe {
@@ -148,13 +158,15 @@ impl WindowHandler for NamPluginWindow {
 
                 let screen_size = [self.width, self.height];
                 // Background color: #1A1D23 (approved dark mode palette)
-                self.painter.clear(screen_size, [0.102, 0.114, 0.137, 1.0]);
-                self.painter.paint_and_update_textures(
-                    screen_size,
-                    full_output.pixels_per_point,
-                    &clipped_primitives,
-                    &mut full_output.textures_delta,
-                );
+                if let Some(painter) = self.painter.as_mut() {
+                    painter.clear(screen_size, [0.102, 0.114, 0.137, 1.0]);
+                    painter.paint_and_update_textures(
+                        screen_size,
+                        full_output.pixels_per_point,
+                        &clipped_primitives,
+                        &mut full_output.textures_delta,
+                    );
+                }
 
                 gl_ctx.swap_buffers();
                 self.last_paint_time = std::time::Instant::now();
@@ -184,7 +196,13 @@ impl WindowHandler for NamPluginWindow {
                 // User closed the window via the window manager (X button, Alt-F4, etc.).
                 // Notify the host that the GUI was closed externally, then
                 // clean up GL resources and stop the render loop.
-                if let Some(gui_host) = self.host.get_extension::<HostGui>() {
+                //
+                // R-09: the host notification is a no-op when the alive fence
+                // is down — during plugin destruction the host handle must not
+                // be dereferenced after teardown began.
+                if self.alive_fence.load(Ordering::Acquire)
+                    && let Some(gui_host) = self.host.get_extension::<HostGui>()
+                {
                     gui_host.closed(&self.host, false);
                 }
                 self.close_signal.store(true, Ordering::Release);
@@ -280,7 +298,12 @@ impl WindowHandler for NamPluginWindow {
                                         .cold
                                         .ui_loading
                                         .store(true, std::sync::atomic::Ordering::Relaxed);
-                                    self.host.request_callback();
+                                    // R-09: fence re-check immediately before
+                                    // the host call — the fence may have
+                                    // dropped between safe_shared() and here.
+                                    if self.alive_fence.load(Ordering::Acquire) {
+                                        self.host.request_callback();
+                                    }
                                 }
                             }
                             return EventStatus::AcceptDrop(DropEffect::Copy);

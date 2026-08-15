@@ -142,6 +142,13 @@ pub struct CommandProducer<'a> {
 pub struct CommandConsumer<'a> {
     rx: Consumer<ClapParamPayload>,
     last_ack: &'a AtomicU64,
+    /// Monotonic sequence number of the last command popped from the ring.
+    ///
+    /// The SPSC is FIFO and the producer assigns one sequence number per
+    /// pushed item (no gaps), so the `k`-th popped command carries sequence
+    /// `base + k`. This field tracks the exact sequence of the most recently
+    /// popped command, enabling strict `ack_up_to` semantics.
+    processed_seq: u64,
 }
 
 /// Channel endpoints extracted from [`CommandScheduler`] during
@@ -272,26 +279,51 @@ impl<'a> CommandProducer<'a> {
     /// command is enqueued, preserving causal ordering.
     ///
     /// Returns the monotonic sequence number assigned to the command
-    /// batch.
+    /// batch. On saturation the command is dropped (see
+    /// [`try_push_command`](Self::try_push_command) for the fail-closed
+    /// variant that returns the command back to the caller).
     pub fn push_command(&mut self, cmd: ClapParamPayload) -> Result<u64, PushError> {
-        self.force_flush()?;
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        self.tx.push(cmd).map_err(|_| PushError::Full)?;
-        Ok(seq)
+        self.try_push_command(cmd).map_err(|(e, _)| e)
+    }
+
+    /// Queues a non-coalescable command, returning the command back to the
+    /// caller on `Full` so it can be retained for retry (fail-closed).
+    ///
+    /// Any pending coalesced parameters are flushed first, preserving causal
+    /// ordering. Sequence numbers are only consumed **after** a successful
+    /// push, guaranteeing the FIFO item↔sequence mapping has no gaps.
+    pub fn try_push_command(
+        &mut self,
+        cmd: ClapParamPayload,
+    ) -> Result<u64, (PushError, ClapParamPayload)> {
+        if let Err(e) = self.force_flush() {
+            return Err((e, cmd));
+        }
+        match self.tx.push(cmd) {
+            Ok(()) => {
+                let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                Ok(seq)
+            }
+            Err(rtrb::PushError::Full(value)) => Err((PushError::Full, value)),
+        }
     }
 
     /// Immediately pushes any pending coalesced parameters to the
     /// SPSC channel. No-op if the coalescing buffer is empty.
     ///
     /// Returns `Ok(seq)` with the assigned sequence number if a push
-    /// occurred, or `Ok(0)` if the buffer was empty.
+    /// occurred, or `Ok(0)` if the buffer was empty. The sequence number
+    /// is consumed only after a successful push so the FIFO mapping
+    /// stays gapless.
     pub fn force_flush(&mut self) -> Result<u64, PushError> {
         if let Some(snapshot) = self.coalescing.take_snapshot() {
-            let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
-            self.tx
-                .push(ClapParamPayload::Params(snapshot))
-                .map_err(|_| PushError::Full)?;
-            Ok(seq)
+            match self.tx.push(ClapParamPayload::Params(snapshot)) {
+                Ok(()) => {
+                    let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                    Ok(seq)
+                }
+                Err(rtrb::PushError::Full(_)) => Err(PushError::Full),
+            }
         } else {
             Ok(0)
         }
@@ -324,14 +356,31 @@ impl<'a> CommandProducer<'a> {
 
 impl<'a> CommandConsumer<'a> {
     /// Creates a new consumer wrapping the given SPSC endpoint and
-    /// ack atomic.
+    /// ack atomic. The internal processed-sequence counter is seeded from
+    /// the current `last_ack` so sequence tracking survives deactivate /
+    /// activate cycles (the ring and ack atomics persist across them).
     pub fn new(rx: Consumer<ClapParamPayload>, last_ack: &'a AtomicU64) -> Self {
-        Self { rx, last_ack }
+        let processed_seq = last_ack.load(Ordering::Acquire);
+        Self {
+            rx,
+            last_ack,
+            processed_seq,
+        }
     }
 
     /// Pops a single command from the SPSC channel (non-blocking).
+    ///
+    /// Advances the internal processed-sequence counter on success so
+    /// [`ack_processed`](Self::ack_processed) acks the exact sequence of
+    /// the last command actually consumed.
     pub(crate) fn pop(&mut self) -> Option<ClapParamPayload> {
-        self.rx.pop().ok()
+        match self.rx.pop() {
+            Ok(payload) => {
+                self.processed_seq = self.processed_seq.wrapping_add(1);
+                Some(payload)
+            }
+            Err(_) => None,
+        }
     }
 
     /// Drains up to `max` commands from the SPSC channel, calling
@@ -343,7 +392,7 @@ impl<'a> CommandConsumer<'a> {
     {
         let mut count = 0;
         while count < max {
-            if let Ok(payload) = self.rx.pop() {
+            if let Some(payload) = self.pop() {
                 process(payload);
                 count += 1;
             } else {
@@ -359,15 +408,12 @@ impl<'a> CommandConsumer<'a> {
         self.last_ack.store(seq, Ordering::Release);
     }
 
-    /// Acknowledges the latest sequence number produced by the main
-    /// thread. Only updates `cmd_last_ack` if the latest value is
-    /// greater than the previously acknowledged value.
-    pub fn ack_latest(&self, latest_seq: &AtomicU64) {
-        let current = latest_seq.load(Ordering::Relaxed);
-        let prev = self.last_ack.load(Ordering::Relaxed);
-        if current > prev {
-            self.last_ack.store(current, Ordering::Release);
-        }
+    /// Acknowledges the exact sequence number of the last command popped
+    /// by this consumer (Release store). Unlike the previous `ack_latest`,
+    /// this never acks commands still queued in the ring — only those
+    /// actually consumed.
+    pub fn ack_processed(&self) {
+        self.last_ack.store(self.processed_seq, Ordering::Release);
     }
 
     /// Returns the inner SPSC consumer for channel restoration

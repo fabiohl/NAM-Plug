@@ -112,7 +112,8 @@ pub fn resolve_plugin_artifact_path() -> PathBuf {
     }
 
     // Out of the regular target dirs but look for `target/clap-test/` as
-    // a last resort (used by tests-long.sh).
+    // a last resort for manually staged builds (no runner currently produces
+    // this layout).
     let clap_test_release = manifest_dir.join("target/clap-test/release/libnam_plug.so");
     if clap_test_release.exists() {
         eprintln!("Using build artifact: {}", clap_test_release.display());

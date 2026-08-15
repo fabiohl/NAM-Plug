@@ -6,7 +6,7 @@
 //! The shared `CountingAllocator` and tracking infrastructure lives in
 //! [`neural_amp_modeler_rs::common::alloc_audit`].
 
-#[cfg(all(feature = "heap-audit", not(test)))]
+#[cfg(feature = "heap-audit")]
 #[global_allocator]
 static GLOBAL: neural_amp_modeler_rs::common::alloc_audit::CountingAllocator =
     neural_amp_modeler_rs::common::alloc_audit::CountingAllocator;

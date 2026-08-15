@@ -7,8 +7,9 @@ mod tests {
     use clack_host::prelude::*;
     use std::sync::atomic::Ordering;
 
+    // on-demand: execute manually or in extended CI
     #[test]
-    #[ignore]
+    #[ignore = "heavy GC stress: 1000 swaps"]
     fn test_gc_stress_1000_swaps() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
@@ -279,8 +280,9 @@ mod tests {
         );
     }
 
+    // on-demand: execute manually or in extended CI
     #[test]
-    #[ignore]
+    #[ignore = "heavy GC drain-on-destroy leak check"]
     fn test_gc_drain_on_destroy_no_leak() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
@@ -350,8 +352,118 @@ mod tests {
         let stopped = started_processor.stop_processing();
         plugin_instance.deactivate(stopped);
 
-        // Under ASAN/Valgrind or leak checks (tests-long), dropping plugin_instance here
-        // will verify that all models in transit are fully released and do not leak.
+        // Under ASAN/Valgrind or on-demand leak checks (extended CI), dropping
+        // plugin_instance here will verify that all models in transit are fully
+        // released and do not leak.
+        drop(plugin_instance);
+    }
+
+    // R-04 (S7.T1): teardown must hand the RT parking lot to the final off-RT
+    // drain. Parks exactly 16 items in the processor's parking lot (SPSC 32 +
+    // lot 16 + 1 overflow = 49 items after 25 swaps with no housekeeping),
+    // then deactivates. Before the fix, drain_gc_final never saw the lot and
+    // only 33 items were accounted; now the full 49 are drained off-RT.
+    #[test]
+    #[ignore = "R-04 teardown: 25 model swaps"]
+    fn test_teardown_drains_rt_parking_lot_off_rt() {
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+
+        let state_ext = test_util::get_state_ext(&mut plugin_instance);
+
+        let audio_config = PluginAudioConfiguration {
+            sample_rate: 48000.0,
+            min_frames_count: 64,
+            max_frames_count: 64,
+        };
+
+        let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+
+        let models = ["wavenet_a1_standard.nam", "lstm.nam", "a2_example.nam"];
+
+        let n = 64;
+        let mut bufs = StereoTestBuffers::new(n, 0.0, 0.0);
+
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        let rt_status = &shared.cold.rt_status;
+
+        // 25 swaps WITHOUT main-thread housekeeping: the GC SPSC (32) fills up,
+        // then the 16-slot RT parking lot parks items (gc_cascade), and the
+        // 49th item spills into the 64-slot overflow buffer. Total in flight:
+        // 32 (SPSC) + 16 (lot) + 1 (overflow) = 49 GcItems.
+        // Swap #1 pushes 1 item (old resampler — model was None); each later
+        // swap pushes 2 (old model + old resampler): 1 + 24 * 2 = 49.
+        for i in 0..25 {
+            let model_name = models[i % models.len()];
+            let path = crate::clap::test_util::model_path(model_name);
+
+            let params = test_util::make_default_params(Some(path));
+            let state_bytes = serde_json::to_vec(&params).unwrap();
+            let mut handle = plugin_instance.plugin_handle();
+            state_ext
+                .load(&mut handle, &mut state_bytes.as_slice())
+                .expect("Failed to load state");
+
+            let mut input_channels = [bufs.in_l.as_mut_slice(), bufs.in_r.as_mut_slice()];
+            let input_audio = bufs.input_ports.with_input_buffers([AudioPortBuffer {
+                latency: 0,
+                channels: AudioPortBufferType::f32_input_only(
+                    input_channels.iter_mut().map(InputChannel::constant),
+                ),
+            }]);
+
+            let output_channels = [bufs.out_l.as_mut_slice(), bufs.out_r.as_mut_slice()];
+            let mut output_audio = bufs.output_ports.with_output_buffers([AudioPortBuffer {
+                latency: 0,
+                channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+            }]);
+
+            let input_events = InputEvents::empty();
+            let mut output_events = OutputEvents::from_buffer(&mut bufs.output_events_buffer);
+
+            started_processor
+                .process(
+                    &input_audio,
+                    &mut output_audio,
+                    &input_events,
+                    &mut output_events,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        // Confirm the cascade reached the parking lot: no overflow overwrite
+        // occurred (64-slot buffer), so the flag stays clear.
+        assert!(
+            !rt_status.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_OVERFLOW),
+            "GC overflow flag was set prematurely — only 1 item entered the 64-slot overflow buffer!"
+        );
+
+        let drains_before = rt_status.drains.load(Ordering::Relaxed);
+
+        // Shutdown: stop the audio thread and deactivate. deactivate() hands
+        // `&mut processor.parking_lot` to drain_gc_final — the single-owner
+        // handoff of R-04 — so one call drops SPSC + overflow + 16 slots off-RT.
+        let stopped = started_processor.stop_processing();
+        plugin_instance.deactivate(stopped);
+
+        let drains_delta = rt_status.drains.load(Ordering::Relaxed) - drains_before;
+        assert_eq!(
+            drains_delta, 49,
+            "deactivate must account for all 49 in-flight GcItems \
+             (32 SPSC + 16 RT parking lot + 1 overflow); before R-04 the \
+             parking lot was invisible and only 33 were drained"
+        );
+
+        // The last quantum must not have allocated on the audio thread.
+        assert!(
+            !rt_status.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
+            "RT_STATUS_HEAP_ALLOC was set — a GcItem drop happened on the audio thread"
+        );
+
+        // Dropping the instance must not drop any remaining GcItem (all were
+        // released by the drain above); plugin_instance drop is a leak check.
         drop(plugin_instance);
     }
 }

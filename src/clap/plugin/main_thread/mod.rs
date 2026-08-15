@@ -12,7 +12,7 @@ mod housekeeping;
 mod load;
 mod logging;
 
-use super::command_scheduler::CommandProducer;
+use super::command_scheduler::{CommandProducer, PushError};
 use super::shared::{ClapParamPayload, NamClapShared, PendingModel};
 use crate::clap::gui::lifecycle::GuiLifecycle;
 use clack_plugin::prelude::*;
@@ -132,24 +132,40 @@ impl<'a> NamClapMainThread<'a> {
             )));
         }
 
-        match self.cmd_producer.push_command(ClapParamPayload::LoadModel {
-            model_l,
-            new_resampler,
-            input_mult_adj,
-            output_mult_adj,
-        }) {
+        match self
+            .cmd_producer
+            .try_push_command(ClapParamPayload::LoadModel {
+                model_l,
+                new_resampler,
+                input_mult_adj,
+                output_mult_adj,
+            }) {
             Ok(seq) => {
                 log::trace!("Deferred model sent to audio thread (seq={seq})");
                 Ok(())
             }
-            Err(_) => {
-                self.shared
-                    .cold
-                    .rt_status
-                    .set_flag(spsc::RT_STATUS_MODEL_LOAD_FAILED);
-                Err(PluginError::Message(
-                    "Failed to send deferred model: SPSC channel full",
-                ))
+            Err((PushError::Full, payload)) => {
+                // R-10: fail-closed — retain the model for retry instead of
+                // dropping it. The resampler is rebuilt on the next flush.
+                if let ClapParamPayload::LoadModel {
+                    model_l,
+                    new_resampler,
+                    input_mult_adj,
+                    output_mult_adj,
+                } = payload
+                {
+                    drop(new_resampler);
+                    if let Ok(mut guard) = self.shared.cold.pending_model.lock() {
+                        *guard = Some(PendingModel {
+                            model: model_l,
+                            model_rate,
+                            input_mult_adj,
+                            output_mult_adj,
+                        });
+                    }
+                }
+                self.host.request_callback();
+                Ok(())
             }
         }
     }
@@ -206,11 +222,8 @@ impl<'a> NamClapMainThread<'a> {
                     .param_activation
                     .load(std::sync::atomic::Ordering::Relaxed) as f32,
             );
-        #[cfg(test)]
-        {
-            if let Ok(ir_guard) = self.shared.cold.ir_path.lock() {
-                self.params.ir_path = ir_guard.as_ref().map(std::path::PathBuf::from);
-            }
+        if let Ok(ir_guard) = self.shared.cold.ir_path.lock() {
+            self.params.ir_path = ir_guard.as_ref().map(std::path::PathBuf::from);
         }
     }
 
@@ -219,14 +232,25 @@ impl<'a> NamClapMainThread<'a> {
     /// Chamado no último `on_main_thread` ou no `deactivate()` final.
     /// Garante que nenhum `Box<StaticModel>` ou similar fique vivo no
     /// `GcOverflowBuffer` após o plugin morrer (R11).
-    pub(crate) fn drain_gc_final(&mut self) {
+    ///
+    /// R-04: `parking_lot` é o handoff single-owner do estado RT — em
+    /// `deactivate()` o processador entrega `&mut self.parking_lot` aqui,
+    /// depois que a thread de áudio parou e antes do `Drop` do estado RT.
+    /// Uma única chamada dropa SPSC + overflow + os 16 slots off-RT.
+    pub(crate) fn drain_gc_final(&mut self, parking_lot: &mut [Option<GcItem>; 16]) {
         use neural_amp_modeler_rs::common::spsc::drain_gc_channels;
-        // Drena o canal SPSC principal
+        // Drena o canal SPSC principal, o overflow e o parking lot RT
         let drained = drain_gc_channels(
             &mut self.gc_rx,
             &self.shared.cold.gc_overflow,
+            parking_lot,
             &self.shared.cold.rt_status,
         );
+        self.shared
+            .cold
+            .rt_status
+            .drains
+            .fetch_add(drained as u32, Ordering::Relaxed);
         if drained > 0 {
             log::debug!(
                 "NAM-rs: GC drain final — {} item(s) liberados no destroy (R11)",
@@ -235,18 +259,38 @@ impl<'a> NamClapMainThread<'a> {
         }
         // Segunda passagem: overflow pode ter sido preenchido pelo RT entre a primeira
         // drenagem e agora (race benigna — a segunda passagem fecha a janela)
-        let _ = drain_gc_channels(
+        let second = drain_gc_channels(
             &mut self.gc_rx,
             &self.shared.cold.gc_overflow,
+            parking_lot,
             &self.shared.cold.rt_status,
         );
+        self.shared
+            .cold
+            .rt_status
+            .drains
+            .fetch_add(second as u32, Ordering::Relaxed);
     }
 }
 
 impl<'a> Drop for NamClapMainThread<'a> {
     fn drop(&mut self) {
-        log::info!("NAM-rs: Plugin instance destroying — draining GC.");
-        self.drain_gc_final();
+        log::info!("NAM-rs: Plugin instance destroying — GUI fence down, teardown + GC drain.");
+        // R-09: lower the alive fence BEFORE releasing any shared state, so
+        // GUI/dialog threads stop dereferencing `NamClapShared` and the host
+        // handle immediately. Their event loops are no-ops from this point on.
+        self.shared.cold.alive_fence.store(false, Ordering::Release);
+        // Synchronous GUI teardown: close windows and bounded-join their
+        // threads before `NamClapShared` is dropped (the wrapper drops the
+        // main thread before the shared state). A reaper is spawned only as a
+        // last resort, after the fence is already down.
+        self.teardown_gui_resources();
+        // R-04: no destroy, `deactivate()` já transferiu o parking lot do RT
+        // para o drain final (ele é single-owner e já veio drenado). Aqui o
+        // lot é vazio — nenhum produtor RT está vivo — e o drain cobre SPSC +
+        // overflow pela última vez.
+        let mut empty_rt_parking_lot: [Option<GcItem>; 16] = Default::default();
+        self.drain_gc_final(&mut empty_rt_parking_lot);
     }
 }
 
@@ -255,7 +299,10 @@ impl<'a> PluginMainThread<'a, NamClapShared> for NamClapMainThread<'a> {
     /// Delegates to concern-specific sub-module methods.
     fn on_main_thread(&mut self) {
         if !self.shared.cold.alive_fence.load(Ordering::Relaxed) {
-            self.drain_gc_final();
+            // R-04: fence down ⇒ o processador RT já parou (deactivate) e o
+            // lot veio drenado no handoff; drain final cobre SPSC + overflow.
+            let mut empty_rt_parking_lot: [Option<GcItem>; 16] = Default::default();
+            self.drain_gc_final(&mut empty_rt_parking_lot);
             return;
         }
         self.housekeeping();

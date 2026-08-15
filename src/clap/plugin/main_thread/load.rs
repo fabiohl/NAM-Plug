@@ -5,6 +5,7 @@
 
 use super::super::shared::{ClapParamPayload, NamModelMetadata, PendingModel};
 use super::NamClapMainThread;
+use crate::clap::plugin::command_scheduler::PushError;
 use neural_amp_modeler_rs::common::diagnostics::{NamDiagnostic, NamErrorCode};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::loader::load_and_build_model;
@@ -15,14 +16,9 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-#[cfg(test)]
-use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
-
-#[cfg(test)]
 use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
-
-#[cfg(test)]
 use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
+use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 
 impl<'a> NamClapMainThread<'a> {
     /// Loads a new neural model from the specified path.
@@ -166,20 +162,41 @@ impl<'a> NamClapMainThread<'a> {
                 ));
             }
 
-            self.cmd_producer
-                .push_command(ClapParamPayload::LoadModel {
+            match self
+                .cmd_producer
+                .try_push_command(ClapParamPayload::LoadModel {
                     model_l,
                     new_resampler,
                     input_mult_adj,
                     output_mult_adj,
-                })
-                .map_err(|_| {
-                    Box::new(
-                        NamDiagnostic::new(NamErrorCode::ParamChannelFull, &self.sys)
-                            .message("The communication channel with the audio thread is full.")
-                            .hint("Please try loading the model again in a few moments."),
-                    )
-                })?;
+                }) {
+                Ok(_seq) => {}
+                Err((PushError::Full, payload)) => {
+                    // R-10: fail-closed — retain the model for retry instead of
+                    // dropping it. The UI is not advanced because the model is
+                    // not yet installed on the audio thread; `flush_pending_model`
+                    // will retry on the next housekeeping cycle.
+                    if let ClapParamPayload::LoadModel {
+                        model_l,
+                        new_resampler,
+                        input_mult_adj,
+                        output_mult_adj,
+                    } = payload
+                    {
+                        drop(new_resampler); // rebuilt by flush_pending_model()
+                        if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock() {
+                            *pending_guard = Some(PendingModel {
+                                model: model_l,
+                                model_rate,
+                                input_mult_adj,
+                                output_mult_adj,
+                            });
+                        }
+                    }
+                    self.host.request_callback();
+                    return Ok(());
+                }
+            }
         } else {
             // F3 / S1-E1-T02: defer sending until `buffer_size` and `sample_rate`
             // become known in `activate()`. The resampler is NOT constructed here
@@ -237,7 +254,6 @@ impl<'a> NamClapMainThread<'a> {
     /// FFT plan construction), being safe to execute only on the main thread.
     /// The constructed `ConvEngine` is sent to the RT thread via a lock-free
     /// SPSC channel following the same pattern as `load_model`.
-    #[cfg(test)]
     pub fn load_cabsim(&mut self, path: &Path) -> Result<(), Box<NamDiagnostic>> {
         let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
         let host_rate = if host_rate == 0 { 48000 } else { host_rate };
@@ -260,37 +276,54 @@ impl<'a> NamClapMainThread<'a> {
             )
         })?;
 
-        // Store ir_path for state save/load and GUI display
-        if let Ok(mut ir_guard) = self.shared.cold.ir_path.lock() {
-            *ir_guard = Some(path.to_string_lossy().to_string());
-        }
-
-        // Store raw IR samples and their sample rate for adaptive rebuild
-        if let Ok(mut raw_guard) = self.shared.cold.ir_raw_samples.lock() {
-            *raw_guard = Some(cabsim.samples.clone());
-        }
-        self.shared
-            .cold
-            .ir_raw_sample_rate
-            .store(cabsim.sample_rate, Ordering::Relaxed);
-
-        let adapter = Some(CabSimAdapter::new(Box::new(engine)).map_err(|e| {
-            Box::new(
-                NamDiagnostic::new(e, &self.sys)
-                    .message("Failed to build cab-sim convolution adapter")
-                    .hint("The IR samples require more memory than available."),
-            )
-        })?);
-
-        self.cmd_producer
-            .push_command(ClapParamPayload::LoadCabIr { adapter })
-            .map_err(|_| {
+        // When the plugin is already active, build and deliver the adapter
+        // with the host partition size. When not yet active (buffer_size == 0),
+        // skip the push: `activate()` rebuilds the adapter from `ir_raw_samples`
+        // with the correct partition size, avoiding a stale fallback-sized
+        // adapter overwriting the activate-built one.
+        let delivered = if buffer_size > 0 {
+            let adapter = Some(CabSimAdapter::new(Box::new(engine)).map_err(|e| {
                 Box::new(
-                    NamDiagnostic::new(NamErrorCode::ParamChannelFull, &self.sys)
-                        .message("The communication channel with the audio thread is full.")
-                        .hint("Please try loading the IR again in a few moments."),
+                    NamDiagnostic::new(e, &self.sys)
+                        .message("Failed to build cab-sim convolution adapter")
+                        .hint("The IR samples require more memory than available."),
                 )
-            })?;
+            })?);
+
+            // R-10: fail-closed — if the SPSC is full, put the path back in
+            // `ui_pending_ir` and request a callback so housekeeping retries.
+            // Do not commit ir_path / ir_raw_samples until the adapter is
+            // actually delivered (UI/state would otherwise claim IR is loaded
+            // while DSP stays dry).
+            match self
+                .cmd_producer
+                .try_push_command(ClapParamPayload::LoadCabIr { adapter })
+            {
+                Ok(_) => true,
+                Err(_) => {
+                    if let Ok(mut pending) = self.shared.cold.ui_pending_ir.lock() {
+                        *pending = Some(path.to_path_buf());
+                    }
+                    self.host.request_callback();
+                    false
+                }
+            }
+        } else {
+            true
+        };
+
+        if delivered {
+            if let Ok(mut ir_guard) = self.shared.cold.ir_path.lock() {
+                *ir_guard = Some(path.to_string_lossy().to_string());
+            }
+            if let Ok(mut raw_guard) = self.shared.cold.ir_raw_samples.lock() {
+                *raw_guard = Some(cabsim.samples);
+            }
+            self.shared
+                .cold
+                .ir_raw_sample_rate
+                .store(cabsim.sample_rate, Ordering::Relaxed);
+        }
 
         Ok(())
     }

@@ -5,10 +5,11 @@
 
 use super::NamClapMainThread;
 use crate::clap::gui::ui::zones::dialog_state;
+use crate::clap::plugin::ClapParamPayload;
 use crate::clap::plugin::shared::PendingPresetLoad;
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::host::HostMainThreadHandle;
-use neural_amp_modeler_rs::common::spsc::{self, drain_gc_channels};
+use neural_amp_modeler_rs::common::spsc::{self, GcItem, drain_gc_channels};
 use neural_amp_modeler_rs::models::slimmable::slice_wavenet_model;
 use neural_amp_modeler_rs::models::{NamModel, StaticModel};
 use std::sync::atomic::Ordering;
@@ -26,9 +27,17 @@ impl<'a> NamClapMainThread<'a> {
         let _ = self.flush_pending_model();
 
         // Drain obsolete models to free memory outside RT.
+        // R-04: during normal operation the RT parking lot is owned by the
+        // processor and flushed back to this SPSC every audio cycle
+        // (gc.rs::drain_parking_lot), so a main-thread-side empty lot is
+        // correct here. The teardown handoff (`deactivate()` →
+        // `drain_gc_final(&mut processor.parking_lot)`) covers the 16 slots
+        // after the audio thread stops.
+        let mut rt_parking_lot: [Option<GcItem>; 16] = Default::default();
         let drained = drain_gc_channels(
             &mut self.gc_rx,
             &self.shared.cold.gc_overflow,
+            &mut rt_parking_lot,
             &self.shared.cold.rt_status,
         );
         self.shared
@@ -116,13 +125,35 @@ impl<'a> NamClapMainThread<'a> {
                 };
 
                 if let Some(model) = new_model {
-                    let _ = self.slimmable_tx.push(Some(model));
+                    match self.slimmable_tx.push(Some(model)) {
+                        Ok(()) => {
+                            self.shared
+                                .cold
+                                .rt_status
+                                .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+                        }
+                        Err(rtrb::PushError::Full(_)) => {
+                            // R-10: keep NEEDS_SLIMMABLE_REBUILD so the FSM
+                            // retries on the next cycle instead of silently
+                            // dropping the slimmed model and locking quality.
+                            log::warn!("NAM-rs: slimmable channel full — rebuild will retry");
+                            self.host.request_callback();
+                        }
+                    }
+                } else {
+                    self.shared
+                        .cold
+                        .rt_status
+                        .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
                 }
+            } else {
+                // target_ch < 4: no slimmable rebuild needed — clear the flag
+                // so the FSM does not retry a no-op.
+                self.shared
+                    .cold
+                    .rt_status
+                    .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
             }
-            self.shared
-                .cold
-                .rt_status
-                .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
         }
 
         // Oversampling engine rebuild: main thread performs all allocation
@@ -267,10 +298,7 @@ impl<'a> NamClapMainThread<'a> {
         }
 
         // Check if there is a pending IR sent by the UI
-        #[cfg(test)]
         {
-            use crate::clap::plugin::ClapParamPayload;
-
             // Propagate ir_dialog_state → ui_pending_ir (R2: Arc-backed, UAF-safe)
             if let Some(ir_dialog_state) = self.shared.cold.ir_dialog_state.as_ref() {
                 let mut dialog_guard = ir_dialog_state.pending_ir.lock().unwrap_or_else(|e| {
@@ -343,28 +371,40 @@ impl<'a> NamClapMainThread<'a> {
                 }
             }
 
-            if self.shared.cold.ui_clear_ir.swap(false, Ordering::Relaxed) {
-                let _ = self
+            if self.shared.cold.ui_clear_ir.load(Ordering::Relaxed) {
+                match self
                     .cmd_producer
-                    .push_command(ClapParamPayload::LoadCabIr { adapter: None });
+                    .try_push_command(ClapParamPayload::LoadCabIr { adapter: None })
                 {
-                    let mut ir_guard = self.shared.cold.ir_path.lock().unwrap_or_else(|e| {
-                        log::error!("PoisonError in ir_path lock: {e:?}");
-                        e.into_inner()
-                    });
-                    *ir_guard = None;
-                }
-                {
-                    let mut raw_guard =
-                        self.shared.cold.ir_raw_samples.lock().unwrap_or_else(|e| {
-                            log::error!("PoisonError in ir_raw_samples lock: {e:?}");
-                            e.into_inner()
-                        });
-                    *raw_guard = None;
-                    self.shared
-                        .cold
-                        .ir_raw_sample_rate
-                        .store(0, Ordering::Relaxed);
+                    Ok(_) => {
+                        self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
+                        {
+                            let mut ir_guard =
+                                self.shared.cold.ir_path.lock().unwrap_or_else(|e| {
+                                    log::error!("PoisonError in ir_path lock: {e:?}");
+                                    e.into_inner()
+                                });
+                            *ir_guard = None;
+                        }
+                        {
+                            let mut raw_guard =
+                                self.shared.cold.ir_raw_samples.lock().unwrap_or_else(|e| {
+                                    log::error!("PoisonError in ir_raw_samples lock: {e:?}");
+                                    e.into_inner()
+                                });
+                            *raw_guard = None;
+                            self.shared
+                                .cold
+                                .ir_raw_sample_rate
+                                .store(0, Ordering::Relaxed);
+                        }
+                    }
+                    Err(_) => {
+                        // R-10: keep ui_clear_ir set so the next housekeeping
+                        // cycle retries. Do not clear ir_path / ir_raw_samples
+                        // until the bypass command is actually delivered.
+                        self.host.request_callback();
+                    }
                 }
             }
         }

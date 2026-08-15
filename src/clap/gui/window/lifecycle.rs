@@ -7,9 +7,11 @@ use super::state::NamPluginWindow;
 /// idempotency flag, so it is safe even when `destroy_gl_resources` was
 /// already called in `on_frame`. The GL context may not be current here;
 /// without a current context, OpenGL delete operations become no-ops or
-/// silently fail (no panics).
+/// silently fail (no panics). Degraded windows (no painter) are no-ops.
 impl Drop for NamPluginWindow {
     fn drop(&mut self) {
-        self.painter.destroy();
+        if let Some(painter) = &mut self.painter {
+            painter.destroy();
+        }
     }
 }

@@ -13,7 +13,8 @@ keywords = ["audio", "dsp", "nam", "neural-amp-modeler", "clap", "plugin"]
 categories = ["multimedia::audio", "multimedia"]
 
 [dependencies]
-NeuralAmpModeler-rs = { version = "0.4", default-features = false, features = [
+# S7.T1: pinned to the local motor 0.5.0 (path) — crates.io 0.4.0 is NOT mixed in.
+NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs", version = "0.5.0", default-features = false, features = [
     "stereo",
 ] }
 clack-common = "0.1"
@@ -56,7 +57,7 @@ libc = "0.2"
 sha2 = "0.11"
 
 [dev-dependencies]
-NeuralAmpModeler-rs = { version = "0.4", features = ["testing"] }
+NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs", version = "0.5.0", features = ["testing"] }
 nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.1", features = ["clack-plugin"] }
 clap-sys = "0.5"

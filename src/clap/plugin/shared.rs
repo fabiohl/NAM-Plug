@@ -45,7 +45,6 @@ pub enum ClapParamPayload {
     /// Loading of a new cab-sim convolution adapter via SPSC.
     /// Follows the same pattern as `LoadModel`: the adapter is constructed
     /// outside the RT thread and swapped atomically in the audio thread.
-    #[cfg(test)]
     LoadCabIr {
         /// Pre-built convolution adapter (None = bypass cabsim).
         adapter: Option<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter>,

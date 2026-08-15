@@ -144,6 +144,12 @@ pub struct NamClapProcessor<'a> {
     /// original dry signal during crossfade for blend computation.
     pub(crate) buf_xfade_dry_l: AlignedVec<f32>,
     pub(crate) buf_xfade_dry_r: AlignedVec<f32>,
+    /// 7. WaveNet crossfade scratch buffers (motor 0.5.0 `run_inference`):
+    ///    second-pass output used when processing is chunked (active
+    ///    resampler). Pre-allocated `MAX_RESAMP_BUF` each — zero alloc in
+    ///    `process()`.
+    pub(crate) buf_xfd_scratch_l: AlignedVec<f32>,
+    pub(crate) buf_xfd_scratch_r: AlignedVec<f32>,
 
     /// Status flags for RT telemetry.
     pub(crate) rt_status: Arc<RtStatusFlags>,
