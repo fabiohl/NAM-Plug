@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Unit tests for the R-09 GUI teardown protocol (Sprint 6 · S6.T1).
+//! Unit tests for the R-09 GUI teardown protocol.
 //!
 //! Covers the bounded-join teardown helpers and the `NamClapMainThread::drop`
 //! contract: the alive fence is lowered before teardown, and any fake

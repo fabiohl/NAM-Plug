@@ -358,7 +358,7 @@ mod tests {
         drop(plugin_instance);
     }
 
-    // R-04 (S7.T1): teardown must hand the RT parking lot to the final off-RT
+    // R-04: teardown must hand the RT parking lot to the final off-RT
     // drain. Parks exactly 16 items in the processor's parking lot (SPSC 32 +
     // lot 16 + 1 overflow = 49 items after 25 swaps with no housekeeping),
     // then deactivates. Before the fix, drain_gc_final never saw the lot and

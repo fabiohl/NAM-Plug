@@ -206,9 +206,15 @@ export RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS -Cprofile-generate=$PROFRAW_
 export LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw"
 echo -e "  Using RUSTFLAGS: ${BOLD}$RUSTFLAGS${NC}"
 
-echo -e "  Compiling and running real-world PGO profiling workload (pgo_profiling_workload)..."
-timeout 120 cargo run --profile dist --features testing --bin pgo_profiling_workload || {
-    echo -e "${RED}Error: pgo_profiling_workload failed (or timed out after 120s). Cannot generate PGO profiles.${NC}"
+echo -e "  Compiling real-world PGO profiling workload (pgo_profiling_workload)..."
+cargo build --profile dist --features testing --bin pgo_profiling_workload || {
+    echo -e "${RED}Error: Failed to build pgo_profiling_workload for PGO profiling.${NC}"
+    exit 1
+}
+
+echo -e "  Executing PGO profiling workload..."
+timeout 60 "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" || {
+    echo -e "${RED}Error: pgo_profiling_workload failed (or timed out after 60s). Cannot generate PGO profiles.${NC}"
     exit 1
 }
 

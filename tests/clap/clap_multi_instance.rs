@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! S8-E8-T02: Multi-instance tests now load the freshly built `.so`
+//! Multi-instance tests load the freshly built `.so`
 //! instead of using the static `PluginEntry::load_from_clack()` path.
 //! SHA256 of the tested binary is recorded in the test log.
 
@@ -169,9 +169,9 @@ fn test_multi_instance_rt_priority() {
     drop(instances);
 }
 
-/// S5-E5-T04: Multi-instance parallel stress test with heap audit.
+/// Multi-instance parallel stress test with heap audit.
 ///
-/// S8-E8-T02: Loads the freshly built `.so` in each parallel thread
+/// Loads the freshly built `.so` in each parallel thread
 /// instead of the static `load_from_clack()` path.
 #[cfg(feature = "heap-audit")]
 #[test]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! CLAP Host Test Harness — S8-E8-T01
+//! CLAP Host Test Harness
 //!
 //! Simulates a complete DAW host for contract validation:
 //!   - Thread-check callbacks (`is_main_thread` / `is_audio_thread`)

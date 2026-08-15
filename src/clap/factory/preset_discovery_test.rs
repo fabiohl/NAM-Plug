@@ -26,7 +26,7 @@ mod tests {
         assert_eq!(result, r#"[1, 2, {"a": 3}, [4, 5]]"#);
     }
 
-    // ── S6-E6-T04: Unicode tests ──
+    // ── Unicode tests ──
 
     #[test]
     fn test_extract_balanced_json_with_unicode_in_strings() {
@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(result, s);
     }
 
-    // ── S6-E6-T04: Malformed/corrupted input tests ──
+    // ── Malformed/corrupted input tests ──
 
     #[test]
     fn test_extract_balanced_json_empty_string() {
@@ -88,7 +88,7 @@ mod tests {
         assert!(extract_balanced_json("{\"a\": \"unclosed}").is_none());
     }
 
-    // ── S6-E6-T04: parse_metadata tests ──
+    // ── parse_metadata tests ──
 
     #[test]
     fn test_parse_metadata_with_unicode_name() {

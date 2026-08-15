@@ -24,7 +24,7 @@ impl<'a> NamClapProcessor<'a> {
         self.drain_parking_lot();
 
         // 1. Event Processing (Main Thread SPSC)
-        // S4-E4-T01: Use CommandConsumer with acknowledgment.
+        // Use CommandConsumer with acknowledgment.
         let mut drained_count = 0u32;
 
         while let Some(payload) = self.cmd_consumer.pop() {
@@ -110,7 +110,7 @@ impl<'a> NamClapProcessor<'a> {
                 // ── Entering Offline ──
                 // Capture an immutable snapshot of the realtime state BEFORE
                 // overwriting it. This snapshot is restored when returning to
-                // Realtime (S0-E0-T04, CLAP-F009).
+                // Realtime (CLAP-F009).
                 self.realtime_activation = self.params.activation_precision;
                 self.adaptive_compute.set_mode(
                     neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Off,
@@ -211,7 +211,7 @@ impl<'a> NamClapProcessor<'a> {
             .store(cabsim_tail, Ordering::Relaxed);
         self.cabsim_tail_remaining = self.cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
 
-        // S4-E4-T03: Notify the host of tail changes from the audio thread,
+        // Notify the host of tail changes from the audio thread,
         // which owns the valid HostAudioProcessorHandle. Eliminates the
         // unsafe main-thread → audio-thread pointer cast previously in
         // housekeeping.rs.

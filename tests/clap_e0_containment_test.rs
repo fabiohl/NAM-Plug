@@ -74,12 +74,12 @@ fn process_block(
     output_events_buffer
 }
 
-// ── Test: CLAP-F001 — CabSim não participa do áudio do plugin ─────────────
+// ── Test: CLAP-F001 — CabSim does not participate in plugin audio ──────────
 //
-// A GUI e o state loader constroem um ConvEngine e o enviam via SPSC.
-// O orquestrador injeta `conv` no DspPipelineContext, mas run_inference()
-// nunca chama conv.process(). A latência do IR é somada a current_latency
-// enquanto a convolução NÃO está aplicando o IR no áudio CLAP.
+// The GUI and state loader build a ConvEngine and send it via SPSC.
+// The orchestrator injects `conv` into DspPipelineContext, but run_inference()
+// never calls conv.process(). The IR latency is added to current_latency
+// while convolution is NOT applying the IR to the CLAP audio.
 
 #[test]
 fn test_f001_cabsim_loaded_but_not_applied_to_audio() {
@@ -172,12 +172,12 @@ fn test_f001_cabsim_loaded_but_not_applied_to_audio() {
     );
 }
 
-// ── Test: CLAP-F014 — Falha de asset no state restore mantém DSP antigo ───
+// ── Test: CLAP-F014 — Asset failure during state restore keeps previous DSP ──
 //
-// O state é comprometido nos parametros e atômicos antes de resolver modelo e IR.
-// Se o caminho não existe, o load deve falhar com erro e manter o estado anterior
-// intacto — sem alterar DSP, parâmetros ou UI.
-// S6-E6-T01: pipeline transacional garante "fail without side-effects".
+// State is committed to parameters and atomics before resolving model and IR.
+// If the path does not exist, loading must fail with an error and maintain the previous state
+// intact — without altering DSP, parameters, or UI.
+// Transactional pipeline ensures "fail without side-effects".
 
 #[test]
 fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
@@ -258,7 +258,7 @@ fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
         let state_ext = test_util::get_state_ext(&mut plugin_instance);
         let state_b = serde_json::to_vec(&params_b).unwrap();
         let mut handle = plugin_instance.plugin_handle();
-        // S6-E6-T01: load returns Err when model is not found — no DSP change
+        // Load returns Err when model is not found — no DSP change
         let result = state_ext.load(&mut handle, &mut state_b.as_slice());
         assert!(
             result.is_err(),
@@ -285,7 +285,7 @@ fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     plugin_instance.deactivate(started.stop_processing());
 
     // ── Assertions ──
-    // S6-E6-T01: failed restore preserves old state completely.
+    // Failed restore preserves old state completely.
 
     // Model name in GUI must still be the original model name
     let ui_name = shared.cold.ui_model_name.lock().unwrap();
@@ -309,10 +309,10 @@ fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     );
 }
 
-// ── Test: CLAP-F009 — Render offline não preserva/restaura state realtime ──
+// ── Test: CLAP-F009 — Offline rendering does not preserve/restore realtime state ──
 //
-// Ao sair do modo offline, `old_activation` é capturado depois de `self.params`
-// já ter sido modificado para Standard. O estado anterior não é restaurado.
+// When exiting offline mode, `old_activation` is captured after `self.params`
+// has already been modified to Standard. The previous state is not restored.
 
 #[test]
 fn test_f009_offline_realtime_loses_activation_precision() {
@@ -426,11 +426,11 @@ fn test_f009_offline_realtime_loses_activation_precision() {
     );
 }
 
-// ── Test: CLAP-F008 — Bypass ativo engole automação de host ────────────────
+// ── Test: CLAP-F008 — Active bypass swallows host automation ──────────────
 //
-// Se `self.params.bypass` já está ativo, `process_bypass()` copia o áudio
-// e o loop faz `continue` antes de aplicar qualquer evento. Um evento
-// host Bypass=0 no mesmo bloco não consegue retirar o plugin do bypass.
+// If `self.params.bypass` is already active, `process_bypass()` copies the audio
+// and the loop executes `continue` before applying any events. A host
+// Bypass=0 event in the same block cannot take the plugin out of bypass.
 
 #[test]
 fn test_f008_bypass_blocks_host_events() {
@@ -519,11 +519,11 @@ fn test_f008_bypass_blocks_host_events() {
     );
 }
 
-// ── Test: CLAP-F007 — Blocos grandes podem truncar saída ───────────────────
+// ── Test: CLAP-F007 — Large blocks may truncate output ───────────────────
 //
-// A ativação aceita max_frames_count arbitrário. O orquestrador passa o
-// sub-bloco completo para run_inference(), que reduz n_samples para
-// MAX_RESAMP_BUF (8.192). Amostras além de 8192 podem não ser processadas.
+// Activation accepts an arbitrary max_frames_count. The orchestrator passes the
+// full sub-block to run_inference(), which reduces n_samples to
+// MAX_RESAMP_BUF (8192). Samples beyond 8192 may not be processed.
 
 #[test]
 fn test_f007_atypical_block_8193_bypass() {
@@ -587,8 +587,8 @@ fn test_f007_atypical_block_8193_bypass() {
 
 // ── Test: CLAP-F009 — Log claims "max quality" without 4x engine ───────────
 //
-// O log emitido em render.rs:44-51 afirma "oversample=max quality" ao entrar
-// em modo offline, mas nenhum engine 4x é solicitado.
+// The log emitted in render.rs:44-51 claims "oversample=max quality" upon entering
+// offline mode, but no 4x engine is requested.
 
 #[test]
 fn test_f009_offline_log_does_not_claim_max_quality_without_4x() {

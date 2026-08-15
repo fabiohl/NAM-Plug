@@ -26,7 +26,7 @@ impl<'a> NamClapProcessor<'a> {
         input_events: &InputEvents,
         start_nanos: u64,
     ) -> Result<ProcessStatus, PluginError> {
-        // S4-E4-T02: track pending restart factor for latency-policy enforcement.
+        // Track pending restart factor for latency-policy enforcement.
         let pending_before = self
             .shared
             .cold
@@ -327,7 +327,7 @@ impl<'a> NamClapProcessor<'a> {
             peaks::store_peaks(self.shared, peak_l, peak_r);
         }
 
-        // S4-E4-T02: if an oversampling change was detected during active
+        // If an oversampling change was detected during active
         // processing, request host restart so latency can be updated
         // legally during the next activate().
         let pending_after = self

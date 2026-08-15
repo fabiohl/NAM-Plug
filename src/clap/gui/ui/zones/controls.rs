@@ -13,6 +13,23 @@ use crate::clap::gui::ui::{
     knob::handle_knob,
 };
 
+fn dispatch_discrete_param_change(
+    shared: &NamClapShared,
+    host: &HostSharedHandle,
+    param_storage: &std::sync::atomic::AtomicU32,
+    param_idx: u32,
+    new_val: u32,
+) {
+    param_storage.store(new_val, Ordering::Relaxed);
+    shared.set_gesture(param_idx as usize, 1);
+    shared.set_gesture(param_idx as usize, 0);
+    shared.set_gesture(param_idx as usize, 2);
+    shared.bump_generation();
+    if let Some(params_ext) = host.get_extension::<HostParams>() {
+        params_ext.request_flush(host);
+    }
+}
+
 pub(crate) fn draw_zone2_controls(
     ui: &mut egui::Ui,
     shared: &NamClapShared,
@@ -171,76 +188,21 @@ pub(crate) fn draw_zone2_controls(
                             .font(egui::FontId::proportional(10.0))
                             .color(egui::Color32::GRAY),
                     );
-                    let resp = ui.selectable_value(
-                        &mut (os_val_i32 == 0),
-                        true,
-                        egui::RichText::new("Off").font(egui::FontId::proportional(11.0)),
-                    );
-                    if resp.clicked() && os_val_i32 != 0 {
-                        shared.ui_to_rt.param_oversample.store(0, Ordering::Relaxed);
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            1,
+                    let os_options = [(0, "Off"), (1, "2×"), (2, "4×")];
+                    for (val, label) in os_options {
+                        let resp = ui.selectable_value(
+                            &mut (os_val_i32 == val),
+                            true,
+                            egui::RichText::new(label).font(egui::FontId::proportional(11.0)),
                         );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            0,
-                        );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            2,
-                        );
-                        shared.bump_generation();
-                        if let Some(params_ext) = host.get_extension::<HostParams>() {
-                            params_ext.request_flush(host);
-                        }
-                    }
-                    let resp = ui.selectable_value(
-                        &mut (os_val_i32 == 1),
-                        true,
-                        egui::RichText::new("2×").font(egui::FontId::proportional(11.0)),
-                    );
-                    if resp.clicked() && os_val_i32 != 1 {
-                        shared.ui_to_rt.param_oversample.store(1, Ordering::Relaxed);
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            1,
-                        );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            0,
-                        );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            2,
-                        );
-                        shared.bump_generation();
-                        if let Some(params_ext) = host.get_extension::<HostParams>() {
-                            params_ext.request_flush(host);
-                        }
-                    }
-                    let resp = ui.selectable_value(
-                        &mut (os_val_i32 == 2),
-                        true,
-                        egui::RichText::new("4×").font(egui::FontId::proportional(11.0)),
-                    );
-                    if resp.clicked() && os_val_i32 != 2 {
-                        shared.ui_to_rt.param_oversample.store(2, Ordering::Relaxed);
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            1,
-                        );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            0,
-                        );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_OVERSAMPLE as usize,
-                            2,
-                        );
-                        shared.bump_generation();
-                        if let Some(params_ext) = host.get_extension::<HostParams>() {
-                            params_ext.request_flush(host);
+                        if resp.clicked() && os_val_i32 != val {
+                            dispatch_discrete_param_change(
+                                shared,
+                                host,
+                                &shared.ui_to_rt.param_oversample,
+                                crate::clap::extensions::params::PARAM_OVERSAMPLE,
+                                val as u32,
+                            );
                         }
                     }
                 });
@@ -303,52 +265,21 @@ pub(crate) fn draw_zone2_controls(
                     );
                     // Value 1 = Standard (exact-grade, universal default);
                     // Value 0 = Fast (Padé/minimax approximation, opt-in).
-                    let resp = ui.selectable_value(
-                        &mut (act_val_i32 == 1),
-                        true,
-                        egui::RichText::new("Standard").font(egui::FontId::proportional(11.0)),
-                    );
-                    if resp.clicked() && act_val_i32 != 1 {
-                        shared.ui_to_rt.param_activation.store(1, Ordering::Relaxed);
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_ACTIVATION as usize,
-                            1,
+                    let act_options = [(1, "Standard"), (0, "Fast")];
+                    for (val, label) in act_options {
+                        let resp = ui.selectable_value(
+                            &mut (act_val_i32 == val),
+                            true,
+                            egui::RichText::new(label).font(egui::FontId::proportional(11.0)),
                         );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_ACTIVATION as usize,
-                            0,
-                        );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_ACTIVATION as usize,
-                            2,
-                        );
-                        shared.bump_generation();
-                        if let Some(params_ext) = host.get_extension::<HostParams>() {
-                            params_ext.request_flush(host);
-                        }
-                    }
-                    let resp = ui.selectable_value(
-                        &mut (act_val_i32 == 0),
-                        true,
-                        egui::RichText::new("Fast").font(egui::FontId::proportional(11.0)),
-                    );
-                    if resp.clicked() && act_val_i32 != 0 {
-                        shared.ui_to_rt.param_activation.store(0, Ordering::Relaxed);
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_ACTIVATION as usize,
-                            1,
-                        );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_ACTIVATION as usize,
-                            0,
-                        );
-                        shared.set_gesture(
-                            crate::clap::extensions::params::PARAM_ACTIVATION as usize,
-                            2,
-                        );
-                        shared.bump_generation();
-                        if let Some(params_ext) = host.get_extension::<HostParams>() {
-                            params_ext.request_flush(host);
+                        if resp.clicked() && act_val_i32 != val {
+                            dispatch_discrete_param_change(
+                                shared,
+                                host,
+                                &shared.ui_to_rt.param_activation,
+                                crate::clap::extensions::params::PARAM_ACTIVATION,
+                                val as u32,
+                            );
                         }
                     }
                 });

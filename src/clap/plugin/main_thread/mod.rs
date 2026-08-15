@@ -105,7 +105,7 @@ impl<'a> NamClapMainThread<'a> {
 
         let sample_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
 
-        // S1-E1-T02: construct the resampler HERE with the real host sample rate
+        // Construct the resampler HERE with the real host sample rate
         // and buffer capacity — both are known now that activate() has been called.
         let buf_capacity = buffer_size.max(MAX_RESAMP_BUF).max(1024) * 2;
         let new_resampler = Box::new(
@@ -227,19 +227,19 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// Drena o GC-cascade completamente antes do plugin ser destruído.
+    /// Drains the GC-cascade completely before the plugin is destroyed.
     ///
-    /// Chamado no último `on_main_thread` ou no `deactivate()` final.
-    /// Garante que nenhum `Box<StaticModel>` ou similar fique vivo no
-    /// `GcOverflowBuffer` após o plugin morrer (R11).
+    /// Called during the final `on_main_thread` callback or in final `deactivate()`.
+    /// Ensures that no `Box<StaticModel>` or similar heap items remain alive in
+    /// `GcOverflowBuffer` after the plugin terminates (R-11).
     ///
-    /// R-04: `parking_lot` é o handoff single-owner do estado RT — em
-    /// `deactivate()` o processador entrega `&mut self.parking_lot` aqui,
-    /// depois que a thread de áudio parou e antes do `Drop` do estado RT.
-    /// Uma única chamada dropa SPSC + overflow + os 16 slots off-RT.
+    /// R-04: `parking_lot` is the single-owner handoff from the RT state — in
+    /// `deactivate()` the processor hands over `&mut self.parking_lot` here,
+    /// after the audio thread has stopped and prior to `Drop` of RT state.
+    /// A single call drops SPSC + overflow + the 16 off-RT slots.
     pub(crate) fn drain_gc_final(&mut self, parking_lot: &mut [Option<GcItem>; 16]) {
         use neural_amp_modeler_rs::common::spsc::drain_gc_channels;
-        // Drena o canal SPSC principal, o overflow e o parking lot RT
+        // Drain primary SPSC channel, overflow buffer, and RT parking lot
         let drained = drain_gc_channels(
             &mut self.gc_rx,
             &self.shared.cold.gc_overflow,

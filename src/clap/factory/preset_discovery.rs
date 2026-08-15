@@ -169,7 +169,7 @@ impl ProviderImpl<'_> for NamPresetProvider {
     }
 }
 
-/// Maximum bytes read from any model file for metadata-only extraction (S6-E6-T04).
+/// Maximum bytes read from any model file for metadata-only extraction.
 const MAX_METADATA_BYTES: u64 = 1_048_576; // 1 MiB
 
 /// NAMB header size in bytes.
@@ -201,7 +201,7 @@ fn read_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
 }
 
 /// Parses just the `metadata` field from a `.nam` JSON file.
-/// Only reads the first `MAX_METADATA_BYTES` to avoid loading weight tensors (S6-E6-T04).
+/// Only reads the first `MAX_METADATA_BYTES` to avoid loading weight tensors.
 fn extract_nam_json_metadata(path: &Path) -> Option<NamMetadata> {
     let bytes = read_file_bounded(path, MAX_METADATA_BYTES).ok()?;
     if bytes.is_empty() {
@@ -225,7 +225,7 @@ fn extract_nam_json_metadata(path: &Path) -> Option<NamMetadata> {
     parse_metadata(json_str)
 }
 
-/// Extracts metadata from a `.namb` binary container (S6-E6-T04).
+/// Extracts metadata from a `.namb` binary container.
 ///
 /// Reads the 80-byte NAMB header, determines `weights_offset`, then parses the
 /// JSON metadata section between the header and the weights block.  All I/O is
@@ -281,7 +281,7 @@ fn parse_metadata(json_str: &str) -> Option<NamMetadata> {
 /// Extracts a balanced JSON object/array from the start of the string.
 ///
 /// Uses `char_indices()` to correctly track byte positions in the presence of
-/// multibyte UTF-8 characters (S6-E6-T04).
+/// multibyte UTF-8 characters.
 fn extract_balanced_json(s: &str) -> Option<&str> {
     let mut iter = s.char_indices();
     let (_, first) = iter.next()?;

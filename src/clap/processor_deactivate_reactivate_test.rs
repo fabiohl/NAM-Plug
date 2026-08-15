@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! S1-E1-T05: Deactivate/Reactivate lifecycle test matrix.
+//! Deactivate/Reactivate lifecycle test matrix.
 //!
 //! Validates audio output parity, resource preservation, and robustness
 //! across deactivate→activate transitions varying sample rate, buffer

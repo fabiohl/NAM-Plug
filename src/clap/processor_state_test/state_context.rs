@@ -155,7 +155,7 @@ fn test_state_context_roundtrip() {
     );
 }
 
-/// S6-E6-T03: `state_context.save(ForPreset)` → `state.load()` roundtrip.
+/// `state_context.save(ForPreset)` → `state.load()` roundtrip.
 ///
 /// Ensures a ForPreset blob, when loaded via the regular `state.load()`,
 /// restores the same parameters and model identity that would be obtained
@@ -223,23 +223,23 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
     let preset_json: serde_json::Value =
         serde_json::from_slice(&preset_buffer).expect("preset buffer should be valid JSON");
     assert!(preset_json["params"]["model_path"].is_null());
-    // S6-E6-T02: model_search_paths are preserved as portable directory hints
+    // Model search paths are preserved as portable directory hints
     assert!(
         preset_json["params"]["model_search_paths"].is_array(),
         "model_search_paths are preserved for cross-machine search"
     );
     assert!(preset_json["params"]["ir_path"].is_null());
     assert!(preset_json["params"]["model_basename"].is_string());
-    // S6-E6-T02: model_hash must be present for portable identity
+    // Model hash must be present for portable identity
     assert!(preset_json["params"]["model_hash"].is_string());
-    // S6-E6-T03: oversample and activation_precision must be preserved
+    // Oversample and activation_precision must be preserved
     assert_eq!(
         preset_json["params"]["oversample"], "X2",
         "ForPreset must preserve oversample"
     );
     assert!((preset_json["params"]["input_gain_db"].as_f64().unwrap() - 2.0).abs() < f64::EPSILON);
 
-    // ── S6-E6-T03 equivalence: ForPreset blob loaded via state.load on same instance ──
+    // ── Preset Equivalence: ForPreset blob loaded via state.load on same instance ──
     // First deactivate the plugin to reset DSP state, then load the preset
     // via state.load. The model must be found via basename + model_search_paths
     // (added to the preset in this test, as the model path is stripped by ForPreset save).
@@ -265,7 +265,7 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
         let mut handle = plugin_instance.plugin_handle();
         state_ext
             .load(&mut handle, &mut preset_buffer.as_slice())
-            .expect("state.load of preset should succeed (S6-E6-T03 equivalence)");
+            .expect("state.load of preset should succeed (preset equivalence)");
     }
 
     let counter = shared
@@ -274,7 +274,7 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
         .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         counter > 0,
-        "S6-E6-T03: model must be loaded via state.load(ForPreset blob)"
+        "Model must be loaded via state.load(ForPreset blob)"
     );
 
     // Verify audio params match original values (not the cleared ones)
@@ -337,8 +337,6 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
     // This part requires the model to be reachable via canonical_search_dirs().
     // For CI environments where ~/.nam/models/ doesn't exist, we skip the cross-machine check.
     if crate::clap::extensions::state_transaction::canonical_search_dirs().is_empty() {
-        log::info!(
-            "S6-E6-T03: canonical search dirs empty, skipping cross-machine equivalence check"
-        );
+        log::info!("Canonical search dirs empty, skipping cross-machine equivalence check");
     }
 }

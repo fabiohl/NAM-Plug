@@ -68,7 +68,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             neural_amp_modeler_rs::common::panic_hook::install_panic_hook("clap");
         });
 
-        // S5-E5-T03: track active instances for multi-instance panic isolation
+        // Track active instances for multi-instance panic isolation.
         crate::clap::plugin::shared::bump_active_instances();
 
         let (param_tx, param_rx) = RingBuffer::new(CMD_QUEUE_CAPACITY);

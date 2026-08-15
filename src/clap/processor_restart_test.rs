@@ -13,7 +13,7 @@ mod tests {
     use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
     use std::sync::atomic::Ordering;
 
-    /// S4-E4-T02: Verify that changing oversampling during active processing
+    /// Verify that changing oversampling during active processing
     /// stores the pending restart factor and does NOT set RT_STATUS_NEEDS_OS_REBUILD.
     #[test]
     fn test_oversample_change_stores_pending_factor_when_active() {
@@ -109,7 +109,7 @@ mod tests {
         );
     }
 
-    /// S4-E4-T02: Verify that `activate()` consumes the pending restart factor.
+    /// Verify that `activate()` consumes the pending restart factor.
     #[test]
     fn test_activate_clears_pending_restart_factor() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();

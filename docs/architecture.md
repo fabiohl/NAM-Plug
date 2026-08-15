@@ -7,9 +7,9 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 This document is the primary architecture bible and source of truth for **NAM-Plug**, a Neural Amp Modeler (NAM) audio plugin built on the CLAP (CLever Audio Plug-in) specification for Linux.
 
-NAM-Plug wraps the low-latency DSP neural inference engine provided by the [`NeuralAmpModeler-rs`](../../NeuralAmpModeler-rs/docs/architecture.md) library crate into a production-grade CLAP plugin. It handles plugin lifecycle, DAW parameter automation, lock-free real-time audio processing, state persistence, host extension compliance, and an immediate-mode graphical user interface.
+NAM-Plug wraps the low-latency DSP neural inference engine provided by the [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) library crate into a production-grade CLAP plugin. It handles plugin lifecycle, DAW parameter automation, lock-free real-time audio processing, state persistence, host extension compliance, and an immediate-mode graphical user interface.
 
-For deep microarchitectural details on neural model execution (WaveNet, LSTM, ConvNet, Linear), SIMD kernels (AVX2/AVX-512), resampler sinc math, oversampling half-band FIR filters, or model loading formats (`.nam`/`.namb`), see the core engine documentation in [`NeuralAmpModeler-rs/docs/architecture.md`](../../NeuralAmpModeler-rs/docs/architecture.md).
+For deep microarchitectural details on neural model execution (WaveNet, LSTM, ConvNet, Linear), SIMD kernels (AVX2/AVX-512), resampler sinc math, oversampling half-band FIR filters, or model loading formats (`.nam`/`.namb`), see the core engine documentation in [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs).
 
 ---
 
@@ -39,9 +39,11 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 ### 1.1 Thread Roles & Hard Contracts
 
 - **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, background model (`.nam`/`.namb`) loading, IR reading via `src/loader/`, and Tier 1 Garbage Collection disposal.
+
 - **Audio Thread (RT)** — Driven by the host `process()` callback (`PluginAudioProcessor::process` in `src/clap/processor/mod.rs`).
 
   > **Hard Real-Time Contract:** Zero heap allocations, zero mutex locks, zero blocking I/O, zero panics. Operates directly on host audio buffers using host-driven single-callback processing (no PipeWire `DspBridge` required).
+
 - **GUI Thread** — Dedicated `baseview` X11 event loop thread driving an `egui`/`glow` OpenGL renderer (`src/clap/gui/`). Fully isolated from the audio thread.
 
 ---
@@ -349,7 +351,7 @@ Loads `.so`, loads target models via CLAP state, processes stress signals across
 
 ## 10. References
 
-- [`NeuralAmpModeler-rs/docs/architecture.md`](../../NeuralAmpModeler-rs/docs/architecture.md) — Neural Amp Modeler DSP engine architecture.
+- [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) — Neural Amp Modeler DSP engine library.
 - [CLAP (CLever Audio Plug-in) Specification](https://cleveraudio.org/) — Official CLAP plugin format documentation.
-- [Clack Framework](https://github.com/prokopyl/clack) - Safe Rust bindings for CLAP plugins and hosts.
-- [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore) - Reference C++ implementation of NAM.
+- [Clack Framework](https://github.com/prokopyl/clack) — Safe Rust bindings for CLAP plugins and hosts.
+- [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore) — Reference C++ implementation of NAM.

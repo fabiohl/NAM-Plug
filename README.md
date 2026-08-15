@@ -171,13 +171,13 @@ The `./utils/` directory contains maintainer tools and standard scripts for code
 
 The following technical documents are maintained in the source repository:
 
-| Document                                                                                                                                                                     | Primary Focus & Topic Coverage                                                                        |
-|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |:----------------------------------------------------------------------------------------------------- |
-| [`docs/architecture.md`](docs/architecture.md)                                                                                                                               | CLAP plugin architecture, SPSC GC thread model, egui GUI integration, lock-free state synchronization |
-| [`docs/testing.md`](docs/testing.md)                                                                                                                                         | Test suite layout, host-harness verification phases, CLAP test policies, and test coverage matrix     |
-| [`docs/functional-tests.md`](docs/functional-tests.md)                                                                                                                       | Plugin functional test checklist and verification matrices                                            |
-| [`docs/postmortem-libm-symbol-interposition.md`](docs/postmortem-libm-symbol-interposition.md)                                                                               | Technical postmortem on libm symbol interposition resolution on Linux dynamic linkers                 |
-| [`https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/audio_fidelity_map.md`](https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/audio_fidelity_map.md) | DSP decision quality trade-off matrix and frequency response analysis (NeuralAmpModeler-rs engine)    |
+| Document                                                                                                                         | Primary Focus & Topic Coverage                                                                        |
+|:-------------------------------------------------------------------------------------------------------------------------------- |:----------------------------------------------------------------------------------------------------- |
+| [`docs/architecture.md`](docs/architecture.md)                                                                                   | CLAP plugin architecture, SPSC GC thread model, egui GUI integration, lock-free state synchronization |
+| [`docs/testing.md`](docs/testing.md)                                                                                             | Test suite layout, host-harness verification phases, CLAP test policies, and test coverage matrix     |
+| [`docs/functional-tests.md`](docs/functional-tests.md)                                                                           | Plugin functional test checklist and verification matrices                                            |
+| [`docs/postmortem-libm-symbol-interposition.md`](docs/postmortem-libm-symbol-interposition.md)                                   | Technical postmortem on libm symbol interposition resolution on Linux dynamic linkers                 |
+| [`NeuralAmpModeler-rs: Audio Fidelity Map`](https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/audio_fidelity_map.md) | DSP decision quality trade-off matrix and frequency response analysis (NeuralAmpModeler-rs engine)    |
 
 ---
 

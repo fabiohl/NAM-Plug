@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Centralised transactional pipeline for state and state-context restoration (S6-E6-T01).
+//! Centralised transactional pipeline for state and state-context restoration.
 //!
 //! Implements a 3-phase pipeline (Prepare → Validate → Commit) that guarantees:
 //! - Any asset validation failure returns an error **without altering active DSP state**
@@ -69,7 +69,7 @@ pub(crate) enum RestoreMode {
     ForPreset,
 }
 
-/// Entry-point for the 3-phase transactional state restore (S6-E6-T01).
+/// Entry-point for the 3-phase transactional state restore.
 pub(crate) fn restore_state_transactional(
     buffer: &[u8],
     main_thread: &mut NamClapMainThread,
@@ -144,7 +144,7 @@ fn validate_and_build(
     })
 }
 
-/// Computes the SHA-256 hex digest of a file's raw bytes (S6-E6-T02).
+/// Computes the SHA-256 hex digest of a file's raw bytes.
 fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
     let bytes = std::fs::read(path).map_err(|e| {
         PluginError::Message(Box::leak(
@@ -157,7 +157,7 @@ fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
     Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Returns canonical search directories for portable model/IR lookup (S6-E6-T02).
+/// Returns canonical search directories for portable model/IR lookup.
 ///
 /// These are well-known directories where users store their NAM models, shared
 /// across the NAM ecosystem. The order is:
@@ -298,7 +298,7 @@ fn validate_model_full(
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
 ) -> Result<ModelValidationResult, PluginError> {
     let Some(ref path) = loaded_params.model_path else {
-        // S6-E6-T03: ForPreset blobs carry model_path=None but model_basename + model_hash.
+        // ForPreset blobs carry model_path=None but model_basename + model_hash.
         // Fall through to portable basename search so state.load() restores presets equivalently
         // to state_context.load(ForPreset).
         return validate_model_from_basename(loaded_params, host_rate, buffer_size, sys);
@@ -374,7 +374,7 @@ fn validate_model_preset(
 }
 
 /// Shared basename-based portable model resolution with canonical search and
-/// content-hash verification (S6-E6-T02, S6-E6-T03).  Used by both
+/// content-hash verification. Used by both
 /// `validate_model_preset()` and `validate_model_full()` when `model_path` is None.
 fn validate_model_from_basename(
     loaded_params: &ProcessingParams,
@@ -386,7 +386,7 @@ fn validate_model_from_basename(
         return Ok((None, None, None, None, None));
     };
 
-    // S6-E6-T02: search chain — loaded search paths first, then canonical dirs.
+    // Search chain: loaded search paths first, then canonical dirs.
     // Hash verification ensures content identity when multiple files share a basename.
     let search_dirs: Vec<PathBuf> = loaded_params
         .model_search_paths
@@ -695,7 +695,7 @@ fn commit(validated: ValidatedRestore, main_thread: &mut NamClapMainThread, mode
             main_thread.params.bypass = validated.params.bypass;
             main_thread.params.adaptive_compute = validated.params.adaptive_compute;
             main_thread.params.slim_override = validated.params.slim_override;
-            // S6-E6-T03: oversample and activation_precision are part of the preset identity
+            // Oversample and activation_precision are part of the preset identity
             main_thread.params.oversample = validated.params.oversample;
             main_thread.params.activation_precision = validated.params.activation_precision;
         }

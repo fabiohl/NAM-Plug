@@ -105,7 +105,7 @@ impl<'a> NamClapProcessor<'a> {
         &mut self,
         factor: neural_amp_modeler_rs::dsp::oversample::OversampleFactor,
     ) {
-        // S4-E4-T02: CLAP latency policy — while the plugin is active,
+        // CLAP latency policy — while the plugin is active,
         // structural changes that alter latency must request a host restart
         // and defer the rebuild to the next `activate()`.
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);

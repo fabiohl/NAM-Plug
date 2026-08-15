@@ -59,7 +59,7 @@ fn leak_error_msg(msg: impl Into<String>) -> PluginError {
     PluginError::Message(Box::leak(msg.into().into_boxed_str()))
 }
 
-/// Converts a panic payload into `PluginError` for `catch_unwind` guards (S5-E5-T03).
+/// Converts a panic payload into `PluginError` for `catch_unwind` guards.
 ///
 /// The panic hook has already written the full crash report to
 /// `~/.cache/nam-rs/crash-*.txt`. This function extracts a human-readable
@@ -90,7 +90,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         shared: &'a NamClapShared,
         audio_config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
-        // S5-E5-T03: catch panics from this instance so they don't
+        // Catch panics from this instance so they don't
         // crash the host or other active instances.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             #[cfg(feature = "heap-audit")]
@@ -101,7 +101,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 }
             }
             // 1. SPSC channel extraction from Shared (ownership transfer)
-            // S1-E1-T04: extracted resources are held in a rollback guard.
+            // Extracted resources are held in a rollback guard.
             // If any later allocation fails, Drop restores everything into ColdShared.
             let param_rx = shared
                 .cold
@@ -222,12 +222,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             let host_rate = audio_config.sample_rate as u32;
             let host_buffer = audio_config.max_frames_count;
 
-            // S1-E1-T01: Restore heavy DSP resources from DeactivatedDspState if
+            // Restore heavy DSP resources from DeactivatedDspState if
             // available, validating sample rate and buffer size invariants. Model
             // weights are always reusable; resampler and conv-engine require
             // matching audio configuration.
             //
-            // S1-E1-T04: DeactivatedDspState is extracted into the rollback guard
+            // DeactivatedDspState is extracted into the rollback guard
             // immediately after `.take()`. If any later allocation fails, the
             // guard restores it — avoiding loss of expensive model/engine state.
             rollback.deactivated = shared
@@ -238,7 +238,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .take();
             let deactivated = rollback.deactivated.take();
 
-            // S4-E4-T02: Resolve the oversampling factor for this activation.
+            // Resolve the oversampling factor for this activation.
             // Priority: pending restart > UiToRt atomic > Off (fresh).
             let os_factor = {
                 let pending = shared
@@ -292,7 +292,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
                 // Oversample engines: reuse only if the factor hasn't changed
                 // (structural change → rebuild). Otherwise rebuild for the resolved
-                // factor (S4-E4-T02).
+                // factor.
                 let os_l = if deact.os_factor == os_factor {
                     deact.os_l
                 } else {
@@ -374,7 +374,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 20.0,
             );
 
-            // S1-E1-T03: Build an atomic snapshot for params that drive smoothers
+            // Build an atomic snapshot for params that drive smoothers
             // from UiToRt atomics BEFORE constructing the RT processor. This
             // guarantees that self.params starts in sync with the smoother state
             // (both read from the same gain atomics) — no one-block window where
@@ -384,8 +384,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // at their defaults and will be synced on the first process events
             // call (SPSC drain or GUI generation guard). Full-param snapshot
             // would trigger AdaptiveCompute::set_mode log on audio thread when
-            // values differ from SPSC-delivered state — a pre-existing log-on-RT
-            // violation tracked as S5-E5-T02.
+            // values differ from SPSC-delivered state.
             let params = RtProcessingParams {
                 input_gain_db: input_db,
                 output_gain_db: output_db,
@@ -395,12 +394,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             debug_assert!(
                 (smoother_in.current_value() - gain_lut.db_to_linear(params.input_gain_db)).abs()
                     < f32::EPSILON * 10.0,
-                "S1-E1-T03 invariant: smoother_in must start from the same input_gain_db atomics"
+                "Invariant: smoother_in must start from the same input_gain_db atomics"
             );
             debug_assert!(
                 (smoother_out.current_value() - gain_lut.db_to_linear(params.output_gain_db)).abs()
                     < f32::EPSILON * 10.0,
-                "S1-E1-T03 invariant: smoother_out must start from the same output_gain_db atomics"
+                "Invariant: smoother_out must start from the same output_gain_db atomics"
             );
 
             // 5. Report initial latency to shared state
@@ -426,7 +425,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // This calls set_max_buffer_size on the main thread before process() starts.
             main_thread.flush_pending_model()?;
 
-            // S1-E1-T04: defuse the rollback guard — transfers SPSC channel
+            // Defuse the rollback guard — transfers SPSC channel
             // ownership back for processor construction. Guard Drop is now a no-op.
             let channels = rollback.defuse()?;
 
@@ -502,7 +501,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     }
 
     fn deactivate(mut self, _main_thread: &mut NamClapMainThread<'a>) {
-        // S5-E5-T03: isolate panics during cleanup.
+        // Isolate panics during cleanup.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut param_rx_guard = self
                 .shared
@@ -528,7 +527,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .unwrap_or_else(|e| e.into_inner());
             *slimmable_rx_guard = Some(self.slimmable_rx);
 
-            // S1-E1-T01: Preserve heavy DSP resources across deactivate/activate
+            // Preserve heavy DSP resources across deactivate/activate
             // cycles to avoid I/O, filter-bank recompute, and FFT setup on the
             // next activate(). Resources are validated on restore against the
             // current audio configuration.
@@ -571,7 +570,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         mut audio: Audio,
         events: Events,
     ) -> Result<ProcessStatus, PluginError> {
-        // S5-E5-T03: isolate panics in this instance's audio callback.
+        // Isolate panics in this instance's audio callback.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             #[cfg(feature = "heap-audit")]
             let _guard = if neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED
@@ -582,7 +581,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 None
             };
 
-            // S5-E5-T01: Per-instance activation precision via TLS.
+            // Per-instance activation precision via TLS.
             // Activation updates within process() (host events, SPSC, GUI sync, offline↔realtime)
             // call set_activation_tls() to reflect the new value.
             neural_amp_modeler_rs::math::activations::set_activation_tls(
@@ -761,142 +760,5 @@ mod processor_restart_test;
 mod processor_events_test;
 
 #[cfg(test)]
-mod diagnostics_logging_tests {
-    use crate::clap::test_util;
-    use neural_amp_modeler_rs::common::spsc::{
-        RT_STATUS_GC_OVERFLOW, RT_STATUS_HAS_CLIPPED, RT_STATUS_HUGEPAGE_OK,
-        RT_STATUS_MODEL_LOAD_FAILED, RtStatusFlags,
-    };
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-
-    // Task 4.3.1 — flag set/clear mechanism for emit_pending_logs
-    #[test]
-    fn test_flag_set_and_clear_mechanism() {
-        let rt_status = Arc::new(RtStatusFlags::new());
-
-        rt_status.set_flag(RT_STATUS_HAS_CLIPPED);
-        rt_status.set_flag(RT_STATUS_GC_OVERFLOW);
-        rt_status.set_flag(RT_STATUS_HUGEPAGE_OK);
-
-        assert!(rt_status.check_flag(RT_STATUS_HAS_CLIPPED));
-        assert!(rt_status.check_flag(RT_STATUS_GC_OVERFLOW));
-        assert!(rt_status.check_flag(RT_STATUS_HUGEPAGE_OK));
-
-        assert!(rt_status.check_and_clear_flag(RT_STATUS_HAS_CLIPPED));
-        assert!(!rt_status.check_flag(RT_STATUS_HAS_CLIPPED));
-
-        assert!(rt_status.check_and_clear_flag(RT_STATUS_GC_OVERFLOW));
-        assert!(!rt_status.check_flag(RT_STATUS_GC_OVERFLOW));
-
-        assert!(rt_status.check_and_clear_flag(RT_STATUS_HUGEPAGE_OK));
-        assert!(!rt_status.check_flag(RT_STATUS_HUGEPAGE_OK));
-
-        let flags_seen = rt_status.flags_seen.load(Ordering::Relaxed);
-        assert_eq!(
-            flags_seen,
-            RT_STATUS_HAS_CLIPPED | RT_STATUS_GC_OVERFLOW | RT_STATUS_HUGEPAGE_OK,
-            "flags_seen should accumulate all flags that were ever set"
-        );
-    }
-
-    // Task 4.3.1 — verify flag-to-log messages reach LogBuffer
-    #[test]
-    fn test_emit_pending_logs_messages_reach_log_buffer() {
-        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
-        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
-
-        let snapshot_before =
-            neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()
-                .expect("LogBuffer should be accessible")
-                .len();
-
-        shared
-            .cold
-            .rt_status
-            .check_and_clear_flag(RT_STATUS_HAS_CLIPPED);
-        log::warn!("NAM-rs: Output clipping detected!");
-
-        shared
-            .cold
-            .rt_status
-            .check_and_clear_flag(RT_STATUS_GC_OVERFLOW);
-        log::error!("NAM-rs: GC channel overflow! Possible memory leak.");
-
-        shared
-            .cold
-            .rt_status
-            .check_and_clear_flag(RT_STATUS_MODEL_LOAD_FAILED);
-        log::error!("NAM-rs: Critical failure! No active model for processing.");
-
-        let snapshot_after =
-            neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()
-                .expect("LogBuffer should be accessible")
-                .len();
-        assert!(
-            snapshot_after > snapshot_before + 2,
-            "LogBuffer should grow after log entries are emitted"
-        );
-
-        test_util::assert_log_buffer_contains("Output clipping detected");
-        test_util::assert_log_buffer_contains("GC channel overflow");
-        test_util::assert_log_buffer_contains("Critical failure! No active model for processing");
-    }
-
-    // Task 4.3.1 — verify state save emits confirmation log
-    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn test_state_save_emits_confirmation_log() {
-        use log::LevelFilter;
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
-        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
-
-        let logger = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
-            .expect("NamLogger should be initialized");
-        let original_level = log::max_level();
-        log::set_max_level(LevelFilter::Debug);
-        logger.set_max_level(LevelFilter::Debug);
-
-        let model_path = crate::clap::test_util::model_path("lstm.nam");
-
-        use neural_amp_modeler_rs::common::params::ProcessingParams;
-        let params = ProcessingParams {
-            model_path: Some(model_path),
-            input_gain_db: 1.0,
-            output_gain_db: -2.0,
-            gate_threshold_db: -50.0,
-            model_basename: Some("lstm.nam".to_string()),
-            model_search_paths: vec![],
-            model_hash: None,
-            bypass: false,
-            adaptive_compute: neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Off,
-            slim_override: Default::default(),
-            oversample: neural_amp_modeler_rs::dsp::oversample::OversampleFactor::Off,
-            ir_path: None,
-            ir_hash: None,
-            activation_precision:
-                neural_amp_modeler_rs::common::params::ActivationPrecision::Standard,
-        };
-        let state_bytes = serde_json::to_vec(&params).unwrap();
-        let state_ext = test_util::get_state_ext(&mut plugin_instance);
-        let mut handle = plugin_instance.plugin_handle();
-        state_ext
-            .load(&mut handle, &mut state_bytes.as_slice())
-            .expect("Failed to load state");
-
-        let mut output = Vec::new();
-        let mut handle = plugin_instance.plugin_handle();
-        state_ext
-            .save(&mut handle, &mut output)
-            .expect("save should succeed");
-
-        assert!(!output.is_empty(), "save output should not be empty");
-        test_util::assert_log_buffer_contains("[State] Save completed:");
-        test_util::assert_log_buffer_contains("bytes serialized.");
-
-        log::set_max_level(original_level);
-        logger.set_max_level(original_level);
-    }
-}
+#[path = "../processor_diagnostics_logging_test.rs"]
+mod processor_diagnostics_logging_test;

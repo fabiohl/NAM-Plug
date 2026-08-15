@@ -5,7 +5,7 @@
 //!
 //! Enables hosts to load NAM model files as presets via the host's preset browser.
 //!
-//! S4-E4-T05: The extension now stores the `location` and `load_key` for deferred
+//! The extension stores the `location` and `load_key` for deferred
 //! notification. The actual model load is asynchronous (queued via `ui_pending_model`
 //! and `host.request_callback()`). When `housekeeping()` completes the load, it
 //! calls `HostPresetLoad::loaded()` on success or `HostPresetLoad::on_error()` on
@@ -47,7 +47,7 @@ impl PluginPresetLoadImpl for NamClapMainThread<'_> {
             .unwrap_or("unknown")
             .to_string();
 
-        // S4-E4-T05: Store the location and load_key for deferred host
+        // Store the location and load_key for deferred host
         // notification when the async load completes (housekeeping.rs).
         {
             let mut pending_guard =

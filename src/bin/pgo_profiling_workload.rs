@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Resolves a suíte de modelos cobrindo as 4 famílias topológicas:
+/// Resolves a model suite covering the 4 topological families:
 /// 1. WaveNet A1 Standard
 /// 2. WaveNet A2 / SlimmableContainer
 /// 3. LSTM 1x16

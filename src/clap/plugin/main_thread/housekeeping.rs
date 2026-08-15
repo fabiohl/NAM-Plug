@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 impl<'a> NamClapMainThread<'a> {
     /// GC drain, status flag mirroring, hugepage sync, pending model load, latency notification.
     pub(crate) fn housekeeping(&mut self) {
-        // S4-E4-T04: Drain in-flight parameter snapshot queued by
+        // Drain in-flight parameter snapshot queued by
         // PluginMainThreadParams::flush() when the SPSC was full.
         self.flush_in_flight_params();
         // Flush any model deferred by load_model() (F3 fix).
@@ -249,7 +249,7 @@ impl<'a> NamClapMainThread<'a> {
                 let res = self.load_model(&path);
                 self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
 
-                // S4-E4-T05: Notify host via HostPresetLoad if this model was
+                // Notify host via HostPresetLoad if this model was
                 // queued by the preset-load extension.
                 let pending_load = self
                     .shared
@@ -425,7 +425,7 @@ impl<'a> NamClapMainThread<'a> {
             }
         }
 
-        // S4-E4-T03: Tail notification moved to cold_load_cabsim() on the audio
+        // Tail notification moved to cold_load_cabsim() on the audio
         // thread (events.rs). The audio thread owns HostAudioProcessorHandle and
         // calls HostTail::changed() safely without unsafe pointer casts.
         // The cabsim_tail_samples value is still monitored here for logging.
@@ -439,7 +439,7 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// S4-E4-T04: Retries delivery of parameter snapshots queued by
+    /// Retries delivery of parameter snapshots queued by
     /// `PluginMainThreadParams::flush()` when the SPSC channel was full.
     /// Called from `housekeeping()` (triggered by `host.request_callback()`).
     fn flush_in_flight_params(&mut self) {
@@ -474,7 +474,7 @@ impl<'a> NamClapMainThread<'a> {
     }
 }
 
-/// S4-E4-T05: Notify the host that a preset was loaded successfully.
+/// Notify the host that a preset was loaded successfully.
 /// Reconstructs the `Location` from the stored `PendingPresetLoad` and
 /// calls `HostPresetLoad::loaded()`.
 fn notify_preset_loaded(host: &mut HostMainThreadHandle, pending: PendingPresetLoad) {
@@ -488,7 +488,7 @@ fn notify_preset_loaded(host: &mut HostMainThreadHandle, pending: PendingPresetL
     }
 }
 
-/// S4-E4-T05: Notify the host that a preset load failed.
+/// Notify the host that a preset load failed.
 fn notify_preset_error(
     host: &mut HostMainThreadHandle,
     pending: PendingPresetLoad,

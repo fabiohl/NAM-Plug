@@ -77,7 +77,7 @@ impl<'a> NamClapMainThread<'a> {
             }
         }
 
-        // S6-E6-T02: compute content hash for portable asset identity
+        // Compute content hash for portable asset identity
         self.params.model_hash = match std::fs::read(path) {
             Ok(bytes) => {
                 let mut hasher = Sha256::new();
@@ -198,7 +198,7 @@ impl<'a> NamClapMainThread<'a> {
                 }
             }
         } else {
-            // F3 / S1-E1-T02: defer sending until `buffer_size` and `sample_rate`
+            // Defer sending until `buffer_size` and `sample_rate`
             // become known in `activate()`. The resampler is NOT constructed here
             // because the host sample rate is unknown during pre-activation state
             // restore (defaults to 48000). `flush_pending_model()` builds the

@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! S8-E8-T04 — Paridade CLAP End-to-End contra NAMcore em Múltiplas Taxas
+//! CLAP End-to-End Parity against NAMcore across Multiple Sample Rates
 //!
-//! Carrega o artefato CLAP `.so` dinamicamente, processa sinais de stress
-//! com buffers irregulares em 44.1 kHz, 48 kHz e 96 kHz, e compara a saída
-//! contra o oráculo C++ NAMcore com métricas ESR/SNR/MR-STFT.
+//! Dynamically loads the CLAP `.so` artifact, processes stress signals
+//! with irregular buffers at 44.1 kHz, 48 kHz, and 96 kHz, and compares the output
+//! against the C++ NAMcore oracle using ESR/SNR/MR-STFT metrics.
 //!
 //! // Measured: F-11 (2026-07-30) — cross-implementation floor against
 //! // real C++ oracle + LUT-based gain (wavenet_a1_standard @ 48 kHz):
 //! //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (after loudness calibration compensation).
 //! // Conservative gates: ESR < 1e-8, SNR > 80 dB.
-//! Critério de aceite: ESR < 1e-8 e SNR > 80 dB em todas as taxas.
+//! Acceptance criteria: ESR < 1e-8 and SNR > 80 dB across all sample rates.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -451,7 +451,7 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
     assert!(all_passed, "CLAP parity failed for {model_name}");
 }
 
-/// S8-E8-T04: Multi-rate CLAP vs NAMCore parity with irregular buffers.
+/// Multi-rate CLAP vs NAMCore parity with irregular buffers.
 ///
 /// Tests a WaveNet model at 48 kHz (native rate) against the C++ oracle.
 /// Applies loudness calibration compensation (input/output_mult_adj via

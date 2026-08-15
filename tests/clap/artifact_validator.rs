@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! S8-E8-T02: Artifact validation — resolve the freshly built `.so`, compute
+//! Artifact validation: resolve the freshly built `.so`, compute
 //! its SHA256, and ensure integration tests run against the real build
 //! artifact, not a stale install or static-link path.
 //!

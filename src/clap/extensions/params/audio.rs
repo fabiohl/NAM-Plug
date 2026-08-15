@@ -32,7 +32,7 @@ impl PluginAudioProcessorParams for NamClapProcessor<'_> {
     /// In addition to applying host events, this method also syncs parameters
     /// that were changed by the GUI directly in the shared atomics.
     fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
-        // S5-E5-T03: isolate panics from this instance.
+        // Isolate panics from this instance to protect the host.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.flush_inner(input, output);
         }));

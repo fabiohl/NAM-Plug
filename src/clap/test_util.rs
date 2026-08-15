@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 pub struct TestHostShared {
     /// Set to `true` when `request_restart()` is called by the plugin.
-    /// Used by tests to verify CLAP restart-on-latency-change policy (S4-E4-T02).
+    /// Used by tests to verify CLAP restart-on-latency-change policy.
     pub restart_was_called: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl<'a> SharedHandler<'a> for TestHostShared {

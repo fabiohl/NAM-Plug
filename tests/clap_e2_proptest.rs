@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Property-Based Tests — S2-E2-T05: Block Invariance and Event Flooding.
+//! Property-Based Tests: Block Invariance and Event Flooding.
 //!
 //! Validates that audio output is identical (to machine precision) regardless
 //! of how the host partitions the audio buffer, and that event floods up to

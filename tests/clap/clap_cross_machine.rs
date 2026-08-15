@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! S6-E6-T05 — Cross-Machine Simulation and Corrupted Asset Test Suite.
+//! Cross-Machine Simulation and Corrupted Asset Test Suite.
 //!
 //! Simulates real-world error scenarios: truncated files, malformed payloads,
 //! missing assets, cross-machine portable search, and corrupted model weights.
@@ -111,10 +111,7 @@ fn test_zero_byte_state_payload_is_rejected() {
     let empty: &[u8] = &[];
     let mut handle = instance.plugin_handle();
     let result = state_ext.load(&mut handle, &mut std::io::Cursor::new(empty));
-    assert!(
-        result.is_err(),
-        "S6-E6-T05: empty state payload must be rejected"
-    );
+    assert!(result.is_err(), "Empty state payload must be rejected");
 }
 
 #[test]
@@ -126,16 +123,13 @@ fn test_malformed_json_state_is_rejected() {
     let garbage = b"not-valid-json-at-all-!!!!";
     let mut handle = instance.plugin_handle();
     let result = state_ext.load(&mut handle, &mut std::io::Cursor::new(garbage));
-    assert!(result.is_err(), "S6-E6-T05: garbage bytes must be rejected");
+    assert!(result.is_err(), "Garbage bytes must be rejected");
 
     // Valid JSON envelope with corrupted params
     let corrupted = br#"{"version":1,"params":{"input_gain_db":"not_a_number","model_path":null}}"#;
     let mut handle = instance.plugin_handle();
     let result = state_ext.load(&mut handle, &mut std::io::Cursor::new(corrupted));
-    assert!(
-        result.is_err(),
-        "S6-E6-T05: corrupted JSON params must be rejected"
-    );
+    assert!(result.is_err(), "Corrupted JSON params must be rejected");
 }
 
 #[test]
@@ -199,10 +193,7 @@ fn test_missing_model_path_is_rejected_and_keeps_old_dsp() {
         let state_ext = test_util::get_state_ext(&mut instance);
         let mut handle = instance.plugin_handle();
         let result = state_ext.load(&mut handle, &mut state_bad.as_slice());
-        assert!(
-            result.is_err(),
-            "S6-E6-T05: missing model path must return Err"
-        );
+        assert!(result.is_err(), "Missing model path must return Err");
     }
 
     process_one_block(&mut started, n);
@@ -265,10 +256,7 @@ fn test_corrupted_model_weights_rejected_gracefully() {
         let state_ext = test_util::get_state_ext(&mut instance);
         let mut handle = instance.plugin_handle();
         let result = state_ext.load(&mut handle, &mut bad_bytes.as_slice());
-        assert!(
-            result.is_err(),
-            "S6-E6-T05: corrupted model weights must return Err"
-        );
+        assert!(result.is_err(), "Corrupted model weights must return Err");
     }
 
     process_one_block(&mut started, n);
@@ -295,10 +283,7 @@ fn test_truncated_model_file_rejected_gracefully() {
     let bad_bytes = serde_json::to_vec(&bad_params).unwrap();
     let mut handle = instance.plugin_handle();
     let result = state_ext.load(&mut handle, &mut bad_bytes.as_slice());
-    assert!(
-        result.is_err(),
-        "S6-E6-T05: truncated model file must return Err"
-    );
+    assert!(result.is_err(), "Truncated model file must return Err");
 
     let _ = std::fs::remove_file(&truncated_path);
 }
@@ -318,10 +303,7 @@ fn test_zero_byte_model_file_rejected_gracefully() {
     let bad_bytes = serde_json::to_vec(&bad_params).unwrap();
     let mut handle = instance.plugin_handle();
     let result = state_ext.load(&mut handle, &mut bad_bytes.as_slice());
-    assert!(
-        result.is_err(),
-        "S6-E6-T05: zero-byte model file must return Err"
-    );
+    assert!(result.is_err(), "Zero-byte model file must return Err");
 
     let _ = std::fs::remove_file(&zero_path);
 }
@@ -354,10 +336,7 @@ fn test_cross_machine_restore_via_basename_search_succeeds() {
     {
         let mut handle = instance.plugin_handle();
         let result = state_ext.load(&mut handle, &mut state_bytes.as_slice());
-        assert!(
-            result.is_ok(),
-            "S6-E6-T05: cross-machine restore must succeed"
-        );
+        assert!(result.is_ok(), "Cross-machine restore must succeed");
     }
 
     let shared = unsafe { &*shared_ptr };
@@ -388,10 +367,7 @@ fn test_cross_machine_basename_not_found_is_rejected() {
     let state_bytes = serde_json::to_vec(&cross_params).unwrap();
     let mut handle = instance.plugin_handle();
     let result = state_ext.load(&mut handle, &mut state_bytes.as_slice());
-    assert!(
-        result.is_err(),
-        "S6-E6-T05: basename not found must return Err"
-    );
+    assert!(result.is_err(), "Basename not found must return Err");
 
     let _ = std::fs::remove_dir_all(&non_existent_dir);
 }
@@ -421,7 +397,7 @@ fn test_bad_model_hash_is_rejected() {
     let result = state_ext.load(&mut handle, &mut state_bytes.as_slice());
     assert!(
         result.is_err(),
-        "S6-E6-T05: bad model_hash must be rejected even with valid basename+search_path"
+        "Bad model_hash must be rejected even with valid basename+search_path"
     );
 }
 
@@ -474,7 +450,7 @@ fn test_state_load_after_failed_restore_still_works() {
         let result = state_ext.load(&mut handle, &mut valid_bytes.as_slice());
         assert!(
             result.is_ok(),
-            "S6-E6-T05: valid state.load must work after failed restore"
+            "Valid state.load must work after failed restore"
         );
     }
 
@@ -544,10 +520,7 @@ fn test_all_failure_modes_preserve_dsp_and_produce_finite_output() {
             let state_ext = test_util::get_state_ext(&mut instance);
             let mut handle = instance.plugin_handle();
             let result = state_ext.load(&mut handle, &mut bad_bytes.as_slice());
-            assert!(
-                result.is_err(),
-                "S6-E6-T05: failure mode {i} must return Err"
-            );
+            assert!(result.is_err(), "Failure mode {i} must return Err");
         }
 
         process_one_block(&mut started, n);

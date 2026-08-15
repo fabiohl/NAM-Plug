@@ -110,7 +110,7 @@ pub struct UiState {
     pub error_msg: String,
     /// Expiration of the visual IR error loading banner (None if not active).
     /// Separated from `error_expiration` so model and IR errors don't
-    /// overwrite each other (CLAP-F021, S0-E0-T05).
+    /// overwrite each other (CLAP-F021).
     pub ir_error_expiration: Option<Instant>,
     /// Short/summary IR error message.
     pub ir_error_msg: String,

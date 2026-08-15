@@ -27,7 +27,7 @@ impl HostHandlers for TestHost {
     type AudioProcessor<'a> = ();
 }
 
-/// S8-E8-T02: Creates a plugin instance by loading the freshly built `.so`.
+/// Creates a plugin instance by loading the freshly built `.so`.
 /// Uses `artifact_validator` to resolve the artifact and record its SHA256.
 fn create_plugin_instance() -> PluginInstance<TestHost> {
     let artifact = super::artifact_validator::TestedArtifact::resolve_and_hash();

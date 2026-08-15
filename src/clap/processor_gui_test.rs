@@ -217,7 +217,7 @@ mod tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // S8-E8-T05: Headless GUI lifecycle + clipboard tests
+    // Headless GUI lifecycle + clipboard tests
     // ══════════════════════════════════════════════════════════════════════
 
     /// Verifies the full floating window lifecycle in a headless X11

@@ -15,13 +15,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Active plugin instance counter (S5-E5-T03).
+/// Active plugin instance counter.
 /// Incremented in `new_shared()`, decremented in `NamClapShared::drop()`.
 /// `set_shutdown_in_progress()` is only called when this reaches zero,
 /// so crash-reporting remains active as long as at least one instance exists.
 static ACTIVE_INSTANCES: AtomicU32 = AtomicU32::new(0);
 
-/// Increments the active instance counter (S5-E5-T03).
+/// Increments the active instance counter.
 #[inline]
 pub(crate) fn bump_active_instances() {
     ACTIVE_INSTANCES.fetch_add(1, Ordering::Release);
@@ -189,7 +189,7 @@ pub struct UiToRt {
     pub host_r_deactivated: AtomicBool,
 }
 
-/// Deferred preset-load metadata for `HostPresetLoad` notification (S4-E4-T05).
+/// Deferred preset-load metadata for `HostPresetLoad` notification.
 /// Stored by `PluginPresetLoadImpl::load_from_location()` and consumed by
 /// `housekeeping()` to call `loaded()` or `on_error()` after the async load.
 pub struct PendingPresetLoad {
@@ -277,25 +277,25 @@ pub struct ColdShared {
     /// When a WaveNet model is loaded, a clone is stored here so the main thread
     /// can create slimmed variants without touching the audio thread.
     pub full_wavenet_model: Mutex<Option<Box<StaticModel>>>,
-    /// Command scheduler ack atomics (S4-E4-T01).
+    /// Command scheduler ack atomics.
     /// Monotonic sequence counter incremented by the main thread on each
     /// enqueued command batch.
     pub cmd_next_seq: AtomicU64,
     /// Last sequence fully drained and processed by the audio thread.
     /// Written by the audio thread (Release), read by the main thread (Acquire).
     pub cmd_last_ack: AtomicU64,
-    /// Pending restart oversampling factor (S4-E4-T02).
+    /// Pending restart oversampling factor.
     /// Set by the audio thread via `host.request_restart()` when
     /// oversampling changes during active processing. Consumed by
     /// `activate()` to build engines at the correct factor. 0 = no
     /// pending restart, 1 = 2x, 2 = 4x.
     pub pending_restart_os_factor: AtomicU32,
-    /// In-flight parameter snapshot (S4-E4-T04).
+    /// In-flight parameter snapshot.
     /// When the main-thread `flush()` fails to push params to the SPSC
     /// (channel full), the snapshot is stored here for retry via
     /// `host.request_callback()` → `housekeeping()`.
     pub in_flight_params: Mutex<Option<neural_amp_modeler_rs::common::params::RtProcessingParams>>,
-    /// Pending preset-load operation (S4-E4-T05).
+    /// Pending preset-load operation.
     /// Set by `load_from_location()` with the location and load_key for
     /// deferred host notification. Consumed by `housekeeping()` to call
     /// `HostPresetLoad::loaded()` or `on_error()` after the async load.
@@ -332,7 +332,7 @@ pub struct ColdShared {
 /// (state-restore-before-activate scenario). Carries the model and enough
 /// metadata for `flush_pending_model()` to construct the resampler with the
 /// correct host sample rate and buffer capacity — both unknown during pre-activation
-/// state restore. See CLAP-F003, S1-E1-T02.
+/// state restore. See CLAP-F003.
 pub struct PendingModel {
     /// The encapsulated model for neural inference (Left Channel).
     pub model: Option<Box<StaticModel>>,
@@ -379,7 +379,7 @@ impl Drop for NamClapShared {
     fn drop(&mut self) {
         log::debug!("NAM-rs: NamClapShared dropped.");
         self.cold.alive_fence.store(false, Ordering::Release); // pairs with Acquire load em gui/window/state.rs:190
-        // S5-E5-T03: only signal shutdown when the last instance is destroyed
+        // Only signal shutdown when the last instance is destroyed.
         let prev = ACTIVE_INSTANCES
             .fetch_update(Ordering::Release, Ordering::Relaxed, |val| {
                 Some(val.saturating_sub(1))

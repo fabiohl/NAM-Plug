@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! S8-E8-T02: Lifecycle test now loads the freshly built `.so` via
+//! Lifecycle test loads the freshly built `.so` via
 //! `artifact_validator::TestedArtifact::resolve_and_hash()`, recording
 //! the SHA256 of the tested binary in the test log.
 //!

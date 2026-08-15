@@ -36,7 +36,7 @@ pub(crate) struct DeactivatedDspState {
     /// Half-band oversampling engine R.
     pub(crate) os_r: Box<OversampleEngine>,
     /// Oversampling factor these engines were built for.
-    /// Used to detect factor changes on restart (S4-E4-T02).
+    /// Used to detect factor changes on restart.
     pub(crate) os_factor: OversampleFactor,
     /// Host sample rate when deactivated (for restore validation).
     pub(crate) sample_rate: u32,

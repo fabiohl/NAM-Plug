@@ -116,7 +116,7 @@ pub(crate) fn apply_scheduled_event(
                     ui_to_rt
                         .param_oversample
                         .store(factor.to_f32() as u32, Ordering::Relaxed);
-                    // S4-E4-T02: if the plugin is active, defer the rebuild
+                    // If the plugin is active, defer the rebuild
                     // via host restart; otherwise flag the main thread.
                     if buffer_size > 0 {
                         pending_restart_os_factor.store(factor.to_f32() as u32, Ordering::Release);

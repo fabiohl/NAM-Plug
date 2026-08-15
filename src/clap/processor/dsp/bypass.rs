@@ -7,4 +7,4 @@
 // within process_sub_block(). See:
 //   - orchestrator.rs:process_dsp_audio() for the sub-block loop
 //   - orchestrator.rs:copy_bypass_to_output() for dry passthrough copy
-//   - S2-E2-T03 for the future unified bypass/wet scheduler with crossfade.
+//   - Architectural design for the unified bypass/wet scheduler with crossfade.
