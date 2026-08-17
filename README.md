@@ -155,6 +155,19 @@ The status bar at the bottom of the plugin GUI provides real-time telemetry:
 
 ---
 
+## ⚠️ Known Host Limitations & DAW Compatibility
+
+| DAW / Host Environment                                  | Status                  | Compatibility Notes                                                                                                                                                                                                                                                            |
+|:------------------------------------------------------- |:----------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Bitwig Studio** (Linux)                               | ✅ Full Support         | Full GUI embedding, sample-accurate automation, state save/restore, and offline bounce.                                                                                                                                                                                        |
+| **REAPER** (Native Linux)                               | ✅ Full Support         | Full GUI embedding, parameter automation, and ultra-low latency playback.                                                                                                                                                                                                      |
+| **Ardour** / **Harrison Mixbus**                        | ✅ Full Support         | Fully functional CLAP plugin scanning, processing, and automation.                                                                                                                                                                                                             |
+| **Carla Plugin Host**                                   | ✅ Full Support         | Works out of the box in bridge and native CLAP rack modes.                                                                                                                                                                                                                     |
+| **Tracktion Waveform**                                  | ✅ Full Support         | Full CLAP compatibility and project state recall.                                                                                                                                                                                                                              |
+| **PreSonus Studio One** / **Fender Studio Pro** (Linux) | ⚠️ Known GUI Limitation | **Known issue:** Audio DSP processing and CLAP parameter control operate normally, but the host cannot currently initialize or attach the X11/XWayland GUI surface (`baseview` / `egui_glow`). This is a known host-side window management limitation in Studio One for Linux. |
+
+---
+
 ## 🧪 CI & QA Automation Suite (`./utils/`)
 
 The `./utils/` directory contains maintainer tools and standard scripts for code quality, CLAP compliance, and continuous integration:

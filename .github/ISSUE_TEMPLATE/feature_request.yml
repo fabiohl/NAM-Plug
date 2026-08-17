@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+name: Feature Request (CLAP Plugin)
+description: Suggest a feature, GUI improvement, or workflow enhancement for NAM-Plug.
+title: "[FEATURE]: "
+labels: ["enhancement", "proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for proposing an enhancement to **NAM-Plug**!
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Feature Category
+      description: What area of the plugin does this request target?
+      options:
+        - "GUI & User Experience (egui controls, visual meters, themes)"
+        - "CLAP Extensions (Remote controls, Preset discovery, Tail)"
+        - "Parameter & Automation Control"
+        - "Preset & Bank Management"
+        - "Cabinet IR & Tone Controls"
+        - "Workflow & Productivity"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem_statement
+    attributes:
+      label: Problem or Motivation
+      description: Is this feature related to a limitation or a desired workflow?
+      placeholder: "A clear and concise description of why this feature is needed..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Solution & Design
+      description: Describe how the feature should look and function.
+      placeholder: "Explain the visual flow, parameter mappings, or host interaction..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or workarounds you have evaluated.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Confirmation
+      options:
+        - label: I verified that this feature does not compromise real-time audio performance.
+          required: true
+        - label: I searched existing issues to ensure this is not a duplicate request.
+          required: true

@@ -115,6 +115,8 @@ Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-exten
 | `clap_plugin_render`           | `src/clap/extensions/render.rs`           | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision. |
 | `clap_plugin_gui`              | `src/clap/extensions/gui.rs`              | Native `egui` windowing via `baseview` (`CLAP_WINDOW_API_X11`).                            |
 
+> **Host Compatibility Note:** Native X11 window embedding (`CLAP_WINDOW_API_X11`) is verified and functional across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. A known host-side window management limitation exists in **PreSonus Studio One / Fender Studio Pro for Linux**, where the host currently fails to initialize or attach embedded X11/XWayland surfaces. Audio DSP and parameter automation remain fully functional.
+
 A separate **Preset Discovery Factory** (`src/clap/factory/preset_discovery.rs`) indexes local models in `~/.nam/models` with extracted metadata so hosts can list them natively.
 
 ---

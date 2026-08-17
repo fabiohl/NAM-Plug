@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+name: DAW / Host Compatibility Issue
+description: Report issues with specific DAWs (e.g. parameter automation, project reload, GUI embedding, preset discovery).
+title: "[DAW]: "
+labels: ["daw-compatibility", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to report compatibility problems between **NAM-Plug** and a specific Digital Audio Workstation (DAW) or plugin host.
+
+  - type: dropdown
+    id: daw_host
+    attributes:
+      label: DAW / Host Application
+      description: Select your primary DAW.
+      options:
+        - "Bitwig Studio"
+        - "Reaper (Native Linux)"
+        - "Ardour"
+        - "Carla Plugin Host"
+        - "Harrison Mixbus"
+        - "Tracktion Waveform"
+        - "PreSonus Studio One / Fender Studio Pro (Linux)"
+        - "Renoise"
+        - "Zrythm"
+        - "Other"
+    validations:
+      required: true
+
+  - type: input
+    id: daw_version
+    attributes:
+      label: DAW Version & Architecture
+      description: Exact version of the DAW (e.g. Bitwig 5.2.1, Reaper 7.15 x86_64).
+      placeholder: "e.g. Bitwig 5.2.1 (Linux x86_64)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue_area
+    attributes:
+      label: Compatibility Area
+      description: Which area of host integration fails?
+      options:
+        - "Parameter Automation / Smoothing"
+        - "Project State Save & Restore"
+        - "GUI Embedding / Window Resize / Wayland Support"
+        - "CLAP Preset Discovery"
+        - "Plugin Scanning / Validation Failure"
+        - "Offline Render / Freeze / Bounce Inconsistency"
+        - "Latency Compensation Reporting"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Detailed Description of the Compatibility Problem
+      description: Explain the issue in detail.
+      placeholder: "Describe how the host behaves unexpectedly when interacting with NAM-Plug..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to Reproduce in the DAW
+      description: Precise steps in the DAW interface.
+      placeholder: |
+        1. Open empty project in DAW
+        2. Add NAM-Plug track
+        3. Save and close project
+        4. Reopen project and observe state loss
+    validations:
+      required: true
+
+  - type: textarea
+    id: host_logs
+    attributes:
+      label: Host Logs / Diagnostic Output
+      description: Paste any diagnostic output or host console logs.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Confirmation
+      options:
+        - label: I checked if the DAW has the latest updates installed.
+          required: true
+        - label: I tested if other CLAP plugins work properly in this DAW.
+          required: true

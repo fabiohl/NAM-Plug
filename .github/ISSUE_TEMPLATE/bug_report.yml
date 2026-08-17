@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+name: Bug Report (CLAP Plugin)
+description: Report a bug, crash, audio dropout, or GUI issue in the NAM-Plug CLAP plugin.
+title: "[BUG]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue with **NAM-Plug** (CLAP plugin)!
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Plugin Subsystem
+      description: Select which component of the plugin is misbehaving.
+      options:
+        - "Audio Processing / Real-Time DSP Callback"
+        - "GUI / Window Rendering (egui / OpenGL)"
+        - "Host Automation & Parameter Sync"
+        - "State Save / Restore (DAW Project Reload)"
+        - "Model & CabSim IR Loading"
+        - "Offline Render / Audio Bounce"
+        - "Preset Management & Discovery"
+        - "Plugin Initialization / Crash on Load"
+        - "Latency / Tail Extension Reporting"
+        - "Other"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: daw_host
+    attributes:
+      label: DAW / Host Application
+      description: Which Digital Audio Workstation or CLAP host are you using?
+      options:
+        - "Bitwig Studio"
+        - "Reaper (Native Linux)"
+        - "Ardour"
+        - "Carla Plugin Host"
+        - "Harrison Mixbus"
+        - "Tracktion Waveform"
+        - "PreSonus Studio One / Fender Studio Pro (Linux)"
+        - "Renoise"
+        - "Zrythm"
+        - "CLAP Validator / Test Host"
+        - "Other (Specify in environment details)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment & System Details
+      description: Provide details about your DAW version, OS, desktop session, and CPU.
+      placeholder: |
+        - NAM-Plug version / commit: 0.4.0 (or commit hash)
+        - DAW version: Reaper 7.15 (64-bit Linux) / Bitwig 5.2
+        - OS & Kernel: Ubuntu 24.04 / Arch Linux (kernel 6.8.0-lowlatency)
+        - Display Server: Wayland / X11
+        - CPU Model: AMD Ryzen 7 5800X / Intel Core i7-12700K
+    validations:
+      required: true
+
+  - type: textarea
+    id: audio_settings
+    attributes:
+      label: Audio & Buffer Configuration
+      description: Specify sampling rate, buffer size, and driver backend.
+      placeholder: |
+        - Audio Server / Driver: PipeWire 1.0.3 (JACK client) / ALSA
+        - Sample Rate: 48000 Hz (or 44100 / 96000 Hz)
+        - Buffer Size / Quantum: 64 samples (or 128 / 256 samples)
+        - Render Mode: Realtime Playback / Offline Bounce
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description & Observed Behavior
+      description: Describe what happened, how it diverged from expected behavior, and any error messages shown.
+      placeholder: "Describe the bug clearly (e.g. GUI flickers on Wayland, audio crackles when automating Gain, project reload fails to restore .nam file path)..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Steps to Reproduce
+      description: Step-by-step instructions to reproduce the issue.
+      placeholder: |
+        1. Insert NAM-Plug into a track in your DAW
+        2. Load model `example.nam` and enable 2x oversampling
+        3. Automate Input Gain parameter
+        4. Play playback and observe glitch
+    validations:
+      required: true
+
+  - type: textarea
+    id: model_ir_attachment
+    attributes:
+      label: Model / IR / Preset Attachment (Optional)
+      description: |
+        If the issue involves a specific `.nam`, `.namb`, or IR `.wav` file, attach it directly by dragging and dropping it into this box, or provide a public URL.
+      placeholder: "Drag and drop .nam / .namb / .wav / .zip file here, or paste download link..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Plugin Logs / Terminal Output / Crash Trace
+      description: Paste any relevant logs from the DAW console, terminal stdout/stderr, or `RUST_LOG=trace`.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I verified this issue with the latest version of NAM-Plug.
+          required: true
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true
+        - label: I confirmed this is a native CLAP build (or tested with official DAW release).
+          required: true
