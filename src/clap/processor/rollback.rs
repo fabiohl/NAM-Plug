@@ -78,26 +78,40 @@ impl Drop for ActivateRollbackGuard<'_> {
     fn drop(&mut self) {
         // Restore SPSC channels and DeactivatedDspState in reverse
         // extraction order. Each `.take()` moves the resource out of the
-        // guard so the Drop is idempotent (restore-once).
-        if let Some(rx) = self.slimmable_rx.take()
-            && let Ok(mut g) = self.shared.cold.slimmable_rx.lock()
-        {
-            *g = Some(rx);
+        // guard so the Drop is idempotent (restore-once). Mutex poisoning
+        // is recovered via `into_inner()` — the resource must be restored
+        // even if a previous lock attempt panicked.
+        if let Some(rx) = self.slimmable_rx.take() {
+            *self
+                .shared
+                .cold
+                .slimmable_rx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(rx);
         }
-        if let Some(tx) = self.gc_tx.take()
-            && let Ok(mut g) = self.shared.cold.gc_tx.lock()
-        {
-            *g = Some(tx);
+        if let Some(tx) = self.gc_tx.take() {
+            *self
+                .shared
+                .cold
+                .gc_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(tx);
         }
-        if let Some(rx) = self.param_rx.take()
-            && let Ok(mut g) = self.shared.cold.param_rx.lock()
-        {
-            *g = Some(rx);
+        if let Some(rx) = self.param_rx.take() {
+            *self
+                .shared
+                .cold
+                .param_rx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(rx);
         }
-        if let Some(state) = self.deactivated.take()
-            && let Ok(mut g) = self.shared.cold.deactivated_dsp.lock()
-        {
-            *g = Some(state);
+        if let Some(state) = self.deactivated.take() {
+            *self
+                .shared
+                .cold
+                .deactivated_dsp
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(state);
         }
     }
 }

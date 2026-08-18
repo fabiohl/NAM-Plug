@@ -106,8 +106,13 @@ impl NamClapSharedRef {
     /// The pointee must outlive all uses of this wrapper.
     #[inline]
     pub unsafe fn new(ptr: *const NamClapShared) -> Self {
-        let nn = std::ptr::NonNull::new(ptr as *mut NamClapShared)
-            .expect("NamClapSharedRef::new: pointer must not be null");
+        debug_assert!(
+            !ptr.is_null(),
+            "NamClapSharedRef::new: pointer must not be null"
+        );
+        // SAFETY: callers contract (documented above) guarantees a valid, non-null
+        // pointer from a leaked `Arc<NamClapShared>`.
+        let nn = unsafe { std::ptr::NonNull::new_unchecked(ptr as *mut NamClapShared) };
         Self(nn)
     }
 

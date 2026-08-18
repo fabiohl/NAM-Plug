@@ -491,6 +491,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     neural_amp_modeler_rs::common::params::ActivationPrecision::Standard,
                 gain_lut: get_gain_lut(),
                 cabsim_tail_remaining: cabsim_tail_initial,
+                cached_effective_latency: initial_latency,
                 host,
             })
         }));

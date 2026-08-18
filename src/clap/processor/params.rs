@@ -99,8 +99,6 @@ impl<'a> NamClapProcessor<'a> {
 
     // ── SPSC full-apply ───────────────────────────────────────────
 
-    // ── SPSC full-apply ───────────────────────────────────────────
-
     pub(crate) fn apply_oversample(
         &mut self,
         factor: neural_amp_modeler_rs::dsp::oversample::OversampleFactor,

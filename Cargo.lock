@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "NeuralAmpModeler-rs"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c100284736d93bedeacbfb68c17e2ccb9225318a322d42bb0470640b4b721799"
+checksum = "842763d818aba9dc7deb6d2915e5d782305b5f3117c833691f11d1876e61e7a2"
 dependencies = [
  "anyhow",
  "libc",
@@ -591,9 +591,9 @@ dependencies = [
 
 [[package]]
 name = "error-code"
-version = "3.3.2"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
+checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
 name = "euclid"
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "nam-plug"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "NeuralAmpModeler-rs",
  "anyhow",

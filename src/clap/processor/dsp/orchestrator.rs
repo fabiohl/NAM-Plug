@@ -115,9 +115,10 @@ impl<'a> NamClapProcessor<'a> {
             if self.gate_dirty {
                 let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
                 let close_db = modulated_gate_db - 6.0;
-                self.cached_threshold_open_sq =
-                    self.gain_lut.db_to_linear(modulated_gate_db).powi(2);
-                self.cached_threshold_close_sq = self.gain_lut.db_to_linear(close_db).powi(2);
+                let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
+                self.cached_threshold_open_sq = open_linear * open_linear;
+                let close_linear = self.gain_lut.db_to_linear(close_db);
+                self.cached_threshold_close_sq = close_linear * close_linear;
                 self.cached_gate_params.threshold_open_db = modulated_gate_db;
                 self.cached_gate_params.threshold_close_db = close_db;
                 self.gate_dirty = false;
@@ -303,9 +304,10 @@ impl<'a> NamClapProcessor<'a> {
                 if self.gate_dirty {
                     let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
                     let close_db = modulated_gate_db - 6.0;
-                    self.cached_threshold_open_sq =
-                        self.gain_lut.db_to_linear(modulated_gate_db).powi(2);
-                    self.cached_threshold_close_sq = self.gain_lut.db_to_linear(close_db).powi(2);
+                    let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
+                    self.cached_threshold_open_sq = open_linear * open_linear;
+                    let close_linear = self.gain_lut.db_to_linear(close_db);
+                    self.cached_threshold_close_sq = close_linear * close_linear;
                     self.cached_gate_params.threshold_open_db = modulated_gate_db;
                     self.cached_gate_params.threshold_close_db = close_db;
                     self.gate_dirty = false;

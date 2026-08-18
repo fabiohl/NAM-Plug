@@ -219,6 +219,12 @@ pub struct NamClapProcessor<'a> {
     /// Decremented by `process_tail_drain` until zero, at which point the
     /// tail ring-out is complete and true silence can be emitted.
     pub(crate) cabsim_tail_remaining: usize,
+    /// Effective latency (resampler + oversample + cab-sim) in host-rate
+    /// samples, cached on the audio thread. Recomputed only in the cold
+    /// handlers that swap latency-affecting resources (model/resampler,
+    /// cab-sim IR, oversample engines) — `process_events` reads this cache
+    /// instead of recomputing on every block.
+    pub(crate) cached_effective_latency: u32,
     /// Host audio processor handle. Used for `host.request_restart()` when
     /// structural latency changes are pending.
     pub(crate) host: HostAudioProcessorHandle<'a>,

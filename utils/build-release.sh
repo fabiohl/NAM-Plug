@@ -323,15 +323,13 @@ if [ -n "$LLVM_BOLT" ]; then
     # Step 3: Apply BOLT Optimization
     if [ -f "$BOLT_DIR/libnam_plug.merged.fdata" ] && [ -s "$BOLT_DIR/libnam_plug.merged.fdata" ]; then
         echo -e "  [Step 3/3] Applying BOLT optimization using merged fdata..."
+        # Shared libraries (cdylib/DSOs) require relocation-safe BOLT flags without -hugify or --split-all-cold
         if "$LLVM_BOLT" "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" \
             -o "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" \
             -data "$BOLT_DIR/libnam_plug.merged.fdata" \
             --reorder-blocks=ext-tsp \
             --reorder-functions=hfsort \
-            --split-functions \
-            --split-all-cold \
             --relocs \
-            -hugify \
             --lite > "$BOLT_DIR/llvm-bolt-clap.log" 2>&1; then
             CLAP_BOLT_APPLIED=true
             echo -e "  ${GREEN}✓${NC} BOLT optimization applied successfully to CLAP plugin."
@@ -365,9 +363,9 @@ fi
 
 if [ -n "${ASM_BIN:-}" ]; then
     if command -v llvm-objdump &>/dev/null; then
-        llvm-objdump -d --no-show-raw-insn "$ASM_BIN" > "$ASM_TARGET" 2>/dev/null || true
+        llvm-objdump -d --demangle --no-show-raw-insn "$ASM_BIN" > "$ASM_TARGET" 2>/dev/null || true
     elif command -v objdump &>/dev/null; then
-        objdump -d --no-show-raw-insn "$ASM_BIN" > "$ASM_TARGET" 2>/dev/null || true
+        objdump -d --demangle --no-show-raw-insn "$ASM_BIN" > "$ASM_TARGET" 2>/dev/null || true
     fi
 
     if [ -s "$ASM_TARGET" ]; then

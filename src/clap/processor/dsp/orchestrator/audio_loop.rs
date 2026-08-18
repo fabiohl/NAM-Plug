@@ -215,8 +215,10 @@ pub(crate) fn process_sub_block(
         unsafe {
             core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), n_out);
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), n_out);
+        if !process_mono {
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), n_out);
+            }
         }
     }
 
@@ -293,7 +295,11 @@ fn process_tail_drain(
         );
         unsafe {
             core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), drain);
-            core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), drain);
+        }
+        if !process_mono {
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), drain);
+            }
         }
     }
 
@@ -412,11 +418,15 @@ fn process_crossfade_sub_block(
                         buf_out_l.as_mut_ptr(),
                         drain,
                     );
-                    core::ptr::copy_nonoverlapping(
-                        buf_out_l.as_ptr(),
-                        buf_out_r.as_mut_ptr(),
-                        drain,
-                    );
+                }
+                if !process_mono {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            buf_out_l.as_ptr(),
+                            buf_out_r.as_mut_ptr(),
+                            drain,
+                        );
+                    }
                 }
             }
             apply_output_stage(
@@ -477,8 +487,10 @@ fn process_crossfade_sub_block(
             unsafe {
                 core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), n_o);
             }
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), n_o);
+            if !process_mono {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), n_o);
+                }
             }
         }
 
@@ -508,28 +520,48 @@ fn process_crossfade_sub_block(
     };
 
     // 3. Crossfade blend: output = dry * (1 - mix_i) + wet * mix_i
+    // Call-site analysis (Sprint 2 T2.3): `dry_n` is always `n_samples`
+    // (buf_xfade_dry_* capacity is max_frames_count >= n_samples). However,
+    // `n_out` can exceed `dry_n` by a few samples when the resampler is
+    // active (per-chunk phase rounding), so `n_xfade` is clamped to `dry_n`
+    // and the legacy guard semantics (dry = 0.0) are preserved in the
+    // overflow continuation loop below — the blend loop itself is branch-free.
+    let n_xfade_raw = n_out.min(crossfader.remaining);
+    let n_xfade = n_xfade_raw.min(dry_n);
     debug_assert!(
-        n_out <= dry_n,
-        "n_out ({n_out}) exceeded dry_n ({dry_n}) in bypass crossfade"
+        n_xfade <= dry_n,
+        "n_xfade ({n_xfade}) exceeded dry_n ({dry_n}) in bypass crossfade"
     );
-    let n_xfade = n_out.min(crossfader.remaining);
     let step = crossfader.step;
     let mut mix = crossfader.mix;
 
-    // Blended portion (first n_xfade samples): ramp from current mix towards target
+    // Blended portion (first n_xfade samples): ramp from current mix towards target.
+    // Bounds pre-validated above — slices are disjoint, loop is auto-vectorizable (FMA).
+    let dry_l = &buf_xfade_dry_l[..n_xfade];
+    let dry_r = &buf_xfade_dry_r[..n_xfade];
+    let wet_l = &mut buf_out_l[..n_xfade];
+    let wet_r = &mut buf_out_r[..n_xfade];
     for i in 0..n_xfade {
-        let dry_l = if i < dry_n { buf_xfade_dry_l[i] } else { 0.0 };
-        let dry_r = if i < dry_n { buf_xfade_dry_r[i] } else { 0.0 };
-        buf_out_l[i] = dry_l + (buf_out_l[i] - dry_l) * mix;
-        buf_out_r[i] = dry_r + (buf_out_r[i] - dry_r) * mix;
+        let d_l = dry_l[i];
+        let d_r = dry_r[i];
+        wet_l[i] = d_l + (wet_l[i] - d_l) * mix;
+        wet_r[i] = d_r + (wet_r[i] - d_r) * mix;
         mix += step;
     }
 
-    // Pure portion (remaining n_out - n_xfade samples): final mix value
+    // Overflow region (n_xfade..n_xfade_raw): wet count exceeded the dry
+    // capture. Legacy guard semantics: dry = 0.0 → wet scaled by the ramp mix.
+    for i in n_xfade..n_xfade_raw {
+        buf_out_l[i] *= mix;
+        buf_out_r[i] *= mix;
+        mix += step;
+    }
+
+    // Pure portion (remaining n_out - n_xfade_raw samples): final mix value
     let final_mix = if crossfader.target { 0.0 } else { 1.0 };
     if (final_mix - 1.0f32).abs() > f32::EPSILON {
         // final_mix is 0.0 (dry target): copy dry to output, zero-fill any excess beyond dry_n
-        for i in n_xfade..n_out {
+        for i in n_xfade_raw..n_out {
             if i < dry_n {
                 buf_out_l[i] = buf_xfade_dry_l[i];
                 buf_out_r[i] = buf_xfade_dry_r[i];
@@ -542,7 +574,8 @@ fn process_crossfade_sub_block(
     // If final_mix is 1.0 (wet target): buf_out already has wet, nothing to do
 
     crossfader.mix = mix;
-    crossfader.remaining = crossfader.remaining.saturating_sub(n_xfade);
+    crossfader.mix = crossfader.mix.clamp(0.0, 1.0);
+    crossfader.remaining = crossfader.remaining.saturating_sub(n_xfade_raw);
     if crossfader.remaining == 0 {
         crossfader.active = false;
         crossfader.mix = final_mix;

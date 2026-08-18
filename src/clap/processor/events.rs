@@ -86,13 +86,10 @@ impl<'a> NamClapProcessor<'a> {
         // polls `current_latency` and calls `latency_ext.changed()` on its
         // regular cycle. Worst case: one main-thread-period delay in reporting.
         // This is a cold path (model activation/swap only), not the hot path.
-        let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
-        let host_rate = if host_rate == 0 { 48000 } else { host_rate };
-        let mut effective_latency = self.resampler.latency_samples(host_rate);
-        effective_latency += self.os_l.latency_samples() as u32;
-        if let Some(ref adapter) = self.cabsim_adapter {
-            effective_latency += adapter.latency_samples() as u32;
-        }
+        //
+        // The effective latency is cached (`cached_effective_latency`) and
+        // recomputed only in the cold swap handlers — never on this hot path.
+        let effective_latency = self.cached_effective_latency;
         if effective_latency != self.shared.rt_to_ui.current_latency.load(Ordering::Relaxed) {
             self.shared
                 .rt_to_ui
@@ -190,6 +187,24 @@ impl<'a> NamClapProcessor<'a> {
             self.adaptive_compute
                 .set_wavenet_full_ch(w.ch, model.is_slimmable_capable());
         }
+
+        self.recompute_effective_latency();
+    }
+
+    /// Recomputes the cached effective latency (resampler + oversample +
+    /// cab-sim) in host-rate samples. Cold path: called only after swapping
+    /// a latency-affecting resource (model/resampler, cab-sim IR, or
+    /// oversample engines) — never on the per-block hot path.
+    #[cold]
+    fn recompute_effective_latency(&mut self) {
+        let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
+        let host_rate = if host_rate == 0 { 48000 } else { host_rate };
+        let mut effective_latency = self.resampler.latency_samples(host_rate);
+        effective_latency += self.os_l.latency_samples() as u32;
+        if let Some(ref adapter) = self.cabsim_adapter {
+            effective_latency += adapter.latency_samples() as u32;
+        }
+        self.cached_effective_latency = effective_latency;
     }
 
     #[cold]
@@ -211,6 +226,8 @@ impl<'a> NamClapProcessor<'a> {
             .store(cabsim_tail, Ordering::Relaxed);
         self.cabsim_tail_remaining = self.cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
 
+        self.recompute_effective_latency();
+
         // Notify the host of tail changes from the audio thread,
         // which owns the valid HostAudioProcessorHandle. Eliminates the
         // unsafe main-thread → audio-thread pointer cast previously in
@@ -230,6 +247,8 @@ impl<'a> NamClapProcessor<'a> {
         let old_r = std::mem::replace(&mut self.os_r, os_r);
         self.push_to_gc(GcItem::Oversample(old_l));
         self.push_to_gc(GcItem::Oversample(old_r));
+
+        self.recompute_effective_latency();
     }
 
     /// Checks if the adaptive FSM demands a WaveNet channel count change
