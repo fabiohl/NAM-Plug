@@ -28,7 +28,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 │  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - baseview Event Loop │
 │  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - egui v0.36 / glow   │
 │  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - OpenGL 3.3 Render   │
-│  - Background Model Loading │  │  - Zero Blocking I/O    │  │  - Async rfd File Dialog│
+│  - Background Model Loading │  │  - Zero Blocking I/O    │  │  - Async rfd FileDialog│
 │  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - 5-Zone UI Layout    │
 └──────────────┬──────────────┘  └────────────▲────────────┘  └───────────┬────────────┘
                │                              │                           │
@@ -42,7 +42,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 - **Audio Thread (RT)** — Driven by the host `process()` callback (`PluginAudioProcessor::process` in `src/clap/processor/mod.rs`).
 
-  > **Hard Real-Time Contract:** Zero heap allocations, zero mutex locks, zero blocking I/O, zero panics. Operates directly on host audio buffers using host-driven single-callback processing (no PipeWire `DspBridge` required).
+  > **Hard Real-Time Contract:** Zero heap allocations, zero mutex locks, zero blocking I/O, zero panics. Operates directly on host audio buffers using host-driven single-callback processing.
 
 - **GUI Thread** — Dedicated `baseview` X11 event loop thread driving an `egui`/`glow` OpenGL renderer (`src/clap/gui/`). Fully isolated from the audio thread.
 
@@ -50,14 +50,21 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ## 2. Compilation Strategy & Feature Flags
 
-NAM-Plug source code (`src/`) is structured to separate CLAP plugin infrastructure from the standalone PipeWire host binary:
+`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.5.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and an auxiliary PGO profiling binary (`pgo_profiling_workload` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
 
-- **CLAP Plugin Library (`cargo build --no-default-features --features clap-plugin --lib`):**
-  Compiles the `.clap` shared library artifact with embedded GUI support (`src/clap/gui/`). Omits `src/standalone/` (PipeWire client, RT thread pin setup, CLI parsing), keeping the dynamic library free of PipeWire runtime dependencies.
-- **Standalone Binary (`cargo build`):**
-  Compiles the standalone PipeWire executable (`standalone` feature default). Omits `src/clap/gui/` and CLAP host extension wrappers.
+The crate feature flags defined in `Cargo.toml` are:
 
-All GUI code lives under `src/clap/gui/` and is conditionally compiled with `#[cfg(feature = "clap-plugin")]`.
+- **`stereo` (default):** Enables dual-channel L/R audio processing and dynamic adaptive stereo VU metering.
+- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, and the `pgo_profiling_workload` binary.
+- **`heap-audit`:** Activates the allocation counting allocator interceptor (`CountingAllocator`) for RT-safety heap audits.
+
+```bash
+# Standard release build (produces target/release/libnam_plug.so)
+cargo build --release
+
+# Development and testing build
+cargo build --features testing
+```
 
 ---
 
@@ -86,7 +93,7 @@ Exposed via `NamPluginParams` (`src/common/params.rs`) and registered in `src/cl
 | **Input Gain**           | `input_gain_db` (0)        | dB      | `-20.0` to `+20.0`                  | Pre-inference gain, sample-accurate smoothed.             |
 | **Output Gain**          | `output_gain_db` (1)       | dB      | `-20.0` to `+20.0`                  | Post-inference gain, sample-accurate smoothed.            |
 | **Gate Threshold**       | `gate_threshold_db` (2)    | dB      | `-100.0` to `0.0`                   | Noise-gate opening threshold.                             |
-| **Bypass**               | `bypass` (3)               | Binary  | `false` / `true`                    | Disables neural processing (dry passthrough).             |
+| **Bypass**               | `bypass` (3)               | Binary  | `false` / `true`                    | Disables neural processing (32 ms crossfaded passthrough) |
 | **Active Model**         | `active_model` (4)         | String  | Read-only                           | Filename of currently loaded model.                       |
 | **Adaptive Compute**     | `adaptive_compute` (5)     | Stepped | `Off`, `Conservative`, `Aggressive` | CPU-based dynamic degradation FSM.                        |
 | **Slim Override**        | `slim_override` (6)        | Stepped | `Auto`, `ForceFull`, `ForceLite`    | Slimmable A2 container submodel selection.                |
@@ -113,6 +120,7 @@ Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-exten
 | `clap_plugin_param_indication` | `src/clap/extensions/param_indication.rs` | GUI visual cues for mapped/automated/overridden parameter status.                          |
 | `clap_plugin_preset_load`      | `src/clap/extensions/preset_load.rs`      | Direct model loading (`.nam`/`.namb`) from host preset browser.                            |
 | `clap_plugin_render`           | `src/clap/extensions/render.rs`           | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision. |
+| `clap_plugin_tail`             | `src/clap/extensions/tail.rs`             | Host tail query reporting remaining cab-sim IR ring-out frames.                            |
 | `clap_plugin_gui`              | `src/clap/extensions/gui.rs`              | Native `egui` windowing via `baseview` (`CLAP_WINDOW_API_X11`).                            |
 
 > **Host Compatibility Note:** Native X11 window embedding (`CLAP_WINDOW_API_X11`) is verified and functional across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. A known host-side window management limitation exists in **PreSonus Studio One / Fender Studio Pro for Linux**, where the host currently fails to initialize or attach embedded X11/XWayland surfaces. Audio DSP and parameter automation remain fully functional.
@@ -130,10 +138,10 @@ Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/share
 │                          NamClapShared Allocation                           │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  #[repr(align(128))] RtToUi      (RT Thread -> UI Reads)                    │
-│    - ui_peak_l / ui_peak_r, ui_clipped, active_channel_count, latency      │
+│    - ui_peak_l / ui_peak_r, ui_clipped, active_channel_count, latency       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  #[repr(align(128))] UiToRt      (UI Thread -> RT Reads)                    │
-│    - 8 Parameter Atomics, gesture_flags, gui_param_generation              │
+│    - 8 Parameter Atomics, gesture_flags, gui_param_generation               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  #[repr(align(128))] ColdShared  (Main / UI / RT Setup)                     │
 │    - SPSC Command Queues, pending_model payload, IR state, alive_fence      │
@@ -177,17 +185,25 @@ RT Thread (Replaced Asset)
 2. **Tier 2 (Processor Parking Lot):** Fixed array `[Option<GcItem>; 16]` inside `PluginAudioProcessor`. `gc_cascade` flushes items parked in previous cycles back to the SPSC whenever capacity frees, and the processor retries once per audio block (`drain_parking_lot`), so parked items reach the off-RT drain during normal operation. At teardown the lot is never dropped with the processor: `deactivate()` hands `&mut parking_lot` to `drain_gc_final()` (single-owner handoff after the audio thread stopped), so one canonical drain releases SPSC + overflow + the 16 slots on the main thread.
 3. **Tier 3 (`GcOverflowBuffer`):** Atomic ring buffer (`SPSC_CAPACITY`). Overwrites oldest slot if completely saturated, setting `RT_STATUS_GC_OVERFLOW` to preserve RT deadline execution.
 
-### 5.4 FFI Lifetime Safety & Panic Guard
+### 5.4 Poison-Resilient Activation Rollback Guard (`ActivateRollbackGuard`)
+
+During plugin `activate()`, channel receivers (`param_rx`, `slimmable_rx`), `gc_tx`, and `deactivated_dsp` are transferred to the audio processor under the protection of `ActivateRollbackGuard` (`src/clap/processor/rollback.rs`). If activation panics or fails midway, `Drop` recovers poisoned mutexes via `.unwrap_or_else(|e| e.into_inner())` and restores all resources back into `ColdShared` without dropping them on the audio thread.
+
+### 5.5 Cold-Path Latency Caching (`cached_effective_latency`)
+
+Recomputing effective latency (resampler latency + oversample latency + cabsim IR latency) involves division and multiple structure queries. Effective latency is cached in `cached_effective_latency` (`src/clap/processor/state.rs`) and recomputed strictly during cold swap routines (`swap_model`, `swap_cabsim`, `apply_oversample`), completely eliminating latency computation from the hot `process_events` per-block path while driving instant host PDC updates via `clap_plugin_latency`.
+
+### 5.6 FFI Lifetime Safety & Panic Guard
 
 - **`alive_fence` (`Arc<AtomicBool>`):** Background file picker threads check `alive_fence` before dereferencing shared pointers, preventing use-after-free (UAF) if the host destroys the plugin while a dialog is open.
 - **`GuiHostBridge` (`src/clap/gui/mod.rs`):** Safe wrapper storing raw host pointers as `NonNull<()>` and reconstructing `HostSharedHandle<'static>` on demand, reflecting the CLAP spec guarantee that the host outlives the plugin.
 - **C-ABI Panic Protection:** `install_panic_hook("clap")` sets the crash reporter. Any Rust panic crossing C-ABI host boundaries is caught to prevent Undefined Behavior (UB), returning clean early failure codes.
 
-### 5.5 Deferred Model Load (`pending_model`)
+### 5.7 Deferred Model Load (`pending_model`)
 
 When DAW state is restored prior to `activate()`, the host buffer size (`max_frames_count`) is unknown. The model payload is cached in `ColdShared::pending_model` and flushed via `flush_pending_model()` during `activate()` (primary) or initial `housekeeping()` before the audio thread processes frames.
 
-### 5.6 Channel Preservation on `deactivate()`
+### 5.8 Channel Preservation on `deactivate()`
 
 Calling `deactivate()` returns SPSC channel consumers (`param_rx`, `gc_tx`, `slimmable_rx`) back into `ColdShared`, allowing hosts to stop and restart audio processing without instance recreation or memory reallocation. Before the processor drops, `deactivate()` also performs the GC parking-lot handoff (see §5.3): the 16-slot RT array is passed by mutable reference to `drain_gc_final()` so every in-flight `GcItem` is released off-RT through the canonical drain.
 
@@ -236,7 +252,16 @@ graph TD
 7. **Cabsim IR Stage (Optional):** Executes Uniform-Partitioned Overlap-Save (UPOLS) frequency-domain convolution (`ConvEngine::process()`) if an IR file is loaded.
 8. **Output Gain & Clipping:** Applies user output gain (SIMD + `ParamSmoother`), enforces hard clipping at `+0 dBFS` if enabled, and writes peak telemetry to `RtToUi` atomics.
 
-### 6.2 Model Gain Calibration Isolation
+### 6.2 Branchless FMA-Optimized Bypass Crossfader (`process_crossfade_sub_block`)
+
+To prevent audible clicks, pops, or abrupt phase shifts when toggling the plugin bypass state during live performance or automated sessions:
+
+- **Equal-Power 32 ms Crossfade:** Ramps `crossfader.mix` linearly towards the target mix (`0.0` for pure dry, `1.0` for pure wet) across sub-blocks.
+- **Branchless FMA Vector Loop:** Inner blend loop executes across `n_xfade` samples without internal branching (`wet[i] = dry[i] + (wet[i] - dry[i]) * mix`), allowing complete auto-vectorization and FMA generation.
+- **Resampler Phase Rounding Discrepancy Continuation:** When `NamResampler` is active, per-chunk phase rounding can cause `n_out` to momentarily differ from `dry_n`. NAM-Plug clamps `n_xfade` to `dry_n` and processes the fractional overflow region (`n_xfade..n_xfade_raw`) cleanly with dry=0.0 semantics before zero-filling or passing remaining pure frames.
+- **Mix Value Clamping:** Mix parameters are clamped to `[0.0, 1.0]` at each step, ensuring saturation cannot overflow even with extreme buffer sizes.
+
+### 6.3 Model Gain Calibration Isolation
 
 NAM models supply embedded metadata (`input_level_dbu`, `loudness`). The loader computes calibration adjustments (`input_mult_adj`, `output_mult_adj`). In NAM-Plug, calibration multipliers are passed via `DspPipelineContext::input_gain_mult`/`output_gain_mult` separately from `smoother_in`/`smoother_out`. This ensures sample-accurate DAW user-gain automation never alters underlying static model loudness calibration.
 
@@ -257,7 +282,7 @@ The graphical interface is built using an immediate-mode paradigm under `src/cla
 │    Zone 4: Bypass Toggle                                                    │
 │    Zone 5: Status Bar (Orchestrator, Telemetry, A2 Slim Controls)           │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Rendering Pipeline: egui v0.34 ──► egui_glow / glow v0.17 (OpenGL 3.3)     │
+│  Rendering Pipeline: egui v0.36 ──► egui_glow / glow v0.17 (OpenGL 3.3)     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Windowing: baseview (Native Embedded X11 Window / RawWindowHandle 0.6)     │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -334,7 +359,7 @@ Automated CLAP integration testing and specification validation are implemented 
 A fully functional simulated DAW host environment built within library unit tests:
 
 - `CompleteHostState` — Shared event log (`Arc<Mutex<Vec<HostEvent>>>`) and assertion flags.
-- `CompleteHostShared` / `CompleteHostMainThread` / `CompleteHostAudioProcessor` — Implements all 6 standard CLAP host extensions (`audio-ports`, `params`, `state`, `latency`, `track-info`, `render`).
+- `CompleteHostShared` / `CompleteHostMainThread` / `CompleteHostAudioProcessor` — Implements all standard CLAP host extensions (`audio-ports`, `params`, `state`, `latency`, `track-info`, `render`).
 - Helper utilities (`make_test_plugin_with_harness()`, `process_block_harness()`, `perform_restart()`) test deactivate/activate cycles, state migration, and parameter automation directly in Rust unit tests.
 
 ### 9.2 Dynamic Artifact Validator (`tests/clap/artifact_validator.rs`)

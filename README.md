@@ -5,7 +5,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # NAM-Plug
 
-![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-egui%20%7C%20Glow-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20%7C%20AVX--512-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
+![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-egui%200.36%20%7C%20Glow-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20%7C%20AVX--512-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
 
 **NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs.
 
@@ -27,14 +27,19 @@ Designed for seamless integration into modern Linux digital audio workstations (
 
 ## ⚡ Key Strengths & Architectural Highlights
 
-* **Native CLAP Standard Integration:** Built on top of the `clack` framework, exposing a clean, robust implementation of the CLever Audio Plug-in (CLAP) standard with zero translation overhead and full DAW parameter automation.
-* **Inherited Neural Engine Excellence:** Powered by [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs), supporting WaveNet (A1/A2 standard & lite profiles), LSTM (1-layer and 2-layer topologies), ConvNet, Linear FIR, and partitioned FFT cabinet impulse responses (.wav).
-* **Zero-Allocation RT Safety:** The audio callback thread runs with strict real-time determinism — no heap allocations, no mutex locks, and no blocking I/O on the hot path. Model loading, IR loading, and quality parameter changes pass through lock-free SPSC channels with garbage collection (GC) cascades.
-* **Hardware-Accelerated egui + Glow GUI:** Vector-rendered OpenGL UI (`egui_glow` + `baseview`), responsive and framerate-independent, providing real-time metering, control knobs, status feedback, and DSP diagnostics.
+* **Native CLAP 1.2+ Standard Integration:** Built on top of the `clack` framework, exposing a clean, robust implementation of the CLever Audio Plug-in (CLAP) standard with zero translation overhead, sample-accurate parameter automation, and native host extension compliance (`audio-ports`, `params`, `state`, `state-context`, `latency`, `gui`, `track-info`, `remote-controls`, `param-indication`, `preset-discovery`, `render`, `tail`, `log`).
+* **Inherited Neural Engine Excellence:** Powered by [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs), supporting WaveNet (A1/A2 standard & slimmable profiles), LSTM (1-layer and 2-layer topologies), ConvNet, Linear FIR, and partitioned FFT speaker cabinet impulse responses (.wav).
+* **Strict Zero-Allocation RT Safety & 3-Tier GC Cascade:** The audio callback thread runs with strict real-time determinism — no heap allocations, no mutex locks, and no blocking I/O on the hot path. Dropped models, IRs, and oversamplers cascade through lock-free SPSC channels (32 slots) → processor parking lot (16 slots) → atomic overflow ring buffer with poison-resilient rollback guards (`ActivateRollbackGuard`).
+* **Branchless FMA-Optimized Bypass Crossfader:** 32 ms equal-power crossfade blending during bypass transitions, executing branchlessly with FMA vectorization and adaptive handling of fractional phase discrepancies between dry capture and resampled wet streams.
+* **Cold-Path Latency Caching & Dynamic PDC:** Effective latency (resampler + oversample + cab-sim) is cached on the audio thread and recomputed strictly during cold asset swaps, driving instant DAW Plugin Delay Compensation (`clap_plugin_latency`) without per-block audio thread overhead.
+* **Decoupled Gain Staging & Model Calibration:** Embedded model loudness metadata calibration (`input_mult_adj`/`output_mult_adj`) is isolated from sample-accurate DAW user-gain automation (`ParamSmoother`), preventing automation sweeps from altering static model calibration multipliers.
+* **Generation-Counter Fast Path (`gui_param_generation`):** Eliminates redundant atomic float loads when parameters are stationary, reading parameter targets only upon modification.
+* **Hardware-Accelerated egui + Glow GUI with 2-Tier Idle Throttling:** Vector-rendered OpenGL UI (`egui 0.36` + `glow 0.17` + `baseview`) featuring adaptive mono/stereo tricolor VU meters with custom GLSL shaders, sub-pixel peak-hold indicators, and an idle skip engine (CLAP-F022) achieving 0% GPU/CPU overhead when static.
 * **Half-Band Anti-Aliasing Oversampling:** Optional `2x` and `4x` polyphase oversampling centered around the neural inference stage to eliminate high-frequency aliasing foldover in high-gain amp models.
 * **Selectable Activation Precision:** Supports both `Standard` (exact-grade, default) and `Fast` (Padé polynomial minimax approximations) math modes to balance precision against CPU consumption on demanding setups.
 * **Real-Time DSP Telemetry & Diagnostics:** Live footer display reporting sample rate (`SR`), buffer latency (`Lat`), DSP CPU load percentage (`DSP %`), CPU cycles per block, block size (`Last N`), real-time thread priority (`RT Prio`), overload xrun count, and diagnostic status flags (`Flags`).
-* **Comprehensive CLAP Extension Support:** Extends DAW integration with `audio-ports`, `params`, `gui`, `state`, `latency`, `log`, `remote-controls`, `preset-discovery`, `render`, `tail`, and `track-info`.
+* **5-Phase Advanced Optimization Pipeline (PGO + LLVM-BOLT):** Automated compilation suite (`build-release.sh`) leveraging synthetic neural DSP profiling, Profile-Guided Optimization (PGO), and LLVM-BOLT machine code layout optimization to maximize Instruction Cache locality.
+* **Linker-Level Symbol Isolation:** Scoped version script (`hide-libm-shadow.map`) ensuring libm symbols resolve dynamically to `glibc` without dangerous PLT/GOT self-referential loops in release builds.
 
 ---
 
@@ -43,15 +48,19 @@ Designed for seamless integration into modern Linux digital audio workstations (
 | Feature / Attribute            | Technical Implementation                                                 | Benefit & Impact                                                   |
 |:------------------------------ |:------------------------------------------------------------------------ |:------------------------------------------------------------------ |
 | **Inference Engine**           | Core `NeuralAmpModeler-rs` engine (WaveNet A1/A2, LSTM, ConvNet, Linear) | Full model compatibility with exact C++ f32 & f64 reference parity |
-| **Plugin Standard**            | Native CLAP API wrapper (`clack-plugin` & `clack-extensions`)            | Sub-millisecond buffer sizes and native DAW parameter automation   |
+| **Plugin Standard**            | Native CLAP API wrapper (`clack-plugin` & `clack-extensions`)            | Sub-millisecond buffer sizes and sample-accurate DAW automation    |
 | **RT Determinism**             | Strict Zero Heap Drop, Zero Locks, Zero Hot-Path Logging                 | Guaranteed audio stability without buffer underruns (xruns)        |
 | **SIMD Hardware Acceleration** | Mandatory `x86-64-v3` (AVX2/FMA) baseline + AVX-512 multiversioning      | Ultra-low CPU usage (< 8.2% of CPU deadline on typical blocks)     |
+| **Bypass Crossfader**          | 32 ms equal-power crossfade with branchless FMA loop & phase compensation| Smooth, pop-free bypass transitions with zero phase cancellation   |
+| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`    | Instant host Plugin Delay Compensation with 0 per-block overhead   |
 | **Cabinet IR Convolution**     | Partitioned FFT & Direct FIR convolution engine (.wav IRs)               | Seamless, zero-latency speaker cabinet simulation                  |
-| **Graphical User Interface**   | `egui` vector UI with `glow` (OpenGL) via `baseview`                     | Responsive, framerate-independent UI with live metering & status   |
+| **Graphical User Interface**   | `egui 0.36` vector UI with `glow 0.17` (OpenGL 3.3) via `baseview`       | Responsive, framerate-independent UI with GLSL shader meters       |
+| **GUI Idle Throttling**        | 2-tier frame lifecycle & dirty-state early exit (CLAP-F022)              | 0% GPU/CPU consumption when plugin UI is open and stationary       |
 | **Oversampling**               | Half-band polyphase FIR filters (`Off`, `2x`, `4x`)                      | Eliminates aliasing distortion in high-gain amp models             |
-| **Activation Precision**       | `Standard` (exact-grade, default) vs `Fast` (Padé approximations)        | User-selectable trade-off between math precision and latency       |
+| **Activation Precision**       | `Standard` (exact-grade, default) vs `Fast` (Padé approximations)        | User-selectable trade-off between math precision and CPU latency   |
 | **CLAP State Persistence**     | Lock-free atomic synchronization & JSON serialization                    | Full preset saving/loading and seamless DAW project restoration    |
 | **Diagnostics & Telemetry**    | Atomic telemetry bitmask & `LogBuffer` ring buffer integration           | Real-time CPU, latency, overload, and flag telemetry in GUI footer |
+| **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly report          | Minimized I-Cache misses and maximum instruction throughput        |
 
 ---
 
@@ -114,7 +123,7 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 2. **Phase 2 — PGO Trace Generation:** Compiles `pgo_profiling_workload` with `-Cprofile-generate`, executing synthetic neural DSP workloads to collect realistic CPU performance profiles (`.profraw`), merging them into `merged.profdata`.
 3. **Phase 3 — PGO-Optimized Compilation:** Recompiles `libnam_plug.so` using `-Cprofile-use=merged.profdata` and relocation symbols (`-Clink-arg=-Wl,-q`), allowing LLVM to optimize hot loops, inline activation functions, and unroll vector SIMD loops.
 4. **Phase 4 — LLVM BOLT Machine Code Reordering:** Reorders machine code instructions via `llvm-bolt` to minimize Instruction Cache (I-Cache) misses and TLB pressure during real-time processing.
-5. **Phase 4.5 — Assembly Hotspot Disassembly Report:** Outputs an AI-ready disassembly report at `target/dsp_hotpath.asm`.
+5. **Phase 4.5 — Assembly Hotspot Disassembly Report:** Outputs an AI-ready demangled disassembly report at `target/dsp_hotpath.asm`.
 6. **Phase 5 — Automated Deployment & Archiving:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap` and generates a release distribution archive at `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst`.
 
 ---
@@ -138,7 +147,7 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 2. **Noise Gate:** Adjust the **`GATE`** knob (default `-70.0 dB`) to eliminate hum and background noise when not playing.
 3. **Anti-Aliasing Oversampling:** Select **`2x`** or **`4x`** polyphase oversampling when running high-gain amplifier models to eliminate aliasing foldover distortion.
 4. **Activation Math Mode:** Switch between **`Standard`** (exact precision) and **`Fast`** (Padé polynomial approximations) to optimize CPU usage on large sessions.
-5. **Active / Bypass:** Toggle the **`ACTIVE`** button to bypass or re-engage processing seamlessly.
+5. **Active / Bypass:** Toggle the **`ACTIVE`** button to bypass or re-engage processing seamlessly with 32 ms equal-power crossfading.
 
 ### 4. Telemetry Footer Monitoring
 
