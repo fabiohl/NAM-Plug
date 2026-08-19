@@ -115,7 +115,7 @@ CLAP_TARGET="$CLAP_INSTALL_DIR/nam_plug.clap"
 echo -e "\n${BLUE}${BOLD}[Phase 1/6] Verifying dependencies and environment...${NC}"
 
 # Verify core dependencies
-for cmd in rustc cargo python3; do
+for cmd in rustc cargo python3 tar zstd; do
     if ! command -v "$cmd" &>/dev/null; then
         echo -e "${RED}Error: '$cmd' is not installed or available in PATH.${NC}"
         exit 1
@@ -436,6 +436,8 @@ cp README.md LICENSE.txt "$PKG_DIR/$ARCHIVE_NAME/" 2>/dev/null || true
 # Generate 1-click install script for end-users
 cat << 'EOF' > "$PKG_DIR/$ARCHIVE_NAME/install.sh"
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 set -e
 CLAP_DIR="$HOME/.clap"
 mkdir -p "$CLAP_DIR"
@@ -445,7 +447,7 @@ EOF
 chmod +x "$PKG_DIR/$ARCHIVE_NAME/install.sh"
 
 TARBALL="$HOME/${ARCHIVE_NAME}.tar.zst"
-tar -C "$PKG_DIR" -caf "$TARBALL" "$ARCHIVE_NAME"
+tar -C "$PKG_DIR" -I "zstd -6 -T0" -cf "$TARBALL" "$ARCHIVE_NAME"
 rm -rf "$PKG_DIR"
 
 echo -e "  ${GREEN}✓${NC} Distribution package generated at: ${BOLD}$TARBALL${NC}"

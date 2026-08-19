@@ -124,7 +124,8 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 3. **Phase 3 — PGO-Optimized Compilation:** Recompiles `libnam_plug.so` using `-Cprofile-use=merged.profdata` and relocation symbols (`-Clink-arg=-Wl,-q`), allowing LLVM to optimize hot loops, inline activation functions, and unroll vector SIMD loops.
 4. **Phase 4 — LLVM BOLT Machine Code Reordering:** Reorders machine code instructions via `llvm-bolt` to minimize Instruction Cache (I-Cache) misses and TLB pressure during real-time processing.
 5. **Phase 4.5 — Assembly Hotspot Disassembly Report:** Outputs an AI-ready demangled disassembly report at `target/dsp_hotpath.asm`.
-6. **Phase 5 — Automated Deployment & Archiving:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap` and generates a release distribution archive at `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst`.
+6. **Phase 5 — Automated Deployment:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap`.
+7. **Phase 6 — Release Packaging (.tar.zst):** Generates a release distribution archive at `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst` containing the plugin, documentation, license, and a 1-click installation script.
 
 ---
 
