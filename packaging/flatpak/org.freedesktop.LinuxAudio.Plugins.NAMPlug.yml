@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+id: org.freedesktop.LinuxAudio.Plugins.NAMPlug
+branch: "25.08"
+runtime: org.freedesktop.LinuxAudio.BaseExtension
+runtime-version: stable
+sdk: org.freedesktop.Sdk//25.08
+build-extension: true
+
+build-options:
+  prefix: /app/extensions/Plugins/NAMPlug
+
+modules:
+  - name: nam-plug
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 nam_plug.clap ${FLATPAK_DEST}/clap/nam_plug.clap
+      - install -Dm644 org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/
+    sources:
+      - type: file
+        path: nam_plug.clap
+      - type: file
+        path: org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml

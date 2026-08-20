@@ -2,16 +2,82 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 #
-# Unified compiler-grade release build script for NAM-Plug (PGO + BOLT).
-# Compiles the CLAP plugin with Profile-Guided Optimization (PGO)
-# and post-link BOLT binary reordering.
+# Unified compiler-grade release build & packaging script for NAM-Plug (PGO + BOLT + Flatpak).
+# Compiles the CLAP plugin with Profile-Guided Optimization (PGO),
+# post-link BOLT binary reordering, and generates release distribution archives
+# and standalone Flatpak plugin extensions.
 #
 # Deliverables:
-#   - ~/.clap/nam_plug.clap                    (PGO + BOLT optimized CLAP plugin)
-#   - target/dsp_hotpath.asm                   (Disassembly hotspot report)
+#   - ~/.clap/nam_plug.clap                      (PGO + BOLT optimized CLAP plugin)
+#   - target/dsp_hotpath.asm                     (Disassembly hotspot report)
 #   - ~/nam-plug-v<ver>-linux-x86_64-v3.tar.zst  (Release distribution tarball)
+#   - ~/nam-plug-v<ver>-linux-x86_64-v3.flatpak  (Flatpak plugin extension bundle)
 
 set -euo pipefail
+
+# Parse command line options
+DO_INSTALL_FLATPAK=false
+BUILD_FLATPAK=true
+BUILD_TARBALL=true
+USE_PGO=true
+USE_BOLT=true
+
+show_help() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Unified compiler-grade release build and packaging pipeline for NAM-Plug.
+
+Options:
+  --install              Automatically install the Flatpak bundle locally (flatpak install --user)
+                         in addition to installing ~/.clap/nam_plug.clap.
+  --no-flatpak           Skip Phase 7 (Flatpak bundle creation).
+  --no-tarball           Skip Phase 6 (.tar.zst archive creation).
+  --no-pgo               Skip Profile-Guided Optimization and compile directly with dist profile.
+  --no-bolt              Skip Phase 4 (LLVM BOLT post-link optimization).
+  -h, --help             Show this help message and exit.
+
+Deliverables:
+  - ~/.clap/nam_plug.clap                      (Installed CLAP plugin)
+  - target/dsp_hotpath.asm                     (Disassembly hotspot report)
+  - ~/nam-plug-v<ver>-linux-x86_64-v3.tar.zst  (Distribution tarball)
+  - ~/nam-plug-v<ver>-linux-x86_64-v3.flatpak  (Flatpak plugin extension bundle)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --install)
+            DO_INSTALL_FLATPAK=true
+            shift
+            ;;
+        --no-flatpak)
+            BUILD_FLATPAK=false
+            shift
+            ;;
+        --no-tarball)
+            BUILD_TARBALL=false
+            shift
+            ;;
+        --no-pgo)
+            USE_PGO=false
+            shift
+            ;;
+        --no-bolt)
+            USE_BOLT=false
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
 
 # Import shared style helpers and utilities from _lib.sh.
 # NAM_LIB_NO_CD=1 prevents _lib.sh from cding — we manage our own working
@@ -31,9 +97,12 @@ ORIG_PARANOID=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "2"
 PARANOID_MODIFIED=false
 WORKLOAD_PID=""
 
-# Dynamic isolated temporary directories for PGO & BOLT profiling
+# Dynamic isolated temporary directories for PGO & BOLT profiling and packaging
 PGO_DIR="$(mktemp -d -t nam-plug-pgo.XXXXXX)"
 BOLT_DIR="$(mktemp -d -t nam-plug-bolt.XXXXXX)"
+PKG_DIR=""
+FLATPAK_BUILD_DIR=""
+FLATPAK_REPO_DIR=""
 PROFRAW_DIR="$PGO_DIR/profraw"
 MERGED_PROFILE="$PGO_DIR/merged.profdata"
 ORIG_RUSTFLAGS="${RUSTFLAGS:-}"
@@ -56,14 +125,14 @@ cleanup() {
         echo -e "\nRestoring kernel.perf_event_paranoid to $ORIG_PARANOID..."
         sudo sysctl -q -w kernel.perf_event_paranoid="$ORIG_PARANOID" 2>/dev/null || true
     fi
-    if [ -n "${PGO_DIR:-}" ] && [ -d "$PGO_DIR" ]; then
-        rm -rf "$PGO_DIR"
-    fi
-    if [ -n "${BOLT_DIR:-}" ] && [ -d "$BOLT_DIR" ]; then
-        rm -rf "$BOLT_DIR"
-    fi
+    if [ -n "${PGO_DIR:-}" ] && [ -d "$PGO_DIR" ]; then rm -rf "$PGO_DIR"; fi
+    if [ -n "${BOLT_DIR:-}" ] && [ -d "$BOLT_DIR" ]; then rm -rf "$BOLT_DIR"; fi
+    if [ -n "${PKG_DIR:-}" ] && [ -d "$PKG_DIR" ]; then rm -rf "$PKG_DIR"; fi
+    if [ -n "${FLATPAK_BUILD_DIR:-}" ] && [ -d "$FLATPAK_BUILD_DIR" ]; then rm -rf "$FLATPAK_BUILD_DIR"; fi
+    if [ -n "${FLATPAK_REPO_DIR:-}" ] && [ -d "$FLATPAK_REPO_DIR" ]; then rm -rf "$FLATPAK_REPO_DIR"; fi
+    return 0
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 export CARGO_TARGET_DIR="$PGO_BUILD_TARGET_DIR"
 
@@ -112,10 +181,15 @@ CLAP_TARGET="$CLAP_INSTALL_DIR/nam_plug.clap"
 # -----------------------------------------------------------------------------
 # PHASE 1: Environment & Dependency Verification
 # -----------------------------------------------------------------------------
-echo -e "\n${BLUE}${BOLD}[Phase 1/6] Verifying dependencies and environment...${NC}"
+echo -e "\n${BLUE}${BOLD}[Phase 1/7] Verifying dependencies and environment...${NC}"
 
 # Verify core dependencies
-for cmd in rustc cargo python3 tar zstd; do
+REQUIRED_CMDS=(rustc cargo python3 tar zstd)
+if [ "$BUILD_FLATPAK" = true ]; then
+    REQUIRED_CMDS+=(flatpak)
+fi
+
+for cmd in "${REQUIRED_CMDS[@]}"; do
     if ! command -v "$cmd" &>/dev/null; then
         echo -e "${RED}Error: '$cmd' is not installed or available in PATH.${NC}"
         exit 1
@@ -131,117 +205,127 @@ if [ -z "${CONFIG_RUSTFLAGS:-}" ]; then
 fi
 echo -e "  ${GREEN}✓${NC} rustflags from config.toml verified: ${BOLD}$CONFIG_RUSTFLAGS${NC}"
 
-# Locate llvm-profdata from Rustup toolchain
-RUST_SYSROOT="$(rustc --print sysroot)"
-RUST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
-LLVM_PROFDATA="$RUST_SYSROOT/lib/rustlib/$RUST_TARGET/bin/llvm-profdata"
-if [ ! -x "$LLVM_PROFDATA" ]; then
-    echo -e "${RED}Error: llvm-profdata not found at $LLVM_PROFDATA${NC}"
-    echo -e "${YELLOW}Install LLVM tools via rustup:${NC}"
-    echo -e "  rustup component add llvm-tools-preview"
-    exit 1
+# Locate llvm-profdata from Rustup toolchain (if PGO is active)
+LLVM_PROFDATA=""
+if [ "$USE_PGO" = true ]; then
+    RUST_SYSROOT="$(rustc --print sysroot)"
+    RUST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+    LLVM_PROFDATA="$RUST_SYSROOT/lib/rustlib/$RUST_TARGET/bin/llvm-profdata"
+    if [ ! -x "$LLVM_PROFDATA" ]; then
+        echo -e "${RED}Error: llvm-profdata not found at $LLVM_PROFDATA${NC}"
+        echo -e "${YELLOW}Install LLVM tools via rustup:${NC}"
+        echo -e "  rustup component add llvm-tools-preview"
+        exit 1
+    fi
+    echo -e "  ${GREEN}✓${NC} llvm-profdata found: $LLVM_PROFDATA"
 fi
-echo -e "  ${GREEN}✓${NC} llvm-profdata found: $LLVM_PROFDATA"
 
-# Locate LLVM BOLT binary and merge-fdata tool
+# Locate LLVM BOLT binary and merge-fdata tool (if BOLT is active)
 LLVM_BOLT=""
-for candidate in \
-    /usr/lib/llvm-22/bin/llvm-bolt \
-    /usr/lib/llvm-21/bin/llvm-bolt \
-    /usr/lib/llvm-20/bin/llvm-bolt \
-    /usr/lib/llvm-19/bin/llvm-bolt \
-    /usr/lib/llvm-18/bin/llvm-bolt \
-    /usr/bin/llvm-bolt-22 \
-    /usr/bin/llvm-bolt-21 \
-    /usr/bin/llvm-bolt; do
-    if [ -x "$candidate" ]; then
-        LLVM_BOLT="$candidate"
-        break
-    fi
-done
+MERGE_FDATA=""
+if [ "$USE_BOLT" = true ]; then
+    for candidate in \
+        /usr/lib/llvm-22/bin/llvm-bolt \
+        /usr/lib/llvm-21/bin/llvm-bolt \
+        /usr/lib/llvm-20/bin/llvm-bolt \
+        /usr/lib/llvm-19/bin/llvm-bolt \
+        /usr/lib/llvm-18/bin/llvm-bolt \
+        /usr/bin/llvm-bolt-22 \
+        /usr/bin/llvm-bolt-21 \
+        /usr/bin/llvm-bolt; do
+        if [ -x "$candidate" ]; then
+            LLVM_BOLT="$candidate"
+            break
+        fi
+    done
 
-if [ -n "$LLVM_BOLT" ]; then
-    echo -e "  ${GREEN}✓${NC} llvm-bolt found: $LLVM_BOLT"
-    MERGE_FDATA="$(dirname "$LLVM_BOLT")/merge-fdata"
-    if [ ! -x "$MERGE_FDATA" ]; then
-        MERGE_FDATA="merge-fdata"
-    fi
-else
-    echo -e "${YELLOW}Warning: llvm-bolt was not found. The build will continue with PGO only.${NC}"
-    echo -e "${YELLOW}To enable BOLT, install: sudo apt install llvm-22-tools${NC}"
-fi
-
-# Check perf_event_paranoid requirement for BOLT profiling
-if [ "$ORIG_PARANOID" -gt 1 ]; then
-    echo -e "  kernel.perf_event_paranoid is $ORIG_PARANOID. Attempting to set to 1..."
-    if command -v sudo &>/dev/null; then
-        if sudo -n sysctl -w kernel.perf_event_paranoid=1 &>/dev/null; then
-            sudo sysctl -w kernel.perf_event_paranoid=1
-            PARANOID_MODIFIED=true
-            echo -e "  ${GREEN}✓${NC} paranoid level set to 1."
-        else
-            echo -e "${YELLOW}Warning: Passwordless sudo not available. Trying interactive sudo...${NC}"
-            if [ -t 0 ]; then
-                if sudo sysctl -w kernel.perf_event_paranoid=1; then
-                    PARANOID_MODIFIED=true
-                    echo -e "  ${GREEN}✓${NC} paranoid level set to 1."
-                else
-                    echo -e "${YELLOW}Warning: Failed to set paranoid level to 1. BOLT profiling might be skipped.${NC}"
-                fi
-            else
-                echo -e "${YELLOW}Warning: Non-interactive shell, cannot prompt for sudo password. BOLT profiling might be skipped.${NC}"
-            fi
+    if [ -n "$LLVM_BOLT" ]; then
+        echo -e "  ${GREEN}✓${NC} llvm-bolt found: $LLVM_BOLT"
+        MERGE_FDATA="$(dirname "$LLVM_BOLT")/merge-fdata"
+        if [ ! -x "$MERGE_FDATA" ]; then
+            MERGE_FDATA="merge-fdata"
         fi
     else
-        echo -e "${YELLOW}Warning: 'sudo' command not found. BOLT profiling might be skipped.${NC}"
+        echo -e "${YELLOW}Warning: llvm-bolt was not found. The build will continue with PGO only.${NC}"
+        echo -e "${YELLOW}To enable BOLT, install: sudo apt install llvm-22-tools${NC}"
+    fi
+
+    # Check perf_event_paranoid requirement for BOLT profiling
+    if [ "$ORIG_PARANOID" -gt 1 ]; then
+        echo -e "  kernel.perf_event_paranoid is $ORIG_PARANOID. Attempting to set to 1..."
+        if command -v sudo &>/dev/null; then
+            if sudo -n sysctl -w kernel.perf_event_paranoid=1 &>/dev/null; then
+                sudo sysctl -w kernel.perf_event_paranoid=1
+                PARANOID_MODIFIED=true
+                echo -e "  ${GREEN}✓${NC} paranoid level set to 1."
+            else
+                echo -e "${YELLOW}Warning: Passwordless sudo not available. Trying interactive sudo...${NC}"
+                if [ -t 0 ]; then
+                    if sudo sysctl -w kernel.perf_event_paranoid=1; then
+                        PARANOID_MODIFIED=true
+                        echo -e "  ${GREEN}✓${NC} paranoid level set to 1."
+                    else
+                        echo -e "${YELLOW}Warning: Failed to set paranoid level to 1. BOLT profiling might be skipped.${NC}"
+                    fi
+                else
+                    echo -e "${YELLOW}Warning: Non-interactive shell, cannot prompt for sudo password. BOLT profiling might be skipped.${NC}"
+                fi
+            fi
+        else
+            echo -e "${YELLOW}Warning: 'sudo' command not found. BOLT profiling might be skipped.${NC}"
+        fi
     fi
 fi
 
 # -----------------------------------------------------------------------------
 # PHASE 2: Profile-Guided Optimization (PGO) - Profiling Workload
 # -----------------------------------------------------------------------------
-echo -e "\n${BLUE}${BOLD}[Phase 2/6] Generating PGO profiles via workload runner...${NC}"
+if [ "$USE_PGO" = true ]; then
+    echo -e "\n${BLUE}${BOLD}[Phase 2/7] Generating PGO profiles via workload runner...${NC}"
 
-export RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS -Cprofile-generate=$PROFRAW_DIR"
-export LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw"
-echo -e "  Using RUSTFLAGS: ${BOLD}$RUSTFLAGS${NC}"
+    export RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS -Cprofile-generate=$PROFRAW_DIR"
+    export LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw"
+    echo -e "  Using RUSTFLAGS: ${BOLD}$RUSTFLAGS${NC}"
 
-echo -e "  Compiling real-world PGO profiling workload (pgo_profiling_workload)..."
-cargo build --profile dist --features testing --bin pgo_profiling_workload || {
-    echo -e "${RED}Error: Failed to build pgo_profiling_workload for PGO profiling.${NC}"
-    exit 1
-}
+    echo -e "  Compiling real-world PGO profiling workload (pgo_profiling_workload)..."
+    cargo build --profile dist --features testing --bin pgo_profiling_workload || {
+        echo -e "${RED}Error: Failed to build pgo_profiling_workload for PGO profiling.${NC}"
+        exit 1
+    }
 
-echo -e "  Executing PGO profiling workload..."
-timeout 60 "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" || {
-    echo -e "${RED}Error: pgo_profiling_workload failed (or timed out after 60s). Cannot generate PGO profiles.${NC}"
-    exit 1
-}
+    echo -e "  Executing PGO profiling workload..."
+    timeout 60 "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" || {
+        echo -e "${RED}Error: pgo_profiling_workload failed (or timed out after 60s). Cannot generate PGO profiles.${NC}"
+        exit 1
+    }
 
-PROFRAW_COUNT=$(find "$PROFRAW_DIR" -name "*.profraw" 2>/dev/null | wc -l)
-if [ "$PROFRAW_COUNT" -eq 0 ]; then
-    echo -e "${RED}Error: No .profraw profile files were generated in $PROFRAW_DIR!${NC}"
-    echo -e "${RED}PGO profiling failed — check that pgo_profiling_workload exercised the DSP pipeline.${NC}"
-    exit 1
+    PROFRAW_COUNT=$(find "$PROFRAW_DIR" -name "*.profraw" 2>/dev/null | wc -l)
+    if [ "$PROFRAW_COUNT" -eq 0 ]; then
+        echo -e "${RED}Error: No .profraw profile files were generated in $PROFRAW_DIR!${NC}"
+        echo -e "${RED}PGO profiling failed — check that pgo_profiling_workload exercised the DSP pipeline.${NC}"
+        exit 1
+    fi
+
+    echo -e "  ${GREEN}✓${NC} Collected $PROFRAW_COUNT .profraw profiles. Merging..."
+    "$LLVM_PROFDATA" merge -sparse -o "$MERGED_PROFILE" "$PROFRAW_DIR"/*.profraw
+    echo -e "  ${GREEN}✓${NC} Merged profile generated at: $MERGED_PROFILE ($(du -h "$MERGED_PROFILE" | cut -f1))"
+
+    # Clean raw profiles after merging
+    rm -rf "$PROFRAW_DIR"
+else
+    echo -e "\n${YELLOW}[Phase 2/7] Skipping PGO trace generation (--no-pgo).${NC}"
 fi
 
-echo -e "  ${GREEN}✓${NC} Collected $PROFRAW_COUNT .profraw profiles. Merging..."
-"$LLVM_PROFDATA" merge -sparse -o "$MERGED_PROFILE" "$PROFRAW_DIR"/*.profraw
-echo -e "  ${GREEN}✓${NC} Merged profile generated at: $MERGED_PROFILE ($(du -h "$MERGED_PROFILE" | cut -f1))"
-
-# Clean raw profiles after merging
-rm -rf "$PROFRAW_DIR"
-
 # -----------------------------------------------------------------------------
-# PHASE 3: Compile PGO-Optimized CLAP Plugin
+# PHASE 3: Compile Optimized CLAP Plugin
 # -----------------------------------------------------------------------------
-echo -e "\n${BLUE}${BOLD}[Phase 3/6] Compiling PGO-optimized CLAP plugin...${NC}"
+echo -e "\n${BLUE}${BOLD}[Phase 3/7] Compiling optimized CLAP plugin...${NC}"
 
-if [ -f "$MERGED_PROFILE" ]; then
+if [ "$USE_PGO" = true ] && [ -f "$MERGED_PROFILE" ]; then
     export RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS -Cprofile-use=$MERGED_PROFILE"
 else
     export RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS"
-    echo -e "  ${YELLOW}No PGO profile available — compiling without PGO.${NC}"
+    echo -e "  ${YELLOW}Compiling without PGO profile.${NC}"
 fi
 
 CLAP_RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,-q -Clink-arg=-Wl,-soname,nam_plug.clap"
@@ -253,15 +337,15 @@ if [ ! -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
     echo -e "${RED}Error: Failed to find compiled CLAP plugin library at $PGO_CLAP_TARGET_DIR/dist/libnam_plug.so${NC}"
     exit 1
 fi
-echo -e "  ${GREEN}✓${NC} PGO compilation completed successfully."
+echo -e "  ${GREEN}✓${NC} Compilation completed successfully."
 
 # -----------------------------------------------------------------------------
 # PHASE 4: BOLT Instrumentation & Post-Link Optimization
 # -----------------------------------------------------------------------------
 CLAP_BOLT_APPLIED=false
 
-if [ -n "$LLVM_BOLT" ]; then
-    echo -e "\n${BLUE}${BOLD}[Phase 4/6] Applying BOLT post-link optimization...${NC}"
+if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
+    echo -e "\n${BLUE}${BOLD}[Phase 4/7] Applying BOLT post-link optimization...${NC}"
 
     # Step 1: Instrument CLAP binary
     echo -e "  [Step 1/3] Instrumenting CLAP plugin library with llvm-bolt..."
@@ -344,13 +428,13 @@ if [ -n "$LLVM_BOLT" ]; then
         echo -e "${YELLOW}  Warning: No merged fdata profile available for CLAP. Skipping BOLT optimization.${NC}"
     fi
 else
-    echo -e "\n${YELLOW}[Phase 4/6] Skipping BOLT (llvm-bolt not found/configured).${NC}"
+    echo -e "\n${YELLOW}[Phase 4/7] Skipping BOLT optimization.${NC}"
 fi
 
 # -----------------------------------------------------------------------------
 # PHASE 4.5: Assembly Hotspot Disassembly Report
 # -----------------------------------------------------------------------------
-echo -e "\n${BLUE}${BOLD}[Phase 4.5/6] Generating AI-ready assembly hotspot report...${NC}"
+echo -e "\n${BLUE}${BOLD}[Phase 4.5/7] Generating AI-ready assembly hotspot report...${NC}"
 
 ASM_TARGET="$PROJECT_DIR/target/dsp_hotpath.asm"
 mkdir -p "$PROJECT_DIR/target"
@@ -380,7 +464,7 @@ fi
 # -----------------------------------------------------------------------------
 # PHASE 5: Deliverables Installation & Verification
 # -----------------------------------------------------------------------------
-echo -e "\n${BLUE}${BOLD}[Phase 5/6] Installing and validating artifacts...${NC}"
+echo -e "\n${BLUE}${BOLD}[Phase 5/7] Installing and validating artifacts...${NC}"
 
 # Target directories creation
 mkdir -p "$CLAP_INSTALL_DIR"
@@ -418,23 +502,26 @@ else
 fi
 echo -e "  ${GREEN}✓${NC} CLAP artifact validation passed."
 
+# Read version for archive naming
+VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys, json; print(json.load(sys.stdin)['packages'][0]['version'])")
+ARCHIVE_NAME="nam-plug-v${VERSION}-linux-x86_64-v3"
+TARBALL="$HOME/${ARCHIVE_NAME}.tar.zst"
+FLATPAK_BUNDLE="$HOME/${ARCHIVE_NAME}.flatpak"
+
 # -----------------------------------------------------------------------------
 # PHASE 6: Release Packaging (.tar.zst)
 # -----------------------------------------------------------------------------
-echo -e "\n${BLUE}${BOLD}[Phase 6/6] Generating distribution tarball...${NC}"
+if [ "$BUILD_TARBALL" = true ]; then
+    echo -e "\n${BLUE}${BOLD}[Phase 6/7] Generating distribution tarball...${NC}"
 
-VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys, json; print(json.load(sys.stdin)['packages'][0]['version'])")
-ARCHIVE_NAME="nam-plug-v${VERSION}-linux-x86_64-v3"
-# mktemp creates a unique temporary directory — do not destroy it immediately;
-# simply create the archive subdirectory inside it.
-PKG_DIR="$(mktemp -d -t nam-plug-pkg.XXXXXX)"
-mkdir -p "$PKG_DIR/$ARCHIVE_NAME"
+    PKG_DIR="$(mktemp -d -t nam-plug-pkg.XXXXXX)"
+    mkdir -p "$PKG_DIR/$ARCHIVE_NAME"
 
-cp "$CLAP_TARGET" "$PKG_DIR/$ARCHIVE_NAME/nam_plug.clap"
-cp README.md LICENSE.txt "$PKG_DIR/$ARCHIVE_NAME/" 2>/dev/null || true
+    cp "$CLAP_TARGET" "$PKG_DIR/$ARCHIVE_NAME/nam_plug.clap"
+    cp README.md LICENSE.txt "$PKG_DIR/$ARCHIVE_NAME/" 2>/dev/null || true
 
-# Generate 1-click install script for end-users
-cat << 'EOF' > "$PKG_DIR/$ARCHIVE_NAME/install.sh"
+    # Generate 1-click install script for end-users
+    cat << 'EOF' > "$PKG_DIR/$ARCHIVE_NAME/install.sh"
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
@@ -444,20 +531,90 @@ mkdir -p "$CLAP_DIR"
 cp nam_plug.clap "$CLAP_DIR/"
 echo "✅ Installed nam_plug.clap to $CLAP_DIR/nam_plug.clap"
 EOF
-chmod +x "$PKG_DIR/$ARCHIVE_NAME/install.sh"
+    chmod +x "$PKG_DIR/$ARCHIVE_NAME/install.sh"
 
-TARBALL="$HOME/${ARCHIVE_NAME}.tar.zst"
-tar -C "$PKG_DIR" -I "zstd -6 -T0" -cf "$TARBALL" "$ARCHIVE_NAME"
-rm -rf "$PKG_DIR"
+    tar -C "$PKG_DIR" -I "zstd -6 -T0" -cf "$TARBALL" "$ARCHIVE_NAME"
+    rm -rf "$PKG_DIR"
+    PKG_DIR=""
 
-echo -e "  ${GREEN}✓${NC} Distribution package generated at: ${BOLD}$TARBALL${NC}"
+    echo -e "  ${GREEN}✓${NC} Distribution package generated at: ${BOLD}$TARBALL${NC} ($(du -h "$TARBALL" | cut -f1))"
+else
+    echo -e "\n${YELLOW}[Phase 6/7] Skipping tarball packaging (--no-tarball).${NC}"
+fi
 
-echo -e "${GREEN}${BOLD}================================================================${NC}"
-echo -e "${GREEN}${BOLD}   Pipeline completed! CLAP plugin ready for distribution.       ${NC}"
-echo -e "${GREEN}${BOLD}================================================================${NC}"
-ls -lath "$CLAP_TARGET" "$TARBALL"
+# -----------------------------------------------------------------------------
+# PHASE 7: Release Packaging (.flatpak)
+# -----------------------------------------------------------------------------
+if [ "$BUILD_FLATPAK" = true ]; then
+    echo -e "\n${BLUE}${BOLD}[Phase 7/7] Generating Flatpak Plugin Extension Bundle (.flatpak)...${NC}"
+
+    FLATPAK_BUILD_DIR="$(mktemp -d -t nam-plug-flatpak-build.XXXXXX)"
+    FLATPAK_REPO_DIR="$(mktemp -d -t nam-plug-flatpak-repo.XXXXXX)"
+
+    SDK_NAME="org.freedesktop.Sdk"
+    if ! flatpak info org.freedesktop.Sdk//25.08 &>/dev/null; then
+        SDK_NAME="org.freedesktop.Platform"
+    fi
+
+    echo -e "  Initializing Flatpak extension environment (25.08 using $SDK_NAME)..."
+    flatpak build-init --type=extension --extension-tag=25.08 \
+        "$FLATPAK_BUILD_DIR" \
+        org.freedesktop.LinuxAudio.Plugins.NAMPlug \
+        "$SDK_NAME" \
+        org.freedesktop.Platform \
+        25.08
+
+    mkdir -p "$FLATPAK_BUILD_DIR/files/clap"
+    mkdir -p "$FLATPAK_BUILD_DIR/files/share/metainfo"
+    mkdir -p "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug"
+
+    cp "$CLAP_TARGET" "$FLATPAK_BUILD_DIR/files/clap/nam_plug.clap"
+    echo -e "  ${GREEN}✓${NC} Installed nam_plug.clap -> extension directory"
+
+    METAINFO_SRC="packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml"
+    if [ -f "$METAINFO_SRC" ]; then
+        cp "$METAINFO_SRC" "$FLATPAK_BUILD_DIR/files/share/metainfo/"
+        echo -e "  ${GREEN}✓${NC} Installed AppStream metainfo XML"
+    else
+        echo -e "  ${YELLOW}Warning: AppStream metainfo not found at $METAINFO_SRC${NC}"
+    fi
+
+    if [ -f "LICENSE.txt" ]; then
+        cp "LICENSE.txt" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
+    elif [ -f "LICENSE" ]; then
+        cp "LICENSE" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
+    fi
+
+    echo -e "  Finalizing Flatpak extension configuration..."
+    flatpak build-finish "$FLATPAK_BUILD_DIR" --extension-priority=100
+
+    echo -e "  Exporting extension to temporary OSTree repository..."
+    flatpak build-export --update-appstream "$FLATPAK_REPO_DIR" "$FLATPAK_BUILD_DIR" 25.08
+
+    echo -e "  Building Flatpak bundle: $FLATPAK_BUNDLE..."
+    mkdir -p "$(dirname "$FLATPAK_BUNDLE")"
+    flatpak build-bundle --runtime "$FLATPAK_REPO_DIR" "$FLATPAK_BUNDLE" org.freedesktop.LinuxAudio.Plugins.NAMPlug 25.08
+
+    echo -e "  ${GREEN}✓${NC} Flatpak bundle generated successfully: ${BOLD}$FLATPAK_BUNDLE${NC} ($(du -h "$FLATPAK_BUNDLE" | cut -f1))"
+
+    if [ "$DO_INSTALL_FLATPAK" = true ]; then
+        echo -e "  Installing Flatpak extension locally for current user..."
+        flatpak install --user --reinstall -y "$FLATPAK_BUNDLE"
+        echo -e "  ${GREEN}✓${NC} Flatpak plugin extension installed successfully."
+    fi
+
+    rm -rf "$FLATPAK_BUILD_DIR" "$FLATPAK_REPO_DIR"
+    FLATPAK_BUILD_DIR=""
+    FLATPAK_REPO_DIR=""
+else
+    echo -e "\n${YELLOW}[Phase 7/7] Skipping Flatpak packaging (--no-flatpak).${NC}"
+fi
+
+echo -e "\n${GREEN}${BOLD}========================================================================${NC}"
+echo -e "${GREEN}${BOLD}   Pipeline completed! Artifacts ready for distribution:                ${NC}"
+echo -e "${GREEN}${BOLD}========================================================================${NC}"
+ls -lath "$CLAP_TARGET" $([ "$BUILD_TARBALL" = true ] && echo "$TARBALL") $([ "$BUILD_FLATPAK" = true ] && echo "$FLATPAK_BUNDLE")
 if [ -f "$PROJECT_DIR/target/dsp_hotpath.asm" ]; then
     echo -e "\n${YELLOW}${BOLD}💡 AI-Ready Assembly Hotspots generated at:${NC} ${BOLD}target/dsp_hotpath.asm${NC}"
 fi
-echo -e "${GREEN}${BOLD}================================================================${NC}"
-
+echo -e "${GREEN}${BOLD}========================================================================${NC}"

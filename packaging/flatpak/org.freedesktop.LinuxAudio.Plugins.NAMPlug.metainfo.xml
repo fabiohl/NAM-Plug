@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-License-Identifier: GPL-3.0-or-later
+Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+-->
+<component type="addon">
+  <id>org.freedesktop.LinuxAudio.Plugins.NAMPlug</id>
+  <extends>org.freedesktop.LinuxAudio.BaseExtension</extends>
+  <extends>com.bitwig.BitwigStudio</extends>
+  <extends>fm.reaper.Reaper</extends>
+  <extends>org.ardour.Ardour</extends>
+  <extends>com.fender.studioapp8</extends>
+  <name>NAM Plug</name>
+  <summary>Neural Amp Modeler CLAP audio plugin</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.fabiohl">
+    <name>Fábio Henrique de Lima Silva</name>
+  </developer>
+  <description>
+    <p>
+      NAM-Plug is a high-performance Neural Amp Modeler audio plugin in CLAP
+      (CLever Audio Plug-in) format, engineered in pure Rust with strict real-time safety.
+    </p>
+    <p>Key features include:</p>
+    <ul>
+      <li>State-of-the-art neural emulation of guitar amplifiers, preamps, and pedals using WaveNet and LSTM topologies.</li>
+      <li>Hardware-accelerated SIMD AVX2/FMA vectorization with zero heap allocations on the audio thread.</li>
+      <li>Integrated CabSim Impulse Response (IR) loader and convolver.</li>
+      <li>Dual operational modes: Live (zero latency, adaptive compute) and HQ/Offline (4× oversampled linear-phase rendering).</li>
+      <li>Responsive hardware-accelerated OpenGL UI built with egui.</li>
+      <li>Extensive CLAP extension integration: Audio Ports, Latency, GUI, State, Track Info, and Tail.</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/fabiohl/NAM-Plug</url>
+  <url type="bugtracker">https://github.com/fabiohl/NAM-Plug/issues</url>
+  <url type="vcs-browser">https://github.com/fabiohl/NAM-Plug</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>AudioVideoEditing</category>
+  </categories>
+  <keywords>
+    <keyword>audio</keyword>
+    <keyword>dsp</keyword>
+    <keyword>nam</keyword>
+    <keyword>guitar</keyword>
+    <keyword>amplifier</keyword>
+    <keyword>cabsim</keyword>
+    <keyword>neural-network</keyword>
+    <keyword>wavenet</keyword>
+    <keyword>lstm</keyword>
+    <keyword>clap</keyword>
+    <keyword>plugin</keyword>
+  </keywords>
+  <releases>
+    <release version="0.5.0" date="2026-08-19">
+      <description>
+        <p>NAM-Plug 0.5.0 release with Flatpak metadata and CLAP integration.</p>
+        <ul>
+          <li>CLAP plugin format support with egui GUI and headless capabilities.</li>
+          <li>WaveNet and LSTM neural model inference with SIMD AVX2 acceleration.</li>
+          <li>Integrated CabSim IR convolver.</li>
+          <li>Live and HQ/Offline rendering modes.</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -119,13 +119,82 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 
 #### What `build-release.sh` does under the hood
 
-1. **Phase 1 — Environment Verification:** Validates toolchain prerequisites (`rustc`, `cargo`, `python3`, `llvm-profdata`, `llvm-bolt`, and `perf`) and verifies target CPU flags from `.cargo/config.toml`.
+1. **Phase 1 — Environment Verification:** Validates toolchain prerequisites (`rustc`, `cargo`, `python3`, `tar`, `zstd`, `flatpak`, `llvm-profdata`, `llvm-bolt`, and `perf`) and verifies target CPU flags from `.cargo/config.toml`.
 2. **Phase 2 — PGO Trace Generation:** Compiles `pgo_profiling_workload` with `-Cprofile-generate`, executing synthetic neural DSP workloads to collect realistic CPU performance profiles (`.profraw`), merging them into `merged.profdata`.
 3. **Phase 3 — PGO-Optimized Compilation:** Recompiles `libnam_plug.so` using `-Cprofile-use=merged.profdata` and relocation symbols (`-Clink-arg=-Wl,-q`), allowing LLVM to optimize hot loops, inline activation functions, and unroll vector SIMD loops.
 4. **Phase 4 — LLVM BOLT Machine Code Reordering:** Reorders machine code instructions via `llvm-bolt` to minimize Instruction Cache (I-Cache) misses and TLB pressure during real-time processing.
 5. **Phase 4.5 — Assembly Hotspot Disassembly Report:** Outputs an AI-ready demangled disassembly report at `target/dsp_hotpath.asm`.
 6. **Phase 5 — Automated Deployment:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap`.
 7. **Phase 6 — Release Packaging (.tar.zst):** Generates a release distribution archive at `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst` containing the plugin, documentation, license, and a 1-click installation script.
+8. **Phase 7 — Release Packaging (.flatpak):** Builds and exports the standalone Flatpak plugin extension bundle (`~/nam-plug-vx.y.z-linux-x86_64-v3.flatpak`) with AppStream metadata for sandboxed DAWs (Bitwig, REAPER, Ardour).
+
+#### CLI Options
+
+| Option          | Description                                                                                                     |
+|:--------------- |:--------------------------------------------------------------------------------------------------------------- |
+| `--install`     | Automatically installs the Flatpak extension locally (`flatpak install --user`) in addition to `~/.clap/`.      |
+| `--no-flatpak`  | Skips Phase 7 (Flatpak bundle creation).                                                                        |
+| `--no-tarball`  | Skips Phase 6 (.tar.zst archive creation).                                                                      |
+| `--no-pgo`      | Skips Phase 2/3 (Profile-Guided Optimization) and compiles directly with the `dist` release profile.            |
+| `--no-bolt`     | Skips Phase 4 (LLVM BOLT post-link optimization).                                                               |
+| `-h, --help`    | Displays command-line help screen and exits.                                                                    |
+
+---
+
+### 3. Flatpak Plugin Extension Distribution (`.flatpak`)
+
+In addition to traditional shared library installation, `NAM-Plug` is distributed as a standalone **Flatpak Audio Plugin Extension** (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`), targeting the standard `org.freedesktop.LinuxAudio.BaseExtension` runtime point (`branch 25.08`).
+
+This format enables sandboxed Flatpak DAWs (including Bitwig Studio `com.bitwig.BitwigStudio`, REAPER `fm.reaper.Reaper`, Ardour `org.ardour.Ardour`, and Studio One `com.fender.studioapp8`) to seamlessly discover and load `NAM-Plug` without requiring insecure filesystem sandbox holes (`--filesystem=host` or `--filesystem=home`).
+
+#### End-User Installation
+
+Install the `.flatpak` bundle directly into your local user Flatpak repository:
+
+```bash
+flatpak install --user --reinstall ~/nam-plug-v0.5.0-linux-x86_64-v3.flatpak
+```
+
+#### How DAW Discovery Works in Flatpak
+
+When installed, the plugin binary is mounted inside the DAW container at `/app/extensions/Plugins/clap/nam_plug.clap`. Compatible Flatpak DAWs configured with the `org.freedesktop.LinuxAudio.Plugins` extension point automatically scan this directory on startup and expose `NAM-Plug` directly in their native CLAP plugin browser.
+
+To verify the installed extension files on your system:
+
+```bash
+ls -la ~/.local/share/flatpak/runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08/active/files/clap/
+```
+
+#### Developer Workflow (Building & Testing Flatpak Locally)
+
+You can build and package the Flatpak extension bundle locally using either the release pipeline or `flatpak-builder`:
+
+1. **Automated Pipeline Build & Install:**
+
+   ```bash
+   ./utils/build-release.sh --install
+   ```
+
+2. **Standalone Manifest Compilation via `flatpak-builder`:**
+
+   ```bash
+   # Build the release CLAP library first
+   cargo build --release
+
+   # Compile and install the extension manifest locally
+   flatpak-builder --user --install --force-clean \
+     --state-dir=target/flatpak-builder \
+     target/flatpak-build \
+     packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml
+   ```
+
+#### Uninstallation
+
+To remove the Flatpak plugin extension:
+
+```bash
+flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
+```
 
 ---
 

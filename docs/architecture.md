@@ -376,7 +376,120 @@ Loads `.so`, loads target models via CLAP state, processes stress signals across
 
 ---
 
-## 10. References
+## 10. Flatpak Packaging & CLAP Discovery Architecture
+
+NAM-Plug supports distribution as a standalone Flatpak audio plugin extension, enabling seamless integration with containerized DAWs (such as Bitwig Studio, REAPER, and Ardour Flatpaks) without requiring insecure host filesystem sandbox holes (`--filesystem=host` or `--filesystem=home`):
+
+### 10.1 Freedesktop LinuxAudio Extension Topology & Mounting Architecture
+
+Freedesktop Flatpak audio applications utilize a standardized extension point architecture (`org.freedesktop.LinuxAudio.Plugins`):
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Flatpak DAW Container                             │
+│                  (e.g., com.bitwig.BitwigStudio)                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Mount Point: /app/extensions/Plugins/                                      │
+│    └── clap/                                                                │
+│         └── nam_plug.clap ◄── Mounted dynamically from host runtime        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  AppStream Catalog: /app/extensions/Plugins/share/metainfo/                 │
+│    └── org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                               ▲
+                               │ (Flatpak runtime extension bind mount)
+┌──────────────────────────────┴──────────────────────────────────────────────┐
+│                    Host User Extension Storage (~/.local/share/flatpak)     │
+│  runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08/active/    │
+│    └── files/clap/nam_plug.clap                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Runtime Extension Ref:** `runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08`
+- **Base Extension:** `org.freedesktop.LinuxAudio.BaseExtension`
+- **Container Mount Path:** `/app/extensions/Plugins/clap/nam_plug.clap`
+- **Extension Priority:** Configured with `--extension-priority=100` during `flatpak build-finish`, ensuring predictable precedence when multiple plugin providers are registered.
+
+### 10.2 AppStream Addon Metadata & DAW Target Association
+
+The metadata descriptor (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`) declares `<component type="addon">` and establishes direct discovery links (`<extends>`) with popular Linux DAWs:
+
+```xml
+<component type="addon">
+  <id>org.freedesktop.LinuxAudio.Plugins.NAMPlug</id>
+  <extends>org.freedesktop.LinuxAudio.BaseExtension</extends>
+  <extends>com.bitwig.BitwigStudio</extends>
+  <extends>fm.reaper.Reaper</extends>
+  <extends>org.ardour.Ardour</extends>
+  <extends>com.fender.studioapp8</extends>
+  <name>NAM Plug</name>
+  <summary>Neural Amp Modeler CLAP audio plugin</summary>
+  ...
+</component>
+```
+
+When a user installs `NAM-Plug` via Flatpak, software centers (GNOME Software, KDE Discover) recognize it as an add-on for installed DAWs, and containerized hosts immediately index `nam_plug.clap` upon next launch.
+
+### 10.3 Manifest Specification (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml`)
+
+The Flatpak manifest defines an extension module targeting the `25.08` runtime branch:
+
+```yaml
+id: org.freedesktop.LinuxAudio.Plugins.NAMPlug
+branch: "25.08"
+runtime: org.freedesktop.LinuxAudio.BaseExtension
+runtime-version: stable
+sdk: org.freedesktop.Sdk//25.08
+build-extension: true
+
+build-options:
+  prefix: /app/extensions/Plugins/NAMPlug
+
+modules:
+  - name: nam-plug
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 nam_plug.clap ${FLATPAK_DEST}/clap/nam_plug.clap
+      - install -Dm644 org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/
+```
+
+### 10.4 Integrated Release Pipeline (`build-release.sh`)
+
+Flatpak bundle creation is integrated directly into Phase 7 of `utils/build-release.sh`:
+
+1. **Environment Initialization:** Runs `flatpak build-init --type=extension --extension-tag=25.08` using `org.freedesktop.Sdk//25.08` (falling back to `org.freedesktop.Platform` if SDK is uninstalled).
+2. **Artifact Installation:** Installs optimized `nam_plug.clap` into `files/clap/`, AppStream XML into `files/share/metainfo/`, and GPL-3.0 license into `files/share/licenses/`.
+3. **Extension Finalization:** Applies `flatpak build-finish --extension-priority=100`.
+4. **OSTree Repository Export:** Executes `flatpak build-export --update-appstream` to create a transient OSTree repository.
+5. **Bundle Export:** Executes `flatpak build-bundle --runtime` producing the single-file deliverable `~/nam-plug-v<VERSION>-linux-x86_64-v3.flatpak`.
+6. **Automated User Installation:** If `--install` is supplied, runs `flatpak install --user --reinstall -y` automatically.
+
+### 10.5 Developer Build & Inspection Commands
+
+```bash
+# 1. Automated build of optimized plugin and Flatpak bundle:
+./utils/build-release.sh --install
+
+# 2. Standalone compilation using flatpak-builder:
+cargo build --release
+flatpak-builder --user --install --force-clean \
+  --state-dir=target/flatpak-builder \
+  target/flatpak-build \
+  packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml
+
+# 3. Query installed extension details:
+flatpak info org.freedesktop.LinuxAudio.Plugins.NAMPlug
+
+# 4. Inspect installed files inside the Flatpak runtime store:
+ls -la ~/.local/share/flatpak/runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08/active/files/clap/
+
+# 5. Remove extension:
+flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
+```
+
+---
+
+## 11. References
 
 - [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) — Neural Amp Modeler DSP engine library.
 - [CLAP (CLever Audio Plug-in) Specification](https://cleveraudio.org/) — Official CLAP plugin format documentation.
