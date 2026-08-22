@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-PHASE_TOTAL=6
+PHASE_TOTAL=7
 source "$(dirname "$0")/_lib.sh"
 
 echo -e "${BLUE}${BOLD}========================================${NC}"
@@ -139,6 +139,13 @@ if [ -n "$undocumented_allows" ]; then
     exit 1
 fi
 ok "All #[allow(clippy::)] suppressions are documented."
+
+# ---------------------------------------------------------------------------
+# [7/7] Binary scan: zero EVEX/ZMM and zero AVX-512 symbols in default release
+# ---------------------------------------------------------------------------
+phase "Validating CLAP binary artifact (zero AVX-512 in default release build)..."
+"$(dirname "$0")/verify_no_avx512_release.sh"
+ok "CLAP binary artifact is clean of AVX-512 symbols and EVEX instructions."
 
 echo -e "${GREEN}${BOLD}========================================${NC}"
 echo -e "${GREEN}${BOLD} Quality suite completed successfully!  ${NC}"

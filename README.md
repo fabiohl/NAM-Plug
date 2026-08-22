@@ -5,7 +5,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # NAM-Plug
 
-![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-egui%200.36%20%7C%20Glow-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20%7C%20AVX--512-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
+![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-egui%200.36%20%7C%20Glow-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
 
 **NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs.
 
@@ -50,7 +50,7 @@ Designed for seamless integration into modern Linux digital audio workstations (
 | **Inference Engine**           | Core `NeuralAmpModeler-rs` engine (WaveNet A1/A2, LSTM, ConvNet, Linear) | Full model compatibility with exact C++ f32 & f64 reference parity |
 | **Plugin Standard**            | Native CLAP API wrapper (`clack-plugin` & `clack-extensions`)            | Sub-millisecond buffer sizes and sample-accurate DAW automation    |
 | **RT Determinism**             | Strict Zero Heap Drop, Zero Locks, Zero Hot-Path Logging                 | Guaranteed audio stability without buffer underruns (xruns)        |
-| **SIMD Hardware Acceleration** | Mandatory `x86-64-v3` (AVX2/FMA) baseline + AVX-512 multiversioning      | Ultra-low CPU usage (< 8.2% of CPU deadline on typical blocks)     |
+| **SIMD Hardware Acceleration** | Engine `x86-64-v3` (AVX2/FMA) production backend                         | Ultra-low CPU usage (WaveNet Std ≪ 1.33 ms deadline)               |
 | **Bypass Crossfader**          | 32 ms equal-power crossfade with branchless FMA loop & phase compensation| Smooth, pop-free bypass transitions with zero phase cancellation   |
 | **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`    | Instant host Plugin Delay Compensation with 0 per-block overhead   |
 | **Cabinet IR Convolution**     | Partitioned FFT & Direct FIR convolution engine (.wav IRs)               | Seamless, zero-latency speaker cabinet simulation                  |
