@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
-//! Graphical interface of the NAM-rs plugin rendered via `egui` + `egui_glow`.
+//! Graphical interface of the NAM-Plug plugin rendered via `egui` + `egui_glow`.
 //!
 //! This module implements the entire GUI rendering of the CLAP plugin,
 //! organized into 5 visual zones:
@@ -42,7 +42,7 @@ use clack_plugin::host::HostSharedHandle;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Draws the components and 5-zone layout of the NAM-rs graphical interface.
+/// Draws the components and 5-zone layout of the NAM-Plug graphical interface.
 ///
 /// This is the main GUI rendering function, called every frame by
 /// `NamPluginWindow::on_frame()`. Reads shared state via atomics and

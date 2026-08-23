@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Implementation of the `clap_plugin_tail` extension for NAM-rs.
+//! Implementation of the `clap_plugin_tail` extension for NAM-Plug.
 //!
 //! Reports the plugin's tail length (CabSim IR + oversampling/resampling latencies)
 //! so DAWs can properly handle offline bounces and silence-timeout processing.

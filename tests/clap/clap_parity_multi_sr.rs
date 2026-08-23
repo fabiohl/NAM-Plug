@@ -216,8 +216,8 @@ fn process_through_clap(model_path: &Path, input: &[f32], sample_rate: f64) -> V
 
     let host_info = HostInfo::new(
         "CLAP-Parity",
-        "nam-rs",
-        "https://github.com/fabiohl/nam-rs",
+        "nam-plug",
+        "https://github.com/fabiohl/NAM-Plug",
         "0.1.0",
     )
     .unwrap();

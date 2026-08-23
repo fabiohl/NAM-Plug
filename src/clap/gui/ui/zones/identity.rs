@@ -45,7 +45,7 @@ fn render_brand_header(ui: &mut egui::Ui, accent_color: egui::Color32) {
     ui.add_space(8.0);
 
     ui.label(
-        egui::RichText::new("NAM-rs⚡")
+        egui::RichText::new("NAM-Plug⚡")
             .font(egui::FontId::proportional(24.0))
             .strong()
             .color(accent_color),

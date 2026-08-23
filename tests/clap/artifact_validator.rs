@@ -9,7 +9,7 @@
 //!
 //! Static-link tests (`PluginEntry::load_from_clack`) exercise a compile-time
 //! code path that can differ from the dynamically-loaded `.so`. Installed
-//! binaries (`~/.clap/nam-rs.clap`) may be stale, hiding regressions. This
+//! binaries (`~/.clap/nam-plug.clap`) may be stale, hiding regressions. This
 //! module forces every integration test to load the **freshly built artifact**
 //! from the cargo target directory and records its SHA256 for CI traceability.
 
@@ -34,12 +34,12 @@ impl TestedArtifact {
     /// # Path resolution (in order)
     ///
     /// 1. `CLAP_PLUGIN_PATH` environment variable (explicit override).
-    /// 2. `CARGO_TARGET_DIR` + `/release/libnam_rs.so` (cargo-managed
+    /// 2. `CARGO_TARGET_DIR` + `/release/libnam_plug.so` (cargo-managed
     ///    release build — what tests-quick.sh / build-release.sh produce).
-    /// 3. `target/release/libnam_rs.so` relative to `CARGO_MANIFEST_DIR`.
-    /// 4. `target/debug/libnam_rs.so` relative to `CARGO_MANIFEST_DIR`.
-    /// 5. `target/clap/release/libnam_rs.so`.
-    /// 6. `target/clap/debug/libnam_rs.so`.
+    /// 3. `target/release/libnam_plug.so` relative to `CARGO_MANIFEST_DIR`.
+    /// 4. `target/debug/libnam_plug.so` relative to `CARGO_MANIFEST_DIR`.
+    /// 5. `target/clap/release/libnam_plug.so`.
+    /// 6. `target/clap/debug/libnam_plug.so`.
     ///
     /// # Panics
     ///
@@ -59,7 +59,7 @@ impl TestedArtifact {
 
 /// Resolves the freshly built CLAP plugin `.so` path.
 ///
-/// **Does NOT fall back** to `~/.clap/nam-rs.clap` — that is a stale install
+/// **Does NOT fall back** to `~/.clap/nam-plug.clap` — that is a stale install
 /// and would mask regressions in the build artifact.
 pub fn resolve_plugin_artifact_path() -> PathBuf {
     // 1. Explicit override via environment variable
@@ -164,8 +164,8 @@ mod tests {
     #[test]
     fn test_artifact_resolver_exists() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let release_path = manifest_dir.join("target/release/libnam_rs.so");
-        let debug_path = manifest_dir.join("target/debug/libnam_rs.so");
+        let release_path = manifest_dir.join("target/release/libnam_plug.so");
+        let debug_path = manifest_dir.join("target/debug/libnam_plug.so");
 
         if release_path.exists() || debug_path.exists() {
             let path = resolve_plugin_artifact_path();
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn test_sha256_deterministic() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let release_path = manifest_dir.join("target/release/libnam_rs.so");
+        let release_path = manifest_dir.join("target/release/libnam_plug.so");
         if release_path.exists() {
             let h1 = compute_sha256(&release_path);
             let h2 = compute_sha256(&release_path);

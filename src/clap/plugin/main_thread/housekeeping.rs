@@ -136,7 +136,7 @@ impl<'a> NamClapMainThread<'a> {
                             // R-10: keep NEEDS_SLIMMABLE_REBUILD so the FSM
                             // retries on the next cycle instead of silently
                             // dropping the slimmed model and locking quality.
-                            log::warn!("NAM-rs: slimmable channel full — rebuild will retry");
+                            log::warn!("NAM-Plug: slimmable channel full — rebuild will retry");
                             self.host.request_callback();
                         }
                     }
@@ -240,10 +240,10 @@ impl<'a> NamClapMainThread<'a> {
             let timedout_sentinel = dialog_state::dialog_timedout_sentinel();
 
             if path == cancelled_sentinel {
-                log::info!("NAM-rs: model file dialog cancelled by user");
+                log::info!("NAM-Plug: model file dialog cancelled by user");
                 self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
             } else if path == timedout_sentinel {
-                log::info!("NAM-rs: model file dialog timed out");
+                log::info!("NAM-Plug: model file dialog timed out");
                 self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
             } else {
                 let res = self.load_model(&path);
@@ -329,13 +329,13 @@ impl<'a> NamClapMainThread<'a> {
                 let timedout_sentinel = dialog_state::dialog_timedout_sentinel();
 
                 if path == cancelled_sentinel {
-                    log::info!("NAM-rs: IR file dialog cancelled by user");
+                    log::info!("NAM-Plug: IR file dialog cancelled by user");
                     self.shared
                         .cold
                         .ui_ir_loading
                         .store(false, Ordering::Relaxed);
                 } else if path == timedout_sentinel {
-                    log::info!("NAM-rs: IR file dialog timed out");
+                    log::info!("NAM-Plug: IR file dialog timed out");
                     self.shared
                         .cold
                         .ui_ir_loading

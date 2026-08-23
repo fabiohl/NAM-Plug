@@ -81,9 +81,9 @@ mod tests {
             PluginEntry::load_from_clack::<NamEntry>(c"/test").expect("Failed to load PluginEntry");
 
         let host_info = HostInfo::new(
-            "NAM-rs-Test",
+            "NAM-Plug-Test",
             "NAM",
-            "https://github.com/fabiohl/nam-rs",
+            "https://github.com/fabiohl/NAM-Plug",
             "0.1.0",
         )
         .expect("Failed to create HostInfo");

@@ -83,9 +83,9 @@ fn test_multi_instance_rt_priority() {
     let artifact = super::artifact_validator::TestedArtifact::resolve_and_hash();
 
     let host_info = HostInfo::new(
-        "NAM-rs Multi-Instance Stress Test",
-        "NAM-rs",
-        "https://github.com/fabiohl/nam-rs",
+        "NAM-Plug Multi-Instance Stress Test",
+        "NAM-Plug",
+        "https://github.com/fabiohl/NAM-Plug",
         "0.1.0",
     )
     .expect("Failed to create HostInfo");
@@ -198,9 +198,9 @@ fn test_multi_instance_heap_audit_stress() {
                     unsafe { PluginEntry::load(&path).expect("Failed to load plugin entry") };
 
                 let host_info = HostInfo::new(
-                    "NAM-rs Stress",
-                    "NAM-rs",
-                    "https://github.com/fabiohl/nam-rs",
+                    "NAM-Plug Stress",
+                    "NAM-Plug",
+                    "https://github.com/fabiohl/NAM-Plug",
                     "0.1.0",
                 )
                 .expect("Failed to create HostInfo");

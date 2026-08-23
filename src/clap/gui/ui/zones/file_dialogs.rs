@@ -143,7 +143,7 @@ fn complete_dialog(
     // was open. Lower the fence ⇒ discard the outcome entirely: no write to
     // the pending slot and no `request_callback`.
     if !alive_fence.load(Ordering::Acquire) {
-        log::debug!("NAM-rs: file dialog completed after teardown — outcome discarded (R-09)");
+        log::debug!("NAM-Plug: file dialog completed after teardown — outcome discarded (R-09)");
         active.store(false, Ordering::Release);
         return;
     }
@@ -164,7 +164,7 @@ fn complete_dialog(
                 *guard = Some(sentinel_timeout);
             }
             log::warn!(
-                "NAM-rs: file dialog timed out after {}s",
+                "NAM-Plug: file dialog timed out after {}s",
                 DIALOG_TIMEOUT.as_secs()
             );
         }

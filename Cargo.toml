@@ -4,6 +4,7 @@
 name = "nam-plug"
 version = "0.7.0"
 edition = "2024"
+rust-version = "1.98.0"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/fabiohl/NAM-Plug"
 description = "NAM CLAP plugin — high-performance Neural Amp Modeler (NAM) inference in CLAP (CLever Audio Plug-in) format."

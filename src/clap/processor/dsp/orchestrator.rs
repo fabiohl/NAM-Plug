@@ -38,6 +38,7 @@ impl<'a> NamClapProcessor<'a> {
 
             for event in input_events {
                 if events.len() >= MAX_SCHEDULED_EVENTS {
+                    core::hint::cold_path();
                     debug_assert!(
                         false,
                         "CLAP-F007: event flood > {MAX_SCHEDULED_EVENTS} in one block; truncating"
@@ -47,6 +48,7 @@ impl<'a> NamClapProcessor<'a> {
                 let time = event.header().time() as usize;
                 if let Some(param_event) = event.as_event::<ParamValueEvent>() {
                     let Some(clap_id) = param_event.param_id() else {
+                        core::hint::cold_path();
                         continue;
                     };
                     events.push(ScheduledEvent {
@@ -57,6 +59,7 @@ impl<'a> NamClapProcessor<'a> {
                     });
                 } else if let Some(mod_event) = event.as_event::<ParamModEvent>() {
                     let Some(clap_id) = mod_event.param_id() else {
+                        core::hint::cold_path();
                         continue;
                     };
                     events.push(ScheduledEvent {
@@ -65,6 +68,9 @@ impl<'a> NamClapProcessor<'a> {
                         value: mod_event.amount() as f32,
                         is_mod: true,
                     });
+                } else {
+                    // Unknown/unsupported event type for this plugin.
+                    core::hint::cold_path();
                 }
             }
         }
@@ -159,6 +165,8 @@ impl<'a> NamClapProcessor<'a> {
                 while event_idx < event_count
                     && self.scheduled_events[event_idx].time < block_offset
                 {
+                    // Out-of-order timestamp (already passed this block offset).
+                    core::hint::cold_path();
                     event_idx += 1;
                 }
 

@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Identity descriptor of the NAM-rs plugin in CLAP format.
-//!
-//! ## Plugin ID Stability Decision
-//!
-//! The CLAP plugin ID was changed from `br.eti.fabiolima.nam-rs` to
-//! `br.eti.fabiolima.nam-plug` to reflect the repository and crate renaming
-//! after the monorepo split. This breaks backward compatibility with DAW
-//! sessions and presets that referenced the old ID — users upgrading from the
-//! monorepo build will need to re-instantiate the plugin in existing projects.
+//! Identity descriptor of the NAM-Plug plugin in CLAP format.
 
 use clack_plugin::prelude::*;
 

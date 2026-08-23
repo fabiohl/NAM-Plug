@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Implementation of the `clap_plugin_latency` extension for NAM-rs.
+//! Implementation of the `clap_plugin_latency` extension for NAM-Plug.
 
 use crate::clap::plugin::NamClapMainThread;
 use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
 use std::sync::atomic::Ordering;
 
-/// Implementation of the `PluginLatencyImpl` trait for the NAM-rs plugin.
+/// Implementation of the `PluginLatencyImpl` trait for the NAM-Plug plugin.
 /// The trait is implemented on `MainThread`.
 impl<'a> PluginLatencyImpl for NamClapMainThread<'a> {
     /// Returns the current plugin latency in samples.

@@ -180,7 +180,7 @@ mod tests {
     fn test_c_string_null_byte_sanitization() {
         use std::ffi::CString;
         let err_msg = "Model load failed: file\0name.nam not found";
-        let err_str = format!("NAM-rs: Failed to load model from GUI: {}", err_msg);
+        let err_str = format!("NAM-Plug: Failed to load model from GUI: {}", err_msg);
         let sanitized_err = err_str.replace('\0', " ");
         let msg = CString::new(sanitized_err);
         assert!(msg.is_ok(), "Sanitized CString creation should succeed");
@@ -325,7 +325,7 @@ mod tests {
         let mut clipboard =
             Clipboard::new().expect("arboard::Clipboard::new() must succeed with X11 display");
 
-        let test_text = "nam-rs diagnostic test — headless clipboard";
+        let test_text = "nam-plug diagnostic test — headless clipboard";
         clipboard
             .set_text(test_text)
             .expect("set_text() must succeed");

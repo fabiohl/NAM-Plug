@@ -6,7 +6,7 @@
 //! the SHA256 of the tested binary in the test log.
 //!
 //! This eliminates the false confidence from loading a stale install
-//! at `~/.clap/nam-rs.clap` when no `CLAP_PLUGIN_PATH` is set.
+//! at `~/.clap/nam-plug.clap` when no `CLAP_PLUGIN_PATH` is set.
 
 use clack_host::prelude::*;
 use std::sync::Arc;
@@ -35,9 +35,9 @@ fn test_clap_lifecycle() {
     // SAFETY: Loading a CLAP plugin is inherently unsafe because it executes code from a dynamic library.
     let entry = unsafe { PluginEntry::load(&artifact.path).expect("Failed to load plugin entry") };
     let host_info = HostInfo::new(
-        "NAM-rs Test Host",
-        "Fabio Lima",
-        "https://github.com/fabiohl/nam-rs",
+        "NAM-Plug Test Host",
+        "NAM",
+        "https://github.com/fabiohl/NAM-Plug",
         "0.1.0",
     )
     .unwrap();

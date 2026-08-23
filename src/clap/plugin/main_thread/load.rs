@@ -86,7 +86,7 @@ impl<'a> NamClapMainThread<'a> {
                 Some(hash.iter().map(|b| format!("{b:02x}")).collect())
             }
             Err(e) => {
-                log::warn!("NAM-rs: Failed to compute model hash ({path:?}): {e}");
+                log::warn!("NAM-Plug: Failed to compute model hash ({path:?}): {e}");
                 None
             }
         };

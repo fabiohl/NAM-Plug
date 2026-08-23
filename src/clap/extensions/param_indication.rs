@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Implementation of the `clap_plugin_param_indication` extension for NAM-rs.
+//! Implementation of the `clap_plugin_param_indication` extension for NAM-Plug.
 
 use crate::clap::plugin::NamClapMainThread;
 use clack_common::utils::{ClapId, Color};

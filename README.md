@@ -5,7 +5,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # NAM-Plug
 
-![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-egui%200.36%20%7C%20Glow-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
+![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.98%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-egui%200.36%20%7C%20Glow-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
 
 **NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs.
 
@@ -69,10 +69,15 @@ Designed for seamless integration into modern Linux digital audio workstations (
 | Dependency                | Minimum Version                               | Package / Command     |
 |:------------------------- |:--------------------------------------------- |:--------------------- |
 | **Linux Kernel**          | ≥ 5.10                                        | `uname -r`            |
-| **Rust Toolchain**        | ≥ 1.85 (edition 2024)                         | `rustc --version`     |
+| **Rust Toolchain**        | ≥ 1.98.0 (edition 2024)                       | `rustc --version`     |
 | **CPU Architecture**      | `x86_64` with AVX2/FMA (`x86-64-v3` baseline) | `lscpu`               |
 | **CLAP Host / DAW**       | Bitwig, REAPER, Ardour, Qtractor, Carla, etc. | Host application      |
 | **Development Libraries** | `build-essential`, `pkg-config`, `cmake`, GL  | See apt command below |
+
+> **MSRV policy:** `rust-version = "1.98.0"` in `Cargo.toml` is the **public MSRV promise**.
+> Development happens on `stable` (pinned by `rust-toolchain.toml`). The MSRV promise is
+> verified as an **isolated local check** — never mixed with the dev toolchain:
+> `cargo +1.98.0 check --locked` from the repository root.
 
 ### Installation of System Dependencies (Debian / Ubuntu / Pop!_OS)
 

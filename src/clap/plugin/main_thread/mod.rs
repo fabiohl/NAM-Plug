@@ -253,7 +253,7 @@ impl<'a> NamClapMainThread<'a> {
             .fetch_add(drained as u32, Ordering::Relaxed);
         if drained > 0 {
             log::debug!(
-                "NAM-rs: GC drain final — {} item(s) liberados no destroy (R11)",
+                "NAM-Plug: GC drain final — {} item(s) liberados no destroy (R11)",
                 drained
             );
         }
@@ -275,7 +275,7 @@ impl<'a> NamClapMainThread<'a> {
 
 impl<'a> Drop for NamClapMainThread<'a> {
     fn drop(&mut self) {
-        log::info!("NAM-rs: Plugin instance destroying — GUI fence down, teardown + GC drain.");
+        log::info!("NAM-Plug: Plugin instance destroying — GUI fence down, teardown + GC drain.");
         // R-09: lower the alive fence BEFORE releasing any shared state, so
         // GUI/dialog threads stop dereferencing `NamClapShared` and the host
         // handle immediately. Their event loops are no-ops from this point on.

@@ -352,7 +352,7 @@ fn validate_model_full(
     }
 
     log::error!(
-        "NAM-rs: State restore failed — model not found at {path:?}{}",
+        "NAM-Plug: State restore failed — model not found at {path:?}{}",
         loaded_params
             .model_basename
             .as_ref()
@@ -407,7 +407,7 @@ fn validate_model_from_basename(
             && actual != *expected
         {
             log::debug!(
-                "NAM-rs: Skipping {candidate:?} — hash mismatch (expected {expected}, got {actual})"
+                "NAM-Plug: Skipping {candidate:?} — hash mismatch (expected {expected}, got {actual})"
             );
             continue;
         }
@@ -419,7 +419,7 @@ fn validate_model_from_basename(
             .map(|s| s.to_string());
         let search_path = candidate.parent().map(|p| p.to_path_buf());
         let hash = Some(resources.model_hash.clone());
-        log::info!("NAM-rs: Resolved model via basename search: {candidate:?}");
+        log::info!("NAM-Plug: Resolved model via basename search: {candidate:?}");
         return Ok((
             Some(resources),
             Some(candidate),
@@ -435,7 +435,7 @@ fn validate_model_from_basename(
         .collect::<Vec<_>>()
         .join(", ");
     log::error!(
-        "NAM-rs: ForPreset restore failed — model basename {basename:?} not found in: [{searched}]"
+        "NAM-Plug: ForPreset restore failed — model basename {basename:?} not found in: [{searched}]"
     );
     Err(PluginError::Message(Box::leak(
         format!("Preset model not found: {basename} (searched canonical dirs)").into_boxed_str(),
@@ -495,7 +495,7 @@ fn validate_ir(
     };
 
     if !ir_path.exists() {
-        log::error!("NAM-rs: State restore failed — IR not found at {ir_path:?}");
+        log::error!("NAM-Plug: State restore failed — IR not found at {ir_path:?}");
         return Err(PluginError::Message(Box::leak(
             format!("Saved IR not found: {:?}", ir_path).into_boxed_str(),
         )));
@@ -658,7 +658,7 @@ fn commit(validated: ValidatedRestore, main_thread: &mut NamClapMainThread, mode
                     // ui_pending_ir / housekeeping. ir_path and
                     // ir_raw_samples are already stored so activate()
                     // can rebuild if the plugin is not yet processing.
-                    log::warn!("NAM-rs: restored IR channel full — will retry on next callback");
+                    log::warn!("NAM-Plug: restored IR channel full — will retry on next callback");
                     if let Some(ref ir_path_str) = validated.ir_path_on_disk
                         && let Ok(mut pending) = main_thread.shared.cold.ui_pending_ir.lock()
                     {

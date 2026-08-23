@@ -54,19 +54,19 @@ fn test_emit_pending_logs_messages_reach_log_buffer() {
         .cold
         .rt_status
         .check_and_clear_flag(RT_STATUS_HAS_CLIPPED);
-    log::warn!("NAM-rs: Output clipping detected!");
+    log::warn!("NAM-Plug: Output clipping detected!");
 
     shared
         .cold
         .rt_status
         .check_and_clear_flag(RT_STATUS_GC_OVERFLOW);
-    log::error!("NAM-rs: GC channel overflow! Possible memory leak.");
+    log::error!("NAM-Plug: GC channel overflow! Possible memory leak.");
 
     shared
         .cold
         .rt_status
         .check_and_clear_flag(RT_STATUS_MODEL_LOAD_FAILED);
-    log::error!("NAM-rs: Critical failure! No active model for processing.");
+    log::error!("NAM-Plug: Critical failure! No active model for processing.");
 
     let snapshot_after =
         neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()

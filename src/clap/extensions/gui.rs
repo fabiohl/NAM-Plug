@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Implementation of the `clap_plugin_gui` extension for NAM-rs.
+//! Implementation of the `clap_plugin_gui` extension for NAM-Plug.
 
 use crate::clap::gui::GuiHostBridge;
 use crate::clap::gui::lifecycle::{GuiEvent, GuiLifecycle};
@@ -96,7 +96,7 @@ impl<'a> NamClapMainThread<'a> {
             let deadline = std::time::Instant::now() + TEARDOWN_JOIN_TIMEOUT;
             if let Some(still_running) = try_join_until(handle, deadline) {
                 log::warn!(
-                    "NAM-rs: floating window thread did not exit within {:?} — \
+                    "NAM-Plug: floating window thread did not exit within {:?} — \
                      handing it to the reaper (thread holds no valid raw pointers \
                      once the fence is lowered)",
                     TEARDOWN_JOIN_TIMEOUT
@@ -313,7 +313,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                     })) {
                         Ok(Ok(window)) => window,
                         Ok(Err(err)) => {
-                            log::error!("NAM-rs: GUI initialization failed: {err}");
+                            log::error!("NAM-Plug: GUI initialization failed: {err}");
                             if let Ok(mut guard) = outcome_cb.lock() {
                                 *guard = Some(plugin_error_message(&err));
                             }
@@ -327,7 +327,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                         }
                         Err(_) => {
                             log::error!(
-                                "NAM-rs: GUI initialization panicked (caught at FFI boundary)"
+                                "NAM-Plug: GUI initialization panicked (caught at FFI boundary)"
                             );
                             if let Ok(mut guard) = outcome_cb.lock() {
                                 *guard = Some("GUI initialization failed unexpectedly");
@@ -386,7 +386,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                 }
             };
 
-            let options = Self::window_options("NAM-rs", scale_factor);
+            let options = Self::window_options("NAM-Plug", scale_factor);
             let (host_static, shared_ptr) = self.host_static_and_shared();
 
             let close_signal = Arc::new(AtomicBool::new(false));
@@ -424,7 +424,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                         })) {
                             Ok(Ok(window)) => window,
                             Ok(Err(err)) => {
-                                log::error!("NAM-rs: floating GUI initialization failed: {err}");
+                                log::error!("NAM-Plug: floating GUI initialization failed: {err}");
                                 if let Ok(mut guard) = outcome_cb.lock() {
                                     *guard = Some(plugin_error_message(&err));
                                 }
@@ -438,7 +438,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                             }
                             Err(_) => {
                                 log::error!(
-                                    "NAM-rs: floating GUI initialization panicked \
+                                    "NAM-Plug: floating GUI initialization panicked \
                                  (caught at FFI boundary)"
                                 );
                                 if let Ok(mut guard) = outcome_cb.lock() {

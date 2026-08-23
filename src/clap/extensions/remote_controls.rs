@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Implementation of the `clap_plugin_remote_controls` extension for NAM-rs.
+//! Implementation of the `clap_plugin_remote_controls` extension for NAM-Plug.
 
 use crate::clap::extensions::params::{
     PARAM_BYPASS, PARAM_GATE_THRESH, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
@@ -27,7 +27,7 @@ pub fn fill_remote_controls_page(index: u32, writer: &mut RemoteControlsPageWrit
             param_ids[2] = Some(ClapId::new(PARAM_BYPASS));
 
             let page = RemoteControlsPage {
-                section_name: b"NAM-rs",
+                section_name: b"NAM-Plug",
                 page_id: ClapId::new(0),
                 page_name: b"Main",
                 param_ids,
@@ -40,7 +40,7 @@ pub fn fill_remote_controls_page(index: u32, writer: &mut RemoteControlsPageWrit
             param_ids[0] = Some(ClapId::new(PARAM_GATE_THRESH));
 
             let page = RemoteControlsPage {
-                section_name: b"NAM-rs",
+                section_name: b"NAM-Plug",
                 page_id: ClapId::new(1),
                 page_name: b"Gate",
                 param_ids,
@@ -86,7 +86,7 @@ mod tests {
             let raw_ref = raw_page.assume_init_ref();
             let page = RemoteControlsPage::from_raw(raw_ref).unwrap();
 
-            assert_eq!(page.section_name, b"NAM-rs");
+            assert_eq!(page.section_name, b"NAM-Plug");
             assert_eq!(page.page_name, b"Main");
             assert_eq!(page.page_id.get(), 0);
             assert_eq!(page.param_ids[0].map(|id| id.get()), Some(PARAM_INPUT_GAIN));
@@ -108,7 +108,7 @@ mod tests {
             let raw_ref = raw_page.assume_init_ref();
             let page = RemoteControlsPage::from_raw(raw_ref).unwrap();
 
-            assert_eq!(page.section_name, b"NAM-rs");
+            assert_eq!(page.section_name, b"NAM-Plug");
             assert_eq!(page.page_name, b"Gate");
             assert_eq!(page.page_id.get(), 1);
             assert_eq!(

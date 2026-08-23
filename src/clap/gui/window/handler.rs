@@ -112,7 +112,7 @@ impl WindowHandler for NamPluginWindow {
                     match Clipboard::new() {
                         Ok(mut clipboard) => {
                             if let Err(e) = clipboard.set_text(text.clone()) {
-                                log::warn!("NAM-rs: Clipboard set_text failed: {e}");
+                                log::warn!("NAM-Plug: Clipboard set_text failed: {e}");
                             } else {
                                 self.state.toast_expiration = Some(
                                     std::time::Instant::now() + std::time::Duration::from_secs(5),
@@ -120,7 +120,7 @@ impl WindowHandler for NamPluginWindow {
                             }
                         }
                         Err(e) => {
-                            log::warn!("NAM-rs: Failed to open clipboard: {e}");
+                            log::warn!("NAM-Plug: Failed to open clipboard: {e}");
                         }
                     }
                 }

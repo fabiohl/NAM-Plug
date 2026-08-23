@@ -45,9 +45,9 @@ fn bench_clap_process_block_64samp(c: &mut Criterion) {
         .expect("Failed to load PluginEntry");
 
     let host_info = HostInfo::new(
-        "NAM-rs Bench Host",
+        "NAM-Plug Bench Host",
         "Fabio Lima",
-        "https://github.com/fabiohl/nam-rs",
+        "https://github.com/fabiohl/NAM-Plug",
         "0.1.0",
     )
     .unwrap();

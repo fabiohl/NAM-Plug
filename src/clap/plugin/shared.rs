@@ -382,7 +382,7 @@ impl<'a> PluginShared<'a> for NamClapShared {}
 
 impl Drop for NamClapShared {
     fn drop(&mut self) {
-        log::debug!("NAM-rs: NamClapShared dropped.");
+        log::debug!("NAM-Plug: NamClapShared dropped.");
         self.cold.alive_fence.store(false, Ordering::Release); // pairs with Acquire load em gui/window/state.rs:190
         // Only signal shutdown when the last instance is destroyed.
         let prev = ACTIVE_INSTANCES

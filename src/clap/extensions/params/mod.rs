@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Implementation of the CLAP parameters extension for NAM-rs.
+//! Implementation of the CLAP parameters extension for NAM-Plug.
 
 pub mod audio;
 pub mod main;

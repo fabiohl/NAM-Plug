@@ -322,7 +322,7 @@ pub fn make_test_plugin_with_harness() -> (
     let host_info = HostInfo::new(
         "NamHarness",
         "CI Suite",
-        "https://github.com/fabiohl/nam-rs",
+        "https://github.com/fabiohl/NAM-Plug",
         "0.1.0",
     )
     .unwrap();

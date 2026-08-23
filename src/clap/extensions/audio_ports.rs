@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Implementation of the audio ports CLAP extension for NAM-rs.
+//! Implementation of the audio ports CLAP extension for NAM-Plug.
 
 use crate::clap::plugin::NamClapMainThread;
 use clack_extensions::audio_ports::{
@@ -12,7 +12,7 @@ use clack_plugin::prelude::ClapId;
 impl PluginAudioPortsImpl for NamClapMainThread<'_> {
     /// Returns the number of audio ports (input or output).
     ///
-    /// NAM-rs is a native mono plugin by definition with exactly 1 input and 1 output port.
+    /// NAM-Plug is a native mono plugin by definition with exactly 1 input and 1 output port.
     fn count(&mut self, _is_input: bool) -> u32 {
         1
     }

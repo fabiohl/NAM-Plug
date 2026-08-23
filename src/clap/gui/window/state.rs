@@ -12,7 +12,7 @@ use super::shaders::{FRAGMENT_SHADER_SRC, VERTEX_SHADER_SRC, compile_shader_prog
 
 use crate::clap::plugin::NamClapSharedRef;
 
-/// Main window representation of the NAM-rs plugin.
+/// Main window representation of the NAM-Plug plugin.
 ///
 /// Manages the initialization and lifecycle of the `egui` context and the `egui_glow` painter
 /// for accelerated drawing via OpenGL (glow).

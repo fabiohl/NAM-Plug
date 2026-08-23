@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! NAM-rs plugin definition and its CLAP lifecycle components.
+//! NAM-Plug plugin definition and its CLAP lifecycle components.
 
 pub mod command_scheduler;
 pub mod shared;
@@ -28,7 +28,7 @@ use std::ffi::CString;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// NAM-rs plugin: main entry point for the CLAP lifecycle.
+/// NAM-Plug plugin: main entry point for the CLAP lifecycle.
 pub struct NamClapPlugin;
 
 impl Plugin for NamClapPlugin {
@@ -324,7 +324,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             .unwrap_or_else(|| String::from("Unknown"));
         let negotiated_clap = main_thread.host.clap_version();
         log::info!(
-            "NAM-rs plugin instance created in host \"{host_name}\" (negotiated CLAP API {negotiated_clap})",
+            "NAM-Plug plugin instance created in host \"{host_name}\" (negotiated CLAP API {negotiated_clap})",
         );
 
         Ok(main_thread)

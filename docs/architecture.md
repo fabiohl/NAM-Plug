@@ -77,9 +77,9 @@ Returned by `nam_descriptor()` (`src/clap/descriptor.rs`) during host scan witho
 | Field        | Value                                                              |
 |:------------ |:------------------------------------------------------------------ |
 | **ID**       | `br.eti.fabiolima.nam-plug`                                        |
-| **Name**     | `NAM-rs`                                                           |
+| **Name**     | `NAM-Plug`                                                         |
 | **Vendor**   | `Fabio Lima`                                                       |
-| **URL**      | `https://github.com/fabiohl/nam-rs`                                |
+| **URL**      | `https://github.com/fabiohl/NAM-Plug`                              |
 | **Features** | `["audio-effect", "distortion", "gate", "mono"]` (CLAP 1.2.2 spec) |
 
 Core DSP neural inference is mono by definition. Buffer extraction and VU metering adapt dynamically to mono or stereo host track configurations.

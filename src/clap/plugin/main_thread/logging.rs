@@ -22,11 +22,11 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HAS_CLIPPED)
         {
-            let msg = CString::new("NAM-rs: Output clipping detected!").unwrap_or_default();
+            let msg = CString::new("NAM-Plug: Output clipping detected!").unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Warning, &msg);
             }
-            log::warn!("NAM-rs: Output clipping detected!");
+            log::warn!("NAM-Plug: Output clipping detected!");
         }
 
         if self
@@ -35,12 +35,12 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_OVERFLOW)
         {
-            let msg = CString::new("NAM-rs: GC channel overflow! Possible memory leak.")
+            let msg = CString::new("NAM-Plug: GC channel overflow! Possible memory leak.")
                 .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Error, &msg);
             }
-            log::error!("NAM-rs: GC channel overflow! Possible memory leak.");
+            log::error!("NAM-Plug: GC channel overflow! Possible memory leak.");
         }
 
         if self
@@ -50,14 +50,14 @@ impl<'a> NamClapMainThread<'a> {
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_TIER3)
         {
             let msg = CString::new(
-                "NAM-rs: GC cascade reached Tier 3 (overflow buffer). Sustained GC pressure.",
+                "NAM-Plug: GC cascade reached Tier 3 (overflow buffer). Sustained GC pressure.",
             )
             .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Warning, &msg);
             }
             log::warn!(
-                "NAM-rs: GC cascade reached Tier 3 (overflow buffer). Sustained GC pressure."
+                "NAM-Plug: GC cascade reached Tier 3 (overflow buffer). Sustained GC pressure."
             );
         }
 
@@ -68,12 +68,12 @@ impl<'a> NamClapMainThread<'a> {
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_CORRUPTED)
         {
             let msg =
-                CString::new("NAM-rs: GC overflow buffer corrupted! Forced leak to avoid UB.")
+                CString::new("NAM-Plug: GC overflow buffer corrupted! Forced leak to avoid UB.")
                     .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Error, &msg);
             }
-            log::error!("NAM-rs: GC overflow buffer corrupted! Forced leak to avoid UB.");
+            log::error!("NAM-Plug: GC overflow buffer corrupted! Forced leak to avoid UB.");
         }
 
         if self
@@ -82,12 +82,12 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED)
         {
-            let msg = CString::new("NAM-rs: Critical failure! No active model for processing.")
+            let msg = CString::new("NAM-Plug: Critical failure! No active model for processing.")
                 .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Error, &msg);
             }
-            log::error!("NAM-rs: Critical failure! No active model for processing.");
+            log::error!("NAM-Plug: Critical failure! No active model for processing.");
         }
 
         if self
@@ -96,13 +96,14 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC)
         {
-            let msg =
-                CString::new("NAM-rs: Heap allocation detected in audio thread during process()!")
-                    .unwrap_or_default();
+            let msg = CString::new(
+                "NAM-Plug: Heap allocation detected in audio thread during process()!",
+            )
+            .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Error, &msg);
             }
-            log::error!("NAM-rs: Heap allocation detected in audio thread during process()!");
+            log::error!("NAM-Plug: Heap allocation detected in audio thread during process()!");
         }
 
         if self
@@ -112,14 +113,14 @@ impl<'a> NamClapMainThread<'a> {
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HUGEPAGE_OK)
         {
             let msg = CString::new(
-                "NAM-rs: HugeTLB explicit 2 MB pages active — reduced TLB pressure on DSP thread.",
+                "NAM-Plug: HugeTLB explicit 2 MB pages active — reduced TLB pressure on DSP thread.",
             )
             .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Info, &msg);
             }
             log::info!(
-                "NAM-rs: HugeTLB explicit 2 MB pages active — reduced TLB pressure on DSP thread."
+                "NAM-Plug: HugeTLB explicit 2 MB pages active — reduced TLB pressure on DSP thread."
             );
         }
 
@@ -130,26 +131,26 @@ impl<'a> NamClapMainThread<'a> {
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_THP_ACTIVE)
         {
             let msg = CString::new(
-                "NAM-rs: Transparent Huge Pages (THP) advice active — kernel may promote to 2 MB.",
+                "NAM-Plug: Transparent Huge Pages (THP) advice active — kernel may promote to 2 MB.",
             )
             .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Info, &msg);
             }
             log::info!(
-                "NAM-rs: Transparent Huge Pages (THP) advice active — kernel may promote to 2 MB."
+                "NAM-Plug: Transparent Huge Pages (THP) advice active — kernel may promote to 2 MB."
             );
         }
 
         if self.shared.cold.rt_status.check_and_clear_flag(
             neural_amp_modeler_rs::common::spsc::RT_STATUS_SLIMMABLE_SLICE_FAILED,
         ) {
-            let msg = CString::new("NAM-rs: WaveNet slimmable slice_channels rebuild failed.")
+            let msg = CString::new("NAM-Plug: WaveNet slimmable slice_channels rebuild failed.")
                 .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Error, &msg);
             }
-            log::error!("NAM-rs: WaveNet slimmable slice_channels rebuild failed.");
+            log::error!("NAM-Plug: WaveNet slimmable slice_channels rebuild failed.");
         }
 
         if self.shared.cold.rt_status.check_and_clear_flag(
