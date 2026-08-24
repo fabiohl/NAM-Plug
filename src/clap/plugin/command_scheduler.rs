@@ -121,6 +121,20 @@ impl CoalesceBuffer {
 
         Some(params)
     }
+
+    /// Re-inserts a snapshot taken by [`take_snapshot`](Self::take_snapshot) back
+    /// into the coalescing buffer. Used to retain the latest values on SPSC
+    /// `Full` instead of silently dropping them (R-10 / T6.1).
+    fn restore_snapshot(&mut self, params: RtProcessingParams) {
+        self.set(0, params.input_gain_db as f64);
+        self.set(1, params.output_gain_db as f64);
+        self.set(2, params.gate_threshold_db as f64);
+        self.set(3, if params.bypass { 1.0 } else { 0.0 });
+        self.set(4, params.adaptive_compute as u32 as f64);
+        self.set(5, params.slim_override as u32 as f64);
+        self.set(6, params.oversample as u32 as f64);
+        self.set(7, params.activation_precision as u32 as f64);
+    }
 }
 
 /// Main-thread side of the command scheduler.
@@ -180,7 +194,15 @@ impl CommandScheduler {
     /// Creates a new command scheduler with a ring buffer of
     /// [`CMD_QUEUE_CAPACITY`] slots.
     pub fn new() -> Self {
-        let (tx, rx) = rtrb::RingBuffer::new(CMD_QUEUE_CAPACITY);
+        Self::with_capacity(CMD_QUEUE_CAPACITY)
+    }
+
+    /// Creates a new command scheduler with a ring buffer of `capacity` slots.
+    ///
+    /// Used by tests to exercise saturation/atomicity guarantees at minimal
+    /// ring sizes (capacity 1/2 per T6.1 acceptance evidence).
+    pub fn with_capacity(capacity: usize) -> Self {
+        let (tx, rx) = rtrb::RingBuffer::new(capacity);
         Self {
             cmd_tx: Mutex::new(Some(tx)),
             cmd_rx: Mutex::new(Some(rx)),
@@ -292,6 +314,14 @@ impl<'a> CommandProducer<'a> {
     /// Any pending coalesced parameters are flushed first, preserving causal
     /// ordering. Sequence numbers are only consumed **after** a successful
     /// push, guaranteeing the FIFO item↔sequence mapping has no gaps.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The payload must be returned by value so the caller can retain it \
+                 (fail-closed, R-10/T6.1). Boxing it would force a heap free on the \
+                 audio thread when the consumer drains it — violating RT-safety. The \
+                 SPSC is sized to carry these inline payloads (models/IRs are already \
+                 moved by value in LoadModel/LoadCabIr)."
+    )]
     pub fn try_push_command(
         &mut self,
         cmd: ClapParamPayload,
@@ -315,6 +345,11 @@ impl<'a> CommandProducer<'a> {
     /// occurred, or `Ok(0)` if the buffer was empty. The sequence number
     /// is consumed only after a successful push so the FIFO mapping
     /// stays gapless.
+    ///
+    /// On `Full` the snapshot is **retained** in the coalescing buffer
+    /// (R-10 / T6.1) so a subsequent `force_flush` retry delivers it —
+    /// the caller must surface the `Err` and schedule a retry (e.g. via
+    /// `host.request_callback()`), never discard it with `let _ =`.
     pub fn force_flush(&mut self) -> Result<u64, PushError> {
         if let Some(snapshot) = self.coalescing.take_snapshot() {
             match self.tx.push(ClapParamPayload::Params(snapshot)) {
@@ -322,7 +357,12 @@ impl<'a> CommandProducer<'a> {
                     let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
                     Ok(seq)
                 }
-                Err(rtrb::PushError::Full(_)) => Err(PushError::Full),
+                Err(rtrb::PushError::Full(_)) => {
+                    // Retain the snapshot so the retry does not lose the
+                    // latest parameter values (T6.1 defect #4).
+                    self.coalescing.restore_snapshot(snapshot);
+                    Err(PushError::Full)
+                }
             }
         } else {
             Ok(0)

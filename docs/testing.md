@@ -114,13 +114,16 @@ All test and benchmark execution commands **must be executed inside `./NAM-Plug/
 ./utils/tests-quick.sh
 ```
 
-`utils/tests-quick.sh` runs three phases, each persisting its output to `target/logs/quick-phaseN.log`, and closes with a typed receipt (`target/logs/quick-receipt.txt`):
+`utils/tests-quick.sh` runs three phases, each persisting its output to `target/logs/quick-phaseN.log`, and closes with a typed receipt (`target/logs/quick-receipt.txt`). The artifact under test is selected by `ensure_clap_artifact` — honoring the authoritative `CLAP_PLUGIN_UNDER_TEST` (or `CLAP_PLUGIN_PATH`) override first — and the chosen path is exported as `CLAP_PLUGIN_UNDER_TEST` so every `dlopen`-based integration test and the release gates run against the exact same `.so` whose SHA256 is logged:
 
-1. **Structural (debug)** — unit + integration tests with debug assertions ON. `ensure_clap_artifact debug` validates the `.so` artifact (fail-closed: missing artifact aborts with `FATAL:`) and logs its SHA256 before any test that `dlopen`s it.
-2. **Release verification (release)** — the release-only surface (S6-T04 / RES-04): `ensure_clap_artifact release` builds the `.so` under release codegen, then the **CLAP × NAMCore parity oracle**: `test_clap_parity_multi_rate` (ESR < 1e-8, SNR > 80 dB) compares the release `.so` against the C++ render binary (`NAM_CORE_RENDER_BIN` or `build/namcore_render`), executing when the render binary, the release `.so` and the model fixture are all present. The Phase 1 targets are not re-run under `--release` — debug assertions ON already validate that logic, and release codegen of the `.so` is exactly what the oracle measures. Missing prerequisites are never masked — they are recorded as `GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")` and reported as a `WARN GAP`.
+1. **Structural (debug)** — unit + integration tests with debug assertions ON. `ensure_clap_artifact debug` validates the `.so` artifact (fail-closed: missing artifact aborts with `FATAL:`) and logs its SHA256 before any test that `dlopen`s it. Under `NAM_QUICK_STRICT=1` the artifact is additionally freshness-gated (T6.4): a `.so` older than any source input (`Cargo.toml`/`Cargo.lock`/`.cargo/config.toml`/`src/**`, including the patched sibling `NeuralAmpModeler-rs` tree) aborts the suite instead of being silently validated.
+2. **Release verification (release)** — the release-only surface (S6-T04 / RES-04): `ensure_clap_artifact release` builds the `.so` under release codegen, then:
+   - **Fail-closed AVX-512 absence certificate** — `utils/verify_no_avx512_release.sh` runs the `nam_bin_guard` scanner (`src/bin/nam_bin_guard.rs`, reuse of `neural_amp_modeler_rs::testing::bin_guard`) against the release `.so`: an EVEX prefix (`0x62`) binary decoder plus a forbidden AVX-512 symbol scan. Any EVEX/ZMM instruction or forbidden symbol aborts the suite (exit ≠ 0); tool/format errors are also fail-closed (never a silent empty pass).
+   - **CLAP × NAMCore parity oracle** — `test_clap_parity_multi_rate` (ESR < 1e-8, SNR > 80 dB) compares the release `.so` against the C++ render binary (`NAM_CORE_RENDER_BIN` or `build/namcore_render`), executing when the render binary, the release `.so` and the model fixture are all present. The Phase 1 targets are not re-run under `--release` — debug assertions ON already validate that logic, and release codegen of the `.so` is exactly what the oracle measures. Missing prerequisites are never masked — they are recorded as `GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")` and reported as a `WARN GAP`.
+   - **CabSim IR artifact test** — `test_cabsim_ir_changes_audio_release_artifact` `dlopen`s the release `.so` to prove a loaded IR changes the audio output.
 3. **RT-Safety heap-audit (debug)** — zero-allocation `process()` gate via `--features testing,heap-audit` (`processor_heap_audit_test`).
 
-The run closes with `OVERALL: PASSED` or `OVERALL: PASSED_WITH_GAPS` (with `NAM_QUICK_STRICT=1`, any GAP turns the run into a failure).
+The run closes with `OVERALL: PASSED` or `OVERALL: PASSED_WITH_GAPS` (with `NAM_QUICK_STRICT=1`, any GAP turns the run into a failure, and stale `.so` artifacts are rejected rather than rebuilt).
 
 ### 5.2 Direct Cargo Commands
 
@@ -169,6 +172,46 @@ NAM_REQUIRE_CPP_ORACLE=1 cargo test --features testing --release --test clap \
 ```
 
 When the oracle is unavailable, `tests-quick.sh` reports an actionable `WARN GAP: clap_parity_multi_rate:missing_render_or_fixtures` (instructing the operator to set `NAM_CORE_RENDER_BIN` or build under local `build/namcore_render`) rather than failing the suite; set `NAM_QUICK_STRICT=1` to promote any GAP to a hard failure.
+
+### 5.4 Release Receipt & Dist-Pipeline Provenance (`build-release.sh`)
+
+The distribution build (`utils/build-release.sh`) compiles the **`dist`**
+profile (inherits `release`, PGO + optional BOLT reordering, `strip`, `panic =
+"unwind"`) into `~/.clap/nam_plug.clap` and packages tarball/Flatpak
+deliverables. Its provenance is certified by a **cryptographic build receipt**
+at `target/release-receipt.json`, written **atomically** (temp file + `mv`
+rename in Phase 8) so an interrupted build (SIGINT/SIGTERM) can never leave a
+partial receipt that looks valid.
+
+The receipt's mandatory fields are:
+
+| Field | Meaning |
+|:------|:--------|
+| `status` | `CERTIFIED` **only** if every gate below actually ran (`skipped_gates` empty) **and** `git_dirty=false`; any skip, missing oracle/fixture/validator, or dirty tree ⇒ `INCOMPLETE` (not certified). |
+| `skipped_gates` | List of gates skipped in non-strict mode (`NAM_STRICT_RELEASE=0`), e.g. `clap_validator:unavailable`, `namcore_parity:missing_oracle_bin`. |
+| `package` | `name` + `version` (`nam-plug` v0.7.0). |
+| `provenance` | `git_commit`, `git_dirty`, `cargo_lock_sha256`, `rustc_version`, `rustflags` (the sanitized `CONFIG_RUSTFLAGS` actually used). |
+| `optimizations` | `pgo_applied`, `bolt_applied`. |
+| `artifacts` | `clap_installed_path` + `clap_installed_sha256`, plus tarball/Flatpak paths and SHA-256 when built. |
+| `oracles_and_fixtures` | `oracle_render_bin` + SHA-256, `fixture_model_path` + SHA-256. |
+
+The five release gates run **against the distributed artifact** — not against
+`target/release/libnam_plug.so`, which the quick QA validates and which is a
+different, non-optimized binary. `CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET"` points
+the gates at the exact installed `.so`:
+
+1. **Symbol & SONAME validation** of the distributed artifact.
+2. **External `clap-validator`** against the distributed artifact (skipped ⇒ `skipped_gates` entry; fail-closed in strict mode).
+3. **AVX-512 absence certificate** — `verify_no_avx512_release.sh` + `nam_bin_guard` EVEX (`0x62`) scan on the distributed artifact (see §5.1).
+4. **NAMCore float parity** — `NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_clap_parity_multi_rate`.
+5. **CabSim IR artifact test** — `CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_cabsim_ir_changes_audio_release_artifact`.
+
+In strict mode (`NAM_STRICT_RELEASE=1`, default) the tree must be clean
+(`check_git_clean_strict()` runs before the build and again right before the
+receipt is written), any external `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` is
+rejected, and a gate skip or missing prerequisite aborts with exit ≠ 0 — so a
+`CERTIFIED` receipt can only ever exist for a clean-tree, all-gates-green
+build of the exact artifact that is distributed.
 
 ---
 

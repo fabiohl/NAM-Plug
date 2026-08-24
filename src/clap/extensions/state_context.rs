@@ -36,12 +36,18 @@ impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
             // Strip absolute file paths, keep portable identifiers + search hints
             preset_params.model_path = None;
             preset_params.ir_path = None;
+            preset_params.ir_hash = None;
             // model_search_paths are directory hints (not machine-specific file paths)
             // and are preserved for cross-machine canonical search fallback
             preset_params
         } else {
             self.params.clone()
         };
+
+        super::state::ensure_asset_hashes(
+            &save_params,
+            context_type == StateContextType::ForPreset,
+        )?;
 
         let serialized = super::state::serialize_envelope(&save_params)?;
 
@@ -60,8 +66,23 @@ impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
         debug_assert_main_thread(&self.host);
         let mut buffer = Vec::new();
         input
+            .take((super::state::MAX_STATE_STREAM_SIZE + 1) as u64)
             .read_to_end(&mut buffer)
             .map_err(|e| PluginError::Error(Box::new(e)))?;
+
+        if buffer.len() > super::state::MAX_STATE_STREAM_SIZE {
+            log::error!(
+                "[StateContext] State stream exceeds maximum size limit of {} bytes (read {} bytes)",
+                super::state::MAX_STATE_STREAM_SIZE,
+                buffer.len()
+            );
+            return Err(PluginError::Error(Box::new(
+                super::state::StateError::StreamTooLarge {
+                    size: buffer.len(),
+                    limit: super::state::MAX_STATE_STREAM_SIZE,
+                },
+            )));
+        }
 
         let mode = if context_type == StateContextType::ForPreset {
             RestoreMode::ForPreset

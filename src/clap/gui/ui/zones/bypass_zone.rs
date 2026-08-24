@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 //! Zone 4 (far right): Bypass toggle with status LED.
 
-use crate::clap::plugin::NamClapShared;
+use crate::clap::plugin::GuiSharedState;
 use clack_plugin::host::HostSharedHandle;
 use std::sync::atomic::Ordering;
 
@@ -10,7 +10,7 @@ use crate::clap::gui::ui::{bypass::handle_bypass, colors::resolve_color};
 
 pub(crate) fn draw_zone4_bypass(
     ui: &mut egui::Ui,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     host: &HostSharedHandle,
     accent_color: egui::Color32,
 ) {

@@ -5,10 +5,11 @@
 # Unified compiler-grade release build & packaging script for NAM-Plug (PGO + BOLT + Flatpak).
 # Compiles the CLAP plugin with Profile-Guided Optimization (PGO),
 # post-link BOLT binary reordering, and generates release distribution archives
-# and standalone Flatpak plugin extensions.
+# and standalone Flatpak plugin extensions with strict cryptographic receipts.
 #
 # Deliverables:
 #   - ~/.clap/nam_plug.clap                      (PGO + BOLT optimized CLAP plugin)
+#   - target/release-receipt.json                (Cryptographic build provenance receipt)
 #   - target/dsp_hotpath.asm                     (Disassembly hotspot report)
 #   - ~/nam-plug-v<ver>-linux-x86_64-v3.tar.zst  (Release distribution tarball)
 #   - ~/nam-plug-v<ver>-linux-x86_64-v3.flatpak  (Flatpak plugin extension bundle)
@@ -21,6 +22,7 @@ BUILD_FLATPAK=true
 BUILD_TARBALL=true
 USE_PGO=true
 USE_BOLT=true
+STRICT_MODE="${NAM_STRICT_RELEASE:-1}"
 
 show_help() {
     cat <<EOF
@@ -35,10 +37,13 @@ Options:
   --no-tarball           Skip Phase 6 (.tar.zst archive creation).
   --no-pgo               Skip Profile-Guided Optimization and compile directly with dist profile.
   --no-bolt              Skip Phase 4 (LLVM BOLT post-link optimization).
+  --no-strict            Disable strict fail-closed mode on optional tool absence.
+  --strict               Enforce strict fail-closed mode (default: 1).
   -h, --help             Show this help message and exit.
 
 Deliverables:
   - ~/.clap/nam_plug.clap                      (Installed CLAP plugin)
+  - target/release-receipt.json                (Cryptographic build receipt)
   - target/dsp_hotpath.asm                     (Disassembly hotspot report)
   - ~/nam-plug-v<ver>-linux-x86_64-v3.tar.zst  (Distribution tarball)
   - ~/nam-plug-v<ver>-linux-x86_64-v3.flatpak  (Flatpak plugin extension bundle)
@@ -67,6 +72,14 @@ while [[ $# -gt 0 ]]; do
             USE_BOLT=false
             shift
             ;;
+        --strict)
+            STRICT_MODE=1
+            shift
+            ;;
+        --no-strict)
+            STRICT_MODE=0
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -80,8 +93,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Import shared style helpers and utilities from _lib.sh.
-# NAM_LIB_NO_CD=1 prevents _lib.sh from cding — we manage our own working
-# directory below after computing PROJECT_DIR from SCRIPT_DIR.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NAM_LIB_NO_CD=1 source "$SCRIPT_DIR/_lib.sh"
 
@@ -92,10 +103,28 @@ echo -e "${BLUE}${BOLD}=========================================================
 # Ensure execution from the subproject root directory
 cd "$PROJECT_DIR"
 
+# T6.4 provenance fail-closed: a certified release can never be produced from a
+# dirty work tree. In strict mode this aborts before any heavy work is started
+# and is re-verified immediately before receipt generation (Phase 8), so no
+# receipt is ever written for a dirty tree.
+check_git_clean_strict() {
+    if [ "$STRICT_MODE" != "1" ]; then
+        return 0
+    fi
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        die "Not inside a git work tree in strict release mode; provenance cannot be certified. Run the release from a clean git checkout."
+    fi
+    if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+        die "Git working tree is dirty in strict release mode (provenance fail-closed). Commit, stash or clean before generating a certified release; no receipt will be written."
+    fi
+}
+check_git_clean_strict
+
 # State tracking for signal safety and cleanup
 ORIG_PARANOID=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "2")
 PARANOID_MODIFIED=false
 WORKLOAD_PID=""
+declare -a GATE_SKIPS=()
 
 # Dynamic isolated temporary directories for PGO & BOLT profiling and packaging
 PGO_DIR="$(mktemp -d -t nam-plug-pgo.XXXXXX)"
@@ -105,7 +134,33 @@ FLATPAK_BUILD_DIR=""
 FLATPAK_REPO_DIR=""
 PROFRAW_DIR="$PGO_DIR/profraw"
 MERGED_PROFILE="$PGO_DIR/merged.profdata"
-ORIG_RUSTFLAGS="${RUSTFLAGS:-}"
+
+# T6.4 provenance fail-closed: external RUSTFLAGS is rejected wholesale in
+# strict release mode. The certified pipeline uses exclusively the
+# CONFIG_RUSTFLAGS extracted from .cargo/config.toml below; any environment
+# flag (not just -Ctarget-cpu=) could otherwise alter the shipped bytes
+# without being recorded as provenance.
+RAW_RUSTFLAGS="${RUSTFLAGS:-}"
+if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
+    RAW_RUSTFLAGS="${RAW_RUSTFLAGS:+$RAW_RUSTFLAGS }$CARGO_ENCODED_RUSTFLAGS"
+fi
+ORIG_RUSTFLAGS=""
+if [ -n "$RAW_RUSTFLAGS" ]; then
+    if [ "$STRICT_MODE" = "1" ]; then
+        die "External RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS detected in strict release mode: '$RAW_RUSTFLAGS'. Certified builds use exclusively CONFIG_RUSTFLAGS from .cargo/config.toml. Unset them or run with NAM_STRICT_RELEASE=0."
+    fi
+    warn "External RUSTFLAGS present in non-strict mode: '$RAW_RUSTFLAGS'"
+    CLEAN_RUSTFLAGS=""
+    for flag in $RAW_RUSTFLAGS; do
+        if [[ "$flag" =~ ^-Ctarget-cpu= ]]; then
+            warn "Ignoring unvetted environment flag: $flag (enforcing controlled x86-64-v3 baseline)"
+        else
+            warn "Allowing unvetted environment flag (non-strict): $flag"
+            CLEAN_RUSTFLAGS="$CLEAN_RUSTFLAGS $flag"
+        fi
+    done
+    ORIG_RUSTFLAGS="$(echo "$CLEAN_RUSTFLAGS" | xargs)"
+fi
 
 # Isolated target directories to avoid polluting standard compilations
 PGO_BUILD_TARGET_DIR="$PROJECT_DIR/target/pgo-build"
@@ -246,12 +301,16 @@ if [ "$USE_BOLT" = true ]; then
             MERGE_FDATA="merge-fdata"
         fi
     else
+        if [ "$STRICT_MODE" = "1" ]; then
+            echo -e "${RED}Error: llvm-bolt was not found in strict release mode.${NC}"
+            echo -e "${YELLOW}To enable BOLT, install: sudo apt install llvm-22-tools (or run with --no-bolt / --no-strict).${NC}"
+            exit 1
+        fi
         echo -e "${YELLOW}Warning: llvm-bolt was not found. The build will continue with PGO only.${NC}"
-        echo -e "${YELLOW}To enable BOLT, install: sudo apt install llvm-22-tools${NC}"
     fi
 
     # Check perf_event_paranoid requirement for BOLT profiling
-    if [ "$ORIG_PARANOID" -gt 1 ]; then
+    if [ -n "$LLVM_BOLT" ] && [ "$ORIG_PARANOID" -gt 1 ]; then
         echo -e "  kernel.perf_event_paranoid is $ORIG_PARANOID. Attempting to set to 1..."
         if command -v sudo &>/dev/null; then
             if sudo -n sysctl -w kernel.perf_event_paranoid=1 &>/dev/null; then
@@ -288,7 +347,7 @@ if [ "$USE_PGO" = true ]; then
     echo -e "  Using RUSTFLAGS: ${BOLD}$RUSTFLAGS${NC}"
 
     echo -e "  Compiling real-world PGO profiling workload (pgo_profiling_workload)..."
-    cargo build --profile dist --features testing --bin pgo_profiling_workload || {
+    cargo build --locked --profile dist --features testing --bin pgo_profiling_workload || {
         echo -e "${RED}Error: Failed to build pgo_profiling_workload for PGO profiling.${NC}"
         exit 1
     }
@@ -330,7 +389,7 @@ fi
 
 CLAP_RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,-q -Clink-arg=-Wl,-soname,nam_plug.clap"
 echo -e "  Using RUSTFLAGS (CLAP): ${BOLD}$CLAP_RUSTFLAGS${NC}"
-RUSTFLAGS="$CLAP_RUSTFLAGS" cargo build --profile dist --target-dir "$PGO_CLAP_TARGET_DIR" --lib
+RUSTFLAGS="$CLAP_RUSTFLAGS" cargo build --locked --profile dist --target-dir "$PGO_CLAP_TARGET_DIR" --lib
 
 # Confirm binary compiled
 if [ ! -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
@@ -357,6 +416,9 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
         --instrumentation-file-append-pid > "$BOLT_DIR/bolt-instrument-clap.log" 2>&1; then
         echo -e "  ${GREEN}✓${NC} CLAP instrumented: $PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so"
     else
+        if [ "$STRICT_MODE" = "1" ]; then
+            die "CLAP instrumentation failed in strict release mode."
+        fi
         echo -e "${YELLOW}  Warning: CLAP instrumentation failed. Falling back to PGO-only build.${NC}"
         if [ -f "$BOLT_DIR/bolt-instrument-clap.log" ]; then
             echo -e "${YELLOW}  --- bolt-instrument log tail ---${NC}"
@@ -370,7 +432,7 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
 
         # Recompile pgo_profiling_workload without PGO instrumentation for clean BOLT profiling
         RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS" \
-            cargo build --profile dist --features testing --bin pgo_profiling_workload
+            cargo build --locked --profile dist --features testing --bin pgo_profiling_workload
 
         NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
             "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" && \
@@ -407,7 +469,6 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
     # Step 3: Apply BOLT Optimization
     if [ -f "$BOLT_DIR/libnam_plug.merged.fdata" ] && [ -s "$BOLT_DIR/libnam_plug.merged.fdata" ]; then
         echo -e "  [Step 3/3] Applying BOLT optimization using merged fdata..."
-        # Shared libraries (cdylib/DSOs) require relocation-safe BOLT flags without -hugify or --split-all-cold
         if "$LLVM_BOLT" "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" \
             -o "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" \
             -data "$BOLT_DIR/libnam_plug.merged.fdata" \
@@ -418,6 +479,9 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
             CLAP_BOLT_APPLIED=true
             echo -e "  ${GREEN}✓${NC} BOLT optimization applied successfully to CLAP plugin."
         else
+            if [ "$STRICT_MODE" = "1" ]; then
+                die "BOLT optimization failed in strict release mode."
+            fi
             echo -e "${YELLOW}  Warning: BOLT optimization failed for CLAP plugin. Falling back to PGO-only build.${NC}"
             if [ -f "$BOLT_DIR/llvm-bolt-clap.log" ]; then
                 echo -e "${YELLOW}  --- llvm-bolt log tail ---${NC}"
@@ -425,6 +489,9 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
             fi
         fi
     else
+        if [ "$STRICT_MODE" = "1" ]; then
+            die "No merged fdata profile available for CLAP in strict release mode."
+        fi
         echo -e "${YELLOW}  Warning: No merged fdata profile available for CLAP. Skipping BOLT optimization.${NC}"
     fi
 else
@@ -462,15 +529,13 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# PHASE 5: Deliverables Installation & Verification
+# PHASE 5: Deliverables Installation & Strict Certification of Shipped Bytes
 # -----------------------------------------------------------------------------
-echo -e "\n${BLUE}${BOLD}[Phase 5/7] Installing and validating artifacts...${NC}"
+echo -e "\n${BLUE}${BOLD}[Phase 5/7] Installing and strictly certifying distributed artifact...${NC}"
 
-# Target directories creation
 mkdir -p "$CLAP_INSTALL_DIR"
-
-# Deliver CLAP plugin
 rm -f "$CLAP_TARGET"
+
 if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
     cp "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" "$CLAP_TARGET"
     strip --strip-unneeded "$CLAP_TARGET"
@@ -481,32 +546,107 @@ else
     echo -e "  Installed CLAP plugin (PGO): $CLAP_TARGET"
 fi
 
-# Gate: validate the SHIPPED CLAP distribution artifact
-echo -e "  Validating shipped CLAP artifact integrity..."
+FINAL_CLAP_SHA=$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)
+echo -e "  ${CYAN}Distributed CLAP artifact SHA-256:${NC} ${BOLD}$FINAL_CLAP_SHA${NC}"
+
+# Gate 1: Symbols and SONAME on distributed artifact
+echo -e "  [Gate 1/5] Validating exported symbols and SONAME on distributed artifact..."
 if ! nm -D "$CLAP_TARGET" | grep -w "clap_entry" > /dev/null; then
-    echo -e "${RED}Error: Missing 'clap_entry' symbol in distributed CLAP artifact!${NC}"
-    exit 1
+    die "Missing 'clap_entry' symbol in distributed CLAP artifact!"
 fi
 if ! readelf -d "$CLAP_TARGET" | grep SONAME >/dev/null; then
-    echo -e "${RED}Error: Missing SONAME in distributed CLAP artifact!${NC}"
-    exit 1
+    die "Missing SONAME in distributed CLAP artifact!"
 fi
+ok "Symbol and SONAME validation passed."
+
+# Gate 2: External clap-validator
+echo -e "  [Gate 2/5] Running external clap-validator against distributed artifact..."
 if command -v clap-validator >/dev/null 2>&1; then
-    echo -e "  Executing clap-validator..."
-    clap-validator validate "$CLAP_TARGET" || {
-        echo -e "${RED}Error: clap-validator rejected the distribution artifact!${NC}"
-        exit 1
-    }
+    clap-validator validate "$CLAP_TARGET" || die "clap-validator rejected the distribution artifact!"
+    ok "clap-validator passed."
 else
-    echo -e "${YELLOW}  Warning: clap-validator unavailable. Skipping external validation.${NC}"
+    if [ "$STRICT_MODE" = "1" ]; then
+        die "clap-validator unavailable in strict release mode!"
+    fi
+    warn "clap-validator unavailable. Skipping external validation."
+    GATE_SKIPS+=("clap_validator:unavailable")
 fi
-echo -e "  ${GREEN}✓${NC} CLAP artifact validation passed."
+
+# Gate 3: Fail-closed AVX-512 absence certificate (EVEX byte decoding)
+echo -e "  [Gate 3/5] Running fail-closed AVX-512 absence scan on distributed artifact..."
+"$SCRIPT_DIR/verify_no_avx512_release.sh" "$CLAP_TARGET"
+ok "AVX-512 absence certificate passed on distributed artifact."
+
+# Discovery helper for NAMCore render oracle
+find_namcore_render() {
+    if [ -n "${NAM_CORE_RENDER_BIN:-}" ]; then
+        if [ -f "$NAM_CORE_RENDER_BIN" ]; then
+            echo "$NAM_CORE_RENDER_BIN"
+            return 0
+        fi
+    fi
+    local base hit
+    for base in "build/namcore_render" "../NeuralAmpModeler-rs/build/namcore_render"; do
+        hit=$(find "$base" -type f -name render -print -quit 2>/dev/null || true)
+        if [ -n "$hit" ]; then
+            echo "$hit"
+            return 0
+        fi
+    done
+    return 1
+}
+
+model_fixture=""
+if [ -n "${NAM_FIXTURES_DIR:-}" ] && [ -f "$NAM_FIXTURES_DIR/wavenet_a1_standard.nam" ]; then
+    model_fixture="$NAM_FIXTURES_DIR/wavenet_a1_standard.nam"
+elif [ -f "tests/fixtures/models/wavenet_a1_standard.nam" ]; then
+    model_fixture="tests/fixtures/models/wavenet_a1_standard.nam"
+fi
+
+ORACLE_BIN=""
+ORACLE_SHA=""
+FIXTURE_SHA=""
+
+# Gate 4: NAMCore float parity test against distributed artifact
+echo -e "  [Gate 4/5] Running NAMCore float parity test against distributed artifact..."
+if ORACLE_BIN=$(find_namcore_render); then
+    if [ -n "$model_fixture" ]; then
+        ORACLE_SHA=$(sha256sum "$ORACLE_BIN" | cut -d' ' -f1)
+        FIXTURE_SHA=$(sha256sum "$model_fixture" | cut -d' ' -f1)
+        echo -e "  ${BLUE}→ Parity oracle found:${NC} $ORACLE_BIN (sha256: ${ORACLE_SHA:0:16}...)"
+        NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
+            timeout 600 cargo test --features testing --release --test clap \
+            test_clap_parity_multi_rate -- --ignored --nocapture
+        ok "NAMCore float parity certified on distributed artifact."
+    else
+        if [ "$STRICT_MODE" = "1" ]; then
+            die "Model fixture tests/fixtures/models/wavenet_a1_standard.nam missing in strict release mode!"
+        fi
+        warn "Model fixture missing. Skipping parity test."
+        GATE_SKIPS+=("namcore_parity:missing_model_fixture")
+    fi
+else
+    if [ "$STRICT_MODE" = "1" ]; then
+        die "NAMCore render binary missing in strict release mode! Set NAM_CORE_RENDER_BIN or build it locally."
+    fi
+    warn "NAMCore render binary missing. Skipping parity test."
+    GATE_SKIPS+=("namcore_parity:missing_oracle_bin")
+fi
+
+# Gate 5: CabSim IR test against distributed artifact
+echo -e "  [Gate 5/5] Running CabSim IR test against distributed artifact..."
+CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
+    timeout 300 cargo test --features testing --release --test clap \
+    test_cabsim_ir_changes_audio_release_artifact -- --ignored --nocapture
+ok "CabSim IR test passed on distributed artifact."
 
 # Read version for archive naming
 VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys, json; print(json.load(sys.stdin)['packages'][0]['version'])")
 ARCHIVE_NAME="nam-plug-v${VERSION}-linux-x86_64-v3"
 TARBALL="$HOME/${ARCHIVE_NAME}.tar.zst"
 FLATPAK_BUNDLE="$HOME/${ARCHIVE_NAME}.flatpak"
+TARBALL_SHA=""
+FLATPAK_SHA=""
 
 # -----------------------------------------------------------------------------
 # PHASE 6: Release Packaging (.tar.zst)
@@ -537,7 +677,8 @@ EOF
     rm -rf "$PKG_DIR"
     PKG_DIR=""
 
-    echo -e "  ${GREEN}✓${NC} Distribution package generated at: ${BOLD}$TARBALL${NC} ($(du -h "$TARBALL" | cut -f1))"
+    TARBALL_SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+    echo -e "  ${GREEN}✓${NC} Distribution package generated at: ${BOLD}$TARBALL${NC} (sha256: ${TARBALL_SHA:0:16}...)"
 else
     echo -e "\n${YELLOW}[Phase 6/7] Skipping tarball packaging (--no-tarball).${NC}"
 fi
@@ -595,7 +736,8 @@ if [ "$BUILD_FLATPAK" = true ]; then
     mkdir -p "$(dirname "$FLATPAK_BUNDLE")"
     flatpak build-bundle --runtime "$FLATPAK_REPO_DIR" "$FLATPAK_BUNDLE" org.freedesktop.LinuxAudio.Plugins.NAMPlug 25.08
 
-    echo -e "  ${GREEN}✓${NC} Flatpak bundle generated successfully: ${BOLD}$FLATPAK_BUNDLE${NC} ($(du -h "$FLATPAK_BUNDLE" | cut -f1))"
+    FLATPAK_SHA=$(sha256sum "$FLATPAK_BUNDLE" | cut -d' ' -f1)
+    echo -e "  ${GREEN}✓${NC} Flatpak bundle generated successfully: ${BOLD}$FLATPAK_BUNDLE${NC} (sha256: ${FLATPAK_SHA:0:16}...)"
 
     if [ "$DO_INSTALL_FLATPAK" = true ]; then
         echo -e "  Installing Flatpak extension locally for current user..."
@@ -610,15 +752,106 @@ else
     echo -e "\n${YELLOW}[Phase 7/7] Skipping Flatpak packaging (--no-flatpak).${NC}"
 fi
 
+# -----------------------------------------------------------------------------
+# PHASE 8: Atomic Cryptographic Build Receipt Generation
+# -----------------------------------------------------------------------------
+echo -e "\n${BLUE}${BOLD}[Receipt] Generating cryptographic build provenance receipt...${NC}"
+
+# T6.4 fail-closed provenance gate: the tree must be clean at the moment of
+# certification. Strict mode dies here (receipt is never written); non-strict
+# records the dirty state and degrades the receipt status.
+check_git_clean_strict
+
+GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_DIRTY=false
+if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+    GIT_DIRTY=true
+fi
+
+# T6.4: status is CERTIFIED only when every gate 1-5 actually ran (no skips)
+# and the work tree is clean. Any skip or dirty tree degrades the receipt to
+# INCOMPLETE — a receipt must never claim CERTIFIED over a gap.
+RECEIPT_STATUS="CERTIFIED"
+if [ "$GIT_DIRTY" = "true" ]; then
+    RECEIPT_STATUS="INCOMPLETE"
+fi
+if [ ${#GATE_SKIPS[@]} -gt 0 ]; then
+    RECEIPT_STATUS="INCOMPLETE"
+fi
+GATE_SKIPS_JOINED="${GATE_SKIPS[*]:-}"
+if [ "$RECEIPT_STATUS" = "INCOMPLETE" ]; then
+    warn "Receipt status INCOMPLETE: git_dirty=$GIT_DIRTY skipped_gates=[${GATE_SKIPS_JOINED:-(none)}]"
+fi
+
+CARGO_LOCK_SHA=$(sha256sum Cargo.lock 2>/dev/null | cut -d' ' -f1 || echo "")
+RUSTC_VER=$(rustc --version 2>/dev/null || echo "unknown")
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+RECEIPT_TMP="$(mktemp -t nam-plug-receipt.XXXXXX)"
+python3 -c "
+import json, sys
+
+skipped_gates = [g for g in sys.argv[1].split('|') if g]
+
+receipt = {
+    'schema_version': '1.0',
+    'timestamp_utc': '$TIMESTAMP',
+    'status': '$RECEIPT_STATUS',
+    'strict_mode': bool($STRICT_MODE),
+    'skipped_gates': skipped_gates,
+    'package': {
+        'name': 'nam-plug',
+        'version': '$VERSION'
+    },
+    'provenance': {
+        'git_commit': '$GIT_COMMIT',
+        'git_dirty': bool('$GIT_DIRTY' == 'true'),
+        'cargo_lock_sha256': '$CARGO_LOCK_SHA',
+        'rustc_version': '$RUSTC_VER',
+        'rustflags': '$CLAP_RUSTFLAGS'
+    },
+    'optimizations': {
+        'pgo_applied': bool('$USE_PGO' == 'true'),
+        'bolt_applied': bool('$CLAP_BOLT_APPLIED' == 'true')
+    },
+    'artifacts': {
+        'clap_installed_path': '$CLAP_TARGET',
+        'clap_installed_sha256': '$FINAL_CLAP_SHA',
+        'tarball_path': '$TARBALL' if '$BUILD_TARBALL' == 'true' else None,
+        'tarball_sha256': '$TARBALL_SHA' if '$BUILD_TARBALL' == 'true' else None,
+        'flatpak_path': '$FLATPAK_BUNDLE' if '$BUILD_FLATPAK' == 'true' else None,
+        'flatpak_sha256': '$FLATPAK_SHA' if '$BUILD_FLATPAK' == 'true' else None
+    },
+    'oracles_and_fixtures': {
+        'oracle_render_bin': '$ORACLE_BIN' or None,
+        'oracle_render_sha256': '$ORACLE_SHA' or None,
+        'fixture_model_path': '$model_fixture' or None,
+        'fixture_model_sha256': '$FIXTURE_SHA' or None
+    }
+}
+
+with open('$RECEIPT_TMP', 'w') as f:
+    json.dump(receipt, f, indent=2)
+" "$GATE_SKIPS_JOINED"
+
+RECEIPT_TARGET="$PROJECT_DIR/target/release-receipt.json"
+mv -f "$RECEIPT_TMP" "$RECEIPT_TARGET"
+echo -e "  ${GREEN}✓${NC} Atomic build receipt generated at: ${BOLD}$RECEIPT_TARGET${NC} (status: $RECEIPT_STATUS)"
+
 echo -e "\n${GREEN}${BOLD}================================================================================${NC}"
-echo -e "${GREEN}${BOLD}   Pipeline completed! Artifacts ready for distribution:                ${NC}"
+if [ "$RECEIPT_STATUS" = "CERTIFIED" ]; then
+    echo -e "${GREEN}${BOLD}   Pipeline completed! Artifacts certified and ready for distribution:   ${NC}"
+else
+    echo -e "${RED}${BOLD}   Pipeline completed with gaps — receipt status INCOMPLETE (not certified): ${NC}"
+fi
 echo -e "  ${BOLD}Artifacts saved:${NC}"
-echo -e "    - CLAP Plugin:    ${CYAN}$CLAP_TARGET${NC}"
+echo -e "    - CLAP Plugin:    ${CYAN}$CLAP_TARGET${NC} (sha256: ${FINAL_CLAP_SHA:0:16}...)"
+echo -e "    - Build Receipt:  ${CYAN}$RECEIPT_TARGET${NC}"
 if [ "$BUILD_TARBALL" = true ]; then
-    echo -e "    - Tarball:        ${CYAN}$TARBALL${NC}"
+    echo -e "    - Tarball:        ${CYAN}$TARBALL${NC} (sha256: ${TARBALL_SHA:0:16}...)"
 fi
 if [ "$BUILD_FLATPAK" = true ]; then
-    echo -e "    - Flatpak Bundle: ${CYAN}$FLATPAK_BUNDLE${NC}"
+    echo -e "    - Flatpak Bundle: ${CYAN}$FLATPAK_BUNDLE${NC} (sha256: ${FLATPAK_SHA:0:16}...)"
 fi
 if [ -f "$PROJECT_DIR/target/dsp_hotpath.asm" ]; then
     echo -e "    - Assembly ASM:   ${CYAN}$PROJECT_DIR/target/dsp_hotpath.asm${NC}"

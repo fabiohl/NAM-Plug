@@ -11,6 +11,8 @@ mod logging;
 mod preset_load;
 #[path = "processor_state_test/render_mode.rs"]
 mod render_mode;
+#[path = "processor_state_test/restore_txn.rs"]
+mod restore_txn;
 #[path = "processor_state_test/spsc_full_retry.rs"]
 mod spsc_full_retry;
 #[path = "processor_state_test/state_context.rs"]

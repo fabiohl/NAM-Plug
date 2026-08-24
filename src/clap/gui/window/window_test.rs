@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
 use super::drag_drop::get_valid_model_file;
-use crate::clap::plugin::NamClapSharedRef;
+use crate::clap::plugin::GuiSharedState;
 use baseview::DropData;
 use std::path::PathBuf;
 
@@ -44,56 +44,55 @@ fn test_get_valid_model_file_valid_namb() {
 }
 
 #[test]
-fn test_get_valid_model_file_case_insensitive() {
+fn test_get_valid_model_file_valid_nam_uppercase() {
     let files = vec![PathBuf::from("MY_AMP_MODEL.NAM")];
     let data = DropData::Files(files);
     assert_eq!(
         get_valid_model_file(&data),
         Some(PathBuf::from("MY_AMP_MODEL.NAM"))
     );
-
-    let files_namb = vec![PathBuf::from("another_model.Namb")];
-    let data_namb = DropData::Files(files_namb);
-    assert_eq!(
-        get_valid_model_file(&data_namb),
-        Some(PathBuf::from("another_model.Namb"))
-    );
 }
 
 #[test]
-fn test_get_valid_model_file_multiple_mixed() {
-    let files = vec![
-        PathBuf::from("invalid.wav"),
-        PathBuf::from("sweet_tone.nam"),
-        PathBuf::from("other.namb"),
-    ];
+fn test_get_valid_model_file_valid_namb_uppercase() {
+    let files = vec![PathBuf::from("MY_AMP_MODEL.NAMB")];
     let data = DropData::Files(files);
-    // Should skip the first invalid file and return the first valid model file
     assert_eq!(
         get_valid_model_file(&data),
-        Some(PathBuf::from("sweet_tone.nam"))
+        Some(PathBuf::from("MY_AMP_MODEL.NAMB"))
     );
 }
 
 #[test]
-fn test_gui_drag_drop_fuzz() {
+fn test_get_valid_model_file_multiple_takes_first_valid() {
+    let files = vec![
+        PathBuf::from("readme.txt"),
+        PathBuf::from("sound.wav"),
+        PathBuf::from("lead_tone.nam"),
+        PathBuf::from("clean_tone.nam"),
+    ];
+    let data = DropData::Files(files);
+    assert_eq!(
+        get_valid_model_file(&data),
+        Some(PathBuf::from("lead_tone.nam"))
+    );
+}
+
+#[test]
+fn test_drag_drop_safe_shared_integration() {
     use crate::clap::plugin::make_test_shared;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    let shared = Arc::new(make_test_shared());
-
-    // SAFETY: `&*shared` is a valid, non-null pointer into the Arc.
-    // The Arc is kept alive for the duration of the test.
-    let shared_ref = unsafe { NamClapSharedRef::new(&*shared) };
+    let shared_owner = make_test_shared();
+    let shared: Arc<GuiSharedState> = Arc::clone(&shared_owner.gui);
     let alive_fence = Arc::clone(&shared.cold.alive_fence);
 
     // Simulates the safe_shared helper logic for drag-drop:
     let check_and_drop =
-        |alive: &Arc<std::sync::atomic::AtomicBool>, s_ref: NamClapSharedRef, path: PathBuf| {
+        |alive: &Arc<std::sync::atomic::AtomicBool>, s_ref: &Arc<GuiSharedState>, path: PathBuf| {
             if alive.load(Ordering::Relaxed) {
-                // SAFETY: alive=true ensures the pointer is still valid.
-                let s = unsafe { s_ref.as_ref() };
+                let s = s_ref.as_ref();
                 if let Ok(mut pending_guard) = s.cold.ui_pending_model.lock() {
                     *pending_guard = Some(path);
                     s.cold.ui_loading.store(true, Ordering::Relaxed);
@@ -106,7 +105,7 @@ fn test_gui_drag_drop_fuzz() {
 
     // 1. Alive case: should set the pending model
     let path = PathBuf::from("model.nam");
-    assert!(check_and_drop(&alive_fence, shared_ref, path.clone()));
+    assert!(check_and_drop(&alive_fence, &shared, path.clone()));
     assert_eq!(*shared.cold.ui_pending_model.lock().unwrap(), Some(path));
 
     // Reset
@@ -117,7 +116,7 @@ fn test_gui_drag_drop_fuzz() {
     alive_fence.store(false, Ordering::Relaxed);
     assert!(!check_and_drop(
         &alive_fence,
-        shared_ref,
+        &shared,
         PathBuf::from("another.nam")
     ));
     assert_eq!(*shared.cold.ui_pending_model.lock().unwrap(), None);

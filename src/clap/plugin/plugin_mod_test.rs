@@ -241,3 +241,24 @@ fn test_per_instance_hugepage_synced() {
         "Instance 2 hugepage_synced should be true after housekeeping"
     );
 }
+
+#[test]
+fn test_gui_event_backpressure_warning_emitted() {
+    use crate::clap::test_util;
+
+    let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+
+    shared
+        .cold
+        .rt_status
+        .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GUI_EVENT_BACKPRESSURE);
+
+    // on_main_thread -> housekeeping + emit_pending_logs consumes the flag
+    // and emits the warning to the host log / LogBuffer.
+    plugin_instance.call_on_main_thread_callback();
+
+    test_util::assert_log_buffer_contains(
+        "NAM-Plug: GUI event queue backpressure - host output full; gesture events retained for retry",
+    );
+}

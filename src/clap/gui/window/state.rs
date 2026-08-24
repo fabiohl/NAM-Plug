@@ -10,7 +10,7 @@ use glow::HasContext;
 
 use super::shaders::{FRAGMENT_SHADER_SRC, VERTEX_SHADER_SRC, compile_shader_program};
 
-use crate::clap::plugin::NamClapSharedRef;
+use crate::clap::plugin::GuiSharedState;
 
 /// Main window representation of the NAM-Plug plugin.
 ///
@@ -35,7 +35,7 @@ pub struct NamPluginWindow {
     /// Screen scale factor.
     pub(crate) scale: f32,
     /// Reference to the plugin's shared state.
-    pub(crate) shared: NamClapSharedRef,
+    pub(crate) shared: Arc<GuiSharedState>,
     /// Lifetime fence (shared Arc for destruction detection).
     pub(crate) alive_fence: Arc<std::sync::atomic::AtomicBool>,
     /// Static shared handle of the CLAP host.
@@ -66,7 +66,7 @@ impl NamPluginWindow {
     /// failures therefore return a structured error — never a panic.
     pub fn new(
         window: &mut Window,
-        shared: NamClapSharedRef,
+        shared: Arc<GuiSharedState>,
         host: clack_plugin::host::HostSharedHandle<'static>,
         close_signal: Arc<AtomicBool>,
         alive_fence: Arc<std::sync::atomic::AtomicBool>,
@@ -197,7 +197,7 @@ impl NamPluginWindow {
     /// installs this stub — its first `on_frame` closes the window without
     /// touching the GL context, the shared state or the host handle.
     pub fn degraded(
-        shared: NamClapSharedRef,
+        shared: Arc<GuiSharedState>,
         host: clack_plugin::host::HostSharedHandle<'static>,
         close_signal: Arc<AtomicBool>,
         alive_fence: Arc<std::sync::atomic::AtomicBool>,
@@ -222,12 +222,9 @@ impl NamPluginWindow {
         }
     }
 
-    pub(crate) fn safe_shared(&self) -> Option<&'static crate::clap::plugin::NamClapShared> {
+    pub(crate) fn safe_shared(&self) -> Option<&GuiSharedState> {
         if self.alive_fence.load(std::sync::atomic::Ordering::Acquire) {
-            // pairs with Release store em plugin/shared.rs:262
-            // SAFETY: If alive_fence is true, the plugin and its shared state
-            // are still alive in memory, so the pointer is valid.
-            unsafe { Some(self.shared.as_ref()) }
+            Some(&self.shared)
         } else {
             None
         }

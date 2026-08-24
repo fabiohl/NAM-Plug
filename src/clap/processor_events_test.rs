@@ -92,7 +92,7 @@ mod tests {
 
         // Confirm that the warning message was logged to LogBuffer
         test_util::assert_log_buffer_contains(
-            "SPSC command queue drain limit reached (64 events) - pending events deferred",
+            "Event queue saturation: SPSC drain limit (64) or input event budget (4096) exceeded",
         );
     }
 }

@@ -40,11 +40,13 @@ pub(crate) fn apply_scheduled_event(
     buffer_size: u32,
     pending_restart_os_factor: &AtomicU32,
 ) {
-    use crate::clap::extensions::params::{bypass_bool_to_u32, bypass_f32_to_bool};
+    use crate::clap::extensions::params::{
+        bypass_bool_to_u32, bypass_f32_to_bool, sanitize_param_value,
+    };
     use std::sync::atomic::Ordering;
 
     if is_mod {
-        let amount = value;
+        let amount = if value.is_finite() { value } else { 0.0 };
         match param_id {
             PARAM_INPUT_GAIN => {
                 *mod_input_gain = amount;
@@ -61,7 +63,7 @@ pub(crate) fn apply_scheduled_event(
             _ => {}
         }
     } else {
-        let val = value;
+        let val = sanitize_param_value(param_id, value);
         match param_id {
             PARAM_INPUT_GAIN => {
                 params.input_gain_db = val;

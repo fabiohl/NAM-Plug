@@ -17,9 +17,17 @@ use std::sync::atomic::Ordering;
 impl<'a> NamClapMainThread<'a> {
     /// GC drain, status flag mirroring, hugepage sync, pending model load, latency notification.
     pub(crate) fn housekeeping(&mut self) {
+        let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
+            self.shared.cold.instance_id,
+        );
+
         // Drain in-flight parameter snapshot queued by
         // PluginMainThreadParams::flush() when the SPSC was full.
         self.flush_in_flight_params();
+        // Deliver/ack any pending restore transaction (T6.1): pushes the atomic
+        // RestoreTxn when the ring has room and publishes UI/paths/hashes only
+        // once the audio thread confirms the generation.
+        self.flush_pending_restore();
         // Flush any model deferred by load_model() (F3 fix).
         // Primary mechanism is activate(), this is a fallback for hosts
         // that call state-load between activate() and the first process().
@@ -178,16 +186,25 @@ impl<'a> NamClapMainThread<'a> {
                 OversampleEngine::new(factor, MAX_RESAMP_BUF),
                 OversampleEngine::new(factor, MAX_RESAMP_BUF),
             ) {
-                let _ = self.cmd_producer.push_command(
+                match self.cmd_producer.try_push_command(
                     crate::clap::plugin::ClapParamPayload::SetOversample {
                         os_l: Box::new(l),
                         os_r: Box::new(r),
                     },
-                );
-                self.shared
-                    .cold
-                    .rt_status
-                    .clear_flag_release(spsc::RT_STATUS_NEEDS_OS_REBUILD);
+                ) {
+                    Ok(_) => {
+                        self.shared
+                            .cold
+                            .rt_status
+                            .clear_flag_release(spsc::RT_STATUS_NEEDS_OS_REBUILD);
+                    }
+                    Err((crate::clap::plugin::command_scheduler::PushError::Full, _payload)) => {
+                        log::warn!(
+                            "NAM-Plug: Command ring full during SetOversample; retaining flag for retry"
+                        );
+                        self.host.request_callback();
+                    }
+                }
             } else {
                 neural_amp_modeler_rs::common::diagnostics::NamDiagnostic::new(
                     neural_amp_modeler_rs::common::diagnostics::NamErrorCode::OutOfMemory,
@@ -225,17 +242,20 @@ impl<'a> NamClapMainThread<'a> {
         }
 
         // Check if there is a pending model sent by the UI (real path) or dialog (sentinel).
-        let pending_model = self
-            .shared
-            .cold
-            .ui_pending_model
-            .lock()
-            .unwrap_or_else(|e| {
-                log::error!("PoisonError in ui_pending_model lock: {e:?}");
-                e.into_inner()
-            })
-            .take();
-        if let Some(path) = pending_model {
+        let pending = {
+            let mut pending_guard = self
+                .shared
+                .cold
+                .ui_pending_model
+                .lock()
+                .unwrap_or_else(|e| {
+                    log::error!("PoisonError in ui_pending_model lock: {e:?}");
+                    e.into_inner()
+                });
+            pending_guard.take()
+        };
+
+        if let Some(path) = pending {
             let cancelled_sentinel = dialog_state::dialog_cancelled_sentinel();
             let timedout_sentinel = dialog_state::dialog_timedout_sentinel();
 
@@ -257,7 +277,7 @@ impl<'a> NamClapMainThread<'a> {
                     .pending_preset_load
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .take();
+                    .pop_front();
 
                 match res {
                     Ok(_) => {
@@ -385,6 +405,14 @@ impl<'a> NamClapMainThread<'a> {
                                     e.into_inner()
                                 });
                             *ir_guard = None;
+                        }
+                        {
+                            let mut hash_guard =
+                                self.shared.cold.ir_hash.lock().unwrap_or_else(|e| {
+                                    log::error!("PoisonError in ir_hash lock: {e:?}");
+                                    e.into_inner()
+                                });
+                            *hash_guard = None;
                         }
                         {
                             let mut raw_guard =

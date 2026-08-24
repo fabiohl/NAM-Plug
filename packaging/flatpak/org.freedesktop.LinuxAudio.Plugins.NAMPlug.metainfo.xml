@@ -54,14 +54,14 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
     <keyword>plugin</keyword>
   </keywords>
   <releases>
-    <release version="0.5.0" date="2026-08-19">
+    <release version="0.7.0" date="2026-08-24">
       <description>
-        <p>NAM-Plug 0.5.0 release with Flatpak metadata and CLAP integration.</p>
+        <p>NAM-Plug 0.7.0 release with strict artifact certification, lock-free concurrency, and CLAP extensions.</p>
         <ul>
           <li>CLAP plugin format support with egui GUI and headless capabilities.</li>
           <li>WaveNet and LSTM neural model inference with SIMD AVX2 acceleration.</li>
-          <li>Integrated CabSim IR convolver.</li>
-          <li>Live and HQ/Offline rendering modes.</li>
+          <li>Integrated CabSim IR convolver and dynamic oversampling.</li>
+          <li>Fail-closed AVX-512 absence certification and cryptographic build provenance.</li>
         </ul>
       </description>
     </release>

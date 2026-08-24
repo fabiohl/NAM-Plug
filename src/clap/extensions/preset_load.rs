@@ -59,7 +59,11 @@ impl PluginPresetLoadImpl for NamClapMainThread<'_> {
                         log::error!("PoisonError in pending_preset_load lock: {e:?}");
                         e.into_inner()
                     });
-            *pending_guard = Some(PendingPresetLoad {
+            if pending_guard.len() >= 16 {
+                log::error!("NAM-Plug: Preset load queue full (max 16 pending loads)");
+                return Err(PluginError::Message("Preset load queue full"));
+            }
+            pending_guard.push_back(PendingPresetLoad {
                 location_path: CString::new(path.to_bytes())
                     .unwrap_or_else(|_| CString::new("").unwrap()),
                 load_key: load_key.map(|k| {

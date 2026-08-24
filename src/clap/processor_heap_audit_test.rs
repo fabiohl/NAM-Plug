@@ -105,7 +105,8 @@ mod tests {
 
         let mut params = test_util::make_default_params(Some(model_path));
         params.oversample = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::X2;
-        params.ir_path = Some(ir_path);
+        params.ir_path = Some(ir_path.clone());
+        params.ir_hash = crate::clap::test_util::asset_hash(&ir_path);
         test_util::load_plugin_state(&mut plugin_instance, &params);
 
         plugin_instance.call_on_main_thread_callback();

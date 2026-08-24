@@ -235,6 +235,7 @@ fn process_through_clap(model_path: &Path, input: &[f32], sample_rate: f64) -> V
     {
         let params = ProcessingParams {
             model_path: Some(model_path.to_path_buf()),
+            model_hash: nam_plug::clap::test_util::asset_hash(model_path),
             input_gain_db: 0.0,
             output_gain_db: 0.0,
             gate_threshold_db: -90.0, // effectively disabled gate

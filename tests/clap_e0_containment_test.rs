@@ -188,8 +188,9 @@ fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
 
     // ── Step 1: Load valid model A via state ──
     let params_a = ProcessingParams {
-        model_path: Some(model_a),
+        model_path: Some(model_a.clone()),
         model_basename: Some("lstm.nam".into()),
+        model_hash: test_util::asset_hash(&model_a),
         input_gain_db: 0.0,
         output_gain_db: 0.0,
         gate_threshold_db: -90.0,

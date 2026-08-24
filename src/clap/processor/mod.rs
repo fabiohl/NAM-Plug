@@ -222,38 +222,117 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             let host_rate = audio_config.sample_rate as u32;
             let host_buffer = audio_config.max_frames_count;
 
+            // Resolve the oversampling factor for this activation.
+            // Priority: pending restart > UiToRt atomic > Off (fresh).
+            let pending_restart = shared
+                .cold
+                .pending_restart_os_factor
+                .swap(0, Ordering::Acquire);
+            if pending_restart != 0 {
+                rollback.pending_restart_os_factor = Some(pending_restart);
+            }
+            let os_factor = if pending_restart != 0 {
+                OversampleFactor::from_f32(pending_restart as f32)
+            } else {
+                OversampleFactor::from_f32(
+                    shared.ui_to_rt.param_oversample.load(Ordering::Relaxed) as f32
+                )
+            };
+
             // Restore heavy DSP resources from DeactivatedDspState if
             // available, validating sample rate and buffer size invariants. Model
             // weights are always reusable; resampler and conv-engine require
             // matching audio configuration.
             //
             // DeactivatedDspState is extracted into the rollback guard
-            // immediately after `.take()`. If any later allocation fails, the
-            // guard restores it — avoiding loss of expensive model/engine state.
+            // immediately after `.take()`. The guard retains it intact during all
+            // fallible allocations (resamplers, oversamplers, CabSim).
             rollback.deactivated = shared
                 .cold
                 .deactivated_dsp
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
-            let deactivated = rollback.deactivated.take();
 
-            // Resolve the oversampling factor for this activation.
-            // Priority: pending restart > UiToRt atomic > Off (fresh).
-            let os_factor = {
-                let pending = shared
-                    .cold
-                    .pending_restart_os_factor
-                    .swap(0, Ordering::Acquire);
-                if pending != 0 {
-                    OversampleFactor::from_f32(pending as f32)
+            let (new_resampler, new_cabsim, new_os) = if let Some(ref deact) = rollback.deactivated
+            {
+                let rate_matches = deact.sample_rate == host_rate;
+                let buf_matches = deact.buffer_size == host_buffer;
+                let os_matches = deact.os_factor == os_factor;
+                let cab_matches = deact.cabsim_adapter.is_some() && buf_matches && rate_matches;
+
+                let res = if rate_matches {
+                    None
                 } else {
-                    OversampleFactor::from_f32(
-                        shared.ui_to_rt.param_oversample.load(Ordering::Relaxed) as f32,
-                    )
-                }
+                    Some(Box::new(
+                        NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
+                            leak_error_msg(format!("Failed to create NamResampler: {:?}", e))
+                        })?,
+                    ))
+                };
+
+                let cab = if cab_matches {
+                    None
+                } else {
+                    Some(build_cab_sim_from_raw_samples(
+                        shared,
+                        audio_config.max_frames_count as usize,
+                        host_rate,
+                    )?)
+                };
+
+                let os = if os_matches {
+                    None
+                } else {
+                    let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
+                        |e| {
+                            leak_error_msg(format!(
+                                "Failed to create oversample engine (L): {:?}",
+                                e
+                            ))
+                        },
+                    )?);
+                    let os_r = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
+                        |e| {
+                            leak_error_msg(format!(
+                                "Failed to create oversample engine (R): {:?}",
+                                e
+                            ))
+                        },
+                    )?);
+                    Some((os_l, os_r))
+                };
+
+                (res, cab, os)
+            } else {
+                let res = Some(Box::new(
+                    NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
+                        leak_error_msg(format!("Failed to create NamResampler: {:?}", e))
+                    })?,
+                ));
+
+                let cab = Some(build_cab_sim_from_raw_samples(
+                    shared,
+                    audio_config.max_frames_count as usize,
+                    host_rate,
+                )?);
+
+                let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
+                    |e| leak_error_msg(format!("Failed to create oversample engine (L): {:?}", e)),
+                )?);
+                let os_r = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
+                    |e| leak_error_msg(format!("Failed to create oversample engine (R): {:?}", e)),
+                )?);
+
+                (res, cab, Some((os_l, os_r)))
             };
 
+            // F3: flush any model deferred by load_model() (state-restore-before-activate).
+            // This calls set_max_buffer_size on the main thread before process() starts.
+            main_thread.flush_pending_model()?;
+
+            // All fallible stages succeeded: now assemble the active DSP resources
+            // by taking ownership from the rollback guard.
             let (
                 model_l,
                 resampler,
@@ -262,63 +341,18 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 cabsim_adapter,
                 model_input_mult_adj,
                 model_output_mult_adj,
-            ) = if let Some(deact) = deactivated {
-                let rate_matches = deact.sample_rate == host_rate;
-                let buf_matches = deact.buffer_size == host_buffer;
-
-                // Resampler: reuse only if host sample rate matches the preserved rate.
-                let resampler = if rate_matches {
-                    deact.resampler
+            ) = if let Some(deact) = rollback.deactivated.take() {
+                let resampler = new_resampler.unwrap_or(deact.resampler);
+                let cabsim_adapter = if let Some(new_c) = new_cabsim {
+                    new_c
                 } else {
-                    Box::new(
-                        NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
-                            leak_error_msg(format!("Failed to create NamResampler: {:?}", e))
-                        })?,
-                    )
+                    deact.cabsim_adapter
                 };
-
-                // CabSimAdapter: rebuild if buffer size OR sample rate changed, or if not yet built.
-                // Rate changes require resampling ir_raw_samples to the new host rate.
-                let cabsim_adapter =
-                    if deact.cabsim_adapter.is_some() && buf_matches && rate_matches {
-                        deact.cabsim_adapter
-                    } else {
-                        build_cab_sim_from_raw_samples(
-                            shared,
-                            audio_config.max_frames_count as usize,
-                            host_rate,
-                        )?
-                    };
-
-                // Oversample engines: reuse only if the factor hasn't changed
-                // (structural change → rebuild). Otherwise rebuild for the resolved
-                // factor.
-                let os_l = if deact.os_factor == os_factor {
-                    deact.os_l
+                let (os_l, os_r) = if let Some((l, r)) = new_os {
+                    (l, r)
                 } else {
-                    Box::new(
-                        OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(|e| {
-                            leak_error_msg(format!(
-                                "Failed to create oversample engine (L): {:?}",
-                                e
-                            ))
-                        })?,
-                    )
+                    (deact.os_l, deact.os_r)
                 };
-                let os_r = if deact.os_factor == os_factor {
-                    deact.os_r
-                } else {
-                    Box::new(
-                        OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(|e| {
-                            leak_error_msg(format!(
-                                "Failed to create oversample engine (R): {:?}",
-                                e
-                            ))
-                        })?,
-                    )
-                };
-
-                // Model weights: always reusable (independent of rates/buffers).
                 (
                     deact.model_l,
                     resampler,
@@ -329,27 +363,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     deact.model_output_mult_adj,
                 )
             } else {
-                // Fresh build: construct all DSP resources from scratch.
-                let resampler = Box::new(
-                    NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
-                        leak_error_msg(format!("Failed to create NamResampler: {:?}", e))
-                    })?,
-                );
-
-                let cabsim_adapter = {
-                    build_cab_sim_from_raw_samples(
-                        shared,
-                        audio_config.max_frames_count as usize,
-                        host_rate,
-                    )?
-                };
-                let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
-                    |e| leak_error_msg(format!("Failed to create oversample engine (L): {:?}", e)),
-                )?);
-                let os_r = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
-                    |e| leak_error_msg(format!("Failed to create oversample engine (R): {:?}", e)),
-                )?);
-
+                let resampler = new_resampler.expect("Fresh resampler must have been built");
+                let cabsim_adapter = new_cabsim.expect("Fresh cabsim must have been built");
+                let (os_l, os_r) = new_os.expect("Fresh oversamplers must have been built");
                 (None, resampler, os_l, os_r, cabsim_adapter, 1.0, 1.0)
             };
 
@@ -659,7 +675,23 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         }));
         match result {
             Ok(r) => r,
-            Err(err) => Err(panic_to_error(err)),
+            Err(err) => {
+                for mut port_pair in &mut audio {
+                    if let Ok(Some(channel_pairs)) = port_pair.channels().map(|c| c.into_f32()) {
+                        for pair in channel_pairs {
+                            match pair {
+                                clack_plugin::process::audio::ChannelPair::InputOutput(_, o)
+                                | clack_plugin::process::audio::ChannelPair::InPlace(o)
+                                | clack_plugin::process::audio::ChannelPair::OutputOnly(o) => {
+                                    o.fill(0.0);
+                                }
+                                clack_plugin::process::audio::ChannelPair::InputOnly(_) => {}
+                            }
+                        }
+                    }
+                }
+                Err(panic_to_error(err))
+            }
         }
     }
 }
@@ -763,3 +795,7 @@ mod processor_events_test;
 #[cfg(test)]
 #[path = "../processor_diagnostics_logging_test.rs"]
 mod processor_diagnostics_logging_test;
+
+#[cfg(test)]
+#[path = "../processor_multi_instance_isolation_test.rs"]
+mod processor_multi_instance_isolation_test;

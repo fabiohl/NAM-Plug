@@ -13,7 +13,7 @@ mod load;
 mod logging;
 
 use super::command_scheduler::{CommandProducer, PushError};
-use super::shared::{ClapParamPayload, NamClapShared, PendingModel};
+use super::shared::{ClapParamPayload, NamClapShared, PendingModel, PendingRestore};
 use crate::clap::gui::lifecycle::GuiLifecycle;
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
@@ -70,6 +70,10 @@ pub struct NamClapMainThread<'a> {
     pub(crate) gui_lifecycle: GuiLifecycle,
     /// Flag indicating whether hugepage status has been synced for this instance.
     pub(crate) hugepage_synced: bool,
+    /// A validated restore staged on the main thread awaiting atomic delivery
+    /// to the audio thread and ack-gated publication (T6.1). Private slot —
+    /// never shared with the audio thread or GUI.
+    pub(crate) pending_restore: Option<PendingRestore>,
 }
 
 impl<'a> NamClapMainThread<'a> {
@@ -224,6 +228,15 @@ impl<'a> NamClapMainThread<'a> {
             );
         if let Ok(ir_guard) = self.shared.cold.ir_path.lock() {
             self.params.ir_path = ir_guard.as_ref().map(std::path::PathBuf::from);
+        }
+        // T6.2: keep the IR digest in lockstep with the path — no persisted IR
+        // reference without its SHA-256 digest, and no stale digest when the
+        // IR was cleared.
+        if let Ok(hash_guard) = self.shared.cold.ir_hash.lock() {
+            self.params.ir_hash = hash_guard.clone();
+        }
+        if self.params.ir_path.is_none() {
+            self.params.ir_hash = None;
         }
     }
 

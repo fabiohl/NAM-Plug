@@ -73,7 +73,8 @@ impl WindowHandler for NamPluginWindow {
             gl_ctx.make_current();
         }
 
-        if let Some(shared) = self.safe_shared() {
+        if self.alive_fence.load(Ordering::Acquire) {
+            let shared = &self.shared;
             // Cache peak values for idle detection on the next frame.
             self.state.cached_peak_l =
                 f32::from_bits(shared.rt_to_ui.ui_peak_l.load(Ordering::Relaxed));

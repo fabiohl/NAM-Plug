@@ -6,9 +6,6 @@ use clack_plugin::host::HostSharedHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
-const DIALOG_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Spawns a model file-picker dialog in a background thread.
 ///
@@ -52,19 +49,14 @@ fn spawn_file_dialog_inner(
     notify_host: impl FnOnce() + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let path_opt = picker();
-            let _ = tx.send(path_opt);
-        });
+        let path_opt = picker();
 
         complete_dialog(
             &state.pending_model,
             &state.active,
             &alive_fence,
-            rx.recv_timeout(DIALOG_TIMEOUT),
+            path_opt,
             dialog_state::dialog_cancelled_sentinel(),
-            dialog_state::dialog_timedout_sentinel(),
             notify_host,
         );
     })
@@ -102,19 +94,14 @@ fn spawn_ir_file_dialog_inner(
     notify_host: impl FnOnce() + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let path_opt = picker();
-            let _ = tx.send(path_opt);
-        });
+        let path_opt = picker();
 
         complete_dialog(
             &state.pending_ir,
             &state.active,
             &alive_fence,
-            rx.recv_timeout(DIALOG_TIMEOUT),
+            path_opt,
             dialog_state::dialog_cancelled_sentinel(),
-            dialog_state::dialog_timedout_sentinel(),
             notify_host,
         );
     })
@@ -134,9 +121,8 @@ fn complete_dialog(
     pending: &std::sync::Mutex<Option<PathBuf>>,
     active: &AtomicBool,
     alive_fence: &AtomicBool,
-    outcome: Result<Option<PathBuf>, std::sync::mpsc::RecvTimeoutError>,
+    outcome: Option<PathBuf>,
     sentinel_cancel: PathBuf,
-    sentinel_timeout: PathBuf,
     notify_host: impl FnOnce(),
 ) {
     // R-09: the plugin instance may have been destroyed while the picker
@@ -149,24 +135,15 @@ fn complete_dialog(
     }
 
     match outcome {
-        Ok(Some(path)) => {
+        Some(path) => {
             if let Ok(mut guard) = pending.lock() {
                 *guard = Some(path);
             }
         }
-        Ok(None) => {
+        None => {
             if let Ok(mut guard) = pending.lock() {
                 *guard = Some(sentinel_cancel);
             }
-        }
-        Err(_) => {
-            if let Ok(mut guard) = pending.lock() {
-                *guard = Some(sentinel_timeout);
-            }
-            log::warn!(
-                "NAM-Plug: file dialog timed out after {}s",
-                DIALOG_TIMEOUT.as_secs()
-            );
         }
     }
 

@@ -139,7 +139,9 @@ fn test_cabsim_ir_changes_audio_release_artifact() {
         &mut instance,
         &ProcessingParams {
             model_path: Some(model.clone()),
+            model_hash: nam_plug::clap::test_util::asset_hash(&model),
             ir_path: Some(ir_path.clone()),
+            ir_hash: nam_plug::clap::test_util::asset_hash(&ir_path),
             ..Default::default()
         },
     );
@@ -167,7 +169,8 @@ fn test_cabsim_ir_changes_audio_release_artifact() {
     load_state(
         &mut instance,
         &ProcessingParams {
-            model_path: Some(model),
+            model_path: Some(model.clone()),
+            model_hash: nam_plug::clap::test_util::asset_hash(&model),
             ir_path: None,
             ..Default::default()
         },

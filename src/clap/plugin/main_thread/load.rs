@@ -12,7 +12,6 @@ use neural_amp_modeler_rs::loader::load_and_build_model;
 use neural_amp_modeler_rs::models::NamModel;
 use neural_amp_modeler_rs::models::StaticModel;
 use neural_amp_modeler_rs::models::slimmable::clone_wavenet_for_slimmable_storage;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -27,6 +26,10 @@ impl<'a> NamClapMainThread<'a> {
     /// only on the main thread. The loaded model is sent to the RT thread
     /// via a lock-free channel.
     pub fn load_model(&mut self, path: &Path) -> Result<(), Box<NamDiagnostic>> {
+        let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
+            self.shared.cold.instance_id,
+        );
+
         let model_pair = load_and_build_model(
             path,
             &self.sys,
@@ -77,19 +80,19 @@ impl<'a> NamClapMainThread<'a> {
             }
         }
 
-        // Compute content hash for portable asset identity
-        self.params.model_hash = match std::fs::read(path) {
-            Ok(bytes) => {
-                let mut hasher = Sha256::new();
-                hasher.update(&bytes);
-                let hash = hasher.finalize();
-                Some(hash.iter().map(|b| format!("{b:02x}")).collect())
-            }
-            Err(e) => {
-                log::warn!("NAM-Plug: Failed to compute model hash ({path:?}): {e}");
-                None
-            }
-        };
+        // Compute content hash for portable asset identity (T6.2). The GUI load
+        // is the explicit user override path — but the asset is only adopted
+        // when its digest can actually be computed, so persisted state always
+        // carries a valid `model_hash`.
+        let model_hash = crate::clap::extensions::state_transaction::compute_file_hash(path)
+            .map_err(|e| {
+                Box::new(
+                    NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                        .message(format!("Failed to compute model SHA-256 ({path:?}): {e}"))
+                        .hint("Assets are adopted only with a verified SHA-256 digest."),
+                )
+            })?;
+        self.params.model_hash = Some(model_hash);
 
         let metadata = model_pair.metadata.clone();
         let architecture = model_pair.architecture.clone();
@@ -255,6 +258,10 @@ impl<'a> NamClapMainThread<'a> {
     /// The constructed `ConvEngine` is sent to the RT thread via a lock-free
     /// SPSC channel following the same pattern as `load_model`.
     pub fn load_cabsim(&mut self, path: &Path) -> Result<(), Box<NamDiagnostic>> {
+        let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
+            self.shared.cold.instance_id,
+        );
+
         let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
         let host_rate = if host_rate == 0 { 48000 } else { host_rate };
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
@@ -267,6 +274,18 @@ impl<'a> NamClapMainThread<'a> {
                     .param("error", e.to_string()),
             )
         })?;
+
+        // T6.2: the IR digest is computed up-front so persisted state always
+        // carries a valid `ir_hash`. A file whose digest cannot be computed is
+        // never adopted — even on this explicit user override path.
+        let ir_hash =
+            crate::clap::extensions::state_transaction::compute_file_hash(path).map_err(|e| {
+                Box::new(
+                    NamDiagnostic::new(NamErrorCode::IrLoadFailed, &self.sys)
+                        .message(format!("Failed to compute IR SHA-256 ({path:?}): {e}"))
+                        .hint("Assets are adopted only with a verified SHA-256 digest."),
+                )
+            })?;
 
         let engine = ConvEngine::new(&cabsim.samples, partition_size).map_err(|e| {
             Box::new(
@@ -316,6 +335,9 @@ impl<'a> NamClapMainThread<'a> {
             if let Ok(mut ir_guard) = self.shared.cold.ir_path.lock() {
                 *ir_guard = Some(path.to_string_lossy().to_string());
             }
+            if let Ok(mut hash_guard) = self.shared.cold.ir_hash.lock() {
+                *hash_guard = Some(ir_hash.clone());
+            }
             if let Ok(mut raw_guard) = self.shared.cold.ir_raw_samples.lock() {
                 *raw_guard = Some(cabsim.samples);
             }
@@ -323,6 +345,8 @@ impl<'a> NamClapMainThread<'a> {
                 .cold
                 .ir_raw_sample_rate
                 .store(cabsim.sample_rate, Ordering::Relaxed);
+            self.params.ir_path = Some(path.to_path_buf());
+            self.params.ir_hash = Some(ir_hash);
         }
 
         Ok(())

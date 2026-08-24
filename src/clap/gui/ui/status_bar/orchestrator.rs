@@ -9,11 +9,11 @@ use super::super::state::UiState;
 use super::metadata::{draw_metadata_strings, update_metadata_cache};
 use super::telemetry::{draw_telemetry_strings, update_telemetry_state};
 
-use crate::clap::plugin::NamClapShared;
+use crate::clap::plugin::GuiSharedState;
 
 pub(crate) fn draw_zone5_status_bar(
     ui: &mut egui::Ui,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     state: &mut UiState,
     accent_color: egui::Color32,
 ) {

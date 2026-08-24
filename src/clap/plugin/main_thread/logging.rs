@@ -157,14 +157,29 @@ impl<'a> NamClapMainThread<'a> {
             neural_amp_modeler_rs::common::spsc::RT_STATUS_SPSC_DRAIN_TRUNCATED,
         ) {
             let msg = CString::new(
-                "SPSC command queue drain limit reached (64 events) - pending events deferred",
+                "Event queue saturation: SPSC drain limit (64) or input event budget (4096) exceeded - pending events deferred",
             )
             .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Warning, &msg);
             }
             log::warn!(
-                "SPSC command queue drain limit reached (64 events) - pending events deferred"
+                "Event queue saturation: SPSC drain limit (64) or input event budget (4096) exceeded - pending events deferred"
+            );
+        }
+
+        if self.shared.cold.rt_status.check_and_clear_flag(
+            neural_amp_modeler_rs::common::spsc::RT_STATUS_GUI_EVENT_BACKPRESSURE,
+        ) {
+            let msg = CString::new(
+                "NAM-Plug: GUI event queue backpressure - host output full; gesture events retained for retry",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Warning, &msg);
+            }
+            log::warn!(
+                "NAM-Plug: GUI event queue backpressure - host output full; gesture events retained for retry"
             );
         }
     }

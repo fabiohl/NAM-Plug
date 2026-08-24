@@ -561,26 +561,420 @@ mod tests {
             None,
         );
 
-        #[cfg(debug_assertions)]
-        {
+        assert!(
+            result.is_err(),
+            "Expected Err(PluginError) across all build profiles when host sends 600 frames with max_frames_count=512"
+        );
+        assert!(
+            rt_status
+                .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION),
+            "RT_STATUS_HOST_CONTRACT_VIOLATION must be set on block size contract violation"
+        );
+        // Verify fail-safe deterministic zeroing of output buffer
+        for &s in &out_l {
+            assert_eq!(
+                s, 0.0,
+                "Output channel L must be zeroed on contract violation"
+            );
+        }
+        for &s in &out_r {
+            assert_eq!(
+                s, 0.0,
+                "Output channel R must be zeroed on contract violation"
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_finite_input_containment_and_recovery() {
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+
+        let audio_config = PluginAudioConfiguration {
+            sample_rate: 48000.0,
+            min_frames_count: 1,
+            max_frames_count: 512,
+        };
+
+        let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        let rt_status = &shared.cold.rt_status;
+
+        let n = 256_usize;
+        let mut in_l = vec![0.0f32; n];
+        let mut in_r = vec![0.0f32; n];
+        in_l[10] = f32::NAN;
+        in_l[50] = f32::INFINITY;
+        in_r[20] = f32::NEG_INFINITY;
+
+        let mut out_l = vec![1.0f32; n];
+        let mut out_r = vec![1.0f32; n];
+
+        let mut input_ports = AudioPorts::with_capacity(2, 1);
+        let mut output_ports = AudioPorts::with_capacity(2, 1);
+
+        let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
+        let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+            latency: 0,
+            channels: AudioPortBufferType::f32_input_only(
+                input_channels.iter_mut().map(InputChannel::constant),
+            ),
+        }]);
+
+        let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
+        let mut output_audio = output_ports.with_output_buffers([AudioPortBuffer {
+            latency: 0,
+            channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+        }]);
+
+        let input_events = InputEvents::empty();
+        let mut output_events_buffer = EventBuffer::new();
+        let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
+
+        let result = started_processor.process(
+            &input_audio,
+            &mut output_audio,
+            &input_events,
+            &mut output_events,
+            None,
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Non-finite block should be contained and process cleanly"
+        );
+        assert!(
+            rt_status.check_flag(
+                neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED
+            ),
+            "RT_STATUS_NON_FINITE_INPUT_DETECTED should be set when input contains NaN/Inf"
+        );
+
+        for i in 0..n {
             assert!(
-                result.is_err(),
-                "Expected ProcessFailed in debug builds: host sent 600 frames with max_frames_count=512"
+                out_l[i].is_finite(),
+                "Output L sample {} must be finite even after hostile NaN/Inf input",
+                i
+            );
+            assert!(
+                out_r[i].is_finite(),
+                "Output R sample {} must be finite even after hostile NaN/Inf input",
+                i
             );
         }
 
-        #[cfg(not(debug_assertions))]
-        {
+        // Verify recovery with subsequent clean audio
+        let mut clean_in_l = vec![0.1f32; n];
+        let mut clean_in_r = vec![0.1f32; n];
+        let mut clean_out_l = vec![0.0f32; n];
+        let mut clean_out_r = vec![0.0f32; n];
+
+        let mut clean_input_channels = [clean_in_l.as_mut_slice(), clean_in_r.as_mut_slice()];
+        let clean_input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+            latency: 0,
+            channels: AudioPortBufferType::f32_input_only(
+                clean_input_channels.iter_mut().map(InputChannel::constant),
+            ),
+        }]);
+
+        let clean_output_channels = [clean_out_l.as_mut_slice(), clean_out_r.as_mut_slice()];
+        let mut clean_output_audio = output_ports.with_output_buffers([AudioPortBuffer {
+            latency: 0,
+            channels: AudioPortBufferType::f32_output_only(clean_output_channels.into_iter()),
+        }]);
+
+        let result_clean = started_processor.process(
+            &clean_input_audio,
+            &mut clean_output_audio,
+            &input_events,
+            &mut output_events,
+            None,
+            None,
+        );
+        assert!(
+            result_clean.is_ok(),
+            "Clean audio after recovery should process successfully"
+        );
+        for i in 0..n {
+            assert!(clean_out_l[i].is_finite());
+            assert!(clean_out_r[i].is_finite());
+        }
+    }
+
+    /// T6.5: the non-finite reset must use the effective model rate of the
+    /// active chain (post-resample), never a hard-coded 48 kHz. Exercised at
+    /// host rates 44.1 kHz and 96 kHz with a NaN burst followed by a sine;
+    /// output must be finite and the subsequent valid block must have a
+    /// defined response. No assertion pins the internal rate to 48000.
+    #[test]
+    fn test_non_finite_reset_uses_effective_model_rate() {
+        let _mutex_guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        for &host_rate in &[44100.0_f64, 96000.0_f64] {
+            let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+
+            // Load a real model BEFORE activate so it is installed by
+            // flush_pending_model() and the non-finite reset branch runs.
+            let path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
+            let params = test_util::make_default_params(Some(path));
+            test_util::load_plugin_state(&mut plugin_instance, &params);
+
+            let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+            let rt_status = &shared.cold.rt_status;
             assert!(
-                result.is_ok(),
-                "Expected success in release builds (debug_assert compiled out)"
+                shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
+                "model must be loaded before activate at {} Hz",
+                host_rate
             );
+            let effective_model_rate = shared.cold.model_sample_rate.load(Ordering::Relaxed);
+            assert!(
+                effective_model_rate > 0,
+                "model_sample_rate must be set when a model is loaded"
+            );
+
+            let audio_config = PluginAudioConfiguration {
+                sample_rate: host_rate,
+                min_frames_count: 64,
+                max_frames_count: 512,
+            };
+            let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
+            let mut started_processor = stopped_processor.start_processing().unwrap();
+
+            let n = 256_usize;
+
+            let fill_sine = |buf_l: &mut [f32], buf_r: &mut [f32]| {
+                for i in 0..n {
+                    let s = 0.2 * (2.0 * std::f32::consts::PI * i as f32 / n as f32).sin();
+                    buf_l[i] = s;
+                    buf_r[i] = s;
+                }
+            };
+
+            // Pre-block: finite sine so the pipeline is warm (lazy statics,
+            // smoothers) before the NaN burst and the model is installed.
+            let mut warm = StereoTestBuffers::new(n, 0.0, 0.0);
+            fill_sine(&mut warm.in_l, &mut warm.in_r);
+            {
+                let mut input_channels = [warm.in_l.as_mut_slice(), warm.in_r.as_mut_slice()];
+                let input_audio = warm.input_ports.with_input_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_input_only(
+                        input_channels.iter_mut().map(InputChannel::constant),
+                    ),
+                }]);
+                let output_channels = [warm.out_l.as_mut_slice(), warm.out_r.as_mut_slice()];
+                let mut output_audio = warm.output_ports.with_output_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+                }]);
+                let input_events = InputEvents::empty();
+                let mut output_events = OutputEvents::from_buffer(&mut warm.output_events_buffer);
+                started_processor
+                    .process(
+                        &input_audio,
+                        &mut output_audio,
+                        &input_events,
+                        &mut output_events,
+                        None,
+                        None,
+                    )
+                    .expect("warm block must process cleanly");
+            }
+            assert!(
+                !rt_status
+                    .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED),
+                "loaded model must be installed at {} Hz",
+                host_rate
+            );
+
+            // NaN burst block: containment + reset with the effective rate.
+            let mut hostile = StereoTestBuffers::new(n, 0.0, 0.0);
+            fill_sine(&mut hostile.in_l, &mut hostile.in_r);
+            hostile.in_l[10] = f32::NAN;
+            hostile.in_l[50] = f32::INFINITY;
+            hostile.in_r[20] = f32::NEG_INFINITY;
+            {
+                let mut input_channels = [hostile.in_l.as_mut_slice(), hostile.in_r.as_mut_slice()];
+                let input_audio = hostile.input_ports.with_input_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_input_only(
+                        input_channels.iter_mut().map(InputChannel::constant),
+                    ),
+                }]);
+                let output_channels = [hostile.out_l.as_mut_slice(), hostile.out_r.as_mut_slice()];
+                let mut output_audio =
+                    hostile.output_ports.with_output_buffers([AudioPortBuffer {
+                        latency: 0,
+                        channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+                    }]);
+                let input_events = InputEvents::empty();
+                let mut output_events =
+                    OutputEvents::from_buffer(&mut hostile.output_events_buffer);
+
+                test_util::assert_zero_alloc("non-finite reset block", || {
+                    started_processor
+                        .process(
+                            &input_audio,
+                            &mut output_audio,
+                            &input_events,
+                            &mut output_events,
+                            None,
+                            None,
+                        )
+                        .expect("NaN burst must be contained");
+                });
+            }
             assert!(
                 rt_status.check_flag(
-                    neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION
+                    neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED
                 ),
-                "RT_STATUS_HOST_CONTRACT_VIOLATION should be set when host sends buffer exceeding max_frames_count"
+                "RT_STATUS_NON_FINITE_INPUT_DETECTED must be set at {} Hz",
+                host_rate
+            );
+            for i in 0..n {
+                assert!(
+                    hostile.out_l[i].is_finite(),
+                    "post-NaN L[{}] = {} must be finite at {} Hz",
+                    i,
+                    hostile.out_l[i],
+                    host_rate
+                );
+                assert!(
+                    hostile.out_r[i].is_finite(),
+                    "post-NaN R[{}] = {} must be finite at {} Hz",
+                    i,
+                    hostile.out_r[i],
+                    host_rate
+                );
+            }
+
+            // Recovery: a subsequent valid sine must produce a defined,
+            // finite response from the freshly reset model.
+            let mut recovery = StereoTestBuffers::new(n, 0.0, 0.0);
+            fill_sine(&mut recovery.in_l, &mut recovery.in_r);
+            {
+                let mut input_channels =
+                    [recovery.in_l.as_mut_slice(), recovery.in_r.as_mut_slice()];
+                let input_audio = recovery.input_ports.with_input_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_input_only(
+                        input_channels.iter_mut().map(InputChannel::constant),
+                    ),
+                }]);
+                let output_channels =
+                    [recovery.out_l.as_mut_slice(), recovery.out_r.as_mut_slice()];
+                let mut output_audio =
+                    recovery.output_ports.with_output_buffers([AudioPortBuffer {
+                        latency: 0,
+                        channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+                    }]);
+                let input_events = InputEvents::empty();
+                let mut output_events =
+                    OutputEvents::from_buffer(&mut recovery.output_events_buffer);
+                started_processor
+                    .process(
+                        &input_audio,
+                        &mut output_audio,
+                        &input_events,
+                        &mut output_events,
+                        None,
+                        None,
+                    )
+                    .expect("recovery sine must process cleanly");
+            }
+            for i in 0..n {
+                assert!(
+                    recovery.out_l[i].is_finite(),
+                    "recovery L[{}] = {} must be finite at {} Hz",
+                    i,
+                    recovery.out_l[i],
+                    host_rate
+                );
+                assert!(
+                    recovery.out_r[i].is_finite(),
+                    "recovery R[{}] = {} must be finite at {} Hz",
+                    i,
+                    recovery.out_r[i],
+                    host_rate
+                );
+            }
+            let rms_l: f64 = recovery
+                .out_l
+                .iter()
+                .map(|&x| (x as f64).powi(2))
+                .sum::<f64>()
+                / n as f64;
+            let rms_r: f64 = recovery
+                .out_r
+                .iter()
+                .map(|&x| (x as f64).powi(2))
+                .sum::<f64>()
+                / n as f64;
+            assert!(
+                rms_l.sqrt() > 0.0001,
+                "recovery L RMS must be non-trivial at {} Hz (got {})",
+                host_rate,
+                rms_l.sqrt()
+            );
+            assert!(
+                rms_r.sqrt() > 0.0001,
+                "recovery R RMS must be non-trivial at {} Hz (got {})",
+                host_rate,
+                rms_r.sqrt()
             );
         }
+    }
+
+    #[test]
+    fn test_parameter_sanitization_host_fuzzing() {
+        use crate::clap::extensions::params::{
+            PARAM_ACTIVATION, PARAM_ACTIVE_MODEL, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS,
+            PARAM_GATE_THRESH, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE,
+            PARAM_SLIM_OVERRIDE, sanitize_param_value,
+        };
+
+        // NaN sanitization
+        assert_eq!(sanitize_param_value(PARAM_INPUT_GAIN, f32::NAN), 0.0);
+        assert_eq!(sanitize_param_value(PARAM_OUTPUT_GAIN, f32::NAN), 0.0);
+        assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, f32::NAN), -70.0);
+        assert_eq!(sanitize_param_value(PARAM_BYPASS, f32::NAN), 0.0);
+        assert_eq!(sanitize_param_value(PARAM_ACTIVE_MODEL, f32::NAN), 0.0);
+        assert_eq!(sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, f32::NAN), 1.0);
+        assert_eq!(sanitize_param_value(PARAM_SLIM_OVERRIDE, f32::NAN), 0.0);
+        assert_eq!(sanitize_param_value(PARAM_OVERSAMPLE, f32::NAN), 0.0);
+        assert_eq!(sanitize_param_value(PARAM_ACTIVATION, f32::NAN), 1.0);
+
+        // Non-finite (NaN/Inf) sanitization replaces with defaults
+        assert_eq!(sanitize_param_value(PARAM_INPUT_GAIN, f32::INFINITY), 0.0);
+        assert_eq!(
+            sanitize_param_value(PARAM_INPUT_GAIN, f32::NEG_INFINITY),
+            0.0
+        );
+        assert_eq!(
+            sanitize_param_value(PARAM_GATE_THRESH, f32::INFINITY),
+            -70.0
+        );
+        assert_eq!(
+            sanitize_param_value(PARAM_GATE_THRESH, f32::NEG_INFINITY),
+            -70.0
+        );
+        assert_eq!(sanitize_param_value(PARAM_BYPASS, f32::INFINITY), 0.0);
+        assert_eq!(sanitize_param_value(PARAM_BYPASS, f32::NEG_INFINITY), 0.0);
+
+        // Finite out-of-bounds sanitization clamps to valid range
+        assert_eq!(sanitize_param_value(PARAM_INPUT_GAIN, 1000.0), 30.0);
+        assert_eq!(sanitize_param_value(PARAM_INPUT_GAIN, -1000.0), -96.0);
+        assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, 10.0), -40.0);
+        assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -150.0), -90.0);
+        assert_eq!(sanitize_param_value(PARAM_BYPASS, 10.0), 1.0);
+        assert_eq!(sanitize_param_value(PARAM_BYPASS, -10.0), 0.0);
+
+        // Stepped & clamping bounds
+        assert_eq!(sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, 50.0), 2.0);
+        assert_eq!(sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, -10.0), 0.0);
+        assert_eq!(sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, 1.4), 1.0);
+        assert_eq!(sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, 1.6), 2.0);
     }
 }

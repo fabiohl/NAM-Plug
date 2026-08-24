@@ -102,13 +102,13 @@ fn test_state_save_emits_confirmation_log() {
 
     use neural_amp_modeler_rs::common::params::ProcessingParams;
     let params = ProcessingParams {
-        model_path: Some(model_path),
+        model_path: Some(model_path.clone()),
         input_gain_db: 1.0,
         output_gain_db: -2.0,
         gate_threshold_db: -50.0,
         model_basename: Some("lstm.nam".to_string()),
         model_search_paths: vec![],
-        model_hash: None,
+        model_hash: crate::clap::test_util::asset_hash(&model_path),
         bypass: false,
         adaptive_compute: neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Off,
         slim_override: Default::default(),

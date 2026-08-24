@@ -6,7 +6,7 @@
 use super::{
     PARAM_ACTIVATION, PARAM_ACTIVE_MODEL, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH,
     PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32,
-    bypass_f32_to_bool,
+    bypass_f32_to_bool, sanitize_param_value, sanitize_param_value_f64,
 };
 use crate::clap::plugin::NamClapMainThread;
 use clack_extensions::params::{
@@ -257,10 +257,19 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
 
     fn text_to_value(&mut self, id: ClapId, text: &CStr) -> Option<f64> {
         let text_str = text.to_str().ok()?;
-        match id.get() {
+        let id_val = id.get();
+        let parsed = match id_val {
             PARAM_INPUT_GAIN | PARAM_OUTPUT_GAIN | PARAM_GATE_THRESH => {
                 let clean_text = text_str.trim_end_matches(" dB").trim();
-                clean_text.parse::<f64>().ok()
+                let lower = clean_text.to_lowercase();
+                if lower.contains("nan") || lower.contains("inf") {
+                    return None;
+                }
+                let val = clean_text.parse::<f64>().ok()?;
+                if !val.is_finite() {
+                    return None;
+                }
+                Some(val)
             }
             PARAM_BYPASS => match text_str.to_lowercase().as_str() {
                 "active" | "0" | "false" | "off" => Some(0.0),
@@ -287,7 +296,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                             as f64,
                     )
                 } else if let Ok(val) = text_str.parse::<f64>() {
-                    Some(val)
+                    if val.is_finite() { Some(val) } else { None }
                 } else {
                     Some(0.0)
                 }
@@ -296,27 +305,41 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 "off" | "0" => Some(0.0),
                 "conservative" | "1" => Some(1.0),
                 "aggressive" | "2" => Some(2.0),
-                _ => text_str.parse::<f64>().ok(),
+                _ => {
+                    let val = text_str.parse::<f64>().ok()?;
+                    if val.is_finite() { Some(val) } else { None }
+                }
             },
             PARAM_SLIM_OVERRIDE => match text_str.to_lowercase().as_str() {
                 "auto" | "0" => Some(0.0),
                 "force full" | "full" | "1" => Some(1.0),
                 "force lite" | "lite" | "2" => Some(2.0),
-                _ => text_str.parse::<f64>().ok(),
+                _ => {
+                    let val = text_str.parse::<f64>().ok()?;
+                    if val.is_finite() { Some(val) } else { None }
+                }
             },
             PARAM_OVERSAMPLE => match text_str.to_lowercase().as_str() {
                 "off" | "0" => Some(0.0),
                 "2x" | "2" => Some(1.0),
                 "4x" | "4" => Some(2.0),
-                _ => text_str.parse::<f64>().ok(),
+                _ => {
+                    let val = text_str.parse::<f64>().ok()?;
+                    if val.is_finite() { Some(val) } else { None }
+                }
             },
             PARAM_ACTIVATION => match text_str.to_lowercase().as_str() {
                 "fast" | "0" => Some(0.0),
                 "standard" | "1" => Some(1.0),
-                _ => text_str.parse::<f64>().ok(),
+                _ => {
+                    let val = text_str.parse::<f64>().ok()?;
+                    if val.is_finite() { Some(val) } else { None }
+                }
             },
             _ => None,
-        }
+        };
+
+        parsed.map(|v| sanitize_param_value_f64(id_val, v))
     }
 
     fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
@@ -332,7 +355,8 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 continue;
             };
             let id = clap_id.get();
-            let val = param_event.value() as f32;
+            let raw_val = param_event.value() as f32;
+            let val = sanitize_param_value(id, raw_val);
 
             match id {
                 PARAM_INPUT_GAIN => {

@@ -28,7 +28,7 @@ fn test_state_context_roundtrip() {
         gate_threshold_db: -45.0,
         model_basename: Some("lstm.nam".to_string()),
         model_search_paths: vec![],
-        model_hash: None,
+        model_hash: test_util::asset_hash(&model_path),
         bypass: false,
         adaptive_compute: neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Conservative,
         slim_override: Default::default(),
@@ -125,9 +125,11 @@ fn test_state_context_roundtrip() {
     );
 
     // --- Load: ForProject context (full state, with model_path) ---
+    let model_hash = test_util::asset_hash(&model_path).unwrap();
     let project_with_path = format!(
-        r#"{{"input_gain_db":5.0,"output_gain_db":-8.0,"gate_threshold_db":-60.0,"model_path":"{}","model_basename":"lstm.nam","model_search_paths":[],"bypass":true,"adaptive_compute":"Aggressive"}}"#,
-        model_path.to_str().unwrap()
+        r#"{{"input_gain_db":5.0,"output_gain_db":-8.0,"gate_threshold_db":-60.0,"model_path":"{}","model_basename":"lstm.nam","model_hash":"{}","model_search_paths":[],"bypass":true,"adaptive_compute":"Aggressive"}}"#,
+        model_path.to_str().unwrap(),
+        model_hash
     );
     let mut handle = plugin_instance.plugin_handle();
     state_ctx_ext
@@ -192,7 +194,7 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
         output_gain_db: -3.5,
         gate_threshold_db: -55.0,
         model_basename: Some("lstm.nam".to_string()),
-        model_hash: None,
+        model_hash: test_util::asset_hash(&model_path),
         model_search_paths: vec![model_dir],
         bypass: true,
         adaptive_compute: AdaptiveComputeMode::Conservative,

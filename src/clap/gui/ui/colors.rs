@@ -25,7 +25,7 @@ pub const COL_VU_RED: egui::Color32 = egui::Color32::from_rgb(247, 78, 78);
 /// Bypass button color when disabled (`#4A4F5A`).
 pub const COL_BYPASS_OFF: egui::Color32 = egui::Color32::from_rgb(74, 79, 90);
 
-use crate::clap::plugin::NamClapShared;
+use crate::clap::plugin::GuiSharedState;
 use std::sync::atomic::Ordering;
 
 /// Resolves the plugin's dynamic accent color.
@@ -33,7 +33,7 @@ use std::sync::atomic::Ordering;
 /// First tries to use the track color provided by the DAW host (stored in
 /// `track_accent_color` as packed ARGB). If `alpha == 0` (sentinel for
 /// "no color"), returns `COL_ACCENT` (default turquoise).
-pub fn resolve_accent(shared: &NamClapShared) -> egui::Color32 {
+pub fn resolve_accent(shared: &GuiSharedState) -> egui::Color32 {
     let packed = shared.cold.track_accent_color.load(Ordering::Relaxed);
     let alpha = (packed >> 24) as u8;
     if alpha == 0 {

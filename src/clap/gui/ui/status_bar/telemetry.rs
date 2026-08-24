@@ -4,12 +4,12 @@
 
 use crate::clap::gui::ui::colors::{COL_AMBER, COL_BORDER, COL_MUTED, COL_VU_GREEN, COL_VU_RED};
 use crate::clap::gui::ui::state::UiState;
-use crate::clap::plugin::NamClapShared;
+use crate::clap::plugin::GuiSharedState;
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-pub(crate) fn update_telemetry_state(state: &mut UiState, shared: &NamClapShared) {
+pub(crate) fn update_telemetry_state(state: &mut UiState, shared: &GuiSharedState) {
     let now = Instant::now();
     if now.duration_since(state.last_telem_update) < Duration::from_secs(1)
         && (state.telem_cycles != 0 || state.telem_last_n != 0)
@@ -84,7 +84,7 @@ pub(crate) fn update_telemetry_state(state: &mut UiState, shared: &NamClapShared
 pub(crate) fn draw_telemetry_strings(
     ui: &mut egui::Ui,
     state: &mut UiState,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     accent_color: egui::Color32,
 ) {
     ui.horizontal(|ui| {
@@ -176,21 +176,19 @@ pub(crate) fn draw_telemetry_strings(
                 info_btn.on_hover_text("Copy Diagnostic info to clipboard and ~/.cache/nam-rs/");
 
             if info_btn.clicked() {
-                // Synchronize global active model name and active sample rate
-                if let (Ok(name), Ok(mut active_name)) = (
-                    shared.cold.ui_model_name.lock(),
-                    neural_amp_modeler_rs::common::diagnostics::ACTIVE_MODEL_NAME.write(),
-                ) {
-                    *active_name = name.clone();
-                }
-                neural_amp_modeler_rs::common::diagnostics::ACTIVE_SAMPLE_RATE.store(
-                    shared.cold.sample_rate.load(Ordering::Relaxed),
-                    Ordering::Relaxed,
-                );
+                let consumer_meta =
+                    neural_amp_modeler_rs::common::diagnostics::AudioMetadata {
+                        channel_count: 2,
+                        host_name: "CLAP Host".to_string(),
+                    };
 
-                // Capture diagnostic bundle
+                // Capture instance-scoped diagnostic bundle with runtime snapshot
                 let bundle =
-                    neural_amp_modeler_rs::common::diagnostics::DiagnosticBundle::capture();
+                    neural_amp_modeler_rs::common::diagnostics::DiagnosticBundle::capture_for_instance_with_runtime(
+                        shared.cold.instance_id,
+                        shared,
+                        &consumer_meta,
+                    );
                 let diagnostic_content = bundle.render();
 
                 // (a) Copy to clipboard

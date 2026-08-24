@@ -15,7 +15,7 @@
 #   2. Release verification — CLAP .so artifact build + CLAP × NAMCore float
 #      parity oracle (S1-T06; release-only scope per S6-T04 / RES-04) when the
 #      C++ render binary, release .so and model fixture exist; otherwise
-#      reported as an explicit GAP.
+#      reported as an explicit GAP (or FAIL in NAM_QUICK_STRICT=1).
 #   3. RT-Safety heap-audit — zero-alloc process() gate (--features heap-audit).
 #
 # Each phase persists its output to target/logs/quick-phaseN.log (phase 3:
@@ -67,12 +67,69 @@ echo -e "${BLUE}${BOLD}========================================${NC}"
 emit "SUITE: tests-quick"
 emit "STRICT: ${NAM_QUICK_STRICT:-0}"
 
+# find_stale_artifact_input <artifact>
+#   Prints the first source input that is strictly newer than <artifact>, or
+#   nothing. Inputs: Cargo.toml, Cargo.lock, .cargo/config.toml, build.rs and
+#   src/** of this crate, plus the patched sibling NeuralAmpModeler-rs tree
+#   (Cargo.toml + src/**) when present ([patch.crates-io] in Cargo.toml).
+find_stale_artifact_input() {
+    local artifact="$1"
+    local f hit
+    for f in Cargo.toml Cargo.lock build.rs .cargo/config.toml; do
+        if [ -f "$f" ] && [ "$f" -nt "$artifact" ]; then
+            printf '%s\n' "$f"
+            return 0
+        fi
+    done
+    if [ -d src ]; then
+        hit=$(find src -type f -newer "$artifact" -print -quit 2>/dev/null || true)
+        if [ -n "$hit" ]; then
+            printf '%s\n' "$hit"
+            return 0
+        fi
+    fi
+    if [ -d "../NeuralAmpModeler-rs" ]; then
+        if [ -f "../NeuralAmpModeler-rs/Cargo.toml" ] && [ "../NeuralAmpModeler-rs/Cargo.toml" -nt "$artifact" ]; then
+            printf '%s\n' "../NeuralAmpModeler-rs/Cargo.toml"
+            return 0
+        fi
+        if [ -d "../NeuralAmpModeler-rs/src" ]; then
+            hit=$(find "../NeuralAmpModeler-rs/src" -type f -newer "$artifact" -print -quit 2>/dev/null || true)
+            if [ -n "$hit" ]; then
+                printf '%s\n' "$hit"
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
+# verify_artifact_fresh <artifact> <profile> <cargo_flag>
+#   T6.4 fail-closed staleness gate: the artifact must be newer than every
+#   source input it is compiled from. In strict mode a stale artifact aborts —
+#   there is NO silent rebuild, because validating a stale .so is exactly the
+#   defect being closed; the operator must build explicitly first.
+verify_artifact_fresh() {
+    local artifact="$1"
+    local profile="$2"
+    local flag="$3"
+    local stale sha
+    stale=$(find_stale_artifact_input "$artifact") || true
+    if [ -n "$stale" ]; then
+        die "FATAL: CLAP artifact ($profile) is STALE — '$stale' is newer than $artifact. Run 'cargo build --locked${flag:+ $flag}' first; strict mode never validates a stale artifact (T6.4 fail-closed)."
+    fi
+    sha=$(sha256sum "$artifact" | cut -d' ' -f1)
+    echo -e "  ${GREEN}✓ CLAP artifact ($profile, fresh):${NC} $artifact (sha256: ${sha:0:16}...)"
+}
+
 # Helper: Ensure the CLAP plugin shared library artifact for the requested
 # profile is present before running integration tests that dlopen it.
 #
 # Accepts profile "debug" or "release". Checks for the exact profile artifact
 # first; does NOT silently fall back to the other profile, since that could
 # mask build-time failures specific to debug assertions or release codegen.
+# In NAM_QUICK_STRICT=1 the artifact is also freshness-checked (T6.4): a
+# stale .so aborts the suite instead of being validated.
 ensure_clap_artifact() {
     local profile="${1:-debug}"
     local flag=""
@@ -80,13 +137,28 @@ ensure_clap_artifact() {
         flag="--release"
     fi
 
-    # If the caller explicitly pointed to a pre-built artifact, honour it only
-    # when the file actually exists — never silently accept a stale path.
-    if [ -n "${CLAP_PLUGIN_PATH:-}" ]; then
-        if [ -f "$CLAP_PLUGIN_PATH" ]; then
+    # Explicit override: honour CLAP_PLUGIN_UNDER_TEST or CLAP_PLUGIN_PATH
+    local explicit="${CLAP_PLUGIN_UNDER_TEST:-${CLAP_PLUGIN_PATH:-}}"
+    if [ -n "$explicit" ]; then
+        if [ -f "$explicit" ]; then
+            if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
+                verify_artifact_fresh "$explicit" "$profile" "$flag"
+            else
+                local stale_input
+                stale_input=$(find_stale_artifact_input "$explicit") || true
+                if [ -n "$stale_input" ]; then
+                    warn "Explicit CLAP artifact is stale relative to '$stale_input'; testing it as requested (non-strict)."
+                fi
+                local sha
+                sha=$(sha256sum "$explicit" | cut -d' ' -f1)
+                echo -e "  ${GREEN}✓ CLAP artifact ($profile explicit):${NC} $explicit (sha256: ${sha:0:16}...)"
+            fi
             return 0
         else
-            warn "CLAP_PLUGIN_PATH set but file not found: $CLAP_PLUGIN_PATH. Rebuilding..."
+            if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
+                die "FATAL: Explicit CLAP plugin artifact does not exist: $explicit"
+            fi
+            warn "Explicit CLAP artifact not found: $explicit. Rebuilding..."
         fi
     fi
 
@@ -96,12 +168,22 @@ ensure_clap_artifact() {
     if [ ! -f "$artifact_path" ]; then
         warn "CLAP plugin ($profile) artifact not found. Pre-building..."
         # shellcheck disable=SC2086
-        cargo build $flag
+        cargo build --locked $flag
+    elif [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
+        verify_artifact_fresh "$artifact_path" "$profile" "$flag"
+        return 0
+    else
+        # Non-strict development flow: stale artifacts are rebuilt (never
+        # validated), preserving the permissive PASSED_WITH_GAPS behavior.
+        local stale_input
+        stale_input=$(find_stale_artifact_input "$artifact_path") || true
+        if [ -n "$stale_input" ]; then
+            warn "CLAP plugin ($profile) artifact is STALE ('$stale_input' newer). Rebuilding with --locked..."
+            # shellcheck disable=SC2086
+            cargo build --locked $flag
+        fi
     fi
 
-    # Fail-closed (S1-T07): a successful cargo build must have produced the
-    # shared library. Never proceed to dlopen-based tests with a missing or
-    # partial artifact — that would mask build-time failures.
     if [ ! -f "$artifact_path" ]; then
         die "FATAL: CLAP plugin artifact was not created at expected path: $artifact_path"
     fi
@@ -119,30 +201,21 @@ timeout 300 cargo test --features testing --lib \
     --test clap_e0_containment_test \
     --test clap_e2_proptest \
     --test processor_bypass_test \
+    --test avx512_guard \
     2>&1 | tee target/logs/quick-phase1.log
 assert_ran_tests target/logs/quick-phase1.log 1
 emit "PHASE1: PASS log=target/logs/quick-phase1.log"
 
 # ── Phase 2: Release verification (release, S6-T04 / RES-04) ─────────────────
-# Gaps collected during the run (e.g. missing oracle prerequisites); surfaced
-# as WARN GAP lines and as OVERALL: PASSED_WITH_GAPS in the final receipt.
 declare -a GAPS=()
 
-# Phase 2 focuses on what actually changes with `--release`: compiling the CLAP
-# .so artifact and running the CLAP × NAMCore float parity oracle against it
-# (test_clap_parity_multi_rate, tests/clap/clap_parity_multi_sr.rs, #[ignore])
-# with ESR < 1e-8 / SNR > 80 dB gates. The logical unit/integration re-run of
-# the Phase 1 targets (--lib, --test clap, --test clap_e0_containment_test,
-# --test clap_e2_proptest, --test processor_bypass_test) is dropped: debug
-# assertions ON in Phase 1 already validate that logic, and the release codegen
-# of the .so is exactly what the oracle measures (RES-04 / SIB-03).
-#
-# The oracle runs only when the C++ render binary, the release artifact and the
-# model fixture are all present; otherwise the gate is reported as an explicit
-# GAP instead of silently passing.
 phase "Release verification: CLAP .so artifact + float parity oracle (release)..."
 ensure_clap_artifact release
-"$SCRIPT_DIR/verify_no_avx512_release.sh" "${CARGO_TARGET_DIR:-target}/release/libnam_plug.so"
+
+release_artifact="${CLAP_PLUGIN_UNDER_TEST:-${CLAP_PLUGIN_PATH:-${CARGO_TARGET_DIR:-target}/release/libnam_plug.so}}"
+export CLAP_PLUGIN_UNDER_TEST="$release_artifact"
+
+"$SCRIPT_DIR/verify_no_avx512_release.sh" "$release_artifact"
 
 # Mirrors the Rust-side discovery order: NAM_CORE_RENDER_BIN first, then
 # build/namcore_render in this repo, then the sibling NeuralAmpModeler-rs
@@ -174,12 +247,17 @@ elif [ -f "tests/fixtures/models/wavenet_a1_standard.nam" ]; then
 fi
 
 if render_bin=$(find_namcore_render); then
-    artifact_path="${CARGO_TARGET_DIR:-target}/release/libnam_plug.so"
-    if [ -f "$artifact_path" ] && [ -n "$model_fixture" ]; then
+    if [ -f "$release_artifact" ] && [ -n "$model_fixture" ]; then
+        oracle_sha=$(sha256sum "$render_bin" | cut -d' ' -f1)
+        fixture_sha=$(sha256sum "$model_fixture" | cut -d' ' -f1)
+        artifact_sha=$(sha256sum "$release_artifact" | cut -d' ' -f1)
+
         echo -e "  ${BLUE}→ Executing CLAP vs NAMCore float parity oracle...${NC}"
-        warn "oracle=$render_bin artifact=$artifact_path fixture=$model_fixture"
-        # NAM_REQUIRE_CPP_ORACLE=1 turns a discovery mismatch inside the test
-        # into a loud panic instead of a masked SKIP-pass.
+        warn "oracle=$render_bin (sha256:${oracle_sha:0:16}) artifact=$release_artifact fixture=$model_fixture (sha256:${fixture_sha:0:16})"
+        emit "ORACLE_SHA256: $oracle_sha"
+        emit "FIXTURE_SHA256: $fixture_sha"
+        emit "ARTIFACT_SHA256: $artifact_sha"
+
         NAM_REQUIRE_CPP_ORACLE=1 timeout 600 cargo test --features testing --release --test clap \
             test_clap_parity_multi_rate -- --ignored --nocapture \
             2>&1 | tee -a target/logs/quick-phase2.log
@@ -193,22 +271,24 @@ if render_bin=$(find_namcore_render); then
             die "PARITY: FAIL test_clap_parity_multi_rate did not complete successfully"
         fi
     else
+        if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
+            die "PARITY: FAIL missing release artifact or fixture in strict mode"
+        fi
         GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")
         echo -e "${YELLOW}${BOLD}WARN GAP: clap_parity_multi_rate:missing_render_or_fixtures${NC}"
-        warn "Actionable: ensure release artifact at $artifact_path ('cargo build --release') and model fixture tests/fixtures/models/wavenet_a1_standard.nam (or set NAM_FIXTURES_DIR to a fixture directory in isolated CI/CD). Oracle found at $render_bin."
+        warn "Actionable: ensure release artifact at $release_artifact and model fixture tests/fixtures/models/wavenet_a1_standard.nam. Oracle found at $render_bin."
         emit "PHASE2: GAP reason=missing_render_or_fixtures"
     fi
 else
+    if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
+        die "PARITY: FAIL missing NAMCore render binary in strict mode"
+    fi
     GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")
     echo -e "${YELLOW}${BOLD}WARN GAP: clap_parity_multi_rate:missing_render_or_fixtures${NC}"
-    warn "Actionable: set NAM_CORE_RENDER_BIN (path to the NAMCore C++ render binary) or build it locally under build/namcore_render (see golden_gen_build.sh) to enable the CLAP parity oracle. Isolated clones must use NAM_CORE_RENDER_BIN."
+    warn "Actionable: set NAM_CORE_RENDER_BIN (path to the NAMCore C++ render binary) or build it locally under build/namcore_render to enable the CLAP parity oracle."
     emit "PHASE2: GAP reason=missing_render_or_fixtures"
 fi
 
-# S4-T1 (R-08): dlopen the production artifact and assert a cab-sim IR
-# measurably changes the audio output (fail-closed evidence that the cabsim
-# path is compiled into the default cdylib, not gated behind #[cfg(test)]).
-release_artifact="${CARGO_TARGET_DIR:-target}/release/libnam_plug.so"
 if [ -f "$release_artifact" ]; then
     echo -e "  ${BLUE}→ Executing cab-sim IR artifact test (dlopen)...${NC}"
     timeout 300 cargo test --features testing --release --test clap \
@@ -221,6 +301,9 @@ if [ -f "$release_artifact" ]; then
         die "CABSIM_IR: FAIL test_cabsim_ir_changes_audio_release_artifact did not complete successfully"
     fi
 else
+    if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
+        die "CABSIM_IR: FAIL missing release artifact in strict mode"
+    fi
     GAPS+=("cabsim_ir:missing_release_artifact")
     echo -e "${YELLOW}${BOLD}WARN GAP: cabsim_ir:missing_release_artifact${NC}"
     warn "Actionable: build the release artifact ('cargo build --release') to enable the cab-sim IR artifact test."
@@ -254,6 +337,8 @@ if [ ${#GAPS[@]} -gt 0 ]; then
         emit "OVERALL: FAIL reason=strict_gaps"
         exit 1
     fi
+    emit "OVERALL: PASSED_WITH_GAPS"
+    echo -e "${YELLOW}${BOLD}OVERALL: PASSED_WITH_GAPS${NC}"
     exit 0
 fi
 

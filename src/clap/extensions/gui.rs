@@ -134,29 +134,17 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// Returns the static host handle and shared pointer needed by window callbacks.
-    ///
-    /// # Safety
-    ///
-    /// The returned `HostSharedHandle<'static>` and `NamClapSharedRef` must
-    /// only be dereferenced while `alive_fence` is up — the window handler
-    /// enforces this via `NamPluginWindow::safe_shared` and fence-gated host
-    /// calls. `NamClapMainThread::drop` lowers the fence and bounded-joins
-    /// every GUI thread before `NamClapShared` is dropped, so no thread can
-    /// dereference these pointers after teardown (R-09).
+    /// Returns the static host handle and shared Arc needed by window callbacks.
     fn host_static_and_shared(
         &self,
     ) -> (
         clack_plugin::host::HostSharedHandle<'static>,
-        crate::clap::plugin::NamClapSharedRef,
+        Arc<crate::clap::plugin::GuiSharedState>,
     ) {
         let bridge = GuiHostBridge::new(&self.host.shared());
         let host_static = bridge.as_static();
-        // SAFETY: self.shared is a valid reference to the plugin shared state.
-        // All dereferences from the GUI thread are fenced by `alive_fence`,
-        // which is lowered before the shared state is dropped (see above).
-        let shared_ptr = unsafe { crate::clap::plugin::NamClapSharedRef::new(self.shared) };
-        (host_static, shared_ptr)
+        let shared_arc = Arc::clone(&self.shared.gui);
+        (host_static, shared_arc)
     }
 
     /// Builds the common `baseview::WindowOpenOptions` for both embedded and floating windows.
@@ -276,7 +264,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             };
 
             let options = Self::window_options("", scale_factor);
-            let (host_static, shared_ptr) = self.host_static_and_shared();
+            let (host_static, shared_arc) = self.host_static_and_shared();
 
             let close_signal = Arc::new(AtomicBool::new(false));
             let cs = Arc::clone(&close_signal);
@@ -298,13 +286,14 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             // `degraded` on the failure arms (match arms are exclusive).
             let cs_for_new = Arc::clone(&close_signal);
             let fence_for_new = Arc::clone(&alive_fence);
+            let shared_for_new = Arc::clone(&shared_arc);
 
             let window_handle = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 baseview::Window::open_parented(&_window, options, move |win| {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         NamPluginWindow::new(
                             win,
-                            shared_ptr,
+                            shared_for_new,
                             host_static,
                             cs_for_new,
                             fence_for_new,
@@ -318,7 +307,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                                 *guard = Some(plugin_error_message(&err));
                             }
                             NamPluginWindow::degraded(
-                                shared_ptr,
+                                shared_arc,
                                 host_static,
                                 cs,
                                 alive_fence,
@@ -333,7 +322,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                                 *guard = Some("GUI initialization failed unexpectedly");
                             }
                             NamPluginWindow::degraded(
-                                shared_ptr,
+                                shared_arc,
                                 host_static,
                                 cs,
                                 alive_fence,
@@ -387,7 +376,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             };
 
             let options = Self::window_options("NAM-Plug", scale_factor);
-            let (host_static, shared_ptr) = self.host_static_and_shared();
+            let (host_static, shared_arc) = self.host_static_and_shared();
 
             let close_signal = Arc::new(AtomicBool::new(false));
             let cs = Arc::clone(&close_signal);
@@ -408,6 +397,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             // `degraded` on the failure arms (match arms are exclusive).
             let cs_for_new = Arc::clone(&close_signal);
             let fence_for_new = Arc::clone(&alive_fence);
+            let shared_for_new = Arc::clone(&shared_arc);
 
             let handle = std::thread::spawn(move || {
                 baseview::Window::open_blocking(options, move |win| {
@@ -415,7 +405,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             NamPluginWindow::new(
                                 win,
-                                shared_ptr,
+                                shared_for_new,
                                 host_static,
                                 cs_for_new,
                                 fence_for_new,
@@ -429,7 +419,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                                     *guard = Some(plugin_error_message(&err));
                                 }
                                 NamPluginWindow::degraded(
-                                    shared_ptr,
+                                    shared_arc,
                                     host_static,
                                     cs,
                                     alive_fence,
@@ -445,7 +435,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                                     *guard = Some("GUI initialization failed unexpectedly");
                                 }
                                 NamPluginWindow::degraded(
-                                    shared_ptr,
+                                    shared_arc,
                                     host_static,
                                     cs,
                                     alive_fence,

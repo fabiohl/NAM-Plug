@@ -10,8 +10,9 @@ pub use command_scheduler::{
     CommandSchedulerChannels,
 };
 pub use shared::{
-    ClapParamPayload, ColdShared, NamClapShared, NamClapSharedRef, NamModelMetadata, PendingModel,
-    RENDER_MODE_OFFLINE, RENDER_MODE_REALTIME, RtToUi, UiToRt,
+    ClapParamPayload, ColdShared, GuiSharedState, LoadModelPayload, NamClapShared,
+    NamModelMetadata, PendingModel, PendingRestore, RENDER_MODE_OFFLINE, RENDER_MODE_REALTIME,
+    RestoreModelPublish, RestorePublish, RestoreTxn, RtToUi, UiToRt,
 };
 
 mod main_thread;
@@ -82,7 +83,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             crate::clap::gui::ui::zones::dialog_state::IrDialogSharedState::new(),
         ));
 
-        Ok(NamClapShared {
+        let gui = Arc::new(GuiSharedState {
             rt_to_ui: RtToUi {
                 ui_peak_l: AtomicU32::new(0.0f32.to_bits()),
                 ui_peak_r: AtomicU32::new(0.0f32.to_bits()),
@@ -105,6 +106,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                 host_r_deactivated: std::sync::atomic::AtomicBool::new(false),
             },
             cold: ColdShared {
+                instance_id: shared::next_instance_id(),
                 param_tx: Mutex::new(Some(param_tx)),
                 param_rx: Mutex::new(Some(param_rx)),
                 gc_tx: Mutex::new(Some(gc_tx)),
@@ -151,6 +153,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                 render_mode: AtomicU32::new(0),
                 gui_scale_factor: AtomicU32::new(0),
                 ir_path: Mutex::new(None),
+                ir_hash: Mutex::new(None),
                 ui_pending_ir: Mutex::new(None),
                 ui_ir_loading: std::sync::atomic::AtomicBool::new(false),
                 ui_ir_load_error: std::sync::atomic::AtomicBool::new(false),
@@ -163,9 +166,10 @@ impl DefaultPluginFactory for NamClapPlugin {
                 full_wavenet_model: Mutex::new(None),
                 cmd_next_seq: AtomicU64::new(0),
                 cmd_last_ack: AtomicU64::new(0),
+                last_applied_generation: AtomicU64::new(0),
                 pending_restart_os_factor: AtomicU32::new(0),
                 in_flight_params: Mutex::new(None),
-                pending_preset_load: Mutex::new(None),
+                pending_preset_load: Mutex::new(std::collections::VecDeque::new()),
                 pending_model: Mutex::new(None),
                 deactivated_dsp: Mutex::new(None),
                 dialog_state: dialog_state.clone(),
@@ -174,7 +178,9 @@ impl DefaultPluginFactory for NamClapPlugin {
                 ir_dialog_handle_sink: Mutex::new(None),
                 host_log_sink: Mutex::new(None),
             },
-        })
+        });
+
+        Ok(NamClapShared { gui })
     }
 
     fn new_main_thread<'a>(
@@ -281,13 +287,16 @@ impl DefaultPluginFactory for NamClapPlugin {
                     host_log.log(&host_shared, severity, &cmsg);
                 });
                 if let Some(nl) = NamLogger::global() {
-                    nl.register_sink(&sink);
+                    nl.register_instance_sink(shared.cold.instance_id, &sink);
                 }
                 if let Ok(mut guard) = shared.cold.host_log_sink.lock() {
                     *guard = Some(sink);
                 }
             }
         }
+
+        let _scope =
+            neural_amp_modeler_rs::common::diagnostics::scope_instance(shared.cold.instance_id);
 
         let cmd_producer = CommandProducer::new(
             param_tx,
@@ -315,6 +324,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             ir_dialog_state: shared.cold.ir_dialog_state.clone(),
             gui_lifecycle: crate::clap::gui::lifecycle::GuiLifecycle::Hidden,
             hugepage_synced: false,
+            pending_restore: None,
         };
 
         let host_name = main_thread

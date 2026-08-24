@@ -14,6 +14,8 @@ use neural_amp_modeler_rs::common::spsc::GcItem;
 use neural_amp_modeler_rs::models::StaticModel;
 use rtrb::{Consumer, Producer};
 
+use std::sync::atomic::Ordering;
+
 use super::deactivated::DeactivatedDspState;
 
 /// RAII guard that restores extracted shared resources on drop.
@@ -29,6 +31,7 @@ pub(crate) struct ActivateRollbackGuard<'a> {
     pub(crate) gc_tx: Option<Producer<GcItem>>,
     pub(crate) slimmable_rx: Option<Consumer<Option<Box<StaticModel>>>>,
     pub(crate) deactivated: Option<DeactivatedDspState>,
+    pub(crate) pending_restart_os_factor: Option<u32>,
 }
 
 /// Resources extracted from `ColdShared` during `activate()`.
@@ -47,6 +50,7 @@ impl<'a> ActivateRollbackGuard<'a> {
             gc_tx: None,
             slimmable_rx: None,
             deactivated: None,
+            pending_restart_os_factor: None,
         }
     }
 
@@ -66,6 +70,8 @@ impl<'a> ActivateRollbackGuard<'a> {
             .slimmable_rx
             .take()
             .ok_or_else(|| PluginError::Message("slimmable_rx must be set before defuse"))?;
+        self.deactivated = None;
+        self.pending_restart_os_factor = None;
         Ok(ActivatedResources {
             param_rx: rx,
             gc_tx: tx,
@@ -76,11 +82,17 @@ impl<'a> ActivateRollbackGuard<'a> {
 
 impl Drop for ActivateRollbackGuard<'_> {
     fn drop(&mut self) {
-        // Restore SPSC channels and DeactivatedDspState in reverse
+        // Restore SPSC channels, DeactivatedDspState, and pending restart factor in reverse
         // extraction order. Each `.take()` moves the resource out of the
         // guard so the Drop is idempotent (restore-once). Mutex poisoning
         // is recovered via `into_inner()` — the resource must be restored
         // even if a previous lock attempt panicked.
+        if let Some(factor) = self.pending_restart_os_factor.take() {
+            self.shared
+                .cold
+                .pending_restart_os_factor
+                .store(factor, Ordering::Release);
+        }
         if let Some(rx) = self.slimmable_rx.take() {
             *self
                 .shared
@@ -143,5 +155,36 @@ mod tests {
         let guard = ActivateRollbackGuard::new(&shared);
         let result = guard.defuse();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_drop_rollback_restores_all_resources() {
+        let shared = make_test_shared();
+        {
+            let mut guard = ActivateRollbackGuard::new(&shared);
+            let (_param_tx, param_rx) = rtrb::RingBuffer::new(8);
+            let (gc_tx, _gc_rx) = rtrb::RingBuffer::new(8);
+            let (_slimmable_tx, slimmable_rx) = rtrb::RingBuffer::new(8);
+
+            guard.param_rx = Some(param_rx);
+            guard.gc_tx = Some(gc_tx);
+            guard.slimmable_rx = Some(slimmable_rx);
+            guard.pending_restart_os_factor = Some(2);
+
+            // Simulating an error before defuse: guard dropped
+        }
+
+        // Verify that pending_restart_os_factor was restored
+        assert_eq!(
+            shared
+                .cold
+                .pending_restart_os_factor
+                .load(Ordering::Acquire),
+            2
+        );
+        // Verify channels are back in ColdShared
+        assert!(shared.cold.param_rx.lock().unwrap().is_some());
+        assert!(shared.cold.gc_tx.lock().unwrap().is_some());
+        assert!(shared.cold.slimmable_rx.lock().unwrap().is_some());
     }
 }

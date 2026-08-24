@@ -50,12 +50,12 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ## 2. Compilation Strategy & Feature Flags
 
-`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.5.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and an auxiliary PGO profiling binary (`pgo_profiling_workload` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
+`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.7.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing binaries (`pgo_profiling_workload` and `nam_bin_guard` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
 
 The crate feature flags defined in `Cargo.toml` are:
 
 - **`stereo` (default):** Enables dual-channel L/R audio processing and dynamic adaptive stereo VU metering.
-- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, and the `pgo_profiling_workload` binary.
+- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, `nam_bin_guard`, and the `pgo_profiling_workload` binary.
 - **`heap-audit`:** Activates the allocation counting allocator interceptor (`CountingAllocator`) for RT-safety heap audits.
 
 ```bash
@@ -101,6 +101,28 @@ Exposed via `NamPluginParams` (`src/common/params.rs`) and registered in `src/cl
 | **Activation Precision** | `activation_precision` (8) | Stepped | `Standard`, `Fast`                  | Math mode (`Standard` exact-grade / `Fast` Padé-minimax). |
 
 Model file paths (`.nam`/`.namb`) and Cabsim IR file paths (`.wav`) are managed as **DAW State Properties** (`clap_plugin_state`), enabling project-level serialization and restoration.
+
+### 3.3 Mandatory Asset Identity (SHA-256)
+
+Every asset reference persisted in state **must** carry its SHA-256 hex digest
+(`model_hash` / `ir_hash`, exactly 64 hex characters) — the content-based
+portable identity of the file (T6.2 / F-ROB-PLUG-08 residual). The invariant:
+
+> **No asset is adopted without a valid digest that was verified in the same
+> restore cycle** — except an explicit user override, which is always logged.
+
+| Path | Policy |
+|:-----|:-------|
+| **Full restore** (project / duplicate) | `model_path` exists: the digest is mandatory and must match the file at restore time. Missing, malformed or divergent digest rejects that path; the basename fallback only runs when the *expected* digest exists and matches a candidate. Full state without any expected digest ⇒ explicit failure — the previously active DSP stays intact. |
+| **Basename search** (portable / cross-machine) | A candidate is adopted only when its computed digest equals the saved `model_hash`. A reference without a saved hash is rejected outright — the first candidate is never accepted silently. |
+| **IR** | The same rule applies: an `ir_path` without a valid `ir_hash` never loads the WAV. |
+| **Presets without hash** (legacy) | Single documented policy: **rejected in automatic restore**; the migration path is the explicit GUI action — re-load the model/IR file via the dialog, which recomputes the digest from the file the user picked and re-saves the preset. There is no silent fail-open. |
+| **Save** | `state.save` / `state-context.save` refuse to persist any asset reference lacking a well-formed digest (defensive guard; every adoption path already computes it). |
+
+All adoption paths (GUI model/IR load, preset-load extension, transactional
+restore) compute the digest up-front and **fail closed** if it cannot be
+computed (e.g. file exceeding the 256 MiB streaming-hash limit) — an asset
+without a digest is never adopted, and therefore never persisted.
 
 ---
 
@@ -193,11 +215,44 @@ During plugin `activate()`, channel receivers (`param_rx`, `slimmable_rx`), `gc_
 
 Recomputing effective latency (resampler latency + oversample latency + cabsim IR latency) involves division and multiple structure queries. Effective latency is cached in `cached_effective_latency` (`src/clap/processor/state.rs`) and recomputed strictly during cold swap routines (`swap_model`, `swap_cabsim`, `apply_oversample`), completely eliminating latency computation from the hot `process_events` per-block path while driving instant host PDC updates via `clap_plugin_latency`.
 
-### 5.6 FFI Lifetime Safety & Panic Guard
+### 5.6 FFI Lifetime Safety, Panic Guard & Multi-Instance Isolation
 
-- **`alive_fence` (`Arc<AtomicBool>`):** Background file picker threads check `alive_fence` before dereferencing shared pointers, preventing use-after-free (UAF) if the host destroys the plugin while a dialog is open.
-- **`GuiHostBridge` (`src/clap/gui/mod.rs`):** Safe wrapper storing raw host pointers as `NonNull<()>` and reconstructing `HostSharedHandle<'static>` on demand, reflecting the CLAP spec guarantee that the host outlives the plugin.
-- **C-ABI Panic Protection:** `install_panic_hook("clap")` sets the crash reporter. Any Rust panic crossing C-ABI host boundaries is caught to prevent Undefined Behavior (UB), returning clean early failure codes.
+**GUI state is reference-counted, not raw.** `NamClapShared` owns the plugin
+shared state through `Arc<GuiSharedState>` (`src/clap/plugin/shared.rs`), so
+GUI windows, background `rfd` file-picker threads, and the `nam-gui-reaper`
+join thread all hold refcounted access to the same state. Memory lifetime is
+therefore managed by the `Arc` — there is no scenario in which a GUI or dialog
+thread can dereference freed plugin state.
+
+- **`alive_fence` (`Arc<AtomicBool>`, lowered in `NamClapShared::drop`):** the
+  fence is a **logical validity** gate (protocol R-09), *not* a memory-lifetime
+  mechanism. During teardown the main thread lowers the fence and bounded-joins
+  every GUI/dialog thread *before* the instance's shared state is released;
+  window event loops and file-picker callbacks are fence-gated no-ops while
+  destruction is in progress, so a background thread can never **publish** a
+  host callback after `destroy()`. The `Arc` already keeps the memory alive;
+  the fence keeps the *interaction* with the host inside the plugin's lifetime.
+- **`GuiHostBridge` (`src/clap/gui/mod.rs`):** safe wrapper storing the raw
+  host pointer as `NonNull<()>` and reconstructing `HostSharedHandle<'static>`
+  on demand, reflecting the CLAP spec guarantee that the host outlives the
+  plugin. GUI threads dereference it only while `alive_fence` is up.
+- **C-ABI Panic Guard:** `profile.release` and `profile.dist` compile with
+  `panic = "unwind"` (`Cargo.toml`), and every CLAP entry point — `activate`,
+  `process`, `deactivate`, GUI `create`/window callbacks, and parameter
+  `flush()` — wraps its body in `catch_unwind(AssertUnwindSafe(..))`
+  (`src/clap/processor/mod.rs`, `src/clap/extensions/gui.rs`,
+  `src/clap/extensions/params/audio.rs`). A Rust panic is converted to a typed
+  `PluginError` (full crash report written to `~/.cache/nam-rs/crash-*.txt` by
+  `install_panic_hook("clap")`) and returned as a clean failure code, never
+  crossing the C-ABI boundary as Undefined Behavior.
+- **Multi-instance isolation (`instance_id`):** every plugin instance receives
+  a unique `ColdShared::instance_id` (`next_instance_id()`). Diagnostics are
+  scoped per instance via `scope_instance(instance_id)`, and the global
+  `NamLogger` registers a per-instance host-log sink keyed by `instance_id`, so
+  concurrent instances keep their logs and state separate
+  (`processor_multi_instance_isolation_test`). The panic hook tracks
+  `ACTIVE_INSTANCES` and raises the global shutdown signal only when the
+  *last* instance is destroyed.
 
 ### 5.7 Deferred Model Load (`pending_model`)
 
@@ -206,6 +261,57 @@ When DAW state is restored prior to `activate()`, the host buffer size (`max_fra
 ### 5.8 Channel Preservation on `deactivate()`
 
 Calling `deactivate()` returns SPSC channel consumers (`param_rx`, `gc_tx`, `slimmable_rx`) back into `ColdShared`, allowing hosts to stop and restart audio processing without instance recreation or memory reallocation. Before the processor drops, `deactivate()` also performs the GC parking-lot handoff (see §5.3): the 16-slot RT array is passed by mutable reference to `drain_gc_final()` so every in-flight `GcItem` is released off-RT through the canonical drain.
+
+### 5.9 Transactional State Restore (Stage/Commit/Ack)
+
+State restoration (`clap_plugin_state`, `clap_plugin_state_context`, and the
+preset-load extension) is applied through a transactional **Stage → Commit →
+Ack** protocol that keeps UI, disk and audio observing the *same* generation
+(T6.1 / F-ROB-PLUG-07 residual). The invariant is **"old-complete or
+new-complete"**: no observer ever sees a hybrid of two restore generations.
+
+1. **Stage** — `build_restore_package(validated, current_params, host_rate, mode)`
+   (`src/clap/extensions/state_transaction.rs`): validates the requested state
+   (asset digests, resampler feasibility), derives the effective parameters
+   (Full = everything; ForPreset = identity subset incl. oversample/activation),
+   clones the lightweight metadata into a publish payload, and moves the heavy
+   resources (model, IR adapter) **by value** into the transaction. Nothing is
+   published yet; a validation failure aborts the commit with the previously
+   active DSP intact.
+2. **Commit (RT)** — the whole package is pushed as a **single**
+   `ClapParamPayload::RestoreTxn` item (`generation`, `model`, `ir`, `params`)
+   into the SPSC command ring (`atomic_commit` → `deliver_pending_restore`). A
+   single item guarantees the audio block that drains it applies the entire
+   package atomically — three separate commands could interleave a `Full`
+   between model and IR, producing the forbidden hybrid. If the ring is full,
+   the full package (txn + publish) is retained in
+   `NamClapMainThread::pending_restore` and `request_callback()` schedules a
+   retry (fail-closed — never dropped).
+3. **Ack** — `flush_pending_restore()` (in `housekeeping()`) retries the push
+   and, once the audio thread has acknowledged the sequence number
+   (`is_acked(seq)`), calls `publish_restore()`: it publishes
+   `full_wavenet_model`, `ui_model_*`, `model_sample_rate`, IR path/samples,
+   the main-thread params (incl. `model_path`/`basename`/`hash`/`search_paths`),
+   the parameter atomics, `bump_generation()` and `mark_dirty`. UI and disk
+   observe the new state **only after** the audio thread applied it.
+   **Latest-wins**: a newer restore replaces the pending one; an older txn
+   already in the ring still applies atomically, but its publication is dropped.
+4. **Observability** — the audio thread records the applied generation in
+   `ColdShared::last_applied_generation` (concrete observable for tests).
+   `model_load_counter` advances **on push** (delivery), not on ack — it is
+   telemetry, and the synchronous contract expected by load-stress tests is
+   preserved.
+5. **Local commit (pre-activate)** — when `buffer_size == 0` there is no
+   audio thread to desynchronize: everything is published immediately and the
+   model is retained in `pending_model` (or the clear is retained as
+   `PendingModel { model: None }` so `flush_pending_model()` emits
+   `LoadModel { None }` on reactivation, preventing `deactivated_dsp` from
+   resurrecting a cleared model).
+
+The RT drain (`cold_apply_restore_txn` in `src/clap/processor/events.rs`,
+`#[cold]`) applies model → IR → params and records the generation in the same
+block; heavy resources travel **by value**, so the RT thread only moves
+pointers into the GC cascade — zero heap allocation (heap-audit verified).
 
 ---
 

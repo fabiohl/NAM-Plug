@@ -11,7 +11,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 It directly embeds [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) as its core neural DSP engine, inheriting all of its real-time guarantees: **zero heap allocations**, **zero locks**, and **zero blocking system calls** on the real-time audio thread, `x86-64-v3` (AVX2/FMA) baseline SIMD vectorization, and exact numerical parity against canonical C++ NAMCore and double-precision f64 reference oracles.
 
-Designed for seamless integration into modern Linux digital audio workstations (DAWs) such as Bitwig Studio, REAPER, Ardour, Tracktion Waveform, and Harrison Mixbus, NAM-Plug offers a vector-rendered `egui` GUI for loading `.nam` neural amp models and `.wav` impulse responses (IRs), gain staging, noise gating, oversampling, anti-aliasing filter configuration, and real-time DSP performance telemetry.
+Designed for seamless integration into modern Linux digital audio workstations (DAWs) such as Bitwig Studio, REAPER, NAM-Plug offers a vector-rendered `egui` GUI for loading `.nam` neural amp models and `.wav` impulse responses (IRs), gain staging, noise gating, oversampling, anti-aliasing filter configuration, and real-time DSP performance telemetry.
 
 > **❤️‍🔥 NAM-Plug is in active development.** Feedback, bug reports, performance metrics, and DAW compatibility notes are very welcome!
 
@@ -71,7 +71,7 @@ Designed for seamless integration into modern Linux digital audio workstations (
 | **Linux Kernel**          | ≥ 5.10                                        | `uname -r`            |
 | **Rust Toolchain**        | ≥ 1.98.0 (edition 2024)                       | `rustc --version`     |
 | **CPU Architecture**      | `x86_64` with AVX2/FMA (`x86-64-v3` baseline) | `lscpu`               |
-| **CLAP Host / DAW**       | Bitwig, REAPER, Ardour, Qtractor, Carla, etc. | Host application      |
+| **CLAP Host / DAW**       | Bitwig, REAPER, Studio Pro, etc.              | Host application      |
 | **Development Libraries** | `build-essential`, `pkg-config`, `cmake`, GL  | See apt command below |
 
 > **MSRV policy:** `rust-version = "1.98.0"` in `Cargo.toml` is the **public MSRV promise**.
@@ -131,7 +131,7 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 5. **Phase 4.5 — Assembly Hotspot Disassembly Report:** Outputs an AI-ready demangled disassembly report at `target/dsp_hotpath.asm`.
 6. **Phase 5 — Automated Deployment:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap`.
 7. **Phase 6 — Release Packaging (.tar.zst):** Generates a release distribution archive at `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst` containing the plugin, documentation, license, and a 1-click installation script.
-8. **Phase 7 — Release Packaging (.flatpak):** Builds and exports the standalone Flatpak plugin extension bundle (`~/nam-plug-vx.y.z-linux-x86_64-v3.flatpak`) with AppStream metadata for sandboxed DAWs (Bitwig, REAPER, Ardour).
+8. **Phase 7 — Release Packaging (.flatpak):** Builds and exports the standalone Flatpak plugin extension bundle (`~/nam-plug-vx.y.z-linux-x86_64-v3.flatpak`) with AppStream metadata for sandboxed DAWs (Bitwig, REAPER).
 
 #### CLI Options
 
@@ -150,14 +150,14 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 
 In addition to traditional shared library installation, `NAM-Plug` is distributed as a standalone **Flatpak Audio Plugin Extension** (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`), targeting the standard `org.freedesktop.LinuxAudio.BaseExtension` runtime point (`branch 25.08`).
 
-This format enables sandboxed Flatpak DAWs (including Bitwig Studio `com.bitwig.BitwigStudio`, REAPER `fm.reaper.Reaper`, Ardour `org.ardour.Ardour`, and Studio One `com.fender.studioapp8`) to seamlessly discover and load `NAM-Plug` without requiring insecure filesystem sandbox holes (`--filesystem=host` or `--filesystem=home`).
+This format enables sandboxed Flatpak DAWs (including Bitwig Studio `com.bitwig.BitwigStudio`, REAPER `fm.reaper.Reaper`, and Studio One `com.fender.studioapp8`) to seamlessly discover and load `NAM-Plug` without requiring insecure filesystem sandbox holes (`--filesystem=host` or `--filesystem=home`).
 
 #### End-User Installation
 
 Install the `.flatpak` bundle directly into your local user Flatpak repository:
 
 ```bash
-flatpak install --user --reinstall ~/nam-plug-v0.5.0-linux-x86_64-v3.flatpak
+flatpak install --user --reinstall ~/nam-plug-v0.7.0-linux-x86_64-v3.flatpak
 ```
 
 #### How DAW Discovery Works in Flatpak
@@ -207,7 +207,7 @@ flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 
 ### 1. Host Scanning & Loading
 
-1. Open your CLAP-compatible DAW (e.g. Bitwig Studio, REAPER, Ardour).
+1. Open your CLAP-compatible DAW.
 2. Trigger a plugin rescan if required. `NAM-Plug` will appear under your CLAP plugin list as **NAM-Plug** (or **Neural Amp Modeler**).
 3. Insert `NAM-Plug` into an audio or guitar track.
 
@@ -245,9 +245,6 @@ The status bar at the bottom of the plugin GUI provides real-time telemetry:
 |:------------------------------------------------------- |:----------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Bitwig Studio** (Linux)                               | ✅ Full Support         | Full GUI embedding, sample-accurate automation, state save/restore, and offline bounce.                                                                                                                                                                                        |
 | **REAPER** (Native Linux)                               | ✅ Full Support         | Full GUI embedding, parameter automation, and ultra-low latency playback.                                                                                                                                                                                                      |
-| **Ardour** / **Harrison Mixbus**                        | ✅ Full Support         | Fully functional CLAP plugin scanning, processing, and automation.                                                                                                                                                                                                             |
-| **Carla Plugin Host**                                   | ✅ Full Support         | Works out of the box in bridge and native CLAP rack modes.                                                                                                                                                                                                                     |
-| **Tracktion Waveform**                                  | ✅ Full Support         | Full CLAP compatibility and project state recall.                                                                                                                                                                                                                              |
 | **PreSonus Studio One** / **Fender Studio Pro** (Linux) | ⚠️ Known GUI Limitation | **Known issue:** Audio DSP processing and CLAP parameter control operate normally, but the host cannot currently initialize or attach the X11/XWayland GUI surface (`baseview` / `egui_glow`). This is a known host-side window management limitation in Studio One for Linux. |
 
 ---

@@ -5,8 +5,11 @@
 
 use crate::clap::processor::DeactivatedDspState;
 use clack_plugin::prelude::*;
+use neural_amp_modeler_rs::common::diagnostics::ModelInfo;
+use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{GcItem, GcOverflowBuffer, RtStatusFlags};
+use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::StaticModel;
 use rtrb::{Consumer, Producer};
@@ -21,10 +24,22 @@ use std::sync::{Arc, Mutex};
 /// so crash-reporting remains active as long as at least one instance exists.
 static ACTIVE_INSTANCES: AtomicU32 = AtomicU32::new(0);
 
+/// Monotonic instance identifier generator for per-instance logging and diagnostics isolation.
+static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Increments the active instance counter.
 #[inline]
 pub(crate) fn bump_active_instances() {
-    ACTIVE_INSTANCES.fetch_add(1, Ordering::Release);
+    let prev = ACTIVE_INSTANCES.fetch_add(1, Ordering::Release);
+    if prev == 0 {
+        neural_amp_modeler_rs::common::panic_hook::clear_shutdown_in_progress();
+    }
+}
+
+/// Allocates a unique monotonic instance ID.
+#[inline]
+pub(crate) fn next_instance_id() -> u64 {
+    NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Main -> RT communication payload for the CLAP plugin.
@@ -56,6 +71,99 @@ pub enum ClapParamPayload {
         /// Pre-built right-channel oversample engine.
         os_r: Box<neural_amp_modeler_rs::dsp::oversample::OversampleEngine>,
     },
+    /// A complete state restore delivered as ONE command.
+    ///
+    /// The audio thread applies the whole package (model, IR, params) atomically
+    /// within a single block, so no observer ever sees a hybrid of two restores.
+    /// UI/paths/hashes are published by the main thread only after the audio
+    /// thread acks this transaction's sequence number.
+    RestoreTxn(RestoreTxn),
+}
+
+/// Model component of a [`RestoreTxn`] (or a standalone model load).
+pub struct LoadModelPayload {
+    /// The encapsulated model for neural inference (Left Channel).
+    /// `None` explicitly clears the active model.
+    pub model_l: Option<Box<StaticModel>>,
+    /// Polyphase sinc resampler matching the model rate.
+    pub new_resampler: Box<NamResampler>,
+    /// Model input gain calibration multiplier.
+    pub input_mult_adj: f32,
+    /// Model output gain calibration multiplier.
+    pub output_mult_adj: f32,
+}
+
+/// A single atomic state-restore transaction.
+///
+/// Carries the complete validated restore so the audio thread applies it as one
+/// package in a single block. The `generation` tags the restore for traceability
+/// and is stored in `ColdShared::last_applied_generation` once the package lands.
+pub struct RestoreTxn {
+    /// Monotonic generation tag identifying this restore.
+    pub generation: u64,
+    /// Model component: `Some(payload)` loads (or clears when `model_l` is None),
+    /// `None` leaves the active model untouched (ForPreset without model).
+    pub model: Option<LoadModelPayload>,
+    /// IR component: `Some(Some(adapter))` loads, `Some(None)` clears,
+    /// `None` leaves the active IR untouched (ForPreset without IR).
+    pub ir: Option<Option<CabSimAdapter>>,
+    /// Full RT parameter snapshot applied atomically with the model/IR.
+    pub params: RtProcessingParams,
+}
+
+/// Model publication data retained until the restore transaction is acked.
+pub struct RestoreModelPublish {
+    /// Model metadata for GUI display.
+    pub metadata: NamModelMetadata,
+    /// Dynamic model info for diagnostics.
+    pub info: ModelInfo,
+    /// Clone of full WaveNet weights for slimmable rebuild storage.
+    pub full_wavenet: Option<Box<StaticModel>>,
+    /// Model native sample rate.
+    pub model_rate: u32,
+}
+
+/// UI/path/hash publication payload for a restore, applied only after the audio
+/// thread acks the transaction (or immediately in a pre-activate local commit).
+pub struct RestorePublish {
+    /// Whether this restore was a `RestoreMode::Full` (drives the clear branches).
+    pub mode_full: bool,
+    /// Effective `ProcessingParams` that `main_thread.params` must adopt on publish.
+    pub params: ProcessingParams,
+    /// Model publication (None = no model loaded in this restore).
+    pub model: Option<RestoreModelPublish>,
+    /// Model path on disk to store in `params.model_path`.
+    pub model_path_on_disk: Option<PathBuf>,
+    /// Model basename for `ui_model_name` and portable identity.
+    pub model_basename: Option<String>,
+    /// Model SHA-256 hex digest.
+    pub model_hash: Option<String>,
+    /// Model search path hint to append to `params.model_search_paths`.
+    pub model_search_path_to_add: Option<PathBuf>,
+    /// IR path on disk for `ir_path` / state save.
+    pub ir_path_on_disk: Option<String>,
+    /// IR SHA-256 hex digest (T6.2: mandatory for any persisted IR reference).
+    pub ir_hash: Option<String>,
+    /// IR raw samples for `ir_raw_samples` (adapter is rebuilt by `activate()`).
+    pub ir_raw_samples: Option<Vec<f32>>,
+    /// Sample rate of `ir_raw_samples`.
+    pub ir_raw_sample_rate: u32,
+}
+
+/// A staged restore awaiting atomic delivery and ack-gated publication.
+///
+/// Held in `NamClapMainThread::pending_restore` (private main-thread slot).
+/// `txn` is `Some` while not yet pushed (SPSC full retry) and `None` once pushed
+/// and waiting for the audio-thread ack of `seq`.
+pub struct PendingRestore {
+    /// Monotonic generation tag identifying this restore.
+    pub generation: u64,
+    /// `Some` = not yet pushed (retain for retry); `None` = pushed, awaiting ack.
+    pub txn: Option<RestoreTxn>,
+    /// Publication payload applied only after the ack.
+    pub publish: RestorePublish,
+    /// Sequence number of the pushed transaction (0 = not yet pushed).
+    pub seq: u64,
 }
 
 /// Model metadata for display in the GUI.
@@ -79,63 +187,6 @@ pub struct NamModelMetadata {
     pub tone_type: Option<String>,
     /// Date formatted as YYYY-MM-DD.
     pub date: Option<String>,
-}
-
-/// Safe wrapper for a NamClapShared pointer passed to the GUI thread.
-///
-/// Encapsulates a `NonNull<NamClapShared>` privately so the pointer is never
-/// exposed directly. Access is mediated through `as_ptr` and `as_ref`,
-/// with the SAFETY contract clearly documented at each call site.
-#[derive(Clone, Copy)]
-pub struct NamClapSharedRef(std::ptr::NonNull<NamClapShared>);
-
-// SAFETY: the pointer is obtained from a leaked `Arc` — the pointee is
-// never deallocated while the process runs. All interior mutation uses
-// `Atomic*`/`Mutex`, so concurrent access is sound. `Send` is safe because
-// the pointee is Sync+Send; `Sync` is safe because `&NamClapSharedRef` only
-// allows reading the pointer itself (not dereferencing the pointee).
-unsafe impl Send for NamClapSharedRef {}
-unsafe impl Sync for NamClapSharedRef {}
-
-impl NamClapSharedRef {
-    /// Creates a new `NamClapSharedRef` from a raw pointer.
-    ///
-    /// # Safety
-    ///
-    /// The pointer must be valid, non-null, and obtained from a leaked `Arc<NamClapShared>`.
-    /// The pointee must outlive all uses of this wrapper.
-    #[inline]
-    pub unsafe fn new(ptr: *const NamClapShared) -> Self {
-        debug_assert!(
-            !ptr.is_null(),
-            "NamClapSharedRef::new: pointer must not be null"
-        );
-        // SAFETY: callers contract (documented above) guarantees a valid, non-null
-        // pointer from a leaked `Arc<NamClapShared>`.
-        let nn = unsafe { std::ptr::NonNull::new_unchecked(ptr as *mut NamClapShared) };
-        Self(nn)
-    }
-
-    /// Returns the raw pointer without dereferencing it.
-    ///
-    /// Use this only for FFI or type-erased storage; use [`as_ref`](Self::as_ref)
-    /// for safe access to the shared state.
-    #[inline]
-    pub fn as_ptr(&self) -> *const NamClapShared {
-        self.0.as_ptr()
-    }
-
-    /// Returns a static reference to the shared state.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure the `alive_fence` is active (see
-    /// `NamPluginWindow::safe_shared`) — the returned reference can
-    /// outlive the plugin if the fence is not checked.
-    #[inline]
-    pub unsafe fn as_ref(&self) -> &'static NamClapShared {
-        unsafe { self.0.as_ref() }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +258,8 @@ pub struct PendingPresetLoad {
 /// Fields accessed at low frequency by both threads (init, shutdown, rare events).
 #[repr(align(128))]
 pub struct ColdShared {
+    /// Unique instance identifier for multi-instance telemetry and logging isolation.
+    pub instance_id: u64,
     /// SPSC channel: Main Thread -> Audio Thread (New parameters/models).
     pub param_tx: Mutex<Option<Producer<ClapParamPayload>>>,
     /// SPSC channel: Main Thread -> Audio Thread (Consumer).
@@ -258,6 +311,9 @@ pub struct ColdShared {
     pub gui_scale_factor: AtomicU32,
     /// Active cab-sim IR file path (for state save/load and GUI display).
     pub ir_path: Mutex<Option<String>>,
+    /// SHA-256 hex digest of the active cab-sim IR file — kept in lockstep with
+    /// `ir_path` so persisted state always carries the digest (T6.2).
+    pub ir_hash: Mutex<Option<String>>,
     /// Pending IR path to be loaded by the Main Thread. Written by the UI thread.
     pub ui_pending_ir: Mutex<Option<PathBuf>>,
     /// Indicates whether the GUI is in the middle of an asynchronous IR load.
@@ -289,6 +345,10 @@ pub struct ColdShared {
     /// Last sequence fully drained and processed by the audio thread.
     /// Written by the audio thread (Release), read by the main thread (Acquire).
     pub cmd_last_ack: AtomicU64,
+    /// Generation of the most recent restore transaction applied atomically by
+    /// the audio thread. Written by the audio thread (Relaxed) after applying a
+    /// [`RestoreTxn`]; read by tests/main thread to verify which restore is live.
+    pub last_applied_generation: AtomicU64,
     /// Pending restart oversampling factor.
     /// Set by the audio thread via `host.request_restart()` when
     /// oversampling changes during active processing. Consumed by
@@ -300,11 +360,11 @@ pub struct ColdShared {
     /// (channel full), the snapshot is stored here for retry via
     /// `host.request_callback()` → `housekeeping()`.
     pub in_flight_params: Mutex<Option<neural_amp_modeler_rs::common::params::RtProcessingParams>>,
-    /// Pending preset-load operation.
-    /// Set by `load_from_location()` with the location and load_key for
-    /// deferred host notification. Consumed by `housekeeping()` to call
-    /// `HostPresetLoad::loaded()` or `on_error()` after the async load.
-    pub pending_preset_load: Mutex<Option<PendingPresetLoad>>,
+    /// Pending preset-load operations (bounded FIFO queue).
+    /// Enqueued by `load_from_location()` with the location and load_key for
+    /// deferred host notification. Consumed by `housekeeping()` in FIFO order to call
+    /// `HostPresetLoad::loaded()` or `on_error()` after async loads.
+    pub pending_preset_load: Mutex<std::collections::VecDeque<PendingPresetLoad>>,
     /// Model loaded before `activate()` (state restore while `buffer_size == 0`),
     /// deferred to avoid heap allocation on the audio thread (F3 fix).
     /// See `flush_pending_model()` in load.rs and housekeeping.rs.
@@ -355,7 +415,7 @@ pub struct PendingModel {
 // Outer shared struct
 // ---------------------------------------------------------------------------
 
-/// Lock-free shared state between the audio thread and the main thread.
+/// Lock-free shared state between the audio thread, main thread, and GUI window.
 ///
 /// Fields are segregated into cache-line-isolated sub-structs grouped by
 /// access pattern to eliminate False Sharing.  Each sub-struct has its own
@@ -369,7 +429,7 @@ pub struct PendingModel {
 /// - `rt_to_ui`: written every block by RT, read by UI.
 /// - `ui_to_rt`: written by UI/Main, read every block by RT.
 /// - `cold`: low-frequency access by both threads.
-pub struct NamClapShared {
+pub struct GuiSharedState {
     /// Cache-line-isolated sub-struct: written every block by RT, read by UI.
     pub rt_to_ui: RtToUi,
     /// Cache-line-isolated sub-struct: written by UI/Main, read every block by RT.
@@ -378,12 +438,30 @@ pub struct NamClapShared {
     pub cold: ColdShared,
 }
 
+/// Shared state handle for the CLAP plugin lifecycle (`clack_plugin::Plugin::Shared`).
+///
+/// Owns the underlying [`GuiSharedState`] via an [`Arc`], enabling safe reference-counted
+/// ownership across GUI windows and background reaper threads without dangling pointers.
+pub struct NamClapShared {
+    /// Inner ref-counted GUI and plugin shared state.
+    pub gui: Arc<GuiSharedState>,
+}
+
 impl<'a> PluginShared<'a> for NamClapShared {}
+
+impl std::ops::Deref for NamClapShared {
+    type Target = GuiSharedState;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.gui
+    }
+}
 
 impl Drop for NamClapShared {
     fn drop(&mut self) {
         log::debug!("NAM-Plug: NamClapShared dropped.");
-        self.cold.alive_fence.store(false, Ordering::Release); // pairs with Acquire load em gui/window/state.rs:190
+        self.gui.cold.alive_fence.store(false, Ordering::Release); // pairs with Acquire load
         // Only signal shutdown when the last instance is destroyed.
         let prev = ACTIVE_INSTANCES
             .fetch_update(Ordering::Release, Ordering::Relaxed, |val| {
@@ -403,7 +481,7 @@ pub const RENDER_MODE_REALTIME: u32 = 0;
 /// Render mode: offline (export/bounce, max quality, no soft-degrade).
 pub const RENDER_MODE_OFFLINE: u32 = 1;
 
-impl NamClapShared {
+impl GuiSharedState {
     /// Bitmask for the parameter in the `gesture_flags` field.
     /// 3 flags per parameter: Changed, GestureBegin, GestureEnd.
     const GESTURE_CHANGED_SHIFT: u32 = 0;
@@ -443,11 +521,24 @@ impl NamClapShared {
     pub fn bump_generation(&self) {
         self.ui_to_rt
             .gui_param_generation
-            .fetch_add(1, Ordering::Release); // pairs with Acquire loads em processor/events.rs:94, extensions/params/audio.rs:70
+            .fetch_add(1, Ordering::Release); // pairs with Acquire loads in processor/events.rs, extensions/params/audio.rs
     }
 
     /// Flushes gestures and parameter updates initiated by the GUI
-    /// into the host's output event queue.
+    /// into the host's output event queue (fail-closed).
+    ///
+    /// # Fail-closed contract (T6.3)
+    ///
+    /// If `output.try_push` fails (host output queue full), the corresponding
+    /// gesture bit is **retained** for retry on the next `flush`/`process`
+    /// instead of being silently consumed. Draining stops at the first failure
+    /// so the legal order `begin → value → end` is preserved for every
+    /// parameter: an `end` is never emitted before its `begin` (or `value`).
+    /// While the queue is full, repeated value writes for the same `param_id`
+    /// coalesce into the latest atomic value (read at retry time); `begin`/`end`
+    /// never coalesce. Every failure raises
+    /// `RT_STATUS_GUI_EVENT_BACKPRESSURE` so the saturation is observable
+    /// off-RT (housekeeping logs it) — never an invisible loss.
     pub fn write_gui_events(&self, output: &mut OutputEvents) {
         use crate::clap::extensions::params::{
             PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH,
@@ -502,11 +593,18 @@ impl NamClapShared {
 
         for (param_id, param_idx, value_atomic) in &params {
             let pi = *param_idx as usize;
+
             if self.take_gesture(pi, Self::GESTURE_BEGIN_SHIFT) {
                 let ev = ParamGestureBeginEvent::new(0, ClapId::new(*param_id));
-                let _ = output.try_push(ev);
+                if output.try_push(ev).is_err() {
+                    self.set_gesture(pi, Self::GESTURE_BEGIN_SHIFT);
+                    self.note_gui_backpressure();
+                    return;
+                }
             }
             if self.take_gesture(pi, Self::GESTURE_CHANGED_SHIFT) {
+                // Value is re-read from the atomic on retry, so the latest GUI
+                // value wins while the queue is full (coalescing).
                 let val = f32::from_bits(value_atomic.load(Ordering::Relaxed)) as f64;
                 let ev = ParamValueEvent::new(
                     0,
@@ -515,17 +613,34 @@ impl NamClapShared {
                     val,
                     clack_plugin::utils::Cookie::empty(),
                 );
-                let _ = output.try_push(ev);
+                if output.try_push(ev).is_err() {
+                    self.set_gesture(pi, Self::GESTURE_CHANGED_SHIFT);
+                    self.note_gui_backpressure();
+                    return;
+                }
             }
             if self.take_gesture(pi, Self::GESTURE_END_SHIFT) {
                 let ev = ParamGestureEndEvent::new(0, ClapId::new(*param_id));
-                let _ = output.try_push(ev);
+                if output.try_push(ev).is_err() {
+                    self.set_gesture(pi, Self::GESTURE_END_SHIFT);
+                    self.note_gui_backpressure();
+                    return;
+                }
             }
         }
     }
+
+    /// Records GUI→host output backpressure as an RT-safe telemetry flag.
+    /// Consumed and logged off-RT by `emit_pending_logs()` (housekeeping).
+    #[inline(always)]
+    fn note_gui_backpressure(&self) {
+        self.cold
+            .rt_status
+            .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GUI_EVENT_BACKPRESSURE);
+    }
 }
 
-impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for NamClapShared {
+impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for GuiSharedState {
     fn model_info(&self) -> Option<neural_amp_modeler_rs::common::diagnostics::ModelInfo> {
         if let Ok(info_guard) = self.cold.ui_model_info.lock() {
             info_guard.clone()
@@ -558,6 +673,31 @@ impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for NamClapS
 
     fn flags_seen(&self) -> u64 {
         self.cold.rt_status.flags_seen()
+    }
+}
+
+impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for NamClapShared {
+    fn model_info(&self) -> Option<neural_amp_modeler_rs::common::diagnostics::ModelInfo> {
+        self.gui.model_info()
+    }
+
+    fn audio_info(
+        &self,
+        consumer: &neural_amp_modeler_rs::common::diagnostics::AudioMetadata,
+    ) -> neural_amp_modeler_rs::common::diagnostics::AudioInfo {
+        self.gui.audio_info(consumer)
+    }
+
+    fn rt_info(&self) -> neural_amp_modeler_rs::common::diagnostics::RtInfo {
+        self.gui.rt_info()
+    }
+
+    fn telemetry_snapshot(&self) -> neural_amp_modeler_rs::common::diagnostics::TelemetrySnapshot {
+        self.gui.telemetry_snapshot()
+    }
+
+    fn flags_seen(&self) -> u64 {
+        self.gui.flags_seen()
     }
 }
 

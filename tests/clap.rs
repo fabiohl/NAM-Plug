@@ -35,6 +35,8 @@ mod clap_cross_machine;
 mod clap_lifecycle_test;
 #[path = "clap/clap_multi_instance.rs"]
 mod clap_multi_instance;
+#[path = "clap/clap_multi_instance_isolation.rs"]
+mod clap_multi_instance_isolation;
 #[path = "clap/clap_parity_multi_sr.rs"]
 mod clap_parity_multi_sr;
 #[path = "clap/clap_state_migration.rs"]

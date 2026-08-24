@@ -737,14 +737,17 @@ pub(crate) fn copy_output_from_sub_block(
 ) {
     if let Some(o_l) = out_l {
         let n = n_out.min(o_l.len().saturating_sub(output_offset));
-        o_l[output_offset..output_offset + n].copy_from_slice(&buf_out_l[..n]);
+        for i in 0..n {
+            let s = buf_out_l[i];
+            o_l[output_offset + i] = if s.is_finite() { s } else { 0.0 };
+        }
     }
     if let Some(o_r) = out_r {
         let n = n_out.min(o_r.len().saturating_sub(output_offset));
-        if process_mono {
-            o_r[output_offset..output_offset + n].copy_from_slice(&buf_out_l[..n]);
-        } else {
-            o_r[output_offset..output_offset + n].copy_from_slice(&buf_out_r[..n]);
+        let src = if process_mono { buf_out_l } else { buf_out_r };
+        for i in 0..n {
+            let s = src[i];
+            o_r[output_offset + i] = if s.is_finite() { s } else { 0.0 };
         }
     }
 }
@@ -762,11 +765,17 @@ pub(crate) fn copy_bypass_to_output(
         let n = buf_host_l
             .len()
             .min(o_l.len().saturating_sub(output_offset));
-        o_l[output_offset..output_offset + n].copy_from_slice(&buf_host_l[..n]);
+        for i in 0..n {
+            let s = buf_host_l[i];
+            o_l[output_offset + i] = if s.is_finite() { s } else { 0.0 };
+        }
     }
     if let Some(o_r) = out_r {
         let src = if process_mono { buf_host_l } else { buf_host_r };
         let n = src.len().min(o_r.len().saturating_sub(output_offset));
-        o_r[output_offset..output_offset + n].copy_from_slice(&src[..n]);
+        for i in 0..n {
+            let s = src[i];
+            o_r[output_offset + i] = if s.is_finite() { s } else { 0.0 };
+        }
     }
 }

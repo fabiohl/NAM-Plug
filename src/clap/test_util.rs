@@ -101,11 +101,28 @@ pub fn make_test_plugin_dynamic(
 
 /// Creates `ProcessingParams` with test-friendly defaults (all zeros/off)
 /// and an optional model path.
+///
+/// When `model_path` names an existing file, the SHA-256 digest is computed and
+/// stored in `model_hash` so the state satisfies the T6.2 mandatory-hash policy.
 pub fn make_default_params(model_path: Option<PathBuf>) -> ProcessingParams {
+    let model_hash = model_path.as_deref().and_then(|p| {
+        if p.exists() {
+            crate::clap::extensions::state_transaction::compute_file_hash(p).ok()
+        } else {
+            None
+        }
+    });
     ProcessingParams {
         model_path,
+        model_hash,
         ..Default::default()
     }
+}
+
+/// Computes the SHA-256 hex digest of `path` with the same streaming hasher the
+/// restore path uses (T6.2). Returns `None` when the file cannot be hashed.
+pub fn asset_hash(path: &std::path::Path) -> Option<String> {
+    crate::clap::extensions::state_transaction::compute_file_hash(path).ok()
 }
 
 // ── Local fixture resolution (NAM-Plug owned; not engine registry paths) ──

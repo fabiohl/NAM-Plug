@@ -3,7 +3,7 @@
 //! Zone 2 (center): Controls — Input Gain, Output Gain, Gate Threshold knobs,
 //! and Oversampling segmented control.
 
-use crate::clap::plugin::NamClapShared;
+use crate::clap::plugin::GuiSharedState;
 use clack_extensions::params::HostParams;
 use clack_plugin::host::HostSharedHandle;
 use std::sync::atomic::Ordering;
@@ -14,7 +14,7 @@ use crate::clap::gui::ui::{
 };
 
 fn dispatch_discrete_param_change(
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     host: &HostSharedHandle,
     param_storage: &std::sync::atomic::AtomicU32,
     param_idx: u32,
@@ -32,7 +32,7 @@ fn dispatch_discrete_param_change(
 
 pub(crate) fn draw_zone2_controls(
     ui: &mut egui::Ui,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     host: &HostSharedHandle,
     current_bypass: bool,
     accent_color: egui::Color32,

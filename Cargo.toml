@@ -79,6 +79,11 @@ name = "pgo_profiling_workload"
 path = "src/bin/pgo_profiling_workload.rs"
 required-features = ["testing"]
 
+[[bin]]
+name = "nam_bin_guard"
+path = "src/bin/nam_bin_guard.rs"
+required-features = ["testing"]
+
 [features]
 default = ["stereo"]
 testing = ["NeuralAmpModeler-rs/testing"]
@@ -98,7 +103,7 @@ panic = "unwind"
 
 [profile.dist]
 inherits = "release"
-panic = "abort"
+panic = "unwind"
 
 [profile.dev]
 debug = 1

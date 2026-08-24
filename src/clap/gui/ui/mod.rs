@@ -37,7 +37,7 @@ use self::status_bar::draw_zone5_status_bar;
 use self::vsep::styled_vsep;
 use self::zones::{draw_zone1_identity, draw_zone2_controls, draw_zone3_meters, draw_zone4_bypass};
 use crate::clap::extensions::params::bypass_u32_to_bool;
-use crate::clap::plugin::NamClapShared;
+use crate::clap::plugin::GuiSharedState;
 use clack_plugin::host::HostSharedHandle;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 /// ```
 pub fn draw_ui(
     ui: &mut egui::Ui,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     host: &HostSharedHandle,
     state: &mut UiState,
 ) {

@@ -15,23 +15,19 @@ fn test_init() {
 
 #[test]
 fn test_window_safe_shared_boundary() {
-    use crate::clap::plugin::NamClapShared;
-    use crate::clap::plugin::make_test_shared;
+    use crate::clap::plugin::GuiSharedState;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    let shared = Arc::new(make_test_shared());
-    // SAFETY: `&*shared` is a valid, non-null pointer into the Arc.
-    // The Arc is kept alive for the duration of the test.
-    let shared_ref = unsafe { NamClapSharedRef::new(&*shared) };
+    let shared_owner = make_test_shared();
+    let shared: Arc<GuiSharedState> = Arc::clone(&shared_owner.gui);
     let alive_fence = Arc::clone(&shared.cold.alive_fence);
 
     // Emulates the accessor logic of safe_shared()
     let safe_access =
-        |fence: &Arc<AtomicBool>, sref: NamClapSharedRef| -> Option<&'static NamClapShared> {
+        |fence: &Arc<AtomicBool>, sref: &Arc<GuiSharedState>| -> Option<Arc<GuiSharedState>> {
             if fence.load(Ordering::Acquire) {
-                // SAFETY: fence Acquire ensures the shared state is still alive
-                unsafe { Some(sref.as_ref()) }
+                Some(Arc::clone(sref))
             } else {
                 None
             }
@@ -39,15 +35,15 @@ fn test_window_safe_shared_boundary() {
 
     // Fence active: access is permitted
     assert!(alive_fence.load(Ordering::Relaxed));
-    assert!(safe_access(&alive_fence, shared_ref).is_some());
+    assert!(safe_access(&alive_fence, &shared).is_some());
 
     // Fence disabled: access is denied (prevents UAF)
     alive_fence.store(false, Ordering::Release);
-    assert!(safe_access(&alive_fence, shared_ref).is_none());
+    assert!(safe_access(&alive_fence, &shared).is_none());
 
     // Re-enable and confirm access restored
     alive_fence.store(true, Ordering::Release);
-    assert!(safe_access(&alive_fence, shared_ref).is_some());
+    assert!(safe_access(&alive_fence, &shared).is_some());
 }
 
 // -----------------------------------------------------------------------
@@ -75,10 +71,8 @@ fn test_degraded_window_builds_without_gl() {
     // A degraded window is the baseview fallback handler after a failed
     // GL init: it must construct with no GL resources, and its drop must
     // be a safe no-op (no painter destroy).
-    let shared = Arc::new(make_test_shared());
-    // SAFETY: `&*shared` is a valid, non-null pointer into the Arc.
-    // The Arc is kept alive for the duration of the test.
-    let shared_ref = unsafe { NamClapSharedRef::new(&*shared) };
+    let shared_owner = make_test_shared();
+    let shared: Arc<GuiSharedState> = Arc::clone(&shared_owner.gui);
     let alive_fence = Arc::clone(&shared.cold.alive_fence);
     // SAFETY (test-only): the dangling host handle is never dereferenced —
     // a degraded window has no painter, so its event loop closes the
@@ -89,7 +83,7 @@ fn test_degraded_window_builds_without_gl() {
         unsafe { std::mem::transmute(std::ptr::NonNull::<()>::dangling()) };
 
     let close_signal = Arc::new(AtomicBool::new(false));
-    let window = NamPluginWindow::degraded(shared_ref, host_static, close_signal, alive_fence, 1.0);
+    let window = NamPluginWindow::degraded(shared, host_static, close_signal, alive_fence, 1.0);
     assert!(
         window.painter.is_none(),
         "degraded window has no GL painter"
@@ -98,5 +92,5 @@ fn test_degraded_window_builds_without_gl() {
     // Dropping the degraded window must not panic (painter is None).
     drop(window);
     // And the shared state survives independently of the GUI failure.
-    assert!(shared.cold.alive_fence.load(Ordering::Relaxed));
+    assert!(shared_owner.cold.alive_fence.load(Ordering::Relaxed));
 }

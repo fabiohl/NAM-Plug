@@ -10,12 +10,22 @@ use super::super::NamClapProcessor;
 use crate::clap::processor::dsp::{channels, peaks};
 use clack_plugin::events::event_types::{ParamModEvent, ParamValueEvent};
 use clack_plugin::prelude::*;
-use neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION;
+use neural_amp_modeler_rs::common::spsc::{
+    RT_STATUS_HOST_CONTRACT_VIOLATION, RT_STATUS_NON_FINITE_INPUT_DETECTED,
+};
 use neural_amp_modeler_rs::dsp::gate::GateState;
 use neural_amp_modeler_rs::dsp::gate_flags;
 use neural_amp_modeler_rs::dsp::pipeline::DspPipelineContext;
+use neural_amp_modeler_rs::models::NamModel;
 use std::sync::atomic::Ordering;
 
+/// Maximum number of host input events scheduled within a single block.
+///
+/// Saturation past this budget is **explicit, not invisible**: the scheduler
+/// stops draining, raises `RT_STATUS_SPSC_DRAIN_TRUNCATED` (kept, see T6.3),
+/// and the main thread logs the overflow off-RT via `emit_pending_logs()`.
+/// The remaining events of the block are rejected — the plugin never silently
+/// drops a partial automation envelope in release without a flag.
 const MAX_SCHEDULED_EVENTS: usize = 4096;
 
 impl<'a> NamClapProcessor<'a> {
@@ -39,20 +49,25 @@ impl<'a> NamClapProcessor<'a> {
             for event in input_events {
                 if events.len() >= MAX_SCHEDULED_EVENTS {
                     core::hint::cold_path();
+                    // Explicit saturation: the flag is the observable signal
+                    // (logged by emit_pending_logs off-RT). Never suppress it.
+                    self.rt_status.set_flag(
+                        neural_amp_modeler_rs::common::spsc::RT_STATUS_SPSC_DRAIN_TRUNCATED,
+                    );
                     debug_assert!(
                         false,
                         "CLAP-F007: event flood > {MAX_SCHEDULED_EVENTS} in one block; truncating"
                     );
                     break;
                 }
-                let time = event.header().time() as usize;
+                let time = event.header().time();
                 if let Some(param_event) = event.as_event::<ParamValueEvent>() {
                     let Some(clap_id) = param_event.param_id() else {
                         core::hint::cold_path();
                         continue;
                     };
                     events.push(ScheduledEvent {
-                        time,
+                        time: time as usize,
                         param_id: clap_id.get(),
                         value: param_event.value() as f32,
                         is_mod: false,
@@ -63,7 +78,7 @@ impl<'a> NamClapProcessor<'a> {
                         continue;
                     };
                     events.push(ScheduledEvent {
-                        time,
+                        time: time as usize,
                         param_id: clap_id.get(),
                         value: mod_event.amount() as f32,
                         is_mod: true,
@@ -81,12 +96,25 @@ impl<'a> NamClapProcessor<'a> {
         for mut port_pair in audio {
             let n_samples_raw = port_pair.frames_count() as usize;
             if n_samples_raw > self.max_frames_count {
-                debug_assert!(
-                    false,
-                    "Host contract violation: n_samples={n_samples_raw} > max_frames_count={}",
-                    self.max_frames_count
-                );
                 self.rt_status.set_flag(RT_STATUS_HOST_CONTRACT_VIOLATION);
+                if let Ok(channels) = port_pair.channels()
+                    && let Some(pairs) = channels.into_f32()
+                {
+                    for pair in pairs {
+                        match pair {
+                            ChannelPair::InputOutput(_, o)
+                            | ChannelPair::OutputOnly(o)
+                            | ChannelPair::InPlace(o) => {
+                                let len = o.len().min(n_samples_raw);
+                                o[..len].fill(0.0);
+                            }
+                            ChannelPair::InputOnly(_) => {}
+                        }
+                    }
+                }
+                return Err(PluginError::Message(
+                    "Host block size exceeds maximum configured capacity",
+                ));
             }
             let n_samples = n_samples_raw.min(self.max_frames_count);
             if n_samples == 0 {
@@ -107,6 +135,53 @@ impl<'a> NamClapProcessor<'a> {
             )?
             else {
                 continue;
+            };
+
+            // Non-finite input sample detection & containment (T2.3)
+            let mut non_finite = false;
+            for &s in &self.buf_host_l[..n_samples] {
+                if !s.is_finite() {
+                    non_finite = true;
+                    break;
+                }
+            }
+            #[cfg(feature = "stereo")]
+            if !non_finite && !self.process_mono {
+                for &s in &self.buf_host_r[..n_samples] {
+                    if !s.is_finite() {
+                        non_finite = true;
+                        break;
+                    }
+                }
+            }
+
+            if non_finite {
+                self.rt_status.set_flag(RT_STATUS_NON_FINITE_INPUT_DETECTED);
+                self.buf_host_l[..n_samples].fill(0.0);
+                self.buf_host_r[..n_samples].fill(0.0);
+                if let Some(model) = &mut self.model_l {
+                    // Reset the model at the effective rate of the active chain
+                    // (post-resample model rate), never a hard-coded 48 kHz —
+                    // models may be native 44.1/48 kHz and the host may run at
+                    // 44.1/48/96 kHz (F-ROB-PLUG-04 / T2.3 residual).
+                    let _ = model.reset(self.resampler.nam_rate(), n_samples);
+                }
+                self.buf_mid_l.fill(0.0);
+                self.buf_mid_r.fill(0.0);
+                self.buf_model_l.fill(0.0);
+                self.buf_model_r.fill(0.0);
+                self.buf_out_l.fill(0.0);
+                self.buf_out_r.fill(0.0);
+                self.buf_os_in_l.fill(0.0);
+                self.buf_os_in_r.fill(0.0);
+                self.buf_os_model_l.fill(0.0);
+                self.buf_os_model_r.fill(0.0);
+                self.buf_xfade_dry_l.fill(0.0);
+                self.buf_xfade_dry_r.fill(0.0);
+                self.buf_xfd_scratch_l.fill(0.0);
+                self.buf_xfd_scratch_r.fill(0.0);
+                self.smoother_in.snap_to_target();
+                self.smoother_out.snap_to_target();
             };
 
             if self

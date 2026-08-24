@@ -45,6 +45,9 @@ impl<'a> NamClapProcessor<'a> {
                 ClapParamPayload::SetOversample { os_l, os_r } => {
                     self.cold_load_os(os_l, os_r);
                 }
+                ClapParamPayload::RestoreTxn(txn) => {
+                    self.cold_apply_restore_txn(txn);
+                }
             }
             if drained_count >= 64 {
                 self.rt_status
@@ -249,6 +252,33 @@ impl<'a> NamClapProcessor<'a> {
         self.push_to_gc(GcItem::Oversample(old_r));
 
         self.recompute_effective_latency();
+    }
+
+    /// Applies a complete [`RestoreTxn`] atomically within the current block.
+    ///
+    /// The whole package (model, IR, params) is applied in one call so no
+    /// observer ever sees a hybrid of two restores. The transaction generation
+    /// is published to `ColdShared::last_applied_generation` only after every
+    /// component has been installed. `#[cold]` — this is a restore path, never
+    /// the per-block hot path.
+    #[cold]
+    fn cold_apply_restore_txn(&mut self, txn: crate::clap::plugin::shared::RestoreTxn) {
+        if let Some(model) = txn.model {
+            self.cold_load_model(
+                model.model_l,
+                model.new_resampler,
+                model.input_mult_adj,
+                model.output_mult_adj,
+            );
+        }
+        if let Some(ir) = txn.ir {
+            self.cold_load_cabsim(ir);
+        }
+        self.apply_params_from_spsc(txn.params);
+        self.shared
+            .cold
+            .last_applied_generation
+            .store(txn.generation, Ordering::Relaxed);
     }
 
     /// Checks if the adaptive FSM demands a WaveNet channel count change

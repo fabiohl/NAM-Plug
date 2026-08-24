@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::clap::plugin::ClapParamPayload;
+use crate::clap::plugin::RestoreTxn;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
+use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::thread;
@@ -13,6 +15,25 @@ fn make_test_scheduler() -> (CommandScheduler, Arc<AtomicU64>, Arc<AtomicU64>) {
     let next_seq = Arc::new(AtomicU64::new(0));
     let last_ack = Arc::new(AtomicU64::new(0));
     (sched, next_seq, last_ack)
+}
+
+/// Builds a complete atomic restore transaction. `mult_adj` differentiates the
+/// model component between restores so snapshots can be told apart.
+fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
+    RestoreTxn {
+        generation,
+        model: Some(crate::clap::plugin::LoadModelPayload {
+            model_l: None,
+            new_resampler: Box::new(NamResampler::new(48000, 48000, 0).unwrap()),
+            input_mult_adj: mult_adj,
+            output_mult_adj: mult_adj,
+        }),
+        ir: Some(None),
+        params: RtProcessingParams {
+            input_gain_db: gain,
+            ..Default::default()
+        },
+    }
 }
 
 #[test]
@@ -375,4 +396,185 @@ fn try_push_command_returns_payload_on_full() {
         4,
         "sequence counter must equal the number of successfully pushed items"
     );
+}
+
+#[test]
+fn force_flush_full_retains_snapshot() {
+    let next_seq = Arc::new(AtomicU64::new(0));
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (tx, mut rx) = rtrb::RingBuffer::new(1);
+    let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
+
+    // First snapshot fills the capacity-1 ring.
+    let p1 = RtProcessingParams {
+        input_gain_db: 1.0,
+        ..Default::default()
+    };
+    assert!(producer.push_params(p1));
+    assert!(producer.force_flush().is_ok());
+
+    // Second snapshot hits Full — and MUST be retained, not dropped (T6.1 #4).
+    let p2 = RtProcessingParams {
+        input_gain_db: 42.0,
+        ..Default::default()
+    };
+    assert!(producer.push_params(p2));
+    assert!(
+        producer.force_flush().is_err(),
+        "capacity-1 ring must report Full on second flush"
+    );
+
+    // Drain the ring, then retry — the retained 42.0 must arrive.
+    let mut popped = rx.pop().expect("first snapshot must be present");
+    assert!(matches!(popped, ClapParamPayload::Params(_)));
+
+    let seq = producer
+        .force_flush()
+        .expect("retained snapshot must flush after the ring drains");
+    assert!(seq > 0, "retained flush must consume a sequence number");
+
+    popped = rx.pop().expect("retained snapshot must be delivered");
+    match popped {
+        ClapParamPayload::Params(p) => {
+            assert_eq!(
+                p.input_gain_db, 42.0,
+                "latest parameter value must survive Full via retention"
+            );
+        }
+        other => {
+            let _ = other;
+            panic!("expected Params payload, got a non-Params command");
+        }
+    }
+}
+
+#[test]
+fn restore_txn_atomic_delivery_capacity_1() {
+    let sched = CommandScheduler::with_capacity(1);
+    let next_seq = Arc::new(AtomicU64::new(0));
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let channels = sched.extract_producer_consumer().unwrap();
+    let mut producer = CommandProducer::new(channels.cmd_tx, &next_seq, &last_ack);
+    let mut consumer = CommandConsumer::new(channels.cmd_rx, &last_ack);
+
+    // Two restores A→B. A fills the capacity-1 ring; B saturates (fail-closed:
+    // the whole package is returned to the caller for retention).
+    let txn_a = make_restore_txn(1, 1.0, 1.0);
+    let txn_b = make_restore_txn(2, 2.0, 2.0);
+
+    let seq_a = match producer.try_push_command(ClapParamPayload::RestoreTxn(txn_a)) {
+        Ok(seq) => seq,
+        Err(_) => panic!("A must fill the empty ring"),
+    };
+    let retained_b = match producer.try_push_command(ClapParamPayload::RestoreTxn(txn_b)) {
+        Err((PushError::Full, ClapParamPayload::RestoreTxn(t))) => t,
+        Ok(_) => panic!("expected Full but B fit the ring"),
+        Err(_) => panic!("unexpected error pushing B"),
+    };
+
+    // Block 1: the audio thread applies exactly ONE complete package (A).
+    let mut applied: Vec<(u64, f32, f32)> = Vec::new();
+    let drained = consumer.drain_and_process(1, |p| {
+        if let ClapParamPayload::RestoreTxn(t) = p {
+            applied.push((
+                t.generation,
+                t.params.input_gain_db,
+                t.model.as_ref().map(|m| m.input_mult_adj).unwrap_or(0.0),
+            ));
+        }
+    });
+    assert_eq!(drained, 1, "exactly one command per block");
+    consumer.ack_processed();
+    assert!(producer.is_acked(seq_a), "A must be acked after its block");
+
+    // Ring now has room: B (retained) is delivered whole.
+    let seq_b = match producer.try_push_command(ClapParamPayload::RestoreTxn(retained_b)) {
+        Ok(seq) => seq,
+        Err(_) => panic!("retained B must push after A drains"),
+    };
+    assert!(seq_b > seq_a, "B sequence must be strictly after A");
+
+    // Block 2: the audio thread applies exactly ONE complete package (B).
+    let drained = consumer.drain_and_process(1, |p| {
+        if let ClapParamPayload::RestoreTxn(t) = p {
+            applied.push((
+                t.generation,
+                t.params.input_gain_db,
+                t.model.as_ref().map(|m| m.input_mult_adj).unwrap_or(0.0),
+            ));
+        }
+    });
+    assert_eq!(drained, 1, "exactly one command per block");
+    consumer.ack_processed();
+    assert!(producer.is_acked(seq_b), "B must be acked after its block");
+
+    // Every per-block snapshot is 100% A then 100% B — never a hybrid: model,
+    // params and generation all come from the same transaction.
+    assert_eq!(applied, vec![(1, 1.0, 1.0), (2, 2.0, 2.0)]);
+}
+
+#[test]
+fn restore_txn_atomic_delivery_capacity_2() {
+    let sched = CommandScheduler::with_capacity(2);
+    let next_seq = Arc::new(AtomicU64::new(0));
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let channels = sched.extract_producer_consumer().unwrap();
+    let mut producer = CommandProducer::new(channels.cmd_tx, &next_seq, &last_ack);
+    let mut consumer = CommandConsumer::new(channels.cmd_rx, &last_ack);
+
+    // Two restores A→B fit the capacity-2 ring; a third C saturates and is
+    // retained whole (fail-closed).
+    let txn_a = make_restore_txn(1, 1.0, 1.0);
+    let txn_b = make_restore_txn(2, 2.0, 2.0);
+    let txn_c = make_restore_txn(3, 3.0, 3.0);
+
+    let seq_a = match producer.try_push_command(ClapParamPayload::RestoreTxn(txn_a)) {
+        Ok(seq) => seq,
+        Err(_) => panic!("A must fill the empty ring"),
+    };
+    let seq_b = match producer.try_push_command(ClapParamPayload::RestoreTxn(txn_b)) {
+        Ok(seq) => seq,
+        Err(_) => panic!("B must fit the capacity-2 ring"),
+    };
+    assert!(seq_b > seq_a);
+
+    let retained_c = match producer.try_push_command(ClapParamPayload::RestoreTxn(txn_c)) {
+        Err((PushError::Full, ClapParamPayload::RestoreTxn(t))) => t,
+        Ok(_) => panic!("expected Full but C fit the ring"),
+        Err(_) => panic!("unexpected error pushing C"),
+    };
+
+    // Each block applies exactly one complete package, in FIFO order.
+    let mut snapshots: Vec<(u64, f32, f32)> = Vec::new();
+    for _ in 0..2 {
+        consumer.drain_and_process(1, |p| {
+            if let ClapParamPayload::RestoreTxn(t) = p {
+                snapshots.push((
+                    t.generation,
+                    t.params.input_gain_db,
+                    t.model.as_ref().map(|m| m.input_mult_adj).unwrap_or(0.0),
+                ));
+            }
+        });
+        consumer.ack_processed();
+    }
+    assert_eq!(snapshots, vec![(1, 1.0, 1.0), (2, 2.0, 2.0)]);
+
+    // Retained C is delivered whole on the next block — still a complete package.
+    let seq_c = match producer.try_push_command(ClapParamPayload::RestoreTxn(retained_c)) {
+        Ok(seq) => seq,
+        Err(_) => panic!("retained C must push after the ring drains"),
+    };
+    consumer.drain_and_process(1, |p| {
+        if let ClapParamPayload::RestoreTxn(t) = p {
+            snapshots.push((
+                t.generation,
+                t.params.input_gain_db,
+                t.model.as_ref().map(|m| m.input_mult_adj).unwrap_or(0.0),
+            ));
+        }
+    });
+    consumer.ack_processed();
+    assert!(producer.is_acked(seq_c));
+    assert_eq!(snapshots, vec![(1, 1.0, 1.0), (2, 2.0, 2.0), (3, 3.0, 3.0)]);
 }

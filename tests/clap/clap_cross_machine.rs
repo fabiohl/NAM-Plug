@@ -141,8 +141,9 @@ fn test_missing_model_path_is_rejected_and_keeps_old_dsp() {
     // Load valid model first
     let model_a = model_fixture("wavenet_a1_standard.nam");
     let params_a = ProcessingParams {
-        model_path: Some(model_a),
+        model_path: Some(model_a.clone()),
         model_basename: Some("wavenet_a1_standard.nam".to_string()),
+        model_hash: test_util::asset_hash(&model_a),
         input_gain_db: 0.0,
         output_gain_db: 0.0,
         gate_threshold_db: -90.0,
@@ -218,8 +219,9 @@ fn test_corrupted_model_weights_rejected_gracefully() {
 
     let model_a = model_fixture("lstm.nam");
     let params_a = ProcessingParams {
-        model_path: Some(model_a),
+        model_path: Some(model_a.clone()),
         model_basename: Some("lstm.nam".to_string()),
+        model_hash: test_util::asset_hash(&model_a),
         ..Default::default()
     };
 
@@ -323,6 +325,7 @@ fn test_cross_machine_restore_via_basename_search_succeeds() {
             "/home/otheruser/models/wavenet_a1_standard.nam",
         )),
         model_basename: Some("wavenet_a1_standard.nam".to_string()),
+        model_hash: test_util::asset_hash(&model_fixture("wavenet_a1_standard.nam")),
         model_search_paths: vec![model_dir],
         input_gain_db: 0.0,
         output_gain_db: 0.0,
@@ -408,8 +411,9 @@ fn test_state_load_after_failed_restore_still_works() {
 
     let model_a = model_fixture("wavenet_a1_standard.nam");
     let params_a = ProcessingParams {
-        model_path: Some(model_a),
+        model_path: Some(model_a.clone()),
         model_basename: Some("wavenet_a1_standard.nam".to_string()),
+        model_hash: test_util::asset_hash(&model_a),
         ..Default::default()
     };
 
@@ -438,8 +442,9 @@ fn test_state_load_after_failed_restore_still_works() {
     // Valid restore afterward
     let valid_b = model_fixture("lstm.nam");
     let valid_params = ProcessingParams {
-        model_path: Some(valid_b),
+        model_path: Some(valid_b.clone()),
         model_basename: Some("lstm.nam".to_string()),
+        model_hash: test_util::asset_hash(&valid_b),
         input_gain_db: 2.5,
         ..Default::default()
     };
@@ -468,8 +473,9 @@ fn test_all_failure_modes_preserve_dsp_and_produce_finite_output() {
 
     let model_a = model_fixture("wavenet_a1_standard.nam");
     let params_a = ProcessingParams {
-        model_path: Some(model_a),
+        model_path: Some(model_a.clone()),
         model_basename: Some("wavenet_a1_standard.nam".to_string()),
+        model_hash: test_util::asset_hash(&model_a),
         ..Default::default()
     };
 

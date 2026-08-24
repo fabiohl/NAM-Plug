@@ -75,3 +75,86 @@ pub fn activation_enum_to_u32(
 ) -> u32 {
     mode as u32
 }
+
+/// Returns the sanitized, clamped, and type-validated value for a CLAP parameter.
+///
+/// If `val` is non-finite (`NaN`, `+Inf`, `-Inf`), returns the parameter's default value.
+/// Otherwise clamps `val` to `[min, max]` and applies step rounding where appropriate.
+#[inline]
+pub fn sanitize_param_value(id: u32, val: f32) -> f32 {
+    use neural_amp_modeler_rs::math::constants::{GAIN_MAX_DB, GAIN_MIN_DB};
+
+    match id {
+        PARAM_INPUT_GAIN | PARAM_OUTPUT_GAIN => {
+            if !val.is_finite() {
+                0.0
+            } else {
+                val.clamp(GAIN_MIN_DB, GAIN_MAX_DB)
+            }
+        }
+        PARAM_GATE_THRESH => {
+            if !val.is_finite() {
+                -70.0
+            } else {
+                val.clamp(-90.0, -40.0)
+            }
+        }
+        PARAM_BYPASS => {
+            if !val.is_finite() {
+                0.0
+            } else if val >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        PARAM_ACTIVE_MODEL => {
+            if !val.is_finite() {
+                0.0
+            } else {
+                val.clamp(0.0, 1000.0)
+            }
+        }
+        PARAM_ADAPTIVE_COMPUTE => {
+            if !val.is_finite() {
+                1.0
+            } else {
+                val.round().clamp(0.0, 2.0)
+            }
+        }
+        PARAM_SLIM_OVERRIDE => {
+            if !val.is_finite() {
+                0.0
+            } else {
+                val.round().clamp(0.0, 2.0)
+            }
+        }
+        PARAM_OVERSAMPLE => {
+            if !val.is_finite() {
+                0.0
+            } else {
+                val.round().clamp(0.0, 2.0)
+            }
+        }
+        PARAM_ACTIVATION => {
+            if !val.is_finite() {
+                1.0
+            } else {
+                val.round().clamp(0.0, 1.0)
+            }
+        }
+        _ => {
+            if !val.is_finite() {
+                0.0
+            } else {
+                val
+            }
+        }
+    }
+}
+
+/// Double-precision variant of `sanitize_param_value`.
+#[inline]
+pub fn sanitize_param_value_f64(id: u32, val: f64) -> f64 {
+    sanitize_param_value(id, val as f32) as f64
+}

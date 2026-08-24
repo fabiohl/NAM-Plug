@@ -185,3 +185,25 @@ fn test_v1_ir_path_serialization_format() {
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(parsed["params"]["ir_path"], "/path/to/cab.wav");
 }
+
+#[test]
+fn test_state_stream_size_limit_constant() {
+    assert_eq!(MAX_STATE_STREAM_SIZE, 32 * 1024 * 1024);
+}
+
+#[test]
+fn test_file_hash_size_limit_and_incremental_computation() {
+    use crate::clap::extensions::state_transaction::{MAX_FILE_HASH_SIZE, compute_file_hash};
+    assert_eq!(MAX_FILE_HASH_SIZE, 256 * 1024 * 1024);
+
+    let temp_dir = std::env::temp_dir();
+    let test_file = temp_dir.join("nam_test_hash_stream.tmp");
+    std::fs::write(&test_file, b"test nam model bytes for streaming hash").unwrap();
+
+    let hash_result = compute_file_hash(&test_file);
+    assert!(hash_result.is_ok());
+    let hash = hash_result.unwrap();
+    assert!(!hash.is_empty());
+
+    let _ = std::fs::remove_file(&test_file);
+}

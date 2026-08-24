@@ -5,7 +5,7 @@
 //! Renders 1 centered bar (mono, 76px) when `active_channel_count < 2`, or
 //! 2 labeled bars L/R (36px each) when the host reports ≥2 channels.
 
-use crate::clap::plugin::NamClapShared;
+use crate::clap::plugin::GuiSharedState;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -13,7 +13,7 @@ use crate::clap::gui::ui::{meter::draw_vertical_meter, state::UiState};
 
 pub(crate) fn draw_zone3_meters(
     ui: &mut egui::Ui,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     state: &mut UiState,
     current_bypass: bool,
 ) {

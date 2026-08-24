@@ -8,7 +8,11 @@
 //! three event-processing paths (SPSC, Host Events, GUI sync).
 
 use super::NamClapProcessor;
-use crate::clap::extensions::params::{bypass_bool_to_u32, bypass_f32_to_bool, bypass_u32_to_bool};
+use crate::clap::extensions::params::{
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH, PARAM_INPUT_GAIN,
+    PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32,
+    bypass_f32_to_bool, bypass_u32_to_bool, sanitize_param_value,
+};
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use std::sync::atomic::Ordering;
 
@@ -16,6 +20,7 @@ impl<'a> NamClapProcessor<'a> {
     // ── Write helpers (Host Events path) ──────────────────────────
 
     pub(crate) fn set_input_gain(&mut self, db: f32) {
+        let db = sanitize_param_value(PARAM_INPUT_GAIN, db);
         self.params.input_gain_db = db;
         self.shared
             .ui_to_rt
@@ -26,6 +31,7 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(crate) fn set_output_gain(&mut self, db: f32) {
+        let db = sanitize_param_value(PARAM_OUTPUT_GAIN, db);
         self.params.output_gain_db = db;
         self.shared
             .ui_to_rt
@@ -36,6 +42,7 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(crate) fn set_gate_threshold(&mut self, db: f32) {
+        let db = sanitize_param_value(PARAM_GATE_THRESH, db);
         self.params.gate_threshold_db = db;
         self.shared
             .ui_to_rt
@@ -45,6 +52,7 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(crate) fn set_bypass(&mut self, val: f32) {
+        let val = sanitize_param_value(PARAM_BYPASS, val);
         let bypass = bypass_f32_to_bool(val);
         self.params.bypass = bypass;
         self.shared
@@ -54,6 +62,7 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(crate) fn set_adaptive_compute(&mut self, val: f32) {
+        let val = sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, val);
         let mode = neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(val);
         self.params.adaptive_compute = mode;
         self.shared
@@ -64,6 +73,7 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(crate) fn set_slim_override(&mut self, val: f32) {
+        let val = sanitize_param_value(PARAM_SLIM_OVERRIDE, val);
         let ov = neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(val);
         self.params.slim_override = ov;
         self.shared
@@ -74,6 +84,7 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(crate) fn set_oversample(&mut self, val: f32) {
+        let val = sanitize_param_value(PARAM_OVERSAMPLE, val);
         let factor = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(val);
         if factor != self.params.oversample {
             self.params.oversample = factor;
@@ -86,6 +97,7 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(crate) fn set_activation(&mut self, val: f32) {
+        let val = sanitize_param_value(PARAM_ACTIVATION, val);
         let mode = neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(val);
         if mode != self.params.activation_precision {
             self.params.activation_precision = mode;
@@ -124,7 +136,13 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
-    pub(super) fn apply_params_from_spsc(&mut self, new_params: RtProcessingParams) {
+    pub(super) fn apply_params_from_spsc(&mut self, mut new_params: RtProcessingParams) {
+        new_params.input_gain_db = sanitize_param_value(PARAM_INPUT_GAIN, new_params.input_gain_db);
+        new_params.output_gain_db =
+            sanitize_param_value(PARAM_OUTPUT_GAIN, new_params.output_gain_db);
+        new_params.gate_threshold_db =
+            sanitize_param_value(PARAM_GATE_THRESH, new_params.gate_threshold_db);
+
         let adaptive_changed = self.params.adaptive_compute != new_params.adaptive_compute;
         let slim_override_changed = self.params.slim_override != new_params.slim_override;
         let oversample_changed = self.params.oversample != new_params.oversample;
@@ -164,12 +182,13 @@ impl<'a> NamClapProcessor<'a> {
     // ── GUI sync helpers ──────────────────────────────────────────
 
     pub(super) fn sync_input_gain_from_gui(&mut self) {
-        let shared_db = f32::from_bits(
+        let raw_db = f32::from_bits(
             self.shared
                 .ui_to_rt
                 .param_input_gain
                 .load(Ordering::Relaxed),
         );
+        let shared_db = sanitize_param_value(PARAM_INPUT_GAIN, raw_db);
         if shared_db != self.params.input_gain_db {
             self.params.input_gain_db = shared_db;
             self.smoother_in
@@ -178,12 +197,13 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(super) fn sync_output_gain_from_gui(&mut self) {
-        let shared_db = f32::from_bits(
+        let raw_db = f32::from_bits(
             self.shared
                 .ui_to_rt
                 .param_output_gain
                 .load(Ordering::Relaxed),
         );
+        let shared_db = sanitize_param_value(PARAM_OUTPUT_GAIN, raw_db);
         if shared_db != self.params.output_gain_db {
             self.params.output_gain_db = shared_db;
             self.smoother_out
@@ -192,12 +212,13 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(super) fn sync_gate_thresh_from_gui(&mut self) {
-        let shared_db = f32::from_bits(
+        let raw_db = f32::from_bits(
             self.shared
                 .ui_to_rt
                 .param_gate_thresh
                 .load(Ordering::Relaxed),
         );
+        let shared_db = sanitize_param_value(PARAM_GATE_THRESH, raw_db);
         if shared_db != self.params.gate_threshold_db {
             self.params.gate_threshold_db = shared_db;
             self.gate_dirty = true;
@@ -213,12 +234,14 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(super) fn sync_adaptive_compute_from_gui(&mut self) {
-        let shared_adaptive = neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(
-            self.shared
-                .ui_to_rt
-                .param_adaptive_compute
-                .load(Ordering::Relaxed) as f32,
-        );
+        let raw = self
+            .shared
+            .ui_to_rt
+            .param_adaptive_compute
+            .load(Ordering::Relaxed) as f32;
+        let sanitized = sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, raw);
+        let shared_adaptive =
+            neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(sanitized);
         if shared_adaptive != self.params.adaptive_compute {
             self.params.adaptive_compute = shared_adaptive;
             self.adaptive_compute
@@ -227,12 +250,14 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(super) fn sync_slim_override_from_gui(&mut self) {
-        let shared_override = neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(
-            self.shared
-                .ui_to_rt
-                .param_slim_override
-                .load(Ordering::Relaxed) as f32,
-        );
+        let raw = self
+            .shared
+            .ui_to_rt
+            .param_slim_override
+            .load(Ordering::Relaxed) as f32;
+        let sanitized = sanitize_param_value(PARAM_SLIM_OVERRIDE, raw);
+        let shared_override =
+            neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(sanitized);
         if shared_override != self.params.slim_override {
             self.params.slim_override = shared_override;
             self.adaptive_compute.set_slim_override(shared_override);
@@ -240,12 +265,14 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(super) fn sync_oversample_from_gui(&mut self) {
-        let shared_factor = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(
-            self.shared
-                .ui_to_rt
-                .param_oversample
-                .load(Ordering::Relaxed) as f32,
-        );
+        let raw = self
+            .shared
+            .ui_to_rt
+            .param_oversample
+            .load(Ordering::Relaxed) as f32;
+        let sanitized = sanitize_param_value(PARAM_OVERSAMPLE, raw);
+        let shared_factor =
+            neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(sanitized);
         if shared_factor != self.params.oversample {
             self.params.oversample = shared_factor;
             self.apply_oversample(shared_factor);
@@ -253,12 +280,14 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     pub(super) fn sync_activation_from_gui(&mut self) {
-        let shared_mode = neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(
-            self.shared
-                .ui_to_rt
-                .param_activation
-                .load(Ordering::Relaxed) as f32,
-        );
+        let raw = self
+            .shared
+            .ui_to_rt
+            .param_activation
+            .load(Ordering::Relaxed) as f32;
+        let sanitized = sanitize_param_value(PARAM_ACTIVATION, raw);
+        let shared_mode =
+            neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(sanitized);
         if shared_mode != self.params.activation_precision {
             self.params.activation_precision = shared_mode;
             neural_amp_modeler_rs::math::activations::set_activation_tls(shared_mode);

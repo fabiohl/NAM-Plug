@@ -3,7 +3,7 @@
 //! Zone 1 (left): Identity — logo, version, SIMD badge, model load button, and Cab IR controls.
 
 use crate::clap::gui::GuiHostBridge;
-use crate::clap::plugin::NamClapShared;
+use crate::clap::plugin::GuiSharedState;
 use clack_plugin::host::HostSharedHandle;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -19,7 +19,7 @@ use super::file_dialogs::{spawn_file_dialog, spawn_ir_file_dialog};
 
 pub(crate) fn draw_zone1_identity(
     ui: &mut egui::Ui,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     host: &HostSharedHandle,
     state: &mut UiState,
     accent_color: egui::Color32,
@@ -87,13 +87,13 @@ fn render_brand_header(ui: &mut egui::Ui, accent_color: egui::Color32) {
 
 fn render_model_section(
     ui: &mut egui::Ui,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     host: &HostSharedHandle,
     state: &mut UiState,
     accent_color: egui::Color32,
 ) -> Option<egui::Id> {
     ui.label(
-        egui::RichText::new("MODEL")
+        egui::RichText::new("AMP MODEL")
             .font(egui::FontId::proportional(9.0))
             .strong()
             .color(COL_MUTED),
@@ -254,7 +254,7 @@ fn render_model_section(
 
 fn render_ir_section(
     ui: &mut egui::Ui,
-    shared: &NamClapShared,
+    shared: &GuiSharedState,
     host: &HostSharedHandle,
     state: &mut UiState,
     accent_color: egui::Color32,
