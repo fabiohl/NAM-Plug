@@ -3,7 +3,8 @@
 
 //! Model loading (main thread only).
 
-use super::super::shared::{ClapParamPayload, NamModelMetadata, PendingModel};
+use super::super::shared::StagedSwap;
+use super::super::shared::{ClapParamPayload, LoadModelPayload, NamModelMetadata, PendingModel};
 use super::NamClapMainThread;
 use crate::clap::plugin::command_scheduler::PushError;
 use neural_amp_modeler_rs::common::diagnostics::{NamDiagnostic, NamErrorCode};
@@ -134,6 +135,11 @@ impl<'a> NamClapMainThread<'a> {
         let input_mult_adj = model_pair.input_mult_adj;
         let output_mult_adj = model_pair.output_mult_adj;
 
+        // T3.2/F-CONC-006: allocate a fresh monotonic model generation for this
+        // identity now (before any deferral/retry) so the model keeps a stable
+        // generation tag through `PendingModel` → `flush_pending_model()`.
+        let generation = self.shared.cold.allocate_model_generation();
+
         // Store full WaveNet weights for main-thread slimmable rebuild
         {
             let mut storage = self
@@ -165,40 +171,100 @@ impl<'a> NamClapMainThread<'a> {
                 ));
             }
 
-            match self
-                .cmd_producer
-                .try_push_command(ClapParamPayload::LoadModel {
-                    model_l,
-                    new_resampler,
-                    input_mult_adj,
-                    output_mult_adj,
-                }) {
-                Ok(_seq) => {}
-                Err((PushError::Full, payload)) => {
-                    // R-10: fail-closed — retain the model for retry instead of
-                    // dropping it. The UI is not advanced because the model is
-                    // not yet installed on the audio thread; `flush_pending_model`
-                    // will retry on the next housekeeping cycle.
-                    if let ClapParamPayload::LoadModel {
+            // Streaming resample adapter (T1.2/F-PERF-002), sized for the
+            // worst-case host block — built off-RT like the resampler.
+            let new_stream =
+                crate::clap::plugin::build_stream_adapter(host_rate, model_rate, buffer_size)
+                    .map_err(|e| {
+                        Box::new(
+                            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                                .message("Failed to build streaming resample buffer")
+                                .param("error", e.to_string()),
+                        )
+                    })?;
+
+            // Explicit user load supersedes any pending staged restore (TR.1 #5).
+            self.staged_restore = None;
+
+            // T3.3/F-LAT-005 (Política A): a model swap only changes the
+            // physical latency when the streaming adapter's latency changes
+            // (i.e. the model rate differs). The audio thread publishes the
+            // latency contribution of the *installed* stream in
+            // `current_stream_latency`, so comparing it against the new
+            // stream's latency is the authoritative same-latency check.
+            let current_stream_latency = self
+                .shared
+                .cold
+                .current_stream_latency
+                .load(Ordering::Relaxed);
+            let new_stream_latency = new_stream.latency_samples();
+            if new_stream_latency == current_stream_latency {
+                // Same exact latency ⇒ continuous hot swap (Política-A
+                // optimization): deliver through the SPSC and supersede any
+                // previously staged model (latest user intent already landed).
+                if let Some(staged) = self.staged_swap.as_mut() {
+                    staged.clear_model();
+                    if staged.is_empty() {
+                        self.staged_swap = None;
+                    }
+                }
+                match self
+                    .cmd_producer
+                    .try_push_command(ClapParamPayload::LoadModel {
+                        generation,
                         model_l,
                         new_resampler,
+                        new_stream,
                         input_mult_adj,
                         output_mult_adj,
-                    } = payload
-                    {
-                        drop(new_resampler); // rebuilt by flush_pending_model()
-                        if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock() {
-                            *pending_guard = Some(PendingModel {
-                                model: model_l,
-                                model_rate,
-                                input_mult_adj,
-                                output_mult_adj,
-                            });
+                    }) {
+                    Ok(_seq) => {}
+                    Err((PushError::Full, payload)) => {
+                        // R-10: fail-closed — retain the model for retry instead of
+                        // dropping it. The UI is not advanced because the model is
+                        // not yet installed on the audio thread; `flush_pending_model`
+                        // will retry on the next housekeeping cycle.
+                        if let ClapParamPayload::LoadModel {
+                            generation,
+                            model_l,
+                            new_resampler,
+                            new_stream,
+                            input_mult_adj,
+                            output_mult_adj,
+                        } = payload
+                        {
+                            drop(new_resampler); // rebuilt by flush_pending_model()
+                            drop(new_stream); // rebuilt by flush_pending_model()
+                            if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock() {
+                                *pending_guard = Some(PendingModel {
+                                    generation,
+                                    model: model_l,
+                                    model_rate,
+                                    input_mult_adj,
+                                    output_mult_adj,
+                                });
+                            }
                         }
+                        self.host.request_callback();
+                        return Ok(());
                     }
-                    self.host.request_callback();
-                    return Ok(());
                 }
+            } else {
+                // Different latency ⇒ strict Política A: the resources are
+                // staged off-RT and land only on the next host restart cycle
+                // (`activate()` consumes `staged_swap`). The DSP keeps the
+                // old, still-reported latency until then — no sample ever
+                // diverges from `PluginLatency::get()`.
+                let staged = self.staged_swap.get_or_insert_with(StagedSwap::default);
+                staged.model = Some(LoadModelPayload {
+                    generation,
+                    model_l,
+                    new_resampler,
+                    new_stream,
+                    input_mult_adj,
+                    output_mult_adj,
+                });
+                self.host.request_restart();
             }
         } else {
             // Defer sending until `buffer_size` and `sample_rate`
@@ -208,6 +274,7 @@ impl<'a> NamClapMainThread<'a> {
             // resampler with the correct rates determined at activate() time.
             if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock() {
                 *pending_guard = Some(PendingModel {
+                    generation,
                     model: model_l,
                     model_rate,
                     input_mult_adj,
@@ -300,32 +367,73 @@ impl<'a> NamClapMainThread<'a> {
         // skip the push: `activate()` rebuilds the adapter from `ir_raw_samples`
         // with the correct partition size, avoiding a stale fallback-sized
         // adapter overwriting the activate-built one.
+        //
+        // T3.3/F-LAT-005 (Política A): the cabsim latency contribution is
+        // exactly the partition size (0 without an IR). Loading the *first* IR
+        // (0 → partition) or clearing the active IR (partition → 0) changes the
+        // physical latency, so the swap is staged and a host restart is
+        // requested; swapping one IR for another (same partition) keeps the
+        // exact same latency and applies continuously through the SPSC.
         let delivered = if buffer_size > 0 {
-            let adapter = Some(CabSimAdapter::new(Box::new(engine)).map_err(|e| {
-                Box::new(
-                    NamDiagnostic::new(e, &self.sys)
-                        .message("Failed to build cab-sim convolution adapter")
-                        .hint("The IR samples require more memory than available."),
-                )
-            })?);
+            // Explicit user IR load supersedes any pending staged restore (TR.1 #5).
+            self.staged_restore = None;
 
-            // R-10: fail-closed — if the SPSC is full, put the path back in
-            // `ui_pending_ir` and request a callback so housekeeping retries.
-            // Do not commit ir_path / ir_raw_samples until the adapter is
-            // actually delivered (UI/state would otherwise claim IR is loaded
-            // while DSP stays dry).
-            match self
-                .cmd_producer
-                .try_push_command(ClapParamPayload::LoadCabIr { adapter })
-            {
-                Ok(_) => true,
-                Err(_) => {
-                    if let Ok(mut pending) = self.shared.cold.ui_pending_ir.lock() {
-                        *pending = Some(path.to_path_buf());
+            // F-RT-003/T2.1: box here on the main thread so the SPSC payload
+            // carries `Box<CabSimAdapter>` and the audio-thread swap moves the
+            // old `Box` by value to the GC with zero allocations.
+            let adapter = Some(Box::new(CabSimAdapter::new(Box::new(engine)).map_err(
+                |e| {
+                    Box::new(
+                        NamDiagnostic::new(e, &self.sys)
+                            .message("Failed to build cab-sim convolution adapter")
+                            .hint("The IR samples require more memory than available."),
+                    )
+                },
+            )?));
+
+            let current_cabsim_latency = self
+                .shared
+                .cold
+                .current_cabsim_latency
+                .load(Ordering::Relaxed);
+            let new_cabsim_latency = partition_size as u32;
+            if new_cabsim_latency == current_cabsim_latency {
+                // Same exact latency ⇒ continuous IR swap (no restart needed).
+                // Supersedes any previously staged IR (latest user intent
+                // already landed).
+                if let Some(staged) = self.staged_swap.as_mut() {
+                    staged.clear_ir();
+                    if staged.is_empty() {
+                        self.staged_swap = None;
                     }
-                    self.host.request_callback();
-                    false
                 }
+                // R-10: fail-closed — if the SPSC is full, put the path back in
+                // `ui_pending_ir` and request a callback so housekeeping retries.
+                // Do not commit ir_path / ir_raw_samples until the adapter is
+                // actually delivered (UI/state would otherwise claim IR is loaded
+                // while DSP stays dry).
+                match self
+                    .cmd_producer
+                    .try_push_command(ClapParamPayload::LoadCabIr { adapter })
+                {
+                    Ok(_) => true,
+                    Err(_) => {
+                        if let Ok(mut pending) = self.shared.cold.ui_pending_ir.lock() {
+                            *pending = Some(path.to_path_buf());
+                        }
+                        self.host.request_callback();
+                        false
+                    }
+                }
+            } else {
+                // Latency changes (first IR load) ⇒ strict Política A: stage
+                // the adapter and request a host restart. The DSP keeps running
+                // without the IR (and reporting the old latency) until the
+                // restart cycle installs the staged IR in `activate()`.
+                let staged = self.staged_swap.get_or_insert_with(StagedSwap::default);
+                staged.ir = Some(adapter);
+                self.host.request_restart();
+                true
             }
         } else {
             true

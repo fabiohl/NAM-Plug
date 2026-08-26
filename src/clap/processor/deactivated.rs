@@ -23,20 +23,31 @@ pub(crate) struct DeactivatedDspState {
     /// Active neural model (L channel). Always reusable — model weights
     /// are independent of host sample rate and buffer size.
     pub(crate) model_l: Option<Box<StaticModel>>,
+    /// Monotonic generation of the active model identity (T3.2 / F-CONC-006),
+    /// persisted with the model so a reactivation keeps the same generation.
+    pub(crate) model_generation: u64,
     /// Cab-sim convolution adapter. Reusable only if `partition_size` matches
     /// the current `max_frames_count` (all FFT plans and FDL are sized by
-    /// partition size at construction time).
-    pub(crate) cabsim_adapter: Option<CabSimAdapter>,
+    /// partition size at construction time). Kept `Box`ed to preserve the
+    /// end-to-end RT-safe ownership contract (F-RT-003/T2.1).
+    pub(crate) cabsim_adapter: Option<Box<CabSimAdapter>>,
     /// Polyphase sinc resampler. Reusable only if `host_rate` matches the
     /// current host sample rate (phase interpolation banks are rate-dependent).
     pub(crate) resampler: Box<NamResampler>,
+    /// Strict-cardinality streaming resample adapter (T1.2/F-PERF-002).
+    /// Reusable only if both `host_rate` and `buffer_size` match (FIFO
+    /// capacities are sized by the worst-case host block).
+    pub(crate) stream: Box<neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer>,
     /// Half-band oversampling engine L. Reusable unconditionally (fixed at
     /// MAX_RESAMP_BUF input, state is reset per activate).
     pub(crate) os_l: Box<OversampleEngine>,
     /// Half-band oversampling engine R.
     pub(crate) os_r: Box<OversampleEngine>,
-    /// Oversampling factor these engines were built for.
-    /// Used to detect factor changes on restart.
+    /// Oversampling factor these engines were *applied* with (T3.1/F-LAT-004).
+    /// Persisted from `NamClapProcessor::applied_os_factor` at deactivate —
+    /// never the requested `params.oversample`, which may lag ahead of the
+    /// engines while a host restart is pending. Used to detect real engine
+    /// compatibility on restore.
     pub(crate) os_factor: OversampleFactor,
     /// Host sample rate when deactivated (for restore validation).
     pub(crate) sample_rate: u32,

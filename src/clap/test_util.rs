@@ -15,6 +15,7 @@ use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::dsp::pipeline::test_util::infra::{TrackingGuard, get_alloc_count};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // ── Test host mocks ──
 
@@ -151,6 +152,27 @@ pub fn write_invalid_model_fixture(path: &std::path::Path) {
         br#"{"version":"0.5.0","architecture":"WaveNet","config":{},"weights":[]}"#,
     )
     .expect("write invalid model fixture");
+}
+
+/// Monotonic counter so parallel tests never collide on the same temp file.
+static TMP_FILE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Returns a unique temporary file path derived from `name`.
+pub fn tmp_path(name: &str) -> PathBuf {
+    let n = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("nam_plug_{}_{n}_{name}", std::process::id()))
+}
+
+/// Writes a copy of `src` (a `.nam` model) with the top-level `"sample_rate"`
+/// field set to `sample_rate`, returning the temporary file path.
+pub fn write_model_with_rate(src: &std::path::Path, sample_rate: u32) -> PathBuf {
+    let content = std::fs::read_to_string(src).expect("read model fixture");
+    let mut model: serde_json::Value = serde_json::from_str(&content).expect("valid model JSON");
+    model["sample_rate"] = serde_json::json!(sample_rate as f64);
+    let path = tmp_path(&format!("model_{sample_rate}.nam"));
+    std::fs::write(&path, serde_json::to_vec(&model).expect("serialize model"))
+        .expect("write injected model");
+    path
 }
 
 // ── Shared pointer extraction ──

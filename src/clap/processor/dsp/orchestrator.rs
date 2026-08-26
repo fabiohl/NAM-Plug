@@ -7,6 +7,7 @@ pub mod worker;
 pub(crate) use worker::ScheduledEvent;
 
 use super::super::NamClapProcessor;
+use crate::clap::plugin::PendingRestartOs;
 use crate::clap::processor::dsp::{channels, peaks};
 use clack_plugin::events::event_types::{ParamModEvent, ParamValueEvent};
 use clack_plugin::prelude::*;
@@ -37,11 +38,12 @@ impl<'a> NamClapProcessor<'a> {
         start_nanos: u64,
     ) -> Result<ProcessStatus, PluginError> {
         // Track pending restart factor for latency-policy enforcement.
-        let pending_before = self
-            .shared
-            .cold
-            .pending_restart_os_factor
-            .load(Ordering::Relaxed);
+        // T3.1/F-LAT-004: decode via `PendingRestartOs` so a pending
+        // transition *to Off* is observable (raw 0 == "no pending").
+        let pending_before = PendingRestartOs::load(
+            &self.shared.cold.pending_restart_os_factor,
+            Ordering::Relaxed,
+        );
         {
             let events = &mut self.scheduled_events;
             events.clear();
@@ -180,6 +182,10 @@ impl<'a> NamClapProcessor<'a> {
                 self.buf_xfade_dry_r.fill(0.0);
                 self.buf_xfd_scratch_l.fill(0.0);
                 self.buf_xfd_scratch_r.fill(0.0);
+                // T4.1/F-DSP-008: the dry delay line must not replay pre-fault
+                // history (which would leak the pre-containment audio through
+                // the bypass/crossfade path); reset it to a zeroed ring.
+                self.dry_delay.reset();
                 self.smoother_in.snap_to_target();
                 self.smoother_out.snap_to_target();
             };
@@ -275,7 +281,7 @@ impl<'a> NamClapProcessor<'a> {
                             rt_status: &self.rt_status,
                             adaptive: &mut self.adaptive_compute,
                             bridge_writer: None,
-                            conv: self.cabsim_adapter.as_mut(),
+                            conv: self.cabsim_adapter.as_deref_mut(),
                         };
 
                         audio_loop::process_sub_block(
@@ -285,9 +291,11 @@ impl<'a> NamClapProcessor<'a> {
                             &mut out_r,
                             output_offset,
                             &mut ctx,
+                            &mut self.stream,
                             bypass,
                             process_mono,
                             &mut self.bypass_xfade,
+                            &mut self.dry_delay,
                             &mut self.buf_xfade_dry_l,
                             &mut self.buf_xfade_dry_r,
                             &mut self.buf_xfd_scratch_l,
@@ -414,13 +422,13 @@ impl<'a> NamClapProcessor<'a> {
 
         // If an oversampling change was detected during active
         // processing, request host restart so latency can be updated
-        // legally during the next activate().
-        let pending_after = self
-            .shared
-            .cold
-            .pending_restart_os_factor
-            .load(Ordering::Relaxed);
-        if pending_after != pending_before && pending_after != 0 {
+        // legally during the next activate(). A pending *Off* target is
+        // representable and also triggers the restart (T3.1/F-LAT-004).
+        let pending_after = PendingRestartOs::load(
+            &self.shared.cold.pending_restart_os_factor,
+            Ordering::Relaxed,
+        );
+        if pending_after != pending_before && pending_after != PendingRestartOs::None {
             self.host.request_restart();
         }
 

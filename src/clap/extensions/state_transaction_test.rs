@@ -9,6 +9,7 @@ fn make_model_resources(mult_adj: f32) -> ModelResources {
     ModelResources {
         model_l: None,
         new_resampler: Box::new(NamResampler::new(48000, 48000, 0).unwrap()),
+        new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
         input_mult_adj: mult_adj,
         output_mult_adj: mult_adj,
         model_rate: 48000,
@@ -499,11 +500,14 @@ fn test_build_restore_package_full_with_model() {
     validated.model_search_path_to_add = Some(PathBuf::from("/tmp"));
     validated.model_hash = Some("deadbeef".to_string());
 
+    let shared = crate::clap::plugin::make_test_shared();
     let (publish, txn) = build_restore_package(
         validated,
         &ProcessingParams::default(),
         48000,
+        512,
         &RestoreMode::Full,
+        &shared.cold,
     )
     .expect("Full restore with model must build");
 
@@ -534,11 +538,14 @@ fn test_build_restore_package_full_with_model() {
 #[test]
 fn test_build_restore_package_full_clear() {
     let validated = make_validated(ProcessingParams::default());
+    let shared = crate::clap::plugin::make_test_shared();
     let (publish, txn) = build_restore_package(
         validated,
         &ProcessingParams::default(),
         48000,
+        512,
         &RestoreMode::Full,
+        &shared.cold,
     )
     .expect("Full restore without model must build a clear transaction");
 
@@ -566,11 +573,14 @@ fn test_build_restore_package_full_clear_resampler_failure_aborts() {
     // An impossible resampler configuration (0 Hz source) must abort the
     // commit — nothing may be published (T6.1: resampler failure aborts).
     let validated = make_validated(ProcessingParams::default());
+    let shared = crate::clap::plugin::make_test_shared();
     let result = build_restore_package(
         validated,
         &ProcessingParams::default(),
         0,
+        512,
         &RestoreMode::Full,
+        &shared.cold,
     );
     assert!(
         result.is_err(),
@@ -592,8 +602,16 @@ fn test_build_restore_package_for_preset_no_model() {
         gate_threshold_db: -10.0,
         ..Default::default()
     };
-    let (publish, txn) = build_restore_package(validated, &current, 48000, &RestoreMode::ForPreset)
-        .expect("ForPreset without model must build");
+    let shared = crate::clap::plugin::make_test_shared();
+    let (publish, txn) = build_restore_package(
+        validated,
+        &current,
+        48000,
+        512,
+        &RestoreMode::ForPreset,
+        &shared.cold,
+    )
+    .expect("ForPreset without model must build");
 
     // ForPreset without model/IR leaves the active model/IR untouched.
     assert!(
@@ -621,11 +639,14 @@ fn test_build_restore_package_for_preset_with_model() {
     validated.model = Some(make_model_resources(1.0));
     validated.model_basename = Some("lstm.nam".to_string());
 
+    let shared = crate::clap::plugin::make_test_shared();
     let (publish, txn) = build_restore_package(
         validated,
         &ProcessingParams::default(),
         48000,
+        512,
         &RestoreMode::ForPreset,
+        &shared.cold,
     )
     .expect("ForPreset with model must build");
 

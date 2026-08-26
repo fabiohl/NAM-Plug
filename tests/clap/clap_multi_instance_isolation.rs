@@ -9,7 +9,9 @@
 //! 3. Zero sink contamination and accurate per-instance `DiagnosticBundle` rendering.
 
 use nam_plug::clap::test_util;
-use neural_amp_modeler_rs::common::diagnostics::logger::{HostLogFn, NamLogger, scope_instance};
+use neural_amp_modeler_rs::common::diagnostics::logger::{
+    HostLogFn, LoggerConfig, NamLogger, scope_instance,
+};
 use neural_amp_modeler_rs::common::diagnostics::{AudioMetadata, DiagnosticBundle, ModelInfo};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -20,7 +22,11 @@ fn test_integration_16_instances_log_and_diagnostic_isolation() {
     const CONCURRENT_INSTANCES: usize = 16;
     const LOGS_PER_THREAD: usize = 15;
 
-    let logger = NamLogger::global().expect("NamLogger must be initialized");
+    let logger = NamLogger::init(LoggerConfig {
+        level_filter: log::LevelFilter::Debug,
+        emit_stderr: false,
+    })
+    .unwrap_or_else(|_| NamLogger::global().expect("NamLogger must be initialized"));
 
     let mut instances = Vec::with_capacity(CONCURRENT_INSTANCES);
     let mut sink_logs: Vec<Arc<Mutex<Vec<String>>>> = Vec::with_capacity(CONCURRENT_INSTANCES);

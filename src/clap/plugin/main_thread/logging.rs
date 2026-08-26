@@ -182,5 +182,35 @@ impl<'a> NamClapMainThread<'a> {
                 "NAM-Plug: GUI event queue backpressure - host output full; gesture events retained for retry"
             );
         }
+
+        if self.shared.cold.rt_status.check_and_clear_flag(
+            neural_amp_modeler_rs::common::spsc::RT_STATUS_STRUCTURAL_DEFERRED,
+        ) {
+            let msg = CString::new(
+                "NAM-Plug: Structural command deferred to the next callback (command budget 1/callback) - FIFO order preserved",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Info, &msg);
+            }
+            log::info!(
+                "NAM-Plug: Structural command deferred to the next callback (command budget 1/callback) - FIFO order preserved"
+            );
+        }
+
+        if self.shared.cold.rt_status.check_and_clear_flag(
+            neural_amp_modeler_rs::common::spsc::RT_STATUS_STRUCTURAL_SUPERSEDED,
+        ) {
+            let msg = CString::new(
+                "NAM-Plug: Deferred structural command superseded by a newer same-kind command; obsolete resources discarded off-RT (coalescing)",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Info, &msg);
+            }
+            log::info!(
+                "NAM-Plug: Deferred structural command superseded by a newer same-kind command; obsolete resources discarded off-RT (coalescing)"
+            );
+        }
     }
 }

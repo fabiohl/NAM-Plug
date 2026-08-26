@@ -28,9 +28,13 @@ mod state;
 pub(crate) use deactivated::DeactivatedDspState;
 pub use state::BYPASS_XFADE_SAMPLES;
 pub use state::BypassCrossfader;
+pub(crate) use state::MAX_STRUCTURAL_COMMANDS_PER_CALLBACK;
 pub(crate) use state::NamClapProcessor;
 
-use crate::clap::plugin::{CommandConsumer, NamClapMainThread, NamClapShared};
+use crate::clap::plugin::{
+    CommandConsumer, NamClapMainThread, NamClapShared, PendingRestartOs, StagedRestore,
+};
+use crate::clap::processor::dsp::dry_delay::{DRY_DELAY_MAX_EXTRA, DryDelayLine};
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 #[cfg(target_arch = "x86_64")]
@@ -43,6 +47,7 @@ use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::dsp::smoother::ParamSmoother;
 use neural_amp_modeler_rs::math::common::AlignedVec;
 use neural_amp_modeler_rs::math::dsp::gain_lut::get_gain_lut;
+use neural_amp_modeler_rs::models::NamModel;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -224,19 +229,19 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
             // Resolve the oversampling factor for this activation.
             // Priority: pending restart > UiToRt atomic > Off (fresh).
-            let pending_restart = shared
-                .cold
-                .pending_restart_os_factor
-                .swap(0, Ordering::Acquire);
-            if pending_restart != 0 {
+            // The pending restart is consumed atomically here; if any later
+            // fallible stage fails, the rollback guard restores it so the
+            // request survives into the next activate() attempt (T3.1).
+            let pending_restart =
+                PendingRestartOs::take(&shared.cold.pending_restart_os_factor, Ordering::Acquire);
+            if pending_restart != PendingRestartOs::None {
                 rollback.pending_restart_os_factor = Some(pending_restart);
             }
-            let os_factor = if pending_restart != 0 {
-                OversampleFactor::from_f32(pending_restart as f32)
-            } else {
-                OversampleFactor::from_f32(
-                    shared.ui_to_rt.param_oversample.load(Ordering::Relaxed) as f32
-                )
+            let os_factor = match pending_restart {
+                PendingRestartOs::Pending(f) => f,
+                PendingRestartOs::None => OversampleFactor::from_f32(
+                    shared.ui_to_rt.param_oversample.load(Ordering::Relaxed) as f32,
+                ),
             };
 
             // Restore heavy DSP resources from DeactivatedDspState if
@@ -254,12 +259,16 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
 
-            let (new_resampler, new_cabsim, new_os) = if let Some(ref deact) = rollback.deactivated
+            let (new_resampler, new_stream, new_cabsim, new_os) = if let Some(ref deact) =
+                rollback.deactivated
             {
                 let rate_matches = deact.sample_rate == host_rate;
                 let buf_matches = deact.buffer_size == host_buffer;
                 let os_matches = deact.os_factor == os_factor;
                 let cab_matches = deact.cabsim_adapter.is_some() && buf_matches && rate_matches;
+                // The streaming adapter's FIFO capacities are sized by the
+                // worst-case host block, so it also needs `buf_matches`.
+                let stream_matches = rate_matches && buf_matches;
 
                 let res = if rate_matches {
                     None
@@ -269,6 +278,24 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                             leak_error_msg(format!("Failed to create NamResampler: {:?}", e))
                         })?,
                     ))
+                };
+
+                let stream = if stream_matches {
+                    None
+                } else {
+                    Some(
+                        crate::clap::plugin::build_stream_adapter(
+                            host_rate,
+                            model_rate,
+                            host_buffer as usize,
+                        )
+                        .map_err(|e| {
+                            leak_error_msg(format!(
+                                "Failed to create streaming resample buffer: {:?}",
+                                e
+                            ))
+                        })?,
+                    )
                 };
 
                 let cab = if cab_matches {
@@ -303,13 +330,27 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     Some((os_l, os_r))
                 };
 
-                (res, cab, os)
+                (res, stream, cab, os)
             } else {
                 let res = Some(Box::new(
                     NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
                         leak_error_msg(format!("Failed to create NamResampler: {:?}", e))
                     })?,
                 ));
+
+                let stream = Some(
+                    crate::clap::plugin::build_stream_adapter(
+                        host_rate,
+                        model_rate,
+                        host_buffer as usize,
+                    )
+                    .map_err(|e| {
+                        leak_error_msg(format!(
+                            "Failed to create streaming resample buffer: {:?}",
+                            e
+                        ))
+                    })?,
+                );
 
                 let cab = Some(build_cab_sim_from_raw_samples(
                     shared,
@@ -324,26 +365,216 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     |e| leak_error_msg(format!("Failed to create oversample engine (R): {:?}", e)),
                 )?);
 
-                (res, cab, Some((os_l, os_r)))
+                (res, stream, cab, Some((os_l, os_r)))
             };
 
             // F3: flush any model deferred by load_model() (state-restore-before-activate).
             // This calls set_max_buffer_size on the main thread before process() starts.
             main_thread.flush_pending_model()?;
 
+            // ── T3.3/F-LAT-005 / TR.1 (Política A): consume any latency-affecting
+            // restore or swap staged for this restart cycle. All fallible stages above
+            // already succeeded, so staged items are never stranded by a failure
+            // between here and `Self` construction. The staged resources were fully
+            // built off-RT by the main thread; they take precedence over preserved
+            // (`DeactivatedDspState`) ones, and superseded preserved resources drop
+            // here on the main thread.
+            let staged_restore = main_thread.staged_restore.take();
+            let staged_restore_valid = staged_restore.as_ref().is_some_and(|r| {
+                if let Some(ref m) = r.txn.model {
+                    m.new_stream.host_rate() == host_rate
+                        && m.new_stream.max_block() == host_buffer as usize
+                } else {
+                    true
+                }
+            });
+            if !staged_restore_valid && staged_restore.is_some() {
+                log::warn!(
+                    "NAM-Plug: staged restore discarded — audio configuration changed before \
+                     the host restart (host_rate={host_rate}, buffer={host_buffer})"
+                );
+            }
+
+            let staged_swap = main_thread.staged_swap.take();
+            let staged_model_ok = staged_swap
+                .as_ref()
+                .and_then(|s| s.model.as_ref())
+                .is_some_and(|m| {
+                    // The streaming adapter FIFOs are sized by host rate and
+                    // max block; a config change between staging and the
+                    // restart invalidates the staged resampler/adapter.
+                    m.new_stream.host_rate() == host_rate
+                        && m.new_stream.max_block() == host_buffer as usize
+                });
+            if !staged_model_ok
+                && staged_swap
+                    .as_ref()
+                    .and_then(|s| s.model.as_ref())
+                    .is_some()
+            {
+                log::warn!(
+                    "NAM-Plug: staged model swap discarded — audio configuration changed before \
+                     the host restart (host_rate={host_rate}, buffer={host_buffer})"
+                );
+            }
+            let (staged_model, staged_ir) = match staged_swap {
+                Some(s) => (s.model, s.ir),
+                None => (None, None),
+            };
+
             // All fallible stages succeeded: now assemble the active DSP resources
-            // by taking ownership from the rollback guard.
+            // by taking ownership from staged items or the rollback guard.
             let (
                 model_l,
+                model_generation,
                 resampler,
+                stream,
                 os_l,
                 os_r,
                 cabsim_adapter,
                 model_input_mult_adj,
                 model_output_mult_adj,
-            ) = if let Some(deact) = rollback.deactivated.take() {
-                let resampler = new_resampler.unwrap_or(deact.resampler);
-                let cabsim_adapter = if let Some(new_c) = new_cabsim {
+            ) = if staged_restore_valid {
+                let StagedRestore { txn, publish } =
+                    staged_restore.expect("staged_restore_valid is true");
+                crate::clap::extensions::state_transaction::publish_restore(publish, main_thread);
+                shared
+                    .cold
+                    .last_applied_generation
+                    .store(txn.generation, Ordering::Relaxed);
+
+                if let Some(deact) = rollback.deactivated.take() {
+                    let (
+                        model_l,
+                        model_generation,
+                        resampler,
+                        stream,
+                        model_input_mult_adj,
+                        model_output_mult_adj,
+                    ) = if let Some(m) = txn.model {
+                        (
+                            m.model_l,
+                            m.generation,
+                            m.new_resampler,
+                            m.new_stream,
+                            m.input_mult_adj,
+                            m.output_mult_adj,
+                        )
+                    } else {
+                        (
+                            deact.model_l,
+                            deact.model_generation,
+                            new_resampler.unwrap_or(deact.resampler),
+                            new_stream.unwrap_or(deact.stream),
+                            deact.model_input_mult_adj,
+                            deact.model_output_mult_adj,
+                        )
+                    };
+
+                    let cabsim_adapter = if let Some(ir) = txn.ir {
+                        ir
+                    } else if let Some(new_c) = new_cabsim {
+                        new_c
+                    } else {
+                        deact.cabsim_adapter
+                    };
+
+                    let (os_l, os_r) = if let Some((l, r)) = new_os {
+                        (l, r)
+                    } else {
+                        (deact.os_l, deact.os_r)
+                    };
+
+                    (
+                        model_l,
+                        model_generation,
+                        resampler,
+                        stream,
+                        os_l,
+                        os_r,
+                        cabsim_adapter,
+                        model_input_mult_adj,
+                        model_output_mult_adj,
+                    )
+                } else {
+                    let (
+                        model_l,
+                        model_generation,
+                        resampler,
+                        stream,
+                        model_input_mult_adj,
+                        model_output_mult_adj,
+                    ) = if let Some(m) = txn.model {
+                        (
+                            m.model_l,
+                            m.generation,
+                            m.new_resampler,
+                            m.new_stream,
+                            m.input_mult_adj,
+                            m.output_mult_adj,
+                        )
+                    } else {
+                        (
+                            None,
+                            0,
+                            new_resampler.expect("Fresh resampler must have been built"),
+                            new_stream.expect("Fresh streaming buffer must have been built"),
+                            1.0,
+                            1.0,
+                        )
+                    };
+
+                    let cabsim_adapter = if let Some(ir) = txn.ir {
+                        ir
+                    } else {
+                        new_cabsim.expect("Fresh cabsim must have been built")
+                    };
+
+                    let (os_l, os_r) = new_os.expect("Fresh oversamplers must have been built");
+
+                    (
+                        model_l,
+                        model_generation,
+                        resampler,
+                        stream,
+                        os_l,
+                        os_r,
+                        cabsim_adapter,
+                        model_input_mult_adj,
+                        model_output_mult_adj,
+                    )
+                }
+            } else if let Some(deact) = rollback.deactivated.take() {
+                let (
+                    model_l,
+                    model_generation,
+                    resampler,
+                    stream,
+                    model_input_mult_adj,
+                    model_output_mult_adj,
+                ) = if staged_model_ok {
+                    let m = staged_model.expect("staged_model_ok implies a staged model");
+                    (
+                        m.model_l,
+                        m.generation,
+                        m.new_resampler,
+                        m.new_stream,
+                        m.input_mult_adj,
+                        m.output_mult_adj,
+                    )
+                } else {
+                    (
+                        deact.model_l,
+                        deact.model_generation,
+                        new_resampler.unwrap_or(deact.resampler),
+                        new_stream.unwrap_or(deact.stream),
+                        deact.model_input_mult_adj,
+                        deact.model_output_mult_adj,
+                    )
+                };
+                let cabsim_adapter = if let Some(ir) = staged_ir {
+                    ir
+                } else if let Some(new_c) = new_cabsim {
                     new_c
                 } else {
                     deact.cabsim_adapter
@@ -354,19 +585,61 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     (deact.os_l, deact.os_r)
                 };
                 (
-                    deact.model_l,
+                    model_l,
+                    model_generation,
                     resampler,
+                    stream,
                     os_l,
                     os_r,
                     cabsim_adapter,
-                    deact.model_input_mult_adj,
-                    deact.model_output_mult_adj,
+                    model_input_mult_adj,
+                    model_output_mult_adj,
                 )
             } else {
-                let resampler = new_resampler.expect("Fresh resampler must have been built");
-                let cabsim_adapter = new_cabsim.expect("Fresh cabsim must have been built");
+                let (
+                    model_l,
+                    model_generation,
+                    resampler,
+                    stream,
+                    model_input_mult_adj,
+                    model_output_mult_adj,
+                ) = if staged_model_ok {
+                    let m = staged_model.expect("staged_model_ok implies a staged model");
+                    (
+                        m.model_l,
+                        m.generation,
+                        m.new_resampler,
+                        m.new_stream,
+                        m.input_mult_adj,
+                        m.output_mult_adj,
+                    )
+                } else {
+                    (
+                        None,
+                        0,
+                        new_resampler.expect("Fresh resampler must have been built"),
+                        new_stream.expect("Fresh streaming buffer must have been built"),
+                        1.0,
+                        1.0,
+                    )
+                };
+                let cabsim_adapter = if let Some(ir) = staged_ir {
+                    ir
+                } else {
+                    new_cabsim.expect("Fresh cabsim must have been built")
+                };
                 let (os_l, os_r) = new_os.expect("Fresh oversamplers must have been built");
-                (None, resampler, os_l, os_r, cabsim_adapter, 1.0, 1.0)
+                (
+                    model_l,
+                    model_generation,
+                    resampler,
+                    stream,
+                    os_l,
+                    os_r,
+                    cabsim_adapter,
+                    model_input_mult_adj,
+                    model_output_mult_adj,
+                )
             };
 
             let silence_hyst = DynamicHysteresis::new();
@@ -419,11 +692,39 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             );
 
             // 5. Report initial latency to shared state
-            let mut initial_latency = resampler.latency_samples(audio_config.sample_rate as u32);
+            // The streaming adapter (T1.2/F-PERF-002) owns the resampler and
+            // zero-primes exactly `latency_samples()` host samples, so its
+            // declared latency is the authoritative PDC value.
+            let mut initial_latency = stream.latency_samples();
             initial_latency += os_l.latency_samples() as u32;
             if let Some(ref adapter) = cabsim_adapter {
                 initial_latency += adapter.latency_samples() as u32;
             }
+            // T3.3/F-LAT-005: publish the installed latency contributions so
+            // the main thread can decide Política-A swaps (same latency ⇒
+            // continuous, different ⇒ staged + restart) for future model/IR
+            // loads. Written at the exact instant the resources land.
+            shared
+                .cold
+                .current_stream_latency
+                .store(stream.latency_samples(), Ordering::Relaxed);
+            shared.cold.current_cabsim_latency.store(
+                cabsim_adapter
+                    .as_ref()
+                    .map_or(0, |a| a.latency_samples() as u32),
+                Ordering::Relaxed,
+            );
+            // T4.2/F-DSP-009: publish the CabSim tail telemetry on the restart
+            // install path too — `cold_load_cabsim` only covers the continuous
+            // SPSC swap, leaving the atomic at 0 (and the host tail extension
+            // wrong) after a staged IR lands via `activate()` (T4.1 gap).
+            shared.rt_to_ui.cabsim_tail_samples.store(
+                cabsim_adapter
+                    .as_ref()
+                    .map(|a| (a.num_partitions() * a.latency_samples()) as u32)
+                    .unwrap_or(0),
+                Ordering::Relaxed,
+            );
             shared
                 .rt_to_ui
                 .current_latency
@@ -449,13 +750,40 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
             let cabsim_tail_initial = cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
 
+            // T4.1/F-DSP-008: pre-allocate the circular dry delay line sized
+            // for the maximum possible DSP latency (cab-sim partition == host
+            // block size, plus the resampler/oversampler group-delay headroom).
+            // Its delay tracks `initial_latency` and is kept in sync whenever a
+            // latency-affecting resource is swapped (recompute_effective_latency).
+            // Allocation happens here in `activate()` — the plugin's single
+            // documented allocation site (F-RT-003/T2.2 static scan).
+            let dry_delay_capacity = (audio_config.max_frames_count as usize)
+                .max(MAX_RESAMP_BUF)
+                .saturating_add(DRY_DELAY_MAX_EXTRA);
+            let dry_delay = DryDelayLine::new(
+                AlignedVec::new(dry_delay_capacity, 0.0f32).map_err(|e| {
+                    leak_error_msg(format!(
+                        "pre-allocation of dry delay buffer (L) failed: {e:?}"
+                    ))
+                })?,
+                AlignedVec::new(dry_delay_capacity, 0.0f32).map_err(|e| {
+                    leak_error_msg(format!(
+                        "pre-allocation of dry delay buffer (R) failed: {e:?}"
+                    ))
+                })?,
+                initial_latency as usize,
+            );
+
             Ok(Self {
                 model_l,
+                model_generation,
                 cabsim_adapter,
                 resampler,
+                stream,
                 os_l,
                 os_r,
                 params,
+                applied_os_factor: os_factor,
                 buf_host_l,
                 buf_host_r,
                 buf_mid_l,
@@ -477,6 +805,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 process_mono: true,
                 scheduled_events: Vec::with_capacity(4096),
                 bypass_xfade: state::BypassCrossfader::new(params.bypass),
+                dry_delay,
                 rt_status: Arc::clone(&shared.cold.rt_status),
                 adaptive_compute: AdaptiveCompute::new(
                     neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Conservative,
@@ -487,6 +816,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 model_input_mult_adj,
                 model_output_mult_adj,
                 cmd_consumer,
+                deferred_structural: None,
                 gc_tx: channels.gc_tx,
                 slimmable_rx: channels.slimmable_rx,
                 gc_overflow: Arc::clone(&shared.cold.gc_overflow),
@@ -520,6 +850,17 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     fn deactivate(mut self, _main_thread: &mut NamClapMainThread<'a>) {
         // Isolate panics during cleanup.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // T2.3/F-RT-007: a structural command deferred by the final
+            // callback is resolved before teardown. The parked payload's heap
+            // resources drop here on the main thread (safe — never on the
+            // audio thread), and its rolled-back sequence slot is consumed so
+            // the ack stays gapless across a subsequent deactivate/activate
+            // cycle (the ring may still hold commands for the next activate).
+            if self.deferred_structural.take().is_some() {
+                self.cmd_consumer.advance_pending();
+                self.cmd_consumer.ack_processed();
+            }
+
             let mut param_rx_guard = self
                 .shared
                 .cold
@@ -548,13 +889,22 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // cycles to avoid I/O, filter-bank recompute, and FFT setup on the
             // next activate(). Resources are validated on restore against the
             // current audio configuration.
+            //
+            // T3.1/F-LAT-004: persist the *applied* oversampling factor — the
+            // one the preserved engines were actually built for — NEVER the
+            // user/DAW-requested `params.oversample`, which may still be ahead
+            // of the engines while a host restart is pending. Otherwise the
+            // next activate() would consider the old engines compatible with
+            // the new requested factor and reuse them incorrectly.
             let deactivated = DeactivatedDspState {
                 model_l: self.model_l,
+                model_generation: self.model_generation,
                 cabsim_adapter: self.cabsim_adapter,
                 resampler: self.resampler,
+                stream: self.stream,
                 os_l: self.os_l,
                 os_r: self.os_r,
-                os_factor: self.params.oversample,
+                os_factor: self.applied_os_factor,
                 sample_rate: self.shared.cold.sample_rate.load(Ordering::Relaxed),
                 buffer_size: self.shared.cold.buffer_size.load(Ordering::Relaxed),
                 model_input_mult_adj: self.model_input_mult_adj,
@@ -694,13 +1044,128 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             }
         }
     }
+
+    fn reset(&mut self) {
+        // T4.3 / F-CLAP-010 — full in-place, zero-alloc DSP state reset on
+        // timeline discontinuity (seek / loop relocation, `steady_time`
+        // regression).
+        //
+        // Reset target: "a freshly-initialized instance with the same
+        // configuration". Every *temporal* state (filter/delay-line history,
+        // phases, FIFOs, gate/adaptive FSM state, smoothers, scratch buffers)
+        // is cleared in place; every *configuration* (model, IR, params,
+        // applied oversampling factor, latency, preset) is preserved — nothing
+        // is deallocated or recreated on the audio thread.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // 1. Recurrent/FIR neural model state (WaveNet / LSTM / ConvNet /
+            //    Linear): `NamModel::reset` zeroes internal states and
+            //    prewarms exactly like a freshly built model (the engine
+            //    loader prewarms by default at build time). In-place and
+            //    zero-alloc for the loaded model families.
+            if let Some(model) = &mut self.model_l {
+                let _ = model.reset(self.resampler.nam_rate(), self.max_frames_count);
+            }
+
+            // 2. Streaming resample adapter (T1.2/F-PERF-002): clears its
+            //    FIFOs, resets the inner resampler and re-arms the priming
+            //    budget — post-reset cardinality matches a fresh activation.
+            self.stream.reset();
+
+            // 3. Polyphase resampler: clears phase accumulators and delay
+            //    lines (keeps host/model rates — config).
+            self.resampler.reset();
+
+            // 4. Oversampling engines (L/R): clears every half-band delay line,
+            //    phase counter and inter-stage scratch (keeps the applied
+            //    factor — config).
+            self.os_l.reset();
+            self.os_r.reset();
+
+            // 5. CabSim convolution adapter: clears the FDL and the input/output
+            //    FIFOs, rewinds the partition accumulator (keeps the IR).
+            if let Some(adapter) = &mut self.cabsim_adapter {
+                adapter.reset();
+            }
+
+            // 6. Noise-gate hysteresis FSMs back to the initial Open state
+            //    (unity multiplier, no ramp).
+            self.silence_hyst.reset();
+            self.mono_hyst.reset();
+
+            // 7. Adaptive compute FSM back to Full, aborting any in-flight
+            //    crossfade; preserves the user mode/override/slimmable config.
+            self.adaptive_compute.reset(&self.rt_status);
+
+            // 8. Parameter smoothers snap to their current target — the
+            //    current params are reapplied without a ramp that originates
+            //    in pre-reset state.
+            self.smoother_in.snap_to_target();
+            self.smoother_out.snap_to_target();
+
+            // 9. Bypass crossfader snaps to the current bypass state (no
+            //    mid-ramp blend left over from the pre-reset timeline).
+            self.bypass_xfade = BypassCrossfader::new(self.params.bypass);
+
+            // 10. Dry delay ring: clears pre-reset history while keeping the
+            //     current applied delay (`cached_effective_latency` did not
+            //     change — no resource was swapped).
+            self.dry_delay.reset();
+
+            // 11. Intermediate/scratch buffers zeroed so no pre-reset sample
+            //     survives in a stale slot.
+            self.buf_host_l.fill(0.0);
+            self.buf_host_r.fill(0.0);
+            self.buf_mid_l.fill(0.0);
+            self.buf_mid_r.fill(0.0);
+            self.buf_model_l.fill(0.0);
+            self.buf_model_r.fill(0.0);
+            self.buf_out_l.fill(0.0);
+            self.buf_out_r.fill(0.0);
+            self.buf_os_in_l.fill(0.0);
+            self.buf_os_in_r.fill(0.0);
+            self.buf_os_model_l.fill(0.0);
+            self.buf_os_model_r.fill(0.0);
+            self.buf_xfade_dry_l.fill(0.0);
+            self.buf_xfade_dry_r.fill(0.0);
+            self.buf_xfd_scratch_l.fill(0.0);
+            self.buf_xfd_scratch_r.fill(0.0);
+
+            // 12. Tail counter re-armed to the full IR duration like a fresh
+            //     activation — the FDL is empty, so the post-reset drain is
+            //     silence (T4.2: the decision is "re-arm", never "drain a
+            //     stale tail").
+            self.cabsim_tail_remaining =
+                self.cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
+
+            // 13. Per-block caches a fresh activation starts with: gate cache
+            //     invalidated (recomputed from the preserved params on the
+            //     next block), modulation offsets zeroed, mono flag at the
+            //     default, telemetry cycle counter and one-time probes re-armed.
+            self.scheduled_events.clear();
+            self.process_mono = true;
+            self.mod_input_gain = 0.0;
+            self.mod_output_gain = 0.0;
+            self.mod_gate_thresh = 0.0;
+            self.cached_threshold_open_sq = 0.0;
+            self.cached_threshold_close_sq = 0.0;
+            self.cached_gate_params = GateParams::default();
+            self.gate_dirty = true;
+            self.cycles_since_telemetry = 0;
+            self.prio_checked = false;
+        }));
+        if let Err(err) = result {
+            // The panic hook already wrote the crash report; the audio thread
+            // must not unwind through the host.
+            drop(err);
+        }
+    }
 }
 
 fn build_cab_sim_from_raw_samples(
     shared: &NamClapShared,
     partition_size: usize,
     host_rate: u32,
-) -> Result<Option<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter>, PluginError> {
+) -> Result<Option<Box<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter>>, PluginError> {
     use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
     use std::sync::atomic::Ordering;
 
@@ -738,10 +1203,10 @@ fn build_cab_sim_from_raw_samples(
     )
     .map_err(|e| leak_error_msg(format!("ConvEngine allocation failed: {e:?}")))?;
 
-    Ok(Some(
+    Ok(Some(Box::new(
         neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter::new(Box::new(engine))
             .map_err(|e| leak_error_msg(format!("CabSimAdapter allocation failed: {e:?}")))?,
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -751,6 +1216,10 @@ mod processor_bypass_test;
 #[cfg(test)]
 #[path = "../processor_stress_test.rs"]
 mod processor_stress_test;
+
+#[cfg(test)]
+#[path = "../processor_streaming_cardinality_test.rs"]
+mod processor_streaming_cardinality_test;
 
 #[cfg(test)]
 #[path = "../processor_gui_test.rs"]
@@ -793,9 +1262,37 @@ mod processor_restart_test;
 mod processor_events_test;
 
 #[cfg(test)]
+#[path = "../processor_slimmable_generation_test.rs"]
+mod processor_slimmable_generation_test;
+
+#[cfg(test)]
+#[path = "../processor_command_budget_test.rs"]
+mod processor_command_budget_test;
+
+#[cfg(test)]
+#[path = "../processor_latency_policy_test.rs"]
+mod processor_latency_policy_test;
+
+#[cfg(test)]
+#[path = "../processor_dry_delay_test.rs"]
+mod processor_dry_delay_test;
+
+#[cfg(test)]
+#[path = "../processor_tail_rearm_test.rs"]
+mod processor_tail_rearm_test;
+
+#[cfg(test)]
+#[path = "../processor_reset_test.rs"]
+mod processor_reset_test;
+
+#[cfg(test)]
 #[path = "../processor_diagnostics_logging_test.rs"]
 mod processor_diagnostics_logging_test;
 
 #[cfg(test)]
 #[path = "../processor_multi_instance_isolation_test.rs"]
 mod processor_multi_instance_isolation_test;
+
+#[cfg(test)]
+#[path = "../processor_temporal_validation_test.rs"]
+mod processor_temporal_validation_test;

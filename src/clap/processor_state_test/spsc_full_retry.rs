@@ -94,6 +94,15 @@ fn test_cabsim_retained_on_spsc_full_no_ui_desync() {
     };
     let mt = unsafe { &mut *main_thread_ptr };
 
+    // T3.3/F-LAT-005 (Política A): the *first* IR load (0 → partition latency)
+    // is staged and requests a host restart — it never touches the SPSC. The
+    // fail-closed SPSC-full retry only applies to a same-partition IR swap, so
+    // simulate an active IR (partition = 512) to drive the continuous path.
+    mt.shared
+        .cold
+        .current_cabsim_latency
+        .store(512, Ordering::Relaxed);
+
     for _ in 0..256 {
         mt.cmd_producer
             .push_command(ClapParamPayload::LoadCabIr { adapter: None })

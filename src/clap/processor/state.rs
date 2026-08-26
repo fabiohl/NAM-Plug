@@ -3,7 +3,8 @@
 
 //! Processor state (struct definition).
 
-use crate::clap::plugin::{CommandConsumer, NamClapShared};
+use crate::clap::plugin::{ClapParamPayload, CommandConsumer, NamClapShared, SlimmableRebuild};
+use crate::clap::processor::dsp::dry_delay::DryDelayLine;
 use crate::clap::processor::dsp::orchestrator::ScheduledEvent;
 use clack_plugin::host::HostAudioProcessorHandle;
 use neural_amp_modeler_rs::common::params::{ActivationPrecision, RtProcessingParams};
@@ -11,7 +12,7 @@ use neural_amp_modeler_rs::common::spsc::{GcItem, GcOverflowBuffer, RtStatusFlag
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
 use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
 use neural_amp_modeler_rs::dsp::gate::{DynamicHysteresis, GateParams};
-use neural_amp_modeler_rs::dsp::oversample::OversampleEngine;
+use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::dsp::smoother::ParamSmoother;
 use neural_amp_modeler_rs::math::common::AlignedVec;
@@ -22,6 +23,18 @@ use std::sync::Arc;
 
 pub const BYPASS_XFADE_SAMPLES: usize = 64;
 pub(crate) const BYPASS_XFADE_INV: f32 = 1.0 / BYPASS_XFADE_SAMPLES as f32;
+
+/// Command Budgeting (T2.3 / F-RT-007): maximum number of structural (heavy
+/// swap) commands applied per audio callback.
+///
+/// Structural applies (model/resampler swap, cab-sim IR swap, oversample engine
+/// rebuild, full state restore) recompute latency, feed the GC cascade and may
+/// call host extensions (`HostTail::changed`) — their cost is not bounded by
+/// command *count*, so a burst of 64 structural payloads must not all execute
+/// in one callback. A single deferred structural command is parked per callback
+/// and applied at the start of the next one, preserving FIFO ordering and the
+/// atomicity of composite transactions (`RestoreTxn`).
+pub(crate) const MAX_STRUCTURAL_COMMANDS_PER_CALLBACK: u32 = 1;
 
 /// Sample-accurate bypass crossfade state machine.
 ///
@@ -95,17 +108,45 @@ impl BypassCrossfader {
 pub struct NamClapProcessor<'a> {
     /// Active model for the left channel (None = bypass).
     pub(crate) model_l: Option<Box<StaticModel>>,
+    /// Monotonic generation of the currently active model identity (T3.2 /
+    /// F-CONC-006).
+    ///
+    /// Set to the generation carried by the model-install payload in
+    /// `cold_load_model()` — never read back from the shared atomic, which may
+    /// have already advanced past this model. `signal_slimmable_rebuild()`
+    /// publishes it into the rebuild request and `drain_slimmable_models()`
+    /// compares it against each rebuilt delivery to reject stale results.
+    pub(crate) model_generation: u64,
     /// Active cab-sim convolution adapter (None = bypass, zero cost).
-    pub(crate) cabsim_adapter: Option<CabSimAdapter>,
+    /// Held in `Box` end-to-end (main thread → SPSC → RT swap → GC) so
+    /// installing/swapping/clearing an IR never allocates on the audio thread
+    /// (F-RT-003/T2.1).
+    pub(crate) cabsim_adapter: Option<Box<CabSimAdapter>>,
     /// Polyphase sinc resampler (bypass when sample_rate == 48000).
     /// Held in Box for RT-safe disposal without allocation.
     pub(crate) resampler: Box<NamResampler>,
+    /// Strict-cardinality streaming resample adapter (T1.2/F-PERF-002).
+    /// Owns the bounded FIFO pipeline that guarantees exactly `frames_count`
+    /// host samples are produced per callback. Built off-RT; swapped on the
+    /// audio thread via SPSC with the old box disposed by GC.
+    pub(crate) stream: Box<neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer>,
     /// Half-band oversampling engine for the left channel.
     pub(crate) os_l: Box<OversampleEngine>,
     /// Half-band oversampling engine for the right channel.
     pub(crate) os_r: Box<OversampleEngine>,
     /// Current parameters on the audio thread (snapshotted from SPSC at each process()).
     pub(crate) params: RtProcessingParams,
+    /// Oversampling factor **actually applied** by the active engines
+    /// (`os_l`/`os_r`) (T3.1 / F-LAT-004).
+    ///
+    /// Updated **only** at the instant engines are installed — `activate()`
+    /// and `cold_load_os()` (derived from the incoming engine itself). Never
+    /// updated eagerly by parameter events: `params.oversample` carries the
+    /// user/DAW-requested factor and may diverge from this field while a host
+    /// restart is pending. `deactivate()` persists this applied factor into
+    /// [`DeactivatedDspState::os_factor`] so a reactivation can verify real
+    /// engine compatibility instead of trusting the requested value.
+    pub(crate) applied_os_factor: OversampleFactor,
 
     /// Intermediate buffers pre-allocated in activate() — ZERO alloc in process().
     /// 1. Copy of host input (variable sample_rate)
@@ -139,9 +180,16 @@ pub struct NamClapProcessor<'a> {
     pub(crate) scheduled_events: Vec<ScheduledEvent>,
     /// Bypass crossfade state machine for click-free bypass transitions.
     pub(crate) bypass_xfade: BypassCrossfader,
-    /// Dry input signal storage for bypass crossfade blending.
-    /// Pipeline modifies buf_host_l/r in place; these preserve the
-    /// original dry signal during crossfade for blend computation.
+    /// Pre-allocated circular dry delay line (T4.1 / F-DSP-008): delays the
+    /// dry (bypass/crossfade) signal by exactly the applied wet latency
+    /// (`cached_effective_latency`) so dry and wet always represent the same
+    /// temporal instant, and the fully-bypassed path keeps the physical
+    /// latency declared to the host. Zero allocations on the audio thread.
+    pub(crate) dry_delay: DryDelayLine,
+    /// Dry input signal storage for bypass crossfade blending (T4.1 / F-DSP-008).
+    /// `dry_delay` writes the latency-compensated dry here each sub-block;
+    /// the pipeline modifies `buf_host_l/r` in place, and these preserve the
+    /// *delayed* dry signal for the bypass output and the crossfade blend.
     pub(crate) buf_xfade_dry_l: AlignedVec<f32>,
     pub(crate) buf_xfade_dry_r: AlignedVec<f32>,
     /// 7. WaveNet crossfade scratch buffers (motor 0.5.0 `run_inference`):
@@ -173,8 +221,19 @@ pub struct NamClapProcessor<'a> {
     pub(crate) parking_lot: [Option<GcItem>; 16],
     /// Command consumer with acknowledgment.
     pub(crate) cmd_consumer: CommandConsumer<'a>,
+    /// Single-slot deferral for Command Budgeting (T2.3 / F-RT-007).
+    ///
+    /// When the per-callback structural budget is exhausted, the drained
+    /// structural command is parked here (its sequence slot is rolled back so
+    /// the ack never covers an unapplied command) and the drain loop stops —
+    /// everything still in the ring is causally *after* this command, so FIFO
+    /// order is preserved. At the start of the next callback the parked command
+    /// is applied first (or superseded by a newer same-kind ring head via
+    /// command coalescing, in which case its resources are discarded off-RT
+    /// through the GC cascade).
+    pub(crate) deferred_structural: Option<ClapParamPayload>,
     /// SPSC channel: Main Thread -> Audio Thread (Slimmable model consumer).
-    pub(crate) slimmable_rx: Consumer<Option<Box<StaticModel>>>,
+    pub(crate) slimmable_rx: Consumer<SlimmableRebuild>,
     /// GC channel: Audio Thread -> Main Thread (Producer).
     pub(crate) gc_tx: Producer<GcItem>,
     /// Fallback buffer for GC overflow (overwrite).

@@ -13,7 +13,10 @@ mod load;
 mod logging;
 
 use super::command_scheduler::{CommandProducer, PushError};
-use super::shared::{ClapParamPayload, NamClapShared, PendingModel, PendingRestore};
+use super::shared::{
+    ClapParamPayload, NamClapShared, PendingModel, PendingRestore, SlimmableRebuild, StagedRestore,
+    StagedSwap,
+};
 use crate::clap::gui::lifecycle::GuiLifecycle;
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
@@ -21,7 +24,7 @@ use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{self, GcItem};
 use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
-use neural_amp_modeler_rs::models::{NamModel, StaticModel};
+use neural_amp_modeler_rs::models::NamModel;
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,11 +43,14 @@ pub struct NamClapMainThread<'a> {
     /// Consumer to collect garbage (obsolete models) from the audio thread.
     pub gc_rx: Consumer<GcItem>,
     /// Producer to send slimmable-rebuilt models to the audio thread.
-    pub slimmable_tx: Producer<Option<Box<StaticModel>>>,
+    pub slimmable_tx: Producer<SlimmableRebuild>,
     /// Cached last latency reported to the host to avoid redundant notifications.
     pub last_reported_latency: u32,
     /// Cached last CabSim tail length reported to the host to avoid redundant notifications.
     pub last_reported_cabsim_tail: u32,
+    /// Last-seen value of `ColdShared::slimmable_stale_discarded_total`, used to
+    /// log stale-slimmable-rebuild discards exactly once (T3.2 / F-CONC-006).
+    pub last_seen_slimmable_stale: u32,
     /// Baseview window handle for GUI lifecycle control (embedded mode).
     pub window_handle: Option<baseview::WindowHandle>,
     /// Thread handle for the floating window event loop.
@@ -74,6 +80,23 @@ pub struct NamClapMainThread<'a> {
     /// to the audio thread and ack-gated publication (T6.1). Private slot —
     /// never shared with the audio thread or GUI.
     pub(crate) pending_restore: Option<PendingRestore>,
+    /// Latency-affecting full state restore staged to land only on the next
+    /// host restart cycle (F-LAT-005 / TR.1, Política A estendida).
+    ///
+    /// Set by `atomic_commit()` when the restore package changes physical
+    /// stream latency, physical cabsim latency, or oversampling factor.
+    /// Parked here until `activate()` installs the entire package atomically.
+    pub(crate) staged_restore: Option<StagedRestore>,
+    /// Latency-affecting model/IR swap staged to land only on the next host
+    /// restart cycle (T3.3 / F-LAT-005, Política A).
+    ///
+    /// Set by `load_model()`/`load_cabsim()`/IR-clear when the swap would
+    /// change the physical latency: the resources are fully built off-RT here,
+    /// `host.request_restart()` is issued, and `activate()` consumes this slot
+    /// during the restart cycle — the DSP keeps the old, still-reported
+    /// latency until then. Same-latency swaps bypass this slot and apply
+    /// continuously through the SPSC. Latest-wins coalescing per component.
+    pub(crate) staged_swap: Option<StagedSwap>,
 }
 
 impl<'a> NamClapMainThread<'a> {
@@ -102,6 +125,7 @@ impl<'a> NamClapMainThread<'a> {
 
         let PendingModel {
             model: mut model_l,
+            generation,
             model_rate,
             input_mult_adj,
             output_mult_adj,
@@ -119,6 +143,17 @@ impl<'a> NamClapMainThread<'a> {
                 ))
             })?,
         );
+
+        // Streaming resample adapter (T1.2/F-PERF-002), sized for the worst-case
+        // host block now that `buffer_size` is known.
+        let new_stream =
+            crate::clap::plugin::build_stream_adapter(sample_rate, model_rate, buffer_size)
+                .map_err(|e| {
+                    PluginError::Message(Box::leak(
+                        format!("Failed to create deferred streaming buffer: {e:?}")
+                            .into_boxed_str(),
+                    ))
+                })?;
 
         if let Some(ref mut model) = model_l
             && let Err(e) = model.set_max_buffer_size(buffer_size)
@@ -139,8 +174,10 @@ impl<'a> NamClapMainThread<'a> {
         match self
             .cmd_producer
             .try_push_command(ClapParamPayload::LoadModel {
+                generation,
                 model_l,
                 new_resampler,
+                new_stream,
                 input_mult_adj,
                 output_mult_adj,
             }) {
@@ -150,17 +187,21 @@ impl<'a> NamClapMainThread<'a> {
             }
             Err((PushError::Full, payload)) => {
                 // R-10: fail-closed — retain the model for retry instead of
-                // dropping it. The resampler is rebuilt on the next flush.
+                // dropping it. The resampler and streaming buffer are rebuilt on the next flush.
                 if let ClapParamPayload::LoadModel {
+                    generation,
                     model_l,
                     new_resampler,
+                    new_stream,
                     input_mult_adj,
                     output_mult_adj,
                 } = payload
                 {
                     drop(new_resampler);
+                    drop(new_stream);
                     if let Ok(mut guard) = self.shared.cold.pending_model.lock() {
                         *guard = Some(PendingModel {
+                            generation,
                             model: model_l,
                             model_rate,
                             input_mult_adj,

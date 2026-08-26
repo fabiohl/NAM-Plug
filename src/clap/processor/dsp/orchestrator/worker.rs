@@ -5,7 +5,7 @@ use crate::clap::extensions::params::{
     PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH, PARAM_INPUT_GAIN,
     PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
 };
-use crate::clap::plugin::UiToRt;
+use crate::clap::plugin::{PendingRestartOs, UiToRt};
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::RtStatusFlags;
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
@@ -120,8 +120,13 @@ pub(crate) fn apply_scheduled_event(
                         .store(factor.to_f32() as u32, Ordering::Relaxed);
                     // If the plugin is active, defer the rebuild
                     // via host restart; otherwise flag the main thread.
+                    // T3.1/F-LAT-004: the pending restart uses the
+                    // `PendingRestartOs` encoding so a transition *to Off*
+                    // is representable (the raw 0 no longer collides with
+                    // "no restart pending").
                     if buffer_size > 0 {
-                        pending_restart_os_factor.store(factor.to_f32() as u32, Ordering::Release);
+                        PendingRestartOs::Pending(factor)
+                            .store(pending_restart_os_factor, Ordering::Release);
                     } else {
                         rt_status
                             .requested_os_factor

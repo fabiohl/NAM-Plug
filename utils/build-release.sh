@@ -103,7 +103,43 @@ echo -e "${BLUE}${BOLD}=========================================================
 # Ensure execution from the subproject root directory
 cd "$PROJECT_DIR"
 
-# T6.4 provenance fail-closed: a certified release can never be produced from a
+# Engine provenance variables
+CORE_PATH=""
+CORE_VERSION="unknown"
+CORE_GIT_COMMIT="unknown"
+CORE_GIT_BRANCH="unknown"
+CORE_GIT_DIRTY=false
+CORE_TREE_SHA=""
+
+# F-PROV-016 provenance check: Inspect DSP engine crate NeuralAmpModeler-rs
+check_engine_provenance() {
+    if [ -d "../NeuralAmpModeler-rs" ] && grep -q 'NeuralAmpModeler-rs.*path.*=.*"\.\./NeuralAmpModeler-rs"' Cargo.toml 2>/dev/null; then
+        CORE_PATH="../NeuralAmpModeler-rs"
+        if [ -f "$CORE_PATH/Cargo.toml" ]; then
+            CORE_VERSION=$(grep '^version\s*=' "$CORE_PATH/Cargo.toml" | head -n 1 | cut -d'"' -f2 || echo "unknown")
+        fi
+        if git -C "$CORE_PATH" rev-parse --is-inside-work-tree &>/dev/null; then
+            CORE_GIT_COMMIT=$(git -C "$CORE_PATH" rev-parse HEAD 2>/dev/null || echo "unknown")
+            CORE_GIT_BRANCH=$(git -C "$CORE_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+            if [ -n "$(git -C "$CORE_PATH" status --porcelain 2>/dev/null || true)" ]; then
+                CORE_GIT_DIRTY=true
+            fi
+            CORE_TREE_SHA=$(git -C "$CORE_PATH" rev-parse HEAD^{tree} 2>/dev/null || echo "")
+        fi
+
+        if [ "$CORE_GIT_DIRTY" = "true" ]; then
+            if [ "$STRICT_MODE" = "1" ]; then
+                die "Engine repository '$CORE_PATH' has uncommitted changes in strict release mode (F-PROV-016 provenance fail-closed). Commit, stash or clean before generating a certified release."
+            else
+                warn "Engine repository '$CORE_PATH' is dirty (non-strict mode)."
+            fi
+        else
+            echo -e "  ${GREEN}✓${NC} Engine ($CORE_PATH) provenance verified clean (commit: ${CORE_GIT_COMMIT:0:12}, branch: $CORE_GIT_BRANCH, version: $CORE_VERSION)."
+        fi
+    fi
+}
+
+# T6.4 & F-PROV-016 provenance fail-closed: a certified release can never be produced from a
 # dirty work tree. In strict mode this aborts before any heavy work is started
 # and is re-verified immediately before receipt generation (Phase 8), so no
 # receipt is ever written for a dirty tree.
@@ -117,6 +153,7 @@ check_git_clean_strict() {
     if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
         die "Git working tree is dirty in strict release mode (provenance fail-closed). Commit, stash or clean before generating a certified release; no receipt will be written."
     fi
+    check_engine_provenance
 }
 check_git_clean_strict
 
@@ -337,6 +374,49 @@ if [ "$USE_BOLT" = true ]; then
 fi
 
 # -----------------------------------------------------------------------------
+# PHASE 1.5: Preflight Quick QA & RT Heap Allocation Audit (F-QA-012)
+# -----------------------------------------------------------------------------
+echo -e "\n${BLUE}${BOLD}[Phase 1.5/7] Executing strict Quick QA & RT Heap Allocation Audit preflight...${NC}"
+
+QUICK_RECEIPT="$PROJECT_DIR/target/logs/quick-receipt.txt"
+HEAP_LOG="$PROJECT_DIR/target/logs/quick-heap-audit.log"
+
+if [ "${NAM_SKIP_QUICK_QA:-0}" != "1" ]; then
+    NAM_QUICK_STRICT=1 "$SCRIPT_DIR/tests-quick.sh" || {
+        if [ "$STRICT_MODE" = "1" ]; then
+            die "Quick QA preflight suite failed in strict release mode!"
+        fi
+        warn "Quick QA preflight suite failed (non-strict mode)."
+        GATE_SKIPS+=("quick_qa:failed")
+    }
+fi
+
+QUICK_QA_PASSED=false
+HEAP_AUDIT_PASSED=false
+QUICK_RECEIPT_SHA=""
+HEAP_AUDIT_LOG_SHA=""
+
+if [ -f "$QUICK_RECEIPT" ] && grep -q "OVERALL: PASSED" "$QUICK_RECEIPT"; then
+    QUICK_QA_PASSED=true
+    QUICK_RECEIPT_SHA=$(sha256sum "$QUICK_RECEIPT" | cut -d' ' -f1)
+fi
+
+if [ -f "$HEAP_LOG" ] && [ -f "$QUICK_RECEIPT" ] && grep -q "HEAP_AUDIT=RAN" "$QUICK_RECEIPT"; then
+    HEAP_AUDIT_PASSED=true
+    HEAP_AUDIT_LOG_SHA=$(sha256sum "$HEAP_LOG" | cut -d' ' -f1)
+fi
+
+if [ "$QUICK_QA_PASSED" = true ] && [ "$HEAP_AUDIT_PASSED" = true ]; then
+    echo -e "  ${GREEN}✓${NC} Quick QA preflight and zero-alloc heap audit verified."
+else
+    if [ "$STRICT_MODE" = "1" ]; then
+        die "Quick QA preflight did not pass or heap audit was not verified in strict release mode!"
+    fi
+    warn "Quick QA preflight or heap audit not fully verified."
+    GATE_SKIPS+=("quick_qa:unverified")
+fi
+
+# -----------------------------------------------------------------------------
 # PHASE 2: Profile-Guided Optimization (PGO) - Profiling Workload
 # -----------------------------------------------------------------------------
 if [ "$USE_PGO" = true ]; then
@@ -399,9 +479,11 @@ fi
 echo -e "  ${GREEN}✓${NC} Compilation completed successfully."
 
 # -----------------------------------------------------------------------------
-# PHASE 4: BOLT Instrumentation & Post-Link Optimization
+# PHASE 4: BOLT Instrumentation & Post-Link Optimization (F-BOLT-014)
 # -----------------------------------------------------------------------------
 CLAP_BOLT_APPLIED=false
+BOLT_PROFILE_SHA=""
+BOLT_VERSION=""
 
 if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
     echo -e "\n${BLUE}${BOLD}[Phase 4/7] Applying BOLT post-link optimization...${NC}"
@@ -415,6 +497,7 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
         --instrumentation-file="$PGO_CLAP_TARGET_DIR/libnam_plug.fdata" \
         --instrumentation-file-append-pid > "$BOLT_DIR/bolt-instrument-clap.log" 2>&1; then
         echo -e "  ${GREEN}✓${NC} CLAP instrumented: $PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so"
+        BOLT_VERSION=$("$LLVM_BOLT" --version 2>&1 | head -n 1 || echo "unknown")
     else
         if [ "$STRICT_MODE" = "1" ]; then
             die "CLAP instrumentation failed in strict release mode."
@@ -434,35 +517,65 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
         RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS" \
             cargo build --locked --profile dist --features testing --bin pgo_profiling_workload
 
-        NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
-            "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" && \
-            echo -e "  ${GREEN}✓${NC} CLAP profile collected" || \
-            echo -e "${YELLOW}  Warning: CLAP profiling workload failed${NC}"
+        # Clean any stale fdata files and previous workload receipt before profiling
+        rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.* "$BOLT_DIR/libnam_plug.merged.fdata" "$PROJECT_DIR/target/pgo-workload-receipt.json"
+
+        if NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
+            "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload"; then
+            
+            # Verify workload completion receipt (F-BOLT-014)
+            if [ -f "$PROJECT_DIR/target/pgo-workload-receipt.json" ] && grep -q '"status": "SUCCESS"' "$PROJECT_DIR/target/pgo-workload-receipt.json"; then
+                echo -e "  ${GREEN}✓${NC} CLAP profile collected and workload receipt verified."
+            else
+                echo -e "${RED}  Error: CLAP profiling workload did not emit valid SUCCESS receipt.${NC}"
+                rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.*
+                if [ "$STRICT_MODE" = "1" ]; then
+                    die "CLAP BOLT profiling workload receipt verification failed in strict release mode."
+                fi
+            fi
+        else
+            echo -e "${RED}  Error: CLAP profiling workload failed during BOLT profile generation.${NC}"
+            # Clean partial fdata to prevent invalid partial optimization (F-BOLT-014)
+            rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.*
+            if [ "$STRICT_MODE" = "1" ]; then
+                die "CLAP BOLT profiling workload failed in strict release mode."
+            fi
+            echo -e "${YELLOW}  Warning: Proceeding without BOLT optimization (partial fdata purged).${NC}"
+        fi
 
         # Merge fdata profiles
         if command -v "$MERGE_FDATA" &>/dev/null || [ -x "$MERGE_FDATA" ]; then
             echo -e "  Merging BOLT instrumentation profiles..."
             CLAP_FDATA_FILES=()
             while IFS= read -r -d '' f; do
-                CLAP_FDATA_FILES+=("$f")
+                if [ -s "$f" ]; then
+                    CLAP_FDATA_FILES+=("$f")
+                fi
             done < <(find "$PGO_CLAP_TARGET_DIR" -maxdepth 1 -name "libnam_plug.fdata.*" -print0 2>/dev/null || true)
 
             if [ ${#CLAP_FDATA_FILES[@]} -gt 0 ]; then
                 "$MERGE_FDATA" "${CLAP_FDATA_FILES[@]}" > "$BOLT_DIR/libnam_plug.merged.fdata" 2>"$BOLT_DIR/merge-fdata-clap.log"
                 if [ -s "$BOLT_DIR/libnam_plug.merged.fdata" ]; then
-                    echo -e "  ${GREEN}✓${NC} CLAP profiles merged (${#CLAP_FDATA_FILES[@]} files)"
+                    BOLT_PROFILE_SHA=$(sha256sum "$BOLT_DIR/libnam_plug.merged.fdata" | cut -d' ' -f1)
+                    echo -e "  ${GREEN}✓${NC} CLAP profiles merged (${#CLAP_FDATA_FILES[@]} files, sha256: ${BOLT_PROFILE_SHA:0:16}...)"
                 else
                     echo -e "${YELLOW}  Warning: CLAP profile merge produced empty output.${NC}"
-                    if [ -f "$BOLT_DIR/merge-fdata-clap.log" ]; then
-                        echo -e "${YELLOW}  --- merge-fdata log tail ---${NC}"
-                        tail -n 10 "$BOLT_DIR/merge-fdata-clap.log"
+                    rm -f "$BOLT_DIR/libnam_plug.merged.fdata"
+                    if [ "$STRICT_MODE" = "1" ]; then
+                        die "CLAP profile merge produced empty output in strict release mode."
                     fi
                 fi
             else
-                echo -e "${YELLOW}  Warning: No CLAP fdata profiles found.${NC}"
+                echo -e "${YELLOW}  Warning: No non-empty CLAP fdata profiles found.${NC}"
+                if [ "$STRICT_MODE" = "1" ]; then
+                    die "No CLAP fdata profiles generated by workload in strict release mode."
+                fi
             fi
         else
             echo -e "${YELLOW}  Warning: merge-fdata tool not available. Skipping profile merge.${NC}"
+            if [ "$STRICT_MODE" = "1" ]; then
+                die "merge-fdata tool not available in strict release mode."
+            fi
         fi
     fi
 
@@ -550,7 +663,7 @@ FINAL_CLAP_SHA=$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)
 echo -e "  ${CYAN}Distributed CLAP artifact SHA-256:${NC} ${BOLD}$FINAL_CLAP_SHA${NC}"
 
 # Gate 1: Symbols and SONAME on distributed artifact
-echo -e "  [Gate 1/5] Validating exported symbols and SONAME on distributed artifact..."
+echo -e "  [Gate 1/6] Validating exported symbols and SONAME on distributed artifact..."
 if ! nm -D "$CLAP_TARGET" | grep -w "clap_entry" > /dev/null; then
     die "Missing 'clap_entry' symbol in distributed CLAP artifact!"
 fi
@@ -560,7 +673,7 @@ fi
 ok "Symbol and SONAME validation passed."
 
 # Gate 2: External clap-validator
-echo -e "  [Gate 2/5] Running external clap-validator against distributed artifact..."
+echo -e "  [Gate 2/6] Running external clap-validator against distributed artifact..."
 if command -v clap-validator >/dev/null 2>&1; then
     clap-validator validate "$CLAP_TARGET" || die "clap-validator rejected the distribution artifact!"
     ok "clap-validator passed."
@@ -573,7 +686,7 @@ else
 fi
 
 # Gate 3: Fail-closed AVX-512 absence certificate (EVEX byte decoding)
-echo -e "  [Gate 3/5] Running fail-closed AVX-512 absence scan on distributed artifact..."
+echo -e "  [Gate 3/6] Running fail-closed AVX-512 absence scan on distributed artifact..."
 "$SCRIPT_DIR/verify_no_avx512_release.sh" "$CLAP_TARGET"
 ok "AVX-512 absence certificate passed on distributed artifact."
 
@@ -608,7 +721,7 @@ ORACLE_SHA=""
 FIXTURE_SHA=""
 
 # Gate 4: NAMCore float parity test against distributed artifact
-echo -e "  [Gate 4/5] Running NAMCore float parity test against distributed artifact..."
+echo -e "  [Gate 4/6] Running NAMCore float parity test against distributed artifact..."
 if ORACLE_BIN=$(find_namcore_render); then
     if [ -n "$model_fixture" ]; then
         ORACLE_SHA=$(sha256sum "$ORACLE_BIN" | cut -d' ' -f1)
@@ -634,11 +747,41 @@ else
 fi
 
 # Gate 5: CabSim IR test against distributed artifact
-echo -e "  [Gate 5/5] Running CabSim IR test against distributed artifact..."
+echo -e "  [Gate 5/6] Running CabSim IR test against distributed artifact..."
 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
     timeout 300 cargo test --features testing --release --test clap \
     test_cabsim_ir_changes_audio_release_artifact -- --ignored --nocapture
 ok "CabSim IR test passed on distributed artifact."
+
+# Gate 6: Distributed Artifact Performance Certification Gate (F-QA-011)
+echo -e "  [Gate 6/6] Running performance certification gate on distributed artifact..."
+PERF_REPORT_PATH="$PROJECT_DIR/target/perf-certification-report.json"
+PERF_REPORT_SHA=""
+PERF_GATE_STATUS="SKIPPED"
+
+set +e
+cargo run --locked --profile dist --features testing --bin nam_perf_guard -- certify --clap "$CLAP_TARGET" --out "$PERF_REPORT_PATH"
+PERF_EXIT_CODE=$?
+set -e
+
+if [ -f "$PERF_REPORT_PATH" ]; then
+    PERF_REPORT_SHA=$(sha256sum "$PERF_REPORT_PATH" | cut -d' ' -f1)
+fi
+
+if [ "$PERF_EXIT_CODE" -eq 0 ]; then
+    PERF_GATE_STATUS="PASSED"
+    ok "Performance certification gate passed on distributed artifact."
+elif [ "$PERF_EXIT_CODE" -eq 2 ]; then
+    PERF_GATE_STATUS="INCONCLUSIVE"
+    warn "Performance certification gate inconclusive due to host environmental noise/jitter."
+else
+    PERF_GATE_STATUS="FAILED"
+    if [ "$STRICT_MODE" = "1" ]; then
+        die "Performance certification gate failed on distributed artifact (deadline violation or fatal error)!"
+    fi
+    warn "Performance certification gate failed (non-strict mode)."
+    GATE_SKIPS+=("performance_gate:failed")
+fi
 
 # Read version for archive naming
 VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys, json; print(json.load(sys.stdin)['packages'][0]['version'])")
@@ -757,30 +900,33 @@ fi
 # -----------------------------------------------------------------------------
 echo -e "\n${BLUE}${BOLD}[Receipt] Generating cryptographic build provenance receipt...${NC}"
 
-# T6.4 fail-closed provenance gate: the tree must be clean at the moment of
-# certification. Strict mode dies here (receipt is never written); non-strict
-# records the dirty state and degrades the receipt status.
+# Re-verify clean work tree before receipt writing (fail-closed)
 check_git_clean_strict
 
 GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 GIT_DIRTY=false
 if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
     GIT_DIRTY=true
 fi
 
-# T6.4: status is CERTIFIED only when every gate 1-5 actually ran (no skips)
-# and the work tree is clean. Any skip or dirty tree degrades the receipt to
-# INCOMPLETE — a receipt must never claim CERTIFIED over a gap.
+# Determine typed certification status (CERTIFIED, FUNCTIONALLY_CERTIFIED, INCOMPLETE)
 RECEIPT_STATUS="CERTIFIED"
-if [ "$GIT_DIRTY" = "true" ]; then
+if [ "$GIT_DIRTY" = "true" ] || [ "${CORE_GIT_DIRTY:-false}" = "true" ]; then
     RECEIPT_STATUS="INCOMPLETE"
 fi
-if [ ${#GATE_SKIPS[@]} -gt 0 ]; then
+
+if [ ${#GATE_SKIPS[@]} -gt 0 ] || [ "$PERF_GATE_STATUS" = "FAILED" ] || [ "$QUICK_QA_PASSED" != true ] || [ "$HEAP_AUDIT_PASSED" != true ]; then
     RECEIPT_STATUS="INCOMPLETE"
+elif [ "$PERF_GATE_STATUS" = "INCONCLUSIVE" ] || [ "$USE_PGO" = false ] || [ "${CLAP_BOLT_APPLIED:-false}" = false ]; then
+    if [ "$RECEIPT_STATUS" = "CERTIFIED" ]; then
+        RECEIPT_STATUS="FUNCTIONALLY_CERTIFIED"
+    fi
 fi
+
 GATE_SKIPS_JOINED="${GATE_SKIPS[*]:-}"
 if [ "$RECEIPT_STATUS" = "INCOMPLETE" ]; then
-    warn "Receipt status INCOMPLETE: git_dirty=$GIT_DIRTY skipped_gates=[${GATE_SKIPS_JOINED:-(none)}]"
+    warn "Receipt status INCOMPLETE: git_dirty=$GIT_DIRTY core_git_dirty=$CORE_GIT_DIRTY skipped_gates=[${GATE_SKIPS_JOINED:-(none)}]"
 fi
 
 CARGO_LOCK_SHA=$(sha256sum Cargo.lock 2>/dev/null | cut -d' ' -f1 || echo "")
@@ -794,7 +940,7 @@ import json, sys
 skipped_gates = [g for g in sys.argv[1].split('|') if g]
 
 receipt = {
-    'schema_version': '1.0',
+    'schema_version': '1.1',
     'timestamp_utc': '$TIMESTAMP',
     'status': '$RECEIPT_STATUS',
     'strict_mode': bool($STRICT_MODE),
@@ -805,14 +951,37 @@ receipt = {
     },
     'provenance': {
         'git_commit': '$GIT_COMMIT',
+        'git_branch': '$GIT_BRANCH',
         'git_dirty': bool('$GIT_DIRTY' == 'true'),
         'cargo_lock_sha256': '$CARGO_LOCK_SHA',
         'rustc_version': '$RUSTC_VER',
         'rustflags': '$CLAP_RUSTFLAGS'
     },
+    'engine_provenance': {
+        'dependency_type': 'path_patch' if '$CORE_PATH' else 'crates_io',
+        'path': '$CORE_PATH' or None,
+        'version': '$CORE_VERSION',
+        'git_commit': '$CORE_GIT_COMMIT',
+        'git_branch': '$CORE_GIT_BRANCH',
+        'git_dirty': bool('$CORE_GIT_DIRTY' == 'true'),
+        'source_tree_sha256': '$CORE_TREE_SHA' or None
+    },
+    'quick_qa_audit': {
+        'status': 'PASSED' if bool('$QUICK_QA_PASSED' == 'true') else 'FAILED',
+        'heap_audit_passed': bool('$HEAP_AUDIT_PASSED' == 'true'),
+        'receipt_sha256': '$QUICK_RECEIPT_SHA' or None,
+        'heap_audit_log_sha256': '$HEAP_AUDIT_LOG_SHA' or None
+    },
     'optimizations': {
         'pgo_applied': bool('$USE_PGO' == 'true'),
-        'bolt_applied': bool('$CLAP_BOLT_APPLIED' == 'true')
+        'bolt_applied': bool('$CLAP_BOLT_APPLIED' == 'true'),
+        'bolt_profile_sha256': '$BOLT_PROFILE_SHA' or None,
+        'bolt_version': '$BOLT_VERSION' or None
+    },
+    'performance_certification': {
+        'gate_status': '$PERF_GATE_STATUS',
+        'report_path': '$PERF_REPORT_PATH' if '$PERF_REPORT_SHA' else None,
+        'report_sha256': '$PERF_REPORT_SHA' or None
     },
     'artifacts': {
         'clap_installed_path': '$CLAP_TARGET',
@@ -841,6 +1010,8 @@ echo -e "  ${GREEN}✓${NC} Atomic build receipt generated at: ${BOLD}$RECEIPT_T
 echo -e "\n${GREEN}${BOLD}================================================================================${NC}"
 if [ "$RECEIPT_STATUS" = "CERTIFIED" ]; then
     echo -e "${GREEN}${BOLD}   Pipeline completed! Artifacts certified and ready for distribution:   ${NC}"
+elif [ "$RECEIPT_STATUS" = "FUNCTIONALLY_CERTIFIED" ]; then
+    echo -e "${YELLOW}${BOLD}   Pipeline completed! Functionally certified (PGO/BOLT omitted or perf inconclusive): ${NC}"
 else
     echo -e "${RED}${BOLD}   Pipeline completed with gaps — receipt status INCOMPLETE (not certified): ${NC}"
 fi

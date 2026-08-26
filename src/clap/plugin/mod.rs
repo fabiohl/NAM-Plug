@@ -9,10 +9,13 @@ pub use command_scheduler::{
     CMD_QUEUE_CAPACITY, CommandConsumer, CommandProducer, CommandScheduler,
     CommandSchedulerChannels,
 };
+pub(crate) use shared::PendingRestartOs;
+pub(crate) use shared::build_stream_adapter;
 pub use shared::{
     ClapParamPayload, ColdShared, GuiSharedState, LoadModelPayload, NamClapShared,
     NamModelMetadata, PendingModel, PendingRestore, RENDER_MODE_OFFLINE, RENDER_MODE_REALTIME,
-    RestoreModelPublish, RestorePublish, RestoreTxn, RtToUi, UiToRt,
+    RestoreModelPublish, RestorePublish, RestoreTxn, RtToUi, SlimmableRebuild, StagedRestore,
+    StructuralKind, UiToRt,
 };
 
 mod main_thread;
@@ -118,6 +121,8 @@ impl DefaultPluginFactory for NamClapPlugin {
                 model_sample_rate: AtomicU32::new(48000),
                 sample_rate: AtomicU32::new(0),
                 buffer_size: AtomicU32::new(0),
+                current_stream_latency: AtomicU32::new(0),
+                current_cabsim_latency: AtomicU32::new(0),
                 track_accent_color: AtomicU32::new(0),
                 param_indication: [
                     std::sync::atomic::AtomicU8::new(0),
@@ -142,6 +147,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                     std::sync::atomic::AtomicU32::new(0),
                 ],
                 model_load_counter: AtomicU32::new(0),
+                model_generation: std::sync::atomic::AtomicU64::new(0),
                 ui_model_name: Mutex::new(String::new()),
                 ui_model_metadata: Mutex::new(None),
                 ui_pending_model: Mutex::new(None),
@@ -163,6 +169,8 @@ impl DefaultPluginFactory for NamClapPlugin {
                 ir_raw_sample_rate: AtomicU32::new(0),
                 slimmable_tx: Mutex::new(Some(slimmable_tx)),
                 slimmable_rx: Mutex::new(Some(slimmable_rx)),
+                requested_slimmable_generation: std::sync::atomic::AtomicU64::new(0),
+                slimmable_stale_discarded_total: AtomicU32::new(0),
                 full_wavenet_model: Mutex::new(None),
                 cmd_next_seq: AtomicU64::new(0),
                 cmd_last_ack: AtomicU64::new(0),
@@ -315,6 +323,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             slimmable_tx,
             last_reported_latency: 0,
             last_reported_cabsim_tail: 0,
+            last_seen_slimmable_stale: 0,
             window_handle: None,
             floating_thread_handle: None,
             floating_close_signal: None,
@@ -325,6 +334,8 @@ impl DefaultPluginFactory for NamClapPlugin {
             gui_lifecycle: crate::clap::gui::lifecycle::GuiLifecycle::Hidden,
             hugepage_synced: false,
             pending_restore: None,
+            staged_restore: None,
+            staged_swap: None,
         };
 
         let host_name = main_thread

@@ -4,6 +4,7 @@
 use super::*;
 use crate::clap::plugin::ClapParamPayload;
 use crate::clap::plugin::RestoreTxn;
+use crate::clap::plugin::StructuralKind;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use std::sync::Arc;
@@ -23,8 +24,10 @@ fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
     RestoreTxn {
         generation,
         model: Some(crate::clap::plugin::LoadModelPayload {
+            generation,
             model_l: None,
             new_resampler: Box::new(NamResampler::new(48000, 48000, 0).unwrap()),
+            new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
             input_mult_adj: mult_adj,
             output_mult_adj: mult_adj,
         }),
@@ -577,4 +580,140 @@ fn restore_txn_atomic_delivery_capacity_2() {
     consumer.ack_processed();
     assert!(producer.is_acked(seq_c));
     assert_eq!(snapshots, vec![(1, 1.0, 1.0), (2, 2.0, 2.0), (3, 3.0, 3.0)]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T2.3 / F-RT-007 — Command Budgeting primitives
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn structural_classification_light_vs_heavy() {
+    // Light: atomic parameter updates drain freely (no budget).
+    let light = ClapParamPayload::Params(RtProcessingParams::default());
+    assert!(!light.is_structural(), "Params is light, not structural");
+    assert_eq!(
+        light.structural_kind(),
+        None,
+        "Params has no structural kind"
+    );
+
+    // Heavy: every swap/restore payload is structural and budgeted.
+    let heavy = [
+        ClapParamPayload::LoadModel {
+            generation: 0,
+            model_l: None,
+            new_resampler: Box::new(NamResampler::new(48000, 48000, 0).unwrap()),
+            new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
+            input_mult_adj: 1.0,
+            output_mult_adj: 1.0,
+        },
+        ClapParamPayload::LoadCabIr { adapter: None },
+        ClapParamPayload::SetOversample {
+            os_l: Box::new(
+                neural_amp_modeler_rs::dsp::oversample::OversampleEngine::new(
+                    neural_amp_modeler_rs::dsp::oversample::OversampleFactor::X2,
+                    256,
+                )
+                .unwrap(),
+            ),
+            os_r: Box::new(
+                neural_amp_modeler_rs::dsp::oversample::OversampleEngine::new(
+                    neural_amp_modeler_rs::dsp::oversample::OversampleFactor::X2,
+                    256,
+                )
+                .unwrap(),
+            ),
+        },
+        ClapParamPayload::RestoreTxn(RestoreTxn {
+            generation: 1,
+            model: None,
+            ir: None,
+            params: RtProcessingParams::default(),
+        }),
+    ];
+    for payload in &heavy {
+        assert!(payload.is_structural(), "payload must be structural");
+        assert!(
+            payload.structural_kind().is_some(),
+            "structural payload must carry a kind"
+        );
+    }
+
+    // Restore is atomic and ack-gated — never coalescible.
+    assert!(
+        !StructuralKind::Restore.is_coalescible(),
+        "RestoreTxn must always be applied atomically (never superseded)"
+    );
+    for kind in [
+        StructuralKind::Model,
+        StructuralKind::CabIr,
+        StructuralKind::Oversample,
+    ] {
+        assert!(kind.is_coalescible(), "{kind:?} must be coalescible");
+    }
+}
+
+#[test]
+fn consumer_rollback_and_advance_pending_keep_ack_gapless() {
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (mut tx, rx) = rtrb::RingBuffer::new(16);
+    let mut consumer = CommandConsumer::new(rx, &last_ack);
+
+    for i in 0..3u32 {
+        tx.push(ClapParamPayload::Params(RtProcessingParams {
+            input_gain_db: i as f32,
+            ..Default::default()
+        }))
+        .unwrap();
+    }
+
+    // Pop two applied commands, then pop a third that will be DEFERRED
+    // (structural budget). The deferral must not advance the ack.
+    let _ = consumer.pop().unwrap();
+    let _ = consumer.pop().unwrap();
+    let _ = consumer.pop().unwrap();
+    consumer.rollback_last_pop();
+    consumer.ack_processed();
+    assert_eq!(
+        last_ack.load(Ordering::Relaxed),
+        2,
+        "ack must cover only applied commands, never the deferred one"
+    );
+
+    // The deferred command reoccupies its sequence slot when applied at the
+    // start of the next callback (advance_pending), keeping the mapping gapless.
+    consumer.advance_pending();
+    consumer.ack_processed();
+    assert_eq!(
+        last_ack.load(Ordering::Relaxed),
+        3,
+        "advance_pending must restore the deferred command's sequence slot"
+    );
+}
+
+#[test]
+fn consumer_peek_does_not_consume() {
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (mut tx, rx) = rtrb::RingBuffer::new(16);
+    let mut consumer = CommandConsumer::new(rx, &last_ack);
+
+    tx.push(ClapParamPayload::LoadCabIr { adapter: None })
+        .unwrap();
+
+    // Peek returns the head without consuming it.
+    let peeked = consumer.peek().expect("ring head must be visible");
+    assert!(matches!(peeked, ClapParamPayload::LoadCabIr { .. }));
+    assert_eq!(
+        last_ack.load(Ordering::Relaxed),
+        0,
+        "peek must not advance ack"
+    );
+
+    // The same command is still popped afterwards.
+    let popped = consumer.pop().expect("peek must not consume");
+    assert!(matches!(popped, ClapParamPayload::LoadCabIr { .. }));
+
+    // Empty ring: peek returns None, pop returns None.
+    assert!(consumer.peek().is_none());
+    assert!(consumer.pop().is_none());
 }

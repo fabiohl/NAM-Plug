@@ -176,6 +176,15 @@ fn test_cabsim_ir_changes_audio_release_artifact() {
         },
     );
 
+    // Under Política A, clearing the IR changes latency (256 -> 0) and requests
+    // a host restart. Simulate the host restart cycle (deactivate -> activate):
+    let stopped = started.stop_processing();
+    instance.deactivate(stopped);
+    let stopped = instance
+        .activate(|_, _| (), audio_config)
+        .expect("activate after IR clear should succeed");
+    let mut started = stopped.start_processing().expect("start processing");
+
     for _ in 0..12 {
         let _ = process_block_rms(&mut started, 256);
     }

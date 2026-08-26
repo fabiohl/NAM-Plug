@@ -6,5 +6,7 @@
 // sub-block boundaries, and the bypass decision is evaluated per sub-block
 // within process_sub_block(). See:
 //   - orchestrator.rs:process_dsp_audio() for the sub-block loop
-//   - orchestrator.rs:copy_bypass_to_output() for dry passthrough copy
+//   - orchestrator.rs:copy_delayed_dry_to_output() for the latency-compensated
+//     dry passthrough copy (T4.1/F-DSP-008)
+//   - dry_delay.rs for the pre-allocated circular dry delay line
 //   - Architectural design for the unified bypass/wet scheduler with crossfade.

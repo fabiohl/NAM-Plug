@@ -5,8 +5,7 @@
 
 use super::NamClapMainThread;
 use crate::clap::gui::ui::zones::dialog_state;
-use crate::clap::plugin::ClapParamPayload;
-use crate::clap::plugin::shared::PendingPresetLoad;
+use crate::clap::plugin::shared::{PendingPresetLoad, SlimmableRebuild, StagedSwap};
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::host::HostMainThreadHandle;
 use neural_amp_modeler_rs::common::spsc::{self, GcItem, drain_gc_channels};
@@ -98,6 +97,11 @@ impl<'a> NamClapMainThread<'a> {
                 .rt_status
                 .requested_slimmable_ch
                 .load(Ordering::Relaxed) as usize;
+            let generation = self
+                .shared
+                .cold
+                .requested_slimmable_generation
+                .load(Ordering::Relaxed);
             let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
 
             if target_ch >= 4 {
@@ -133,7 +137,10 @@ impl<'a> NamClapMainThread<'a> {
                 };
 
                 if let Some(model) = new_model {
-                    match self.slimmable_tx.push(Some(model)) {
+                    match self
+                        .slimmable_tx
+                        .push(SlimmableRebuild { generation, model })
+                    {
                         Ok(()) => {
                             self.shared
                                 .cold
@@ -392,46 +399,48 @@ impl<'a> NamClapMainThread<'a> {
             }
 
             if self.shared.cold.ui_clear_ir.load(Ordering::Relaxed) {
-                match self
-                    .cmd_producer
-                    .try_push_command(ClapParamPayload::LoadCabIr { adapter: None })
-                {
-                    Ok(_) => {
-                        self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
-                        {
-                            let mut ir_guard =
-                                self.shared.cold.ir_path.lock().unwrap_or_else(|e| {
-                                    log::error!("PoisonError in ir_path lock: {e:?}");
-                                    e.into_inner()
-                                });
-                            *ir_guard = None;
-                        }
-                        {
-                            let mut hash_guard =
-                                self.shared.cold.ir_hash.lock().unwrap_or_else(|e| {
-                                    log::error!("PoisonError in ir_hash lock: {e:?}");
-                                    e.into_inner()
-                                });
-                            *hash_guard = None;
-                        }
-                        {
-                            let mut raw_guard =
-                                self.shared.cold.ir_raw_samples.lock().unwrap_or_else(|e| {
-                                    log::error!("PoisonError in ir_raw_samples lock: {e:?}");
-                                    e.into_inner()
-                                });
-                            *raw_guard = None;
-                            self.shared
-                                .cold
-                                .ir_raw_sample_rate
-                                .store(0, Ordering::Relaxed);
-                        }
+                // T3.3/F-LAT-005 (Política A): clearing the active IR changes
+                // the physical latency (partition → 0), so it is staged and a
+                // host restart is requested — the DSP keeps the IR (and the
+                // still-reported latency) until `activate()` installs the
+                // staged clear. A clear when no IR is installed is a no-op.
+                let current_cabsim_latency = self
+                    .shared
+                    .cold
+                    .current_cabsim_latency
+                    .load(Ordering::Relaxed);
+                if current_cabsim_latency == 0 {
+                    self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
+                } else {
+                    let staged = self.staged_swap.get_or_insert_with(StagedSwap::default);
+                    staged.ir = Some(None);
+                    self.host.request_restart();
+                    self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
+                    {
+                        let mut ir_guard = self.shared.cold.ir_path.lock().unwrap_or_else(|e| {
+                            log::error!("PoisonError in ir_path lock: {e:?}");
+                            e.into_inner()
+                        });
+                        *ir_guard = None;
                     }
-                    Err(_) => {
-                        // R-10: keep ui_clear_ir set so the next housekeeping
-                        // cycle retries. Do not clear ir_path / ir_raw_samples
-                        // until the bypass command is actually delivered.
-                        self.host.request_callback();
+                    {
+                        let mut hash_guard = self.shared.cold.ir_hash.lock().unwrap_or_else(|e| {
+                            log::error!("PoisonError in ir_hash lock: {e:?}");
+                            e.into_inner()
+                        });
+                        *hash_guard = None;
+                    }
+                    {
+                        let mut raw_guard =
+                            self.shared.cold.ir_raw_samples.lock().unwrap_or_else(|e| {
+                                log::error!("PoisonError in ir_raw_samples lock: {e:?}");
+                                e.into_inner()
+                            });
+                        *raw_guard = None;
+                        self.shared
+                            .cold
+                            .ir_raw_sample_rate
+                            .store(0, Ordering::Relaxed);
                     }
                 }
             }
@@ -464,6 +473,23 @@ impl<'a> NamClapMainThread<'a> {
             .load(Ordering::Relaxed);
         if _cabsim_tail != self.last_reported_cabsim_tail {
             self.last_reported_cabsim_tail = _cabsim_tail;
+        }
+
+        // T3.2/F-CONC-006 observability: surface stale slimmable-rebuild
+        // discards exactly once when the RT counter advances. Without this, a
+        // regression that discards legitimate rebuilds (adaptive-compute
+        // starvation) would be invisible in field telemetry.
+        let stale_discarded = self
+            .shared
+            .cold
+            .slimmable_stale_discarded_total
+            .load(Ordering::Relaxed);
+        if stale_discarded != self.last_seen_slimmable_stale {
+            self.last_seen_slimmable_stale = stale_discarded;
+            log::warn!(
+                "NAM-Plug: {} stale slimmable rebuild(s) discarded (F-CONC-006)",
+                stale_discarded
+            );
         }
     }
 

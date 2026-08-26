@@ -13,6 +13,7 @@ use crate::clap::extensions::params::{
     PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32,
     bypass_f32_to_bool, bypass_u32_to_bool, sanitize_param_value,
 };
+use crate::clap::plugin::PendingRestartOs;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use std::sync::atomic::Ordering;
 
@@ -118,13 +119,26 @@ impl<'a> NamClapProcessor<'a> {
         // CLAP latency policy — while the plugin is active,
         // structural changes that alter latency must request a host restart
         // and defer the rebuild to the next `activate()`.
+        //
+        // T3.1/F-LAT-004: the pending request uses the `PendingRestartOs`
+        // encoding, so a pending transition *to Off* is representable (the
+        // legacy `0` no longer collides with "no restart pending"). Coalescing
+        // is latest-wins: if a restart for the *same* target factor is already
+        // pending, we skip the redundant `request_restart()` (exactly one
+        // restart per coalesced relevant transition).
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
         if buffer_size > 0 {
-            self.shared
-                .cold
-                .pending_restart_os_factor
-                .store(factor.to_f32() as u32, Ordering::Release);
-            self.host.request_restart();
+            let prev = PendingRestartOs::load(
+                &self.shared.cold.pending_restart_os_factor,
+                Ordering::Relaxed,
+            );
+            if prev != PendingRestartOs::Pending(factor) {
+                PendingRestartOs::Pending(factor).store(
+                    &self.shared.cold.pending_restart_os_factor,
+                    Ordering::Release,
+                );
+                self.host.request_restart();
+            }
         } else {
             // Plugin is not active yet — safe to flag the main thread for
             // an immediate rebuild (allocate off-RT, deliver via SPSC).

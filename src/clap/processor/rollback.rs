@@ -8,10 +8,9 @@
 //! back into `ColdShared`, leaving the plugin in a clean deactivated state
 //! ready for the next `activate()` attempt.
 
-use crate::clap::plugin::{ClapParamPayload, NamClapShared};
+use crate::clap::plugin::{ClapParamPayload, NamClapShared, PendingRestartOs, SlimmableRebuild};
 use clack_plugin::plugin::PluginError;
 use neural_amp_modeler_rs::common::spsc::GcItem;
-use neural_amp_modeler_rs::models::StaticModel;
 use rtrb::{Consumer, Producer};
 
 use std::sync::atomic::Ordering;
@@ -29,9 +28,9 @@ pub(crate) struct ActivateRollbackGuard<'a> {
     shared: &'a NamClapShared,
     pub(crate) param_rx: Option<Consumer<ClapParamPayload>>,
     pub(crate) gc_tx: Option<Producer<GcItem>>,
-    pub(crate) slimmable_rx: Option<Consumer<Option<Box<StaticModel>>>>,
+    pub(crate) slimmable_rx: Option<Consumer<SlimmableRebuild>>,
     pub(crate) deactivated: Option<DeactivatedDspState>,
-    pub(crate) pending_restart_os_factor: Option<u32>,
+    pub(crate) pending_restart_os_factor: Option<PendingRestartOs>,
 }
 
 /// Resources extracted from `ColdShared` during `activate()`.
@@ -39,7 +38,7 @@ pub(crate) struct ActivateRollbackGuard<'a> {
 pub(crate) struct ActivatedResources {
     pub(crate) param_rx: Consumer<ClapParamPayload>,
     pub(crate) gc_tx: Producer<GcItem>,
-    pub(crate) slimmable_rx: Consumer<Option<Box<StaticModel>>>,
+    pub(crate) slimmable_rx: Consumer<SlimmableRebuild>,
 }
 
 impl<'a> ActivateRollbackGuard<'a> {
@@ -87,11 +86,11 @@ impl Drop for ActivateRollbackGuard<'_> {
         // guard so the Drop is idempotent (restore-once). Mutex poisoning
         // is recovered via `into_inner()` — the resource must be restored
         // even if a previous lock attempt panicked.
-        if let Some(factor) = self.pending_restart_os_factor.take() {
+        if let Some(restart) = self.pending_restart_os_factor.take() {
             self.shared
                 .cold
                 .pending_restart_os_factor
-                .store(factor, Ordering::Release);
+                .store(restart.encode(), Ordering::Release);
         }
         if let Some(rx) = self.slimmable_rx.take() {
             *self
@@ -169,18 +168,17 @@ mod tests {
             guard.param_rx = Some(param_rx);
             guard.gc_tx = Some(gc_tx);
             guard.slimmable_rx = Some(slimmable_rx);
-            guard.pending_restart_os_factor = Some(2);
+            guard.pending_restart_os_factor = Some(PendingRestartOs::Pending(
+                neural_amp_modeler_rs::dsp::oversample::OversampleFactor::X4,
+            ));
 
             // Simulating an error before defuse: guard dropped
         }
 
-        // Verify that pending_restart_os_factor was restored
+        // Verify that pending_restart_os_factor was restored (encoded).
         assert_eq!(
-            shared
-                .cold
-                .pending_restart_os_factor
-                .load(Ordering::Acquire),
-            2
+            PendingRestartOs::load(&shared.cold.pending_restart_os_factor, Ordering::Acquire,),
+            PendingRestartOs::Pending(neural_amp_modeler_rs::dsp::oversample::OversampleFactor::X4)
         );
         // Verify channels are back in ColdShared
         assert!(shared.cold.param_rx.lock().unwrap().is_some());

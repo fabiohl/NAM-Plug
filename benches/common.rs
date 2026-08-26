@@ -237,3 +237,14 @@ pub fn synth_ir(len: usize, freq: f32, decay: f32) -> Vec<f32> {
         })
         .collect()
 }
+
+/// Writes a synthetic 512-sample IR WAV file for CabSim benchmarking.
+pub fn create_bench_ir_wav(sample_rate: u32) -> PathBuf {
+    let ir_path = std::env::temp_dir().join(format!("nam_plug_bench_ir_{sample_rate}.wav"));
+    let mut ir = vec![0.0f32; 512];
+    ir[0] = 1.0;
+    ir[1] = -0.9;
+    neural_amp_modeler_rs::testing::wav::write_wav_f32(&ir_path, &ir, sample_rate)
+        .expect("write synthetic bench IR wav");
+    ir_path
+}

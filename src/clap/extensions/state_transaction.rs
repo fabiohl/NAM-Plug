@@ -17,10 +17,12 @@ use crate::clap::plugin::LoadModelPayload;
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::plugin::NamModelMetadata;
 use crate::clap::plugin::PendingModel;
+use crate::clap::plugin::PendingRestartOs;
 use crate::clap::plugin::PendingRestore;
 use crate::clap::plugin::RestoreModelPublish;
 use crate::clap::plugin::RestorePublish;
 use crate::clap::plugin::RestoreTxn;
+use crate::clap::plugin::StagedRestore;
 use crate::clap::plugin::command_scheduler::PushError;
 use crate::clap::plugin::debug_assert_main_thread;
 use clack_plugin::prelude::*;
@@ -30,7 +32,9 @@ use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
 use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
 use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
+use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
+use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
 use neural_amp_modeler_rs::loader::load_and_build_model;
 use neural_amp_modeler_rs::models::NamModel;
 use neural_amp_modeler_rs::models::StaticModel;
@@ -42,6 +46,7 @@ use std::sync::atomic::Ordering;
 struct ModelResources {
     model_l: Option<Box<StaticModel>>,
     new_resampler: Box<NamResampler>,
+    new_stream: Box<StreamingResampleBuffer>,
     input_mult_adj: f32,
     output_mult_adj: f32,
     model_rate: u32,
@@ -51,7 +56,7 @@ struct ModelResources {
 }
 
 struct IrResources {
-    adapter: Option<CabSimAdapter>,
+    adapter: Option<Box<CabSimAdapter>>,
     samples: Vec<f32>,
     sample_rate: u32,
 }
@@ -329,6 +334,22 @@ fn build_model_resources(
         )
     })?);
 
+    // Streaming resample adapter (T1.2/F-PERF-002), sized for the host buffer.
+    // When `buffer_size` is 0 (pre-activation restore), `flush_pending_model()`
+    // builds it at activate() time from the deferred `PendingModel`.
+    let new_stream = crate::clap::plugin::build_stream_adapter(
+        host_rate,
+        model_rate,
+        buffer_size.max(1) as usize,
+    )
+    .map_err(|e| {
+        Box::new(
+            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                .message("Failed to build streaming resample buffer")
+                .param("error", e.to_string()),
+        )
+    })?;
+
     let metadata = model_pair.metadata.clone();
     let architecture = model_pair.architecture.clone();
     let topology = model_pair.topology.clone();
@@ -356,6 +377,7 @@ fn build_model_resources(
     Ok(ModelResources {
         model_l,
         new_resampler,
+        new_stream,
         input_mult_adj,
         output_mult_adj,
         model_rate,
@@ -648,13 +670,15 @@ fn build_ir_resources(
     })?;
 
     Ok(IrResources {
-        adapter: Some(CabSimAdapter::new(Box::new(engine)).map_err(|e| {
-            Box::new(
-                NamDiagnostic::new(e, sys)
-                    .message("Failed to build cab-sim convolution adapter")
-                    .hint("The IR samples require more memory than available."),
-            )
-        })?),
+        adapter: Some(Box::new(CabSimAdapter::new(Box::new(engine)).map_err(
+            |e| {
+                Box::new(
+                    NamDiagnostic::new(e, sys)
+                        .message("Failed to build cab-sim convolution adapter")
+                        .hint("The IR samples require more memory than available."),
+                )
+            },
+        )?)),
         samples: cabsim.samples,
         sample_rate: cabsim.sample_rate,
     })
@@ -755,8 +779,9 @@ fn commit(
     atomic_commit(validated, main_thread, mode)
 }
 
-/// Active path: builds the atomic [`RestoreTxn`] and delivers it to the audio
-/// thread, retaining it on SPSC `Full` (fail-closed).
+/// Active path: builds the atomic [`RestoreTxn`] and either delivers it
+/// continuously through SPSC (same physical latency) or stages it for the next
+/// host restart cycle (different physical latency, Política A / TR.1).
 fn atomic_commit(
     validated: ValidatedRestore,
     main_thread: &mut NamClapMainThread,
@@ -766,14 +791,91 @@ fn atomic_commit(
         let rate = main_thread.shared.cold.sample_rate.load(Ordering::Relaxed);
         if rate == 0 { 48000 } else { rate }
     };
-    let (publish, txn) = build_restore_package(validated, &main_thread.params, host_rate, mode)?;
-    let pending = PendingRestore {
-        generation: txn.generation,
-        txn: Some(txn),
-        publish,
-        seq: 0,
+    let buffer_size = main_thread.shared.cold.buffer_size.load(Ordering::Relaxed);
+    let (publish, txn) = build_restore_package(
+        validated,
+        &main_thread.params,
+        host_rate,
+        buffer_size,
+        mode,
+        &main_thread.shared.cold,
+    )?;
+
+    // Check if the restore changes physical latency (T3.3 / F-LAT-005 / TR.1 Política A).
+    let current_stream_latency = main_thread
+        .shared
+        .cold
+        .current_stream_latency
+        .load(Ordering::Relaxed);
+    let current_cabsim_latency = main_thread
+        .shared
+        .cold
+        .current_cabsim_latency
+        .load(Ordering::Relaxed);
+
+    let stream_latency_differs = match txn.model.as_ref() {
+        Some(m) => m.new_stream.latency_samples() != current_stream_latency,
+        None => false,
     };
-    deliver_pending_restore(main_thread, pending);
+
+    let cabsim_latency_differs = match txn.ir.as_ref() {
+        Some(maybe_adapter) => {
+            let new_lat = maybe_adapter
+                .as_ref()
+                .map_or(0, |a| a.latency_samples() as u32);
+            new_lat != current_cabsim_latency
+        }
+        None => false,
+    };
+
+    let current_os = OversampleFactor::from_f32(
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_oversample
+            .load(Ordering::Relaxed) as f32,
+    );
+    let pending_os = PendingRestartOs::load(
+        &main_thread.shared.cold.pending_restart_os_factor,
+        Ordering::Relaxed,
+    );
+    let os_differs =
+        publish.params.oversample != current_os || pending_os != PendingRestartOs::None;
+
+    let latency_differs = stream_latency_differs || cabsim_latency_differs || os_differs;
+
+    if !latency_differs {
+        // Same latency ⇒ continuous atomic restore through SPSC (ack-gated).
+        // Clear any superseded staged items on the main thread (TR.1 #5).
+        main_thread.staged_restore = None;
+        if let Some(staged) = main_thread.staged_swap.as_mut() {
+            staged.clear_model();
+            staged.clear_ir();
+            main_thread.staged_swap = None;
+        }
+
+        let pending = PendingRestore {
+            generation: txn.generation,
+            txn: Some(txn),
+            publish,
+            seq: 0,
+        };
+        deliver_pending_restore(main_thread, pending);
+    } else {
+        // Different physical latency ⇒ strict Política A: stage entire package off-RT
+        // and request host restart. Audio thread keeps running current state and reporting
+        // current latency until activate() consumes this staged restore.
+        if os_differs {
+            PendingRestartOs::Pending(publish.params.oversample).store(
+                &main_thread.shared.cold.pending_restart_os_factor,
+                Ordering::Release,
+            );
+        }
+        main_thread.staged_swap = None;
+        main_thread.staged_restore = Some(StagedRestore { txn, publish });
+        main_thread.host.request_restart();
+    }
+
     Ok(())
 }
 
@@ -783,7 +885,9 @@ fn build_restore_package(
     validated: ValidatedRestore,
     current_params: &ProcessingParams,
     host_rate: u32,
+    buffer_size: u32,
     mode: &RestoreMode,
+    cold: &crate::clap::plugin::shared::ColdShared,
 ) -> Result<(RestorePublish, RestoreTxn), PluginError> {
     let ValidatedRestore {
         params: validated_params,
@@ -835,6 +939,7 @@ fn build_restore_package(
             let ModelResources {
                 model_l,
                 new_resampler,
+                new_stream,
                 input_mult_adj,
                 output_mult_adj,
                 model_rate: _,
@@ -843,8 +948,10 @@ fn build_restore_package(
                 model_hash: _,
             } = resources;
             Some(LoadModelPayload {
+                generation: cold.allocate_model_generation(),
                 model_l,
                 new_resampler,
+                new_stream,
                 input_mult_adj,
                 output_mult_adj,
             })
@@ -859,9 +966,22 @@ fn build_restore_package(
                         format!("Failed to build clear-model resampler: {e:?}").into_boxed_str(),
                     ))
                 })?;
+                let new_stream = crate::clap::plugin::build_stream_adapter(
+                    host_rate,
+                    48000,
+                    buffer_size.max(1) as usize,
+                )
+                .map_err(|e| {
+                    PluginError::Message(Box::leak(
+                        format!("Failed to build clear-model streaming buffer: {e:?}")
+                            .into_boxed_str(),
+                    ))
+                })?;
                 Some(LoadModelPayload {
+                    generation: cold.allocate_model_generation(),
                     model_l: None,
                     new_resampler: Box::new(new_resampler),
+                    new_stream,
                     input_mult_adj: 1.0,
                     output_mult_adj: 1.0,
                 })
@@ -878,7 +998,9 @@ fn build_restore_package(
                 samples: _,
                 sample_rate: _,
             } = resources;
-            // `adapter` is already `Option<CabSimAdapter>` — None clears the IR.
+            // `adapter` is already `Option<Box<CabSimAdapter>>` — None clears
+            // the IR. The box preserves the RT-safe end-to-end ownership
+            // contract (F-RT-003/T2.1).
             Some(adapter)
         }
         None => match mode {
@@ -955,7 +1077,7 @@ fn note_model_delivered(main_thread: &mut NamClapMainThread, publish: &RestorePu
 
 /// Publishes UI/paths/hashes for a restore transaction once the audio thread has
 /// applied it (ack phase), or immediately in a pre-activate local commit.
-fn publish_restore(publish: RestorePublish, main_thread: &mut NamClapMainThread) {
+pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &mut NamClapMainThread) {
     let RestorePublish {
         mode_full,
         params,
@@ -1166,6 +1288,7 @@ fn local_commit(
         let ModelResources {
             model_l,
             new_resampler: _,
+            new_stream: _,
             input_mult_adj,
             output_mult_adj,
             model_rate,
@@ -1200,6 +1323,7 @@ fn local_commit(
 
         if let Ok(mut pending_guard) = main_thread.shared.cold.pending_model.lock() {
             *pending_guard = Some(PendingModel {
+                generation: main_thread.shared.cold.allocate_model_generation(),
                 model: model_l,
                 model_rate,
                 input_mult_adj,
@@ -1240,6 +1364,7 @@ fn local_commit(
         // ensuring the previous model does not survive a reactivation.
         if let Ok(mut pending_guard) = main_thread.shared.cold.pending_model.lock() {
             *pending_guard = Some(PendingModel {
+                generation: main_thread.shared.cold.allocate_model_generation(),
                 model: None,
                 model_rate: 48000,
                 input_mult_adj: 1.0,

@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-PHASE_TOTAL=7
+PHASE_TOTAL=9
 source "$(dirname "$0")/_lib.sh"
 
 echo -e "${BLUE}${BOLD}========================================${NC}"
@@ -21,13 +21,13 @@ echo -e "${BLUE}${BOLD}    NAM-Plug Linting & Quality Suite    ${NC}"
 echo -e "${BLUE}${BOLD}========================================${NC}"
 
 # ---------------------------------------------------------------------------
-# [1/6] Code formatting (cargo fmt)
+# [1/9] Code formatting (cargo fmt)
 # ---------------------------------------------------------------------------
 phase "Applying code formatting (cargo fmt)..."
 cargo fmt --all
 
 # ---------------------------------------------------------------------------
-# [2/6] Compilation checks (cargo check) — broad feature matrix
+# [2/9] Compilation checks (cargo check) — broad feature matrix
 # ---------------------------------------------------------------------------
 phase "Executing compilation checks (cargo check)..."
 
@@ -41,7 +41,7 @@ echo -e "  ${YELLOW}${BOLD}Checking: All Targets (no default features)...${NC}"
 cargo check --all-targets --no-default-features
 
 # ---------------------------------------------------------------------------
-# [3/6] Static analysis (cargo clippy) — strict, broad feature matrix
+# [3/9] Static analysis (cargo clippy) — strict, broad feature matrix
 # ---------------------------------------------------------------------------
 phase "Executing strict static analysis (cargo clippy)..."
 
@@ -55,7 +55,7 @@ echo -e "  ${YELLOW}${BOLD}Clippy: All Targets (no default features)...${NC}"
 cargo clippy --all-targets --no-default-features -- -D warnings
 
 # ---------------------------------------------------------------------------
-# [4/6] SPDX license header validation (deterministic, no external tooling)
+# [4/9] SPDX license header validation (deterministic, no external tooling)
 # ---------------------------------------------------------------------------
 phase "Validating SPDX license headers..."
 
@@ -89,7 +89,7 @@ fi
 ok "All files have valid SPDX headers (GPL-3.0-or-later, MIT)."
 
 # ---------------------------------------------------------------------------
-# [5/6] Anti-pattern check: #[test] in tests/common/
+# [5/9] Anti-pattern check: #[test] in tests/common/
 # ---------------------------------------------------------------------------
 phase "Checking anti-pattern #[test] in tests/common/..."
 if [ -d "tests/common" ] && grep -rnF "#[test]" tests/common/ > /dev/null 2>&1; then
@@ -100,7 +100,18 @@ fi
 ok "No '#[test]' in tests/common/."
 
 # ---------------------------------------------------------------------------
-# [6/6] Undocumented #[allow(clippy::)] check (enforce allow_attributes policy)
+# [6/9] RT-path static allocation scan (F-RT-003 / T2.2)
+#
+# Verifies that the audio-thread code under `src/clap/processor/` contains no
+# `Box::new` or implicit heap allocations outside the documented off-RT sites
+# (`activate()`, panic helpers, test modules). Static half of the zero-alloc
+# contract; the dynamic half is the heap-audit CI lane.
+# ---------------------------------------------------------------------------
+phase "Checking RT path for heap allocations (static scan)..."
+"$(dirname "$0")/verify_no_rt_alloc.sh"
+
+# ---------------------------------------------------------------------------
+# [7/9] Undocumented #[allow(clippy::)] check (enforce allow_attributes policy)
 #
 # The project sets `allow_attributes = "warn"` in [lints.clippy], meaning every
 # #[allow(clippy::...)] must carry a justification comment immediately above it
@@ -141,11 +152,28 @@ fi
 ok "All #[allow(clippy::)] suppressions are documented."
 
 # ---------------------------------------------------------------------------
-# [7/7] Binary scan: zero EVEX/ZMM and zero AVX-512 symbols in default release
+# [8/9] Binary scan: zero EVEX/ZMM and zero AVX-512 symbols in default release
 # ---------------------------------------------------------------------------
 phase "Validating CLAP binary artifact (zero AVX-512 in default release build)..."
 "$(dirname "$0")/verify_no_avx512_release.sh"
 ok "CLAP binary artifact is clean of AVX-512 symbols and EVEX instructions."
+
+# ---------------------------------------------------------------------------
+# [9/9] AppStream metadata version sync check
+# ---------------------------------------------------------------------------
+phase "Checking AppStream metainfo release version sync with Cargo.toml..."
+
+cargo_ver=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+metainfo_file="packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml"
+
+if [ -f "$metainfo_file" ]; then
+    xml_ver=$(grep -m1 '<release version=' "$metainfo_file" | sed -E 's/.*version="([^"]+)".*/\1/')
+    if [ "$cargo_ver" != "$xml_ver" ]; then
+        echo -e "  ${RED}${BOLD}ERROR: Version mismatch between Cargo.toml ($cargo_ver) and $metainfo_file ($xml_ver)!${NC}"
+        exit 1
+    fi
+    ok "AppStream metainfo version matches Cargo.toml ($cargo_ver)."
+fi
 
 echo -e "${GREEN}${BOLD}========================================${NC}"
 echo -e "${GREEN}${BOLD} Quality suite completed successfully!  ${NC}"

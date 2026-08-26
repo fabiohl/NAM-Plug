@@ -424,6 +424,30 @@ pub fn extract_plugin_shared(
     .expect("Failed to get plugin wrapper")
 }
 
+/// Extracts a raw `*mut` to the plugin's main thread (`NamClapMainThread`).
+///
+/// The caller should dereference this with `unsafe { &mut *ptr }` and ensure
+/// the `PluginInstance` outlives the dereferenced reference. Used by tests that
+/// drive `load_model()`/`load_cabsim()` and inspect the staged-swap slot
+/// (T3.3/F-LAT-005).
+pub fn extract_plugin_main_thread(
+    instance: &mut PluginInstance<CompleteHost>,
+) -> *mut crate::clap::plugin::NamClapMainThread<'static> {
+    let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    unsafe {
+        clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
+            raw_ptr,
+            |wrapper| {
+                Ok(wrapper
+                    .main_thread()
+                    .as_ptr()
+                    .cast::<crate::clap::plugin::NamClapMainThread<'static>>())
+            },
+        )
+    }
+    .expect("Failed to get plugin wrapper")
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════

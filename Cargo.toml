@@ -84,6 +84,11 @@ name = "nam_bin_guard"
 path = "src/bin/nam_bin_guard.rs"
 required-features = ["testing"]
 
+[[bin]]
+name = "nam_perf_guard"
+path = "src/bin/nam_perf_guard.rs"
+required-features = ["testing"]
+
 [features]
 default = ["stereo"]
 testing = ["NeuralAmpModeler-rs/testing"]

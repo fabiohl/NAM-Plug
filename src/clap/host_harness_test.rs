@@ -2,9 +2,13 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
 use super::*;
+use crate::clap::extensions::params::PARAM_OVERSAMPLE;
+use crate::clap::plugin::PendingRestartOs;
+use crate::clap::test_util::{model_path, write_model_with_rate};
 use clack_common::events::Pckn;
 use clack_common::events::event_types::ParamValueEvent;
 use clack_common::utils::{ClapId, Cookie};
+use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use std::sync::atomic::Ordering;
 
 fn default_audio_config() -> PluginAudioConfiguration {
@@ -50,8 +54,6 @@ fn test_thread_check_audio_thread() {
 
 #[test]
 fn test_oversample_change_triggers_restart_protocol() {
-    use crate::clap::extensions::params::PARAM_OVERSAMPLE;
-
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
 
     let n = 256;
@@ -127,34 +129,312 @@ fn test_restart_cycle_clean() {
     );
 }
 
+/// Oversample engine group-delay contribution (host-rate samples): Off = 0,
+/// X2 = 12 (one half-band stage), X4 = 24 (two cascaded stages).
+const OS_LATENCY_2X: u32 = 12;
+const OS_LATENCY_4X: u32 = 24;
+
+/// Reads the latency the host would receive via `PluginLatency::get()`.
+fn plugin_latency_get(instance: &mut PluginInstance<CompleteHost>) -> u32 {
+    let mut handle = instance.plugin_handle();
+    let ext = handle
+        .get_extension::<clack_extensions::latency::PluginLatency>()
+        .expect("PluginLatency extension must be registered");
+    ext.get(&mut handle)
+}
+
+/// Sends an oversampling parameter event through one audio block (host-event
+/// path), mirroring `test_oversample_change_triggers_restart_protocol`.
+fn send_oversample_request(
+    started: &mut StartedPluginAudioProcessor<CompleteHost>,
+    factor: OversampleFactor,
+) {
+    let event = ParamValueEvent::new(
+        0u32,
+        ClapId::new(PARAM_OVERSAMPLE),
+        Pckn::match_all(),
+        factor.to_f32() as f64,
+        Cookie::empty(),
+    );
+    let mut event_buffer = EventBuffer::new();
+    event_buffer.push(&event);
+    let input_events = InputEvents::from_buffer(&event_buffer);
+    let mut il = vec![0.3f32; 256];
+    let mut ir = vec![0.3f32; 256];
+    let mut ol = vec![0.0f32; 256];
+    let mut or = vec![0.0f32; 256];
+    let _ = process_block_harness(
+        started,
+        &mut il,
+        &mut ir,
+        &mut ol,
+        &mut or,
+        Some(&input_events),
+    );
+}
+
+/// Processes one audio block with no input events (used to drain the SPSC).
+fn process_block_silent(started: &mut StartedPluginAudioProcessor<CompleteHost>) {
+    let mut il = vec![0.3f32; 256];
+    let mut ir = vec![0.3f32; 256];
+    let mut ol = vec![0.0f32; 256];
+    let mut or = vec![0.0f32; 256];
+    let _ = process_block_harness(started, &mut il, &mut ir, &mut ol, &mut or, None);
+}
+
+/// Asserts the value a host would read (`PluginLatency::get()`) equals the
+/// physical latency of the active filter chain: stream + cabsim + OS delay.
+/// A removed notification or a diverging announced value fails the test.
+fn assert_reported_latency_matches_physical(
+    shared: &crate::clap::plugin::NamClapShared,
+    instance: &mut PluginInstance<CompleteHost>,
+    expected_os_latency: u32,
+) {
+    let reported = plugin_latency_get(instance);
+    let stream = shared.cold.current_stream_latency.load(Ordering::Relaxed);
+    let cabsim = shared.cold.current_cabsim_latency.load(Ordering::Relaxed);
+    assert_eq!(
+        reported,
+        stream + cabsim + expected_os_latency,
+        "announced latency must equal the physical filter-chain latency \
+         (stream={stream} + cabsim={cabsim} + os={expected_os_latency})"
+    );
+    assert_eq!(
+        shared.rt_to_ui.current_latency.load(Ordering::Relaxed),
+        reported,
+        "PluginLatency::get() must match the published current_latency"
+    );
+}
+
+/// F-QA-017 / T3.4 — deterministic CLAP latency notification harness.
+///
+/// Induces real structural transitions (OS Off→2x→4x, a same-latency model
+/// swap, a latency-changing 44.1k model over a 48k host) and asserts:
+///   - `HostLatency::changed()` fires exactly once per applied latency change;
+///   - no notification fires while a restart is pending, for a same-latency
+///     swap, for a coalesced round-trip, or for repeated housekeeping;
+///   - the announced value (`PluginLatency::get()`) equals the physical
+///     filter-chain latency after every transition.
 #[test]
 fn test_latency_changed_notification() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let audio_config = default_audio_config();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
         .activate(|_, _| make_harness_audio_processor(&state), audio_config)
         .expect("activate failed");
     let mut started = stopped.start_processing().expect("start_processing failed");
 
-    for _ in 0..8 {
-        let n = 256;
-        let mut il = vec![0.3f32; n];
-        let mut ir = vec![0.3f32; n];
-        let mut ol = vec![0.0f32; n];
-        let mut or = vec![0.0f32; n];
-        let _ = process_block_harness(&mut started, &mut il, &mut ir, &mut ol, &mut or, None);
-    }
-
-    let events = state.snapshot();
-    let latency_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, HostEvent::LatencyChanged))
-        .collect();
-    eprintln!(
-        "LatencyChanged events: {latency_events:?} (total={})",
-        events.len()
+    // 48 kHz host, no model/IR, OS Off → 0 latency, no notification.
+    instance.call_on_main_thread_callback();
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        0,
+        "initial 0-sample latency must not notify"
     );
+    assert_eq!(plugin_latency_get(&mut instance), 0);
+
+    // ── Off → X2 ──────────────────────────────────────────────────────────
+    send_oversample_request(&mut started, OversampleFactor::X2);
+    assert!(
+        state.restart_requested.load(Ordering::SeqCst),
+        "OS change must request a host restart"
+    );
+    assert_eq!(
+        PendingRestartOs::load(&shared.cold.pending_restart_os_factor, Ordering::Relaxed),
+        PendingRestartOs::Pending(OversampleFactor::X2)
+    );
+    assert_eq!(
+        shared.rt_to_ui.current_latency.load(Ordering::Relaxed),
+        0,
+        "latency must not change while the restart is pending"
+    );
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        0,
+        "no notification while the restart is pending"
+    );
+
+    let mut started = perform_restart(&mut instance, started, &state, audio_config);
+    instance.call_on_main_thread_callback();
+    assert_eq!(
+        shared.rt_to_ui.current_latency.load(Ordering::Relaxed),
+        OS_LATENCY_2X
+    );
+    assert_reported_latency_matches_physical(shared, &mut instance, OS_LATENCY_2X);
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        1,
+        "exactly one LatencyChanged after the X2 restart"
+    );
+
+    // ── X2 → X4 ───────────────────────────────────────────────────────────
+    send_oversample_request(&mut started, OversampleFactor::X4);
+    assert!(state.restart_requested.load(Ordering::SeqCst));
+    assert_eq!(
+        PendingRestartOs::load(&shared.cold.pending_restart_os_factor, Ordering::Relaxed),
+        PendingRestartOs::Pending(OversampleFactor::X4)
+    );
+    assert_eq!(
+        shared.rt_to_ui.current_latency.load(Ordering::Relaxed),
+        OS_LATENCY_2X,
+        "latency must stay at X2 while X4 is pending"
+    );
+    assert_eq!(state.latency_changed_count.load(Ordering::SeqCst), 1);
+
+    let mut started = perform_restart(&mut instance, started, &state, audio_config);
+    instance.call_on_main_thread_callback();
+    assert_eq!(
+        shared.rt_to_ui.current_latency.load(Ordering::Relaxed),
+        OS_LATENCY_4X
+    );
+    assert_reported_latency_matches_physical(shared, &mut instance, OS_LATENCY_4X);
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        2,
+        "exactly two LatencyChanged after the X4 restart"
+    );
+
+    // ── Coalescing: a burst that ends at the current factor must not notify ──
+    send_oversample_request(&mut started, OversampleFactor::X2);
+    send_oversample_request(&mut started, OversampleFactor::X4);
+    send_oversample_request(&mut started, OversampleFactor::X2);
+    send_oversample_request(&mut started, OversampleFactor::X4);
+    assert_eq!(
+        PendingRestartOs::load(&shared.cold.pending_restart_os_factor, Ordering::Relaxed),
+        PendingRestartOs::Pending(OversampleFactor::X4),
+        "latest-wins coalescing must leave the X4 factor pending"
+    );
+    let mut started = perform_restart(&mut instance, started, &state, audio_config);
+    instance.call_on_main_thread_callback();
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        2,
+        "a coalesced round-trip landing on the current factor must not notify"
+    );
+
+    // ── Same-latency model swap (48k over 48k): continuous, silent ─────────
+    let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+    let base = model_path("lstm.nam");
+    assert!(base.exists(), "lstm.nam fixture missing");
+    mt.load_model(&base).expect("load same-rate model");
+    assert!(
+        !state.restart_requested.load(Ordering::SeqCst),
+        "same-latency model swap must not request a restart"
+    );
+    assert!(
+        mt.staged_swap.is_none(),
+        "same-latency swap must not be staged"
+    );
+    process_block_silent(&mut started);
+    instance.call_on_main_thread_callback();
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        2,
+        "a model swap that keeps the latency unchanged must not notify"
+    );
+    assert_reported_latency_matches_physical(shared, &mut instance, OS_LATENCY_4X);
+
+    // Prove the continuous swap landed on the audio thread: the installed
+    // model generation must be 1 (the 48k model), with zero latency change.
+    let stopped = started.stop_processing();
+    instance.deactivate(stopped);
+    let guard = shared.cold.deactivated_dsp.lock().unwrap();
+    let deact = guard.as_ref().expect("deactivated state missing");
+    assert_eq!(
+        deact.model_generation, 1,
+        "the same-latency 48k model must be installed on the audio thread"
+    );
+    drop(guard);
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config)
+        .expect("reactivate after same-latency swap failed");
+    started = stopped
+        .start_processing()
+        .expect("restart processing failed");
+
+    // ── 44.1k model over 48k host: latency-changing → staged + one notify ──
+    let model_44k = write_model_with_rate(&base, 44100);
+    let stream_44k_latency = crate::clap::plugin::build_stream_adapter(48000, 44100, 256)
+        .expect("build 44.1k stream adapter")
+        .latency_samples();
+    assert!(
+        stream_44k_latency > 0,
+        "44.1k over 48k must add stream latency"
+    );
+
+    mt.load_model(&model_44k).expect("load 44.1k model");
+    assert!(
+        state.restart_requested.load(Ordering::SeqCst),
+        "rate-changing model load must request a host restart"
+    );
+    assert!(
+        mt.staged_swap
+            .as_ref()
+            .and_then(|s| s.model.as_ref())
+            .is_some(),
+        "44.1k model must be staged for the restart"
+    );
+    assert_eq!(
+        shared.rt_to_ui.current_latency.load(Ordering::Relaxed),
+        OS_LATENCY_4X,
+        "latency must stay at X4 while the model restart is pending"
+    );
+    assert_eq!(state.latency_changed_count.load(Ordering::SeqCst), 2);
+    instance.call_on_main_thread_callback();
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        2,
+        "no notification while the latency-changing swap is pending"
+    );
+
+    let expected_latency = OS_LATENCY_4X + stream_44k_latency;
+    let _started = perform_restart(&mut instance, started, &state, audio_config);
+    instance.call_on_main_thread_callback();
+    assert_eq!(
+        shared.rt_to_ui.current_latency.load(Ordering::Relaxed),
+        expected_latency
+    );
+    assert_reported_latency_matches_physical(shared, &mut instance, OS_LATENCY_4X);
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        3,
+        "exactly three LatencyChanged across the three latency transitions"
+    );
+
+    // ── No spam: repeated housekeeping without a latency change ────────────
+    for _ in 0..4 {
+        instance.call_on_main_thread_callback();
+    }
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        3,
+        "housekeeping without a latency change must not spam notifications"
+    );
+
+    // ── Ordering invariant: every LatencyChanged is preceded by a restart ──
+    let mut restarts = 0u32;
+    let mut changes = 0u32;
+    for event in state.snapshot() {
+        match event {
+            HostEvent::RestartRequested => restarts += 1,
+            HostEvent::LatencyChanged => {
+                changes += 1;
+                assert!(
+                    restarts >= changes,
+                    "LatencyChanged must be preceded by a RestartRequested"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        changes, 3,
+        "exactly one LatencyChanged per applied latency transition"
+    );
+
+    let _ = std::fs::remove_file(&model_44k);
 }
 
 #[test]

@@ -321,8 +321,9 @@ The audio thread entry point `PluginAudioProcessor::process()` (`src/clap/proces
 
 ```mermaid
 graph TD
-    HostInput[/"Host Input Buffer"/] --> BypassCheck{"Bypass Active?"}
-    BypassCheck -->|"Yes"| RunBypass["process_bypass()\n(Passthrough / Zero Out)"]
+    HostInput[/"Host Input Buffer"/] --> DryDelay["DryDelayLine\n(circular ring, L/R)"]
+    DryDelay --> BypassCheck{"Bypass Active?"}
+    BypassCheck -->|"Yes"| RunBypass["copy_delayed_dry_to_output()\n(Latency-compensated passthrough)"]
     BypassCheck -->|"No"| ChanExt["extract_channels()\n(Mono / Adaptive Stereo)"]
 
     ChanExt --> InGain["Input Gain\n(SIMD + ParamSmoother)"]
@@ -364,8 +365,41 @@ To prevent audible clicks, pops, or abrupt phase shifts when toggling the plugin
 
 - **Equal-Power 32 ms Crossfade:** Ramps `crossfader.mix` linearly towards the target mix (`0.0` for pure dry, `1.0` for pure wet) across sub-blocks.
 - **Branchless FMA Vector Loop:** Inner blend loop executes across `n_xfade` samples without internal branching (`wet[i] = dry[i] + (wet[i] - dry[i]) * mix`), allowing complete auto-vectorization and FMA generation.
-- **Resampler Phase Rounding Discrepancy Continuation:** When `NamResampler` is active, per-chunk phase rounding can cause `n_out` to momentarily differ from `dry_n`. NAM-Plug clamps `n_xfade` to `dry_n` and processes the fractional overflow region (`n_xfade..n_xfade_raw`) cleanly with dry=0.0 semantics before zero-filling or passing remaining pure frames.
+- **Cardinality Defensive Guard:** with the strict-cardinality streaming adapter (T1.2) `n_out == n_samples == dry_n` always; the legacy overflow region (`n_xfade..n_xfade_raw`, wet count exceeding the dry capture) remains as a cheap defensive guard with dry=0.0 semantics.
 - **Mix Value Clamping:** Mix parameters are clamped to `[0.0, 1.0]` at each step, ensuring saturation cannot overflow even with extreme buffer sizes.
+
+#### 6.2.1 Latency-Compensated Dry Path (`DryDelayLine`, T4.1 / F-DSP-008)
+
+The wet DSP chain applies a fixed algorithmic latency (`cached_effective_latency` =
+streaming resampler + oversampling half-band delay + cab-sim partition, in
+host-rate samples). Before T4.1 the dry path bypassed this latency entirely:
+the crossfade blended two signals representing *different* temporal instants
+of the input (comb filtering / transient cancellation), and the fully-bypassed
+state returned to zero physical latency while the plugin kept announcing the
+wet latency (PDC inconsistency).
+
+- **Pre-allocated circular delay line:** `DryDelayLine` (`dsp/dry_delay.rs`)
+  is a bounded L/R ring buffer allocated once in `activate()` (capacity =
+  `max(max_frames_count, MAX_RESAMP_BUF) + DRY_DELAY_MAX_EXTRA`, covering the
+  cab-sim partition plus the worst-case resampler/oversampler group delay).
+  The hot path (`process_block`) is zero-alloc.
+- **Single dry source:** `process_sub_block` feeds the raw (pre-gain) host
+  input into the ring **every sub-block** — even during wet-only processing,
+  so the ring always holds the full latency history when a bypass/crossfade
+  transition starts — and stages the `delay`-delayed dry into
+  `buf_xfade_dry_l/r`. Both the bypass output (`copy_delayed_dry_to_output`)
+  and the crossfade blend consume this compensated dry; no dry is captured
+  from the current (undelayed) input anymore.
+- **Latency synchronization:** `recompute_effective_latency()` (cold
+  resource-swap handlers) calls `dry_delay.set_delay()` at the exact instant
+  the new wet resources land; `activate()` initializes the delay from
+  `initial_latency`. A staged + restart swap keeps the old delay until
+  `activate()` consumes it (Política A, T3.3). Non-finite input containment
+  resets the ring.
+- **Bypass keeps the declared latency:** in the fully-bypassed state the
+  output is the input delayed by exactly the declared latency, so the plugin's
+  physical latency matches its PDC report and automation ramps through bypass
+  without temporal jumps.
 
 ### 6.3 Model Gain Calibration Isolation
 

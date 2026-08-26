@@ -8,7 +8,6 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
   <extends>org.freedesktop.LinuxAudio.BaseExtension</extends>
   <extends>com.bitwig.BitwigStudio</extends>
   <extends>fm.reaper.Reaper</extends>
-  <extends>org.ardour.Ardour</extends>
   <extends>com.fender.studioapp8</extends>
   <name>NAM Plug</name>
   <summary>Neural Amp Modeler CLAP audio plugin</summary>
@@ -55,15 +54,6 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
   </keywords>
   <releases>
     <release version="0.7.0" date="2026-08-24">
-      <description>
-        <p>NAM-Plug 0.7.0 release with strict artifact certification, lock-free concurrency, and CLAP extensions.</p>
-        <ul>
-          <li>CLAP plugin format support with egui GUI and headless capabilities.</li>
-          <li>WaveNet and LSTM neural model inference with SIMD AVX2 acceleration.</li>
-          <li>Integrated CabSim IR convolver and dynamic oversampling.</li>
-          <li>Fail-closed AVX-512 absence certification and cryptographic build provenance.</li>
-        </ul>
-      </description>
     </release>
   </releases>
 </component>

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
+use crate::clap::processor::dsp::dry_delay::DryDelayLine;
 use crate::clap::processor::state::BypassCrossfader;
-use neural_amp_modeler_rs::dsp::gate::GateState;
+use neural_amp_modeler_rs::dsp::gate::{DynamicHysteresis, GateState};
 use neural_amp_modeler_rs::dsp::pipeline::{
-    DspPipelineContext, apply_input_stage, apply_output_stage, run_inference,
+    DspPipelineContext, apply_input_stage, apply_output_stage, run_inference_streaming,
 };
+use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
 use neural_amp_modeler_rs::dsp::smoother::ParamSmoother;
 use neural_amp_modeler_rs::math::dsp::gain_lut::GainLUT;
 
@@ -18,9 +20,11 @@ pub(crate) fn process_sub_block(
     out_r: &mut Option<&mut [f32]>,
     output_offset: usize,
     ctx: &mut DspPipelineContext<'_>,
+    stream: &mut StreamingResampleBuffer,
     bypass: bool,
     process_mono: bool,
     crossfader: &mut BypassCrossfader,
+    dry_delay: &mut DryDelayLine,
     buf_xfade_dry_l: &mut [f32],
     buf_xfade_dry_r: &mut [f32],
     buf_xfd_scratch_l: &mut [f32],
@@ -61,9 +65,11 @@ pub(crate) fn process_sub_block(
                 out_r,
                 curr_out_offset,
                 ctx,
+                stream,
                 bypass,
                 process_mono,
                 crossfader,
+                dry_delay,
                 buf_xfade_dry_l,
                 buf_xfade_dry_r,
                 buf_xfd_scratch_l,
@@ -97,6 +103,20 @@ pub(crate) fn process_sub_block(
         return (total_out, last_gate);
     }
 
+    // T4.1/F-DSP-008: delay the raw dry input by the applied wet latency and
+    // stage it into buf_xfade_dry — the single source for both the bypass
+    // output and the crossfade blend. Fed every sub-block (even wet-only) so
+    // the ring always holds the full latency history when a bypass/crossfade
+    // transition starts. `n_samples <= buf_xfade_dry.len()` by construction
+    // (both are bounded by max_frames_count / MAX_RESAMP_BUF chunking).
+    dry_delay.process_block(
+        &buf_host_l[offset..offset + n_samples],
+        &buf_host_r[offset..offset + n_samples],
+        &mut buf_xfade_dry_l[..n_samples],
+        &mut buf_xfade_dry_r[..n_samples],
+        n_samples,
+    );
+
     if crossfader.active {
         return process_crossfade_sub_block(
             offset,
@@ -105,6 +125,7 @@ pub(crate) fn process_sub_block(
             out_r,
             output_offset,
             ctx,
+            stream,
             process_mono,
             crossfader,
             buf_xfade_dry_l,
@@ -134,11 +155,11 @@ pub(crate) fn process_sub_block(
     }
 
     if bypass {
-        copy_bypass_to_output(
+        copy_delayed_dry_to_output(
             out_l,
             out_r,
-            &buf_host_l[offset..offset + n_samples],
-            &buf_host_r[offset..offset + n_samples],
+            &buf_xfade_dry_l[..n_samples],
+            &buf_xfade_dry_r[..n_samples],
             output_offset,
             process_mono,
         );
@@ -185,17 +206,14 @@ pub(crate) fn process_sub_block(
         return (n_samples, GateState::Closed);
     }
 
-    let n_out = run_inference(
-        &mut buf_host_l[offset..offset + n_samples],
-        &mut buf_host_r[offset..offset + n_samples],
+    let n_out = run_inference_streaming(
+        &buf_host_l[offset..offset + n_samples],
+        &buf_host_r[offset..offset + n_samples],
+        &mut buf_out_l[..n_samples],
+        &mut buf_out_r[..n_samples],
         n_samples,
         ctx,
-        buf_mid_l,
-        buf_mid_r,
-        buf_out_l,
-        buf_out_r,
-        buf_model_l,
-        buf_model_r,
+        stream,
         buf_os_in_l,
         buf_os_in_r,
         buf_os_model_l,
@@ -212,6 +230,13 @@ pub(crate) fn process_sub_block(
             &mut buf_model_l[..n_out],
             Some(ctx.rt_status),
         );
+        // F-DSP-009/T4.2: the tail counter is re-armed to the full IR duration
+        // whenever active audio is effectively fed into the convolution module.
+        // Without this, the first gate close consumes the counter to zero and
+        // every later note is truncated to immediate silence on the next close.
+        // Rearming in the drain paths is deliberately avoided (no signal reaches
+        // the conv there) so the drain always terminates.
+        *cabsim_tail_remaining = conv.tail_samples();
         unsafe {
             core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), n_out);
         }
@@ -303,12 +328,18 @@ fn process_tail_drain(
         }
     }
 
+    // F-DSP-009/T4.2: the ring-out is intentional signal, not noise floor —
+    // the output stage must not multiply it by the (now closed) noise-gate
+    // multiplier of 0. A fresh unity gate (Open, multiplier 1.0, steady) yields
+    // exactly the wet output gain + smoothing while letting the IR ring to
+    // completion; the real gate FSM keeps tracking the input independently.
+    let mut tail_gate = DynamicHysteresis::new();
     apply_output_stage(
         &mut buf_out_l[..drain],
         &mut buf_out_r[..drain],
         drain,
         model_output_mult_adj,
-        ctx.silence_hysteresis,
+        &mut tail_gate,
         ctx.rt_status,
         *ctx.process_mono,
         ctx.adaptive,
@@ -325,18 +356,27 @@ fn process_tail_drain(
         &mut false,
     );
 
+    // Strict cardinality (F-PERF-002 / T1.3): every sub-block must deliver
+    // exactly `n_samples` host samples. The ring-out only covers `drain`
+    // samples; zero-fill the suffix so no stale/sentinel residue reaches the
+    // host and `output_offset` advances by the full sub-block size.
+    if drain < n_samples {
+        buf_out_l[drain..n_samples].fill(0.0);
+        buf_out_r[drain..n_samples].fill(0.0);
+    }
+
     copy_output_from_sub_block(
         out_l,
         out_r,
         buf_out_l,
         buf_out_r,
-        drain,
+        n_samples,
         output_offset,
         process_mono,
     );
 
     *cabsim_tail_remaining -= drain;
-    (drain, GateState::Closed)
+    (n_samples, GateState::Closed)
 }
 
 #[inline(always)]
@@ -348,6 +388,7 @@ fn process_crossfade_sub_block(
     out_r: &mut Option<&mut [f32]>,
     output_offset: usize,
     ctx: &mut DspPipelineContext<'_>,
+    stream: &mut StreamingResampleBuffer,
     process_mono: bool,
     crossfader: &mut BypassCrossfader,
     buf_xfade_dry_l: &mut [f32],
@@ -359,12 +400,12 @@ fn process_crossfade_sub_block(
     smoother_out: &mut ParamSmoother,
     buf_host_l: &mut [f32],
     buf_host_r: &mut [f32],
-    buf_mid_l: &mut [f32],
-    buf_mid_r: &mut [f32],
+    _buf_mid_l: &mut [f32],
+    _buf_mid_r: &mut [f32],
     buf_out_l: &mut [f32],
     buf_out_r: &mut [f32],
     buf_model_l: &mut [f32],
-    buf_model_r: &mut [f32],
+    _buf_model_r: &mut [f32],
     buf_os_in_l: &mut [f32],
     buf_os_in_r: &mut [f32],
     buf_os_model_l: &mut [f32],
@@ -374,13 +415,16 @@ fn process_crossfade_sub_block(
     _gain_lut: &GainLUT,
     cabsim_tail_remaining: &mut usize,
 ) -> (usize, GateState) {
-    // 1. Save dry input before pipeline modifies buf_host in place
+    // 1. Dry source: `buf_xfade_dry` already holds the latency-compensated dry
+    // for this sub-block (fed by `process_sub_block` via the DryDelayLine, so
+    // the dry and the wet below represent the same input instant — T4.1/
+    // F-DSP-008). The wet pipeline below modifies `buf_host` in place; the
+    // dry was captured before that happened.
     let dry_n = n_samples.min(buf_xfade_dry_l.len());
-    buf_xfade_dry_l[..dry_n].copy_from_slice(&buf_host_l[offset..offset + dry_n]);
-    #[cfg(feature = "stereo")]
-    buf_xfade_dry_r[..dry_n].copy_from_slice(&buf_host_r[offset..offset + dry_n]);
-    #[cfg(not(feature = "stereo"))]
-    buf_xfade_dry_r[..dry_n].copy_from_slice(&buf_xfade_dry_l[..dry_n]);
+    debug_assert_eq!(
+        dry_n, n_samples,
+        "dry delay output must cover the full sub-block (n_samples={n_samples})"
+    );
 
     // 2. Run full wet pipeline
     apply_iir_gain_ramp_sub_block(
@@ -429,12 +473,15 @@ fn process_crossfade_sub_block(
                     }
                 }
             }
+            // F-DSP-009/T4.2: same unity-gate semantics as `process_tail_drain`
+            // — the cab ring-out must not be gated to zero by the closed gate.
+            let mut tail_gate = DynamicHysteresis::new();
             apply_output_stage(
                 &mut buf_out_l[..drain],
                 &mut buf_out_r[..drain],
                 drain,
                 model_output_mult_adj,
-                ctx.silence_hysteresis,
+                &mut tail_gate,
                 ctx.rt_status,
                 *ctx.process_mono,
                 ctx.adaptive,
@@ -450,24 +497,28 @@ fn process_crossfade_sub_block(
                 &mut false,
             );
             *cabsim_tail_remaining -= drain;
-            drain
+            // Strict cardinality: the sub-block must deliver exactly
+            // `n_samples` host samples. Zero-fill the suffix after the
+            // ring-out so no stale/sentinel residue reaches the host.
+            if drain < n_samples {
+                buf_out_l[drain..n_samples].fill(0.0);
+                buf_out_r[drain..n_samples].fill(0.0);
+            }
+            n_samples
         } else {
             buf_out_l[..n_samples].fill(0.0);
             buf_out_r[..n_samples].fill(0.0);
             n_samples
         }
     } else {
-        let n_o = run_inference(
-            &mut buf_host_l[offset..offset + n_samples],
-            &mut buf_host_r[offset..offset + n_samples],
+        let n_o = run_inference_streaming(
+            &buf_host_l[offset..offset + n_samples],
+            &buf_host_r[offset..offset + n_samples],
+            &mut buf_out_l[..n_samples],
+            &mut buf_out_r[..n_samples],
             n_samples,
             ctx,
-            buf_mid_l,
-            buf_mid_r,
-            buf_out_l,
-            buf_out_r,
-            buf_model_l,
-            buf_model_r,
+            stream,
             buf_os_in_l,
             buf_os_in_r,
             buf_os_model_l,
@@ -484,6 +535,9 @@ fn process_crossfade_sub_block(
                 &mut buf_model_l[..n_o],
                 Some(ctx.rt_status),
             );
+            // F-DSP-009/T4.2: re-arm the tail counter for active audio (see
+            // the main-path comment in `process_sub_block`).
+            *cabsim_tail_remaining = conv.tail_samples();
             unsafe {
                 core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), n_o);
             }
@@ -520,12 +574,9 @@ fn process_crossfade_sub_block(
     };
 
     // 3. Crossfade blend: output = dry * (1 - mix_i) + wet * mix_i
-    // Call-site analysis (Sprint 2 T2.3): `dry_n` is always `n_samples`
-    // (buf_xfade_dry_* capacity is max_frames_count >= n_samples). However,
-    // `n_out` can exceed `dry_n` by a few samples when the resampler is
-    // active (per-chunk phase rounding), so `n_xfade` is clamped to `dry_n`
-    // and the legacy guard semantics (dry = 0.0) are preserved in the
-    // overflow continuation loop below — the blend loop itself is branch-free.
+    // With the strict-cardinality streaming adapter (T1.2/F-PERF-002),
+    // `n_out == n_samples == dry_n` always, so the wet count never exceeds the
+    // dry capture. The clamps below remain as cheap defensive guards.
     let n_xfade_raw = n_out.min(crossfader.remaining);
     let n_xfade = n_xfade_raw.min(dry_n);
     debug_assert!(
@@ -752,26 +803,29 @@ pub(crate) fn copy_output_from_sub_block(
     }
 }
 
+/// Copies the latency-compensated dry signal (T4.1/F-DSP-008) to the output
+/// in the fully-bypassed state. `dry_l`/`dry_r` are the `DryDelayLine` output
+/// staged into `buf_xfade_dry`, delayed by exactly the applied wet latency —
+/// the bypass path therefore keeps the physical latency declared to the host
+/// instead of snapping back to zero.
 #[inline(always)]
-pub(crate) fn copy_bypass_to_output(
+pub(crate) fn copy_delayed_dry_to_output(
     out_l: &mut Option<&mut [f32]>,
     out_r: &mut Option<&mut [f32]>,
-    buf_host_l: &[f32],
-    buf_host_r: &[f32],
+    dry_l: &[f32],
+    dry_r: &[f32],
     output_offset: usize,
     process_mono: bool,
 ) {
     if let Some(o_l) = out_l {
-        let n = buf_host_l
-            .len()
-            .min(o_l.len().saturating_sub(output_offset));
+        let n = dry_l.len().min(o_l.len().saturating_sub(output_offset));
         for i in 0..n {
-            let s = buf_host_l[i];
+            let s = dry_l[i];
             o_l[output_offset + i] = if s.is_finite() { s } else { 0.0 };
         }
     }
     if let Some(o_r) = out_r {
-        let src = if process_mono { buf_host_l } else { buf_host_r };
+        let src = if process_mono { dry_l } else { dry_r };
         let n = src.len().min(o_r.len().saturating_sub(output_offset));
         for i in 0..n {
             let s = src[i];

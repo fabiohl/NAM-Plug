@@ -160,10 +160,16 @@ fn test_restore_ui_not_published_until_ack() {
         "model_load_counter must NOT advance while the restore is pending"
     );
 
-    // Drain the 256 saturated commands (64 per block), then housekeeping
-    // retries the transaction push (the ring now has room).
+    // Drain the 256 saturated commands, then housekeeping retries the
+    // transaction push (the ring now has room).
+    //
+    // T2.3 / F-RT-007 Command Budgeting changed the drain rate for structural
+    // bursts: at most one structural apply per callback, and same-kind
+    // coalescible commands (LoadCabIr here) are superseded at the same rate
+    // (1 apply + 1 superseded discard per block). 256 same-kind clears
+    // therefore drain in 128 blocks, not 4×64.
     let mut bufs = StereoTestBuffers::new(N, 0.1, 0.1);
-    for _ in 0..4 {
+    for _ in 0..128 {
         process_block(&mut started, &mut bufs);
     }
     {
@@ -171,7 +177,10 @@ fn test_restore_ui_not_published_until_ack() {
         mt.housekeeping();
     }
 
-    // One more block applies the transaction atomically (generation advances).
+    // One more block applies the last deferred saturation command; a second
+    // block applies the transaction atomically (generation advances). The
+    // deferred clear is FIFO-before the txn, so it lands one block earlier.
+    process_block(&mut started, &mut bufs);
     process_block(&mut started, &mut bufs);
     let applied_generation = shared.cold.last_applied_generation.load(Ordering::Relaxed);
     assert!(

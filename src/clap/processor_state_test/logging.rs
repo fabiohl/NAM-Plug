@@ -2,6 +2,35 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
 use crate::clap::test_util;
+use log::LevelFilter;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static LOG_BUFFER_TEST_NONCE: AtomicU64 = AtomicU64::new(0);
+
+struct LogLevelGuard {
+    logger: &'static neural_amp_modeler_rs::common::diagnostics::logger::NamLogger,
+    previous_level: LevelFilter,
+}
+
+impl LogLevelGuard {
+    fn new(
+        logger: &'static neural_amp_modeler_rs::common::diagnostics::logger::NamLogger,
+        level: LevelFilter,
+    ) -> Self {
+        let previous_level = log::max_level();
+        logger.set_max_level(level);
+        Self {
+            logger,
+            previous_level,
+        }
+    }
+}
+
+impl Drop for LogLevelGuard {
+    fn drop(&mut self) {
+        self.logger.set_max_level(self.previous_level);
+    }
+}
 
 #[test]
 fn test_nam_logger_initialized_on_plugin_construction() {
@@ -20,24 +49,21 @@ fn test_nam_logger_initialized_on_plugin_construction() {
 #[test]
 fn test_log_info_reaches_log_buffer_during_plugin_lifecycle() {
     let (_entry, _host_info, _plugin_instance) = test_util::make_test_plugin();
+    let logger = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
+        .expect("NamLogger should be initialized");
+    let _level_guard = LogLevelGuard::new(logger, LevelFilter::Info);
+    let nonce = LOG_BUFFER_TEST_NONCE.fetch_add(1, Ordering::Relaxed);
+    let expected = format!("CLAP integration log test: reaching LogBuffer nonce={nonce}");
 
-    let snapshot_before =
-        neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()
-            .expect("LogBuffer should be accessible")
-            .len();
+    log::info!("{expected}");
 
-    log::info!("CLAP integration log test: reaching LogBuffer");
-
-    let snapshot_after =
-        neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()
-            .expect("LogBuffer should be accessible")
-            .len();
+    let snapshot = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()
+        .expect("LogBuffer should be accessible")
+        .snapshot();
     assert!(
-        snapshot_after > snapshot_before,
-        "LogBuffer should have new entries after log::info! call"
+        snapshot.iter().any(|record| record.message == expected),
+        "LogBuffer should contain the unique test message: {expected}"
     );
-
-    test_util::assert_log_buffer_contains("CLAP integration log test: reaching LogBuffer");
 }
 
 #[test]

@@ -314,14 +314,10 @@ impl<'a> CommandProducer<'a> {
     /// Any pending coalesced parameters are flushed first, preserving causal
     /// ordering. Sequence numbers are only consumed **after** a successful
     /// push, guaranteeing the FIFO item↔sequence mapping has no gaps.
-    #[expect(
-        clippy::result_large_err,
-        reason = "The payload must be returned by value so the caller can retain it \
-                 (fail-closed, R-10/T6.1). Boxing it would force a heap free on the \
-                 audio thread when the consumer drains it — violating RT-safety. The \
-                 SPSC is sized to carry these inline payloads (models/IRs are already \
-                 moved by value in LoadModel/LoadCabIr)."
-    )]
+    ///
+    /// The payload is deliberately small (heap resources travel `Box`ed
+    /// end-to-end — models, resamplers, streams and cab-sim adapters), so
+    /// returning it by value on `Full` costs no large struct copy.
     pub fn try_push_command(
         &mut self,
         cmd: ClapParamPayload,
@@ -421,6 +417,38 @@ impl<'a> CommandConsumer<'a> {
             }
             Err(_) => None,
         }
+    }
+
+    /// Returns a shared reference to the next command in the ring without
+    /// consuming it (peek). Used by the RT drain loop to decide whether a
+    /// deferred structural command can be superseded by a newer same-kind
+    /// command already queued (command coalescing, T2.3/F-RT-007).
+    pub(crate) fn peek(&self) -> Option<&ClapParamPayload> {
+        self.rx.peek().ok()
+    }
+
+    /// Unwinds the sequence advance of the most recent [`pop`](Self::pop).
+    ///
+    /// Used when a popped command is **deferred** (structural budget exhausted)
+    /// instead of applied: the ack must never cover a command that was parked
+    /// unapplied. The deferred command reoccupies its sequence slot when it is
+    /// applied at the start of the next callback (see
+    /// [`advance_pending`](Self::advance_pending)), keeping the ack gapless.
+    pub(crate) fn rollback_last_pop(&mut self) {
+        self.processed_seq = self.processed_seq.wrapping_sub(1);
+    }
+
+    /// Advances the processed-sequence counter by one **without** popping.
+    ///
+    /// Called when a command deferred in a previous callback (whose sequence
+    /// was rolled back via [`rollback_last_pop`](Self::rollback_last_pop)) is
+    /// resolved at the start of the current callback — either applied (the
+    /// deferred command occupies exactly the next sequence slot) or superseded
+    /// by a newer same-kind ring head and discarded (its slot is consumed by
+    /// the discard; the superseding command reoccupies the following slot when
+    /// popped). In both cases this keeps the item↔sequence mapping gapless.
+    pub(crate) fn advance_pending(&mut self) {
+        self.processed_seq = self.processed_seq.wrapping_add(1);
     }
 
     /// Drains up to `max` commands from the SPSC channel, calling
