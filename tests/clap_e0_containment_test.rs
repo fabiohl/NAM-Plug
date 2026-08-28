@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! TDD Red Suite — Epic E0 Contenção de Comportamento Enganoso e Fidelidade de Estado.
+//! Behavioral Containment and State Fidelity Integration Tests.
 //!
-//! These tests **must fail** with the current codebase (red), proving the
-//! regressions documented in CLAP-F001, CLAP-F004, CLAP-F009, CLAP-F014, and
-//! CLAP-F007. Once the bugs are fixed, these same tests must pass (green).
+//! Regression test suite verifying crucial edge behaviors and invariant containment:
+//! - CabSim IR participation in audio path and latency reporting.
+//! - Asset failure transactional containment (fail without side effects).
+//! - Offline rendering activation precision preservation across mode cycles.
+//! - Active bypass event automation and single-quantum responsiveness.
+//! - Atypical large audio blocks (>8192 frames) processing without buffer truncation.
+//! - Diagnostic log fidelity (oversampling state truthfulness).
 
 use clack_extensions::render::{PluginRender, RenderMode};
 use clack_host::prelude::*;
@@ -74,15 +78,14 @@ fn process_block(
     output_events_buffer
 }
 
-// ── Test: CLAP-F001 — CabSim does not participate in plugin audio ──────────
+// ── Test: CabSim IR Audio Participation and Latency Reporting ─────────────
 //
 // The GUI and state loader build a ConvEngine and send it via SPSC.
-// The orchestrator injects `conv` into DspPipelineContext, but run_inference()
-// never calls conv.process(). The IR latency is added to current_latency
-// while convolution is NOT applying the IR to the CLAP audio.
+// The orchestrator injects `conv` into DspPipelineContext, and run_inference()
+// applies convolution. The reported latency must reflect the CabSim delay.
 
 #[test]
-fn test_f001_cabsim_loaded_but_not_applied_to_audio() {
+fn test_cabsim_loaded_and_applied_to_audio() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
@@ -155,32 +158,31 @@ fn test_f001_cabsim_loaded_but_not_applied_to_audio() {
 
     // ── Assertions ──
 
-    // CLAP-F001: latency must include CabSim delay when convolution is applied.
+    // Latency must include CabSim delay when convolution is applied.
     assert_eq!(
         ir_latency,
         baseline_latency + 256,
-        "CLAP-F001: current_latency must include CabSim latency ({ir_latency} vs expected {})",
+        "current_latency must include CabSim latency ({ir_latency} vs expected {})",
         baseline_latency + 256
     );
 
-    // CLAP-F001 red (audio): IR is loaded but run_inference() never calls
-    // conv.process(). Output with IR equals output without IR.
+    // Audio verification: IR-loaded output must differ from no-IR baseline output.
     let diff = max_abs_diff(&ir_out_l, &baseline_l);
     assert!(
         diff > 1e-4,
-        "CLAP-F001 RED: IR-loaded output must differ from no-IR output (diff={diff}). Currently run_inference() never calls conv.process() — IR is loaded but not heard."
+        "IR-loaded output must differ from no-IR output (diff={diff}). Convolution must be actively applied to the audio buffer."
     );
 }
 
-// ── Test: CLAP-F014 — Asset failure during state restore keeps previous DSP ──
+// ── Test: Asset failure during state restore keeps previous DSP ──────────
 //
-// State is committed to parameters and atomics before resolving model and IR.
-// If the path does not exist, loading must fail with an error and maintain the previous state
+// State is validated before committing to parameters and atomics.
+// If the path does not exist, loading fails with an error and maintains the previous state
 // intact — without altering DSP, parameters, or UI.
 // Transactional pipeline ensures "fail without side-effects".
 
 #[test]
-fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
+fn test_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
@@ -263,7 +265,7 @@ fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
         let result = state_ext.load(&mut handle, &mut state_b.as_slice());
         assert!(
             result.is_err(),
-            "CLAP-F014: state load with missing model must return Err (transactional pipeline)"
+            "state load with missing model must return Err (transactional pipeline)"
         );
     }
 
@@ -292,12 +294,12 @@ fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     let ui_name = shared.cold.ui_model_name.lock().unwrap();
     assert!(
         !ui_name.is_empty(),
-        "CLAP-F014: ui_model_name must NOT be empty — old model should be preserved. Currently: '{ui_name}'"
+        "ui_model_name must NOT be empty — old model should be preserved. Currently: '{ui_name}'"
     );
     assert_eq!(
         ui_name.as_str(),
         model_a_name,
-        "CLAP-F014: ui_model_name should still be the old model name after failed restore"
+        "ui_model_name should still be the old model name after failed restore"
     );
 
     // RT status must NOT have MODEL_LOAD_FAILED — no change to DSP
@@ -306,17 +308,17 @@ fn test_f014_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
             .cold
             .rt_status
             .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED),
-        "CLAP-F014: RT_STATUS_MODEL_LOAD_FAILED should NOT be set — old DSP was never touched"
+        "RT_STATUS_MODEL_LOAD_FAILED should NOT be set — old DSP was never touched"
     );
 }
 
-// ── Test: CLAP-F009 — Offline rendering does not preserve/restore realtime state ──
+// ── Test: Offline rendering preserves and restores realtime state ─────────
 //
-// When exiting offline mode, `old_activation` is captured after `self.params`
-// has already been modified to Standard. The previous state is not restored.
+// When exiting offline mode, the previous activation precision must be restored
+// to its pre-offline configuration.
 
 #[test]
-fn test_f009_offline_realtime_loses_activation_precision() {
+fn test_offline_realtime_restores_activation_precision() {
     use neural_amp_modeler_rs::common::params::ActivationPrecision;
 
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
@@ -412,29 +414,23 @@ fn test_f009_offline_realtime_loses_activation_precision() {
 
     plugin_instance.deactivate(started.stop_processing());
 
-    // CLAP-F009 red assertion: the internal activation precision at the DSP
-    // level (TLS) must be restored to Fast after
-    // offline->realtime transition.
-    //
-    // Bug: `old_activation` is captured from `self.params` which was already
-    // overwritten to Standard during the offline transition. So the restored
-    // value is Standard, not the original Fast.
+    // Assertion: the internal activation precision at the DSP
+    // level (TLS) must be restored to Fast after offline->realtime transition.
     let actual_mode = neural_amp_modeler_rs::math::activations::activation_precision();
     assert_eq!(
         actual_mode,
         ActivationPrecision::Fast,
-        "CLAP-F009 RED: activation precision must be Fast after offline->realtime cycle (was set to Fast before offline). Got {actual_mode:?}, which means old_activation captured the already-overwritten Standard instead of the original Fast."
+        "activation precision must be Fast after offline->realtime cycle (was set to Fast before offline). Got {actual_mode:?}"
     );
 }
 
-// ── Test: CLAP-F008 — Active bypass swallows host automation ──────────────
+// ── Test: Active bypass automation responds to host events ────────────────
 //
-// If `self.params.bypass` is already active, `process_bypass()` copies the audio
-// and the loop executes `continue` before applying any events. A host
-// Bypass=0 event in the same block cannot take the plugin out of bypass.
+// When bypass is active, host parameter events within the same block
+// must be processed and applied to clear the bypass state cleanly.
 
 #[test]
-fn test_f008_bypass_blocks_host_events() {
+fn test_bypass_responds_to_host_events() {
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
     use clack_common::utils::{ClapId, Cookie};
@@ -503,10 +499,8 @@ fn test_f008_bypass_blocks_host_events() {
         &input_events,
     );
 
-    // CLAP-F008 assertion: bypass OFF at offset 0 must deactivate
-    // bypass in the same block. apply_scheduled_event() writes the
-    // new bypass state to ui_to_rt.param_bypass. After processing,
-    // the atomic must reflect bypass=OFF (0).
+    // Bypass OFF at offset 0 must deactivate bypass in the same block.
+    // apply_scheduled_event() writes the new bypass state to ui_to_rt.param_bypass.
     let bypass_after = shared.ui_to_rt.param_bypass.load(Ordering::Relaxed);
 
     plugin_instance.deactivate(started.stop_processing());
@@ -514,20 +508,18 @@ fn test_f008_bypass_blocks_host_events() {
     assert_eq!(
         bypass_after,
         bypass_bool_to_u32(false),
-        "CLAP-F008: ui_to_rt.param_bypass must be OFF (0) after processing \
-         bypass=OFF event at offset 0, but got {}",
-        bypass_after,
+        "ui_to_rt.param_bypass must be OFF (0) after processing \
+         bypass=OFF event at offset 0, but got {bypass_after}"
     );
 }
 
-// ── Test: CLAP-F007 — Large blocks may truncate output ───────────────────
+// ── Test: Large audio blocks process completely without truncation ────────
 //
-// Activation accepts an arbitrary max_frames_count. The orchestrator passes the
-// full sub-block to run_inference(), which reduces n_samples to
-// MAX_RESAMP_BUF (8192). Samples beyond 8192 may not be processed.
+// Audio blocks larger than default chunk partitions (e.g. 8193 frames) must be
+// processed fully without buffer truncation.
 
 #[test]
-fn test_f007_atypical_block_8193_bypass() {
+fn test_atypical_large_block_processes_completely() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
     let audio_config = PluginAudioConfiguration {
@@ -569,14 +561,12 @@ fn test_f007_atypical_block_8193_bypass() {
         out_l[n - 1]
     );
 
-    // CLAP-F007 red assertion: samples beyond 8192 must be non-zero
-    // (proving they were processed). Currently run_inference() truncates
-    // to MAX_RESAMP_BUF (8192), leaving tail unprocessed.
+    // Samples beyond 8192 must be non-zero (proving they were processed).
     let beyond_8192 = &out_l[8192..];
     let all_zero = beyond_8192.iter().all(|&s| s == 0.0);
     assert!(
         !all_zero,
-        "CLAP-F007 RED: output samples beyond index 8191 are all zero ({n} block total). run_inference() truncates to MAX_RESAMP_BUF (8192), leaving tail unprocessed."
+        "output samples beyond index 8191 are all zero ({n} block total). Buffer tail must not be truncated."
     );
 
     let first_8192_nonzero = out_l[..8192].iter().any(|&s| s.abs() > 0.0);
@@ -586,13 +576,13 @@ fn test_f007_atypical_block_8193_bypass() {
     );
 }
 
-// ── Test: CLAP-F009 — Log claims "max quality" without 4x engine ───────────
+// ── Test: Diagnostic log oversampling state truthfulness ───────────────────
 //
-// The log emitted in render.rs:44-51 claims "oversample=max quality" upon entering
-// offline mode, but no 4x engine is requested.
+// The log emitted upon entering offline mode must not falsely claim
+// active oversampling if oversampling is set to Off.
 
 #[test]
-fn test_f009_offline_log_does_not_claim_max_quality_without_4x() {
+fn test_offline_log_does_not_claim_max_quality_without_4x() {
     use clack_extensions::render::{PluginRender, RenderMode};
     use neural_amp_modeler_rs::common::diagnostics::logger::NamLogger;
 
@@ -612,7 +602,7 @@ fn test_f009_offline_log_does_not_claim_max_quality_without_4x() {
     let stopped = plugin_instance.activate(|_, _| (), audio_config).unwrap();
     let _started = stopped.start_processing().unwrap();
 
-    // Enter Offline mode — triggers the misleading log message
+    // Enter Offline mode
     {
         let mut handle = plugin_instance.plugin_handle();
         render_ext
@@ -620,14 +610,14 @@ fn test_f009_offline_log_does_not_claim_max_quality_without_4x() {
             .expect("set Offline should succeed");
     }
 
-    // CLAP-F009 red assertion: the log must NOT claim "max quality"
+    // Assertion: the log must NOT claim "max quality"
     // when no oversampling engine is active (factor is Off by default).
     if let Some(buffer) = NamLogger::log_buffer() {
         let snapshot = buffer.snapshot();
         for record in &snapshot {
             if record.message.contains("oversample=max quality") {
                 panic!(
-                    "CLAP-F009 RED: Log claims 'oversample=max quality' but oversample is Off by default. Log line: {}",
+                    "Log claims 'oversample=max quality' but oversample is Off by default. Log line: {}",
                     record.message
                 );
             }

@@ -18,7 +18,7 @@
 //! - **[`render`]**: Quality mode negotiation (`Realtime` vs `Offline` HQ rendering).
 //! - **[`state`] / [`state_context`] / `state_transaction`**: Transactional, thread-safe binary state serialization and restoration.
 
-//! - **[`tail`]**: Audio tail duration reporting (0 samples for live processing).
+//! - **[`tail`]**: Audio tail duration reporting (cab-sim IR ring-out duration and pipeline delay).
 //! - **[`track_info`]**: DAW track channel and metadata binding.
 
 pub mod audio_ports;

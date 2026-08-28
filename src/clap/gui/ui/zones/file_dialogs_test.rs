@@ -40,7 +40,7 @@ fn test_ir_dialog_state_active_flag() {
 
 #[test]
 fn test_dialog_fence_down_discards_outcome_and_notification() {
-    // R-09: the fence drops while the picker is open (plugin destroyed).
+    // Teardown safety: the fence drops while the picker is open (plugin destroyed).
     // The completed dialog must NOT write the path and must NOT notify
     // the host (request_callback would dispatch to a destroyed instance).
     let state = Arc::new(DialogSharedState::new());

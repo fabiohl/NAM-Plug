@@ -428,8 +428,7 @@ pub fn extract_plugin_shared(
 ///
 /// The caller should dereference this with `unsafe { &mut *ptr }` and ensure
 /// the `PluginInstance` outlives the dereferenced reference. Used by tests that
-/// drive `load_model()`/`load_cabsim()` and inspect the staged-swap slot
-/// (T3.3/F-LAT-005).
+/// drive `load_model()`/`load_cabsim()` and inspect the staged-swap slot.
 pub fn extract_plugin_main_thread(
     instance: &mut PluginInstance<CompleteHost>,
 ) -> *mut crate::clap::plugin::NamClapMainThread<'static> {

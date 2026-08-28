@@ -191,7 +191,7 @@ fn test_validate_ir_hash_mismatch() {
     let _ = std::fs::remove_file(&ir_file);
 }
 
-// ── T6.2: mandatory SHA-256 asset identity ──────────────────────────────────
+// ── Mandatory SHA-256 asset identity validation ──────────────────────────────
 
 fn fixture_model_path(name: &str) -> std::path::PathBuf {
     let p = crate::clap::test_util::model_path(name);
@@ -244,7 +244,7 @@ fn test_validate_model_full_omitted_hash_rejected() {
     let result = validate_model_full(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
-        "Full restore with existing path but omitted hash must be rejected (T6.2)"
+        "Full restore with existing path but omitted hash must be rejected"
     );
 }
 
@@ -260,7 +260,7 @@ fn test_validate_model_full_malformed_hash_rejected() {
     let result = validate_model_full(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
-        "Full restore with malformed hash must be rejected (T6.2)"
+        "Full restore with malformed hash must be rejected"
     );
 }
 
@@ -268,18 +268,19 @@ fn test_validate_model_full_malformed_hash_rejected() {
 fn test_validate_model_full_wrong_hash_no_fallback_match_rejected() {
     let model = fixture_model_path("lstm.nam");
     // Well-formed but wrong digest; no search dir is provided, so the basename
-    // fallback cannot find a candidate whose digest matches.
+    // candidate cannot be resolved → the restore must be rejected.
     let params = ProcessingParams {
         model_path: Some(model),
         model_basename: Some("lstm.nam".to_string()),
-        model_hash: Some("0".repeat(64)),
-        model_search_paths: vec![],
+        model_hash: Some(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        ),
         ..Default::default()
     };
     let result = validate_model_full(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
-        "path with divergent hash and no matching basename+hash fallback must fail"
+        "Full restore with wrong hash and no fallback must be rejected"
     );
 }
 
@@ -303,7 +304,7 @@ fn test_validate_model_full_wrong_path_falls_back_to_matching_basename_hash() {
     let result = validate_model_full(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_ok(),
-        "basename+hash fallback must adopt the matching candidate (T6.2)"
+        "basename+hash fallback must adopt the matching candidate"
     );
     let (resources, path_on_disk, basename, _search, hash) = result.unwrap();
     assert!(resources.is_some(), "fallback must build model resources");
@@ -332,7 +333,7 @@ fn test_validate_model_from_basename_omitted_hash_rejected() {
     let result = validate_model_from_basename(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
-        "basename search without a saved hash must be rejected (T6.2)"
+        "basename search without a saved hash must be rejected"
     );
 }
 
@@ -351,7 +352,7 @@ fn test_validate_model_from_basename_malformed_hash_rejected() {
     let result = validate_model_from_basename(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
-        "basename search with a malformed hash must be rejected (T6.2)"
+        "basename search with a malformed hash must be rejected"
     );
 }
 
@@ -412,7 +413,7 @@ fn test_validate_ir_omitted_hash_rejected() {
     let result = validate_ir(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
-        "IR without a saved hash must not load the WAV (T6.2)"
+        "IR without a saved hash must not load the WAV"
     );
 
     let _ = std::fs::remove_file(&ir_file);
@@ -433,10 +434,7 @@ fn test_validate_ir_malformed_hash_rejected() {
         ..Default::default()
     };
     let result = validate_ir(&params, 48000, 256, &sys_snapshot());
-    assert!(
-        result.is_err(),
-        "IR with a malformed hash must be rejected (T6.2)"
-    );
+    assert!(result.is_err(), "IR with a malformed hash must be rejected");
 
     let _ = std::fs::remove_file(&ir_file);
 }
@@ -475,7 +473,7 @@ fn test_validate_model_full_no_model_path_without_basename_is_clear() {
     );
 }
 
-// ── T6.1: transactional restore package mapping ────────────────────────────
+// ── Transactional restore package mapping ──────────────────────────────────
 
 #[test]
 fn test_next_restore_generation_monotonic() {
@@ -549,7 +547,7 @@ fn test_build_restore_package_full_clear() {
     )
     .expect("Full restore without model must build a clear transaction");
 
-    // Full without model → explicit RT clear payload (T6.1 defect #5).
+    // Full without model → explicit RT clear payload.
     let clear = txn
         .model
         .expect("Full restore must carry a clear-model payload");
@@ -571,7 +569,7 @@ fn test_build_restore_package_full_clear() {
 #[test]
 fn test_build_restore_package_full_clear_resampler_failure_aborts() {
     // An impossible resampler configuration (0 Hz source) must abort the
-    // commit — nothing may be published (T6.1: resampler failure aborts).
+    // commit — nothing may be published (resampler failure aborts).
     let validated = make_validated(ProcessingParams::default());
     let shared = crate::clap::plugin::make_test_shared();
     let result = build_restore_package(

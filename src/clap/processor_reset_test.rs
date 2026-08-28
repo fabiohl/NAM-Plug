@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T4.3 / F-CLAP-010 — Complete, in-place, zero-alloc CLAP reset.
+//! Complete, in-place, zero-alloc CLAP reset.
 //!
 //! Validates `PluginAudioProcessor::reset()`:
 //!
@@ -13,7 +13,7 @@
 //!   same configuration (model, IR, oversampling) — both with the conv engine
 //!   and with the recurrent (LSTM) neural model.
 //! * **Zero allocation (acceptance):** the `reset()` method itself performs no
-//!   heap allocation (F-RT-003).
+//!   heap allocation on the real-time audio thread.
 //! * **Configuration preservation:** model, IR, params, applied oversampling
 //!   factor and the declared latency survive the reset; no host restart is
 //!   requested and the latency telemetry never changes.
@@ -309,13 +309,13 @@ mod tests {
             let _ = process_block(&mut started, &pattern);
         }
 
-        // The reset itself must be zero-alloc (F-RT-003 / acceptance).
-        assert_zero_alloc("T4.3 reset() (model+OS+conv in place)", || {
+        // The reset itself must be zero-alloc in real time.
+        assert_zero_alloc("reset() (model+OS+conv in place)", || {
             started.reset();
         });
 
         // And the first post-reset block remains zero-alloc too.
-        assert_zero_alloc("T4.3 post-reset process()", || {
+        assert_zero_alloc("post-reset process()", || {
             let _ = process_block(&mut started, &pattern);
         });
 

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T3.3 / F-LAT-005 — Política A (restart estrito com otimização de mesma
-//! latência) para trocas de modelo/IR.
+//! Strict host restart policy with same-latency optimization
+//! for model and IR swaps.
 //!
 //! Validates the decision matrix on the main thread:
 //! - A model swap that keeps the *exact* same latency (same model rate) is a

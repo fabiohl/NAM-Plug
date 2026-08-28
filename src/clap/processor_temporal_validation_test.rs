@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T4.4 / F-DSP-008, F-DSP-009, F-CLAP-010 — Temporal validation suite:
+//! Temporal validation suite:
 //! Reset Equivalence, Bypass Continuity & Impulse/Tail Fidelity.
 //!
 //! Comprehensive temporal fidelity audit of `NAM-Plug`:
@@ -19,7 +19,7 @@
 //!   produce aligned dry/wet impulse arrival samples under all active stages.
 //! * **Zero allocation under rapid temporal transitions:** dynamic bypass
 //!   toggling, reset, and gate transitions execute strictly without heap
-//!   allocation (RT-safety / F-RT-003).
+//!   allocation in real-time processing routines.
 
 #[cfg(test)]
 mod tests {

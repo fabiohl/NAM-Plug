@@ -4,7 +4,7 @@
 //! Benchmarks of CLAP host integration — the `process` call path through the full
 //! plugin stack (NamClapPlugin).
 //!
-//! Structured into two distinct layers (F-BENCH-013):
+//! Structured into two distinct layers:
 //! 1. `CLAP_Infrastructure`: Isolated host wrapper, buffer routing, event dispatch, and bypass overhead.
 //! 2. `CLAP_Inference`: Real neural network inference through the complete CLAP plugin stack
 //!    with authentic models (WaveNet A1 Standard, WaveNet A2 / Slimmable, LSTM), sample rate

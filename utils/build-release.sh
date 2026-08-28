@@ -22,7 +22,7 @@ BUILD_FLATPAK=true
 BUILD_TARBALL=true
 USE_PGO=true
 USE_BOLT=true
-STRICT_MODE="${NAM_STRICT_RELEASE:-1}"
+RELEASE_CEREMONY=false
 
 show_help() {
     cat <<EOF
@@ -39,6 +39,7 @@ Options:
   --no-bolt              Skip Phase 4 (LLVM BOLT post-link optimization).
   --no-strict            Disable strict fail-closed mode on optional tool absence.
   --strict               Enforce strict fail-closed mode (default: 1).
+  --release-ceremony     Official release ceremony mode: requires a pristine worktree & strict tests.
   -h, --help             Show this help message and exit.
 
 Deliverables:
@@ -80,6 +81,11 @@ while [[ $# -gt 0 ]]; do
             STRICT_MODE=0
             shift
             ;;
+        --release-ceremony)
+            RELEASE_CEREMONY=true
+            STRICT_MODE=1
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -94,7 +100,7 @@ done
 
 # Import shared style helpers and utilities from _lib.sh.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-NAM_LIB_NO_CD=1 source "$SCRIPT_DIR/_lib.sh"
+NAM_LIB_NO_CD=1 source "$SCRIPT_DIR/lib/_lib.sh"
 
 echo -e "${BLUE}${BOLD}========================================================================${NC}"
 echo -e "${BLUE}${BOLD}   NAM-Plug Unified Release Build & Optimization Pipeline               ${NC}"
@@ -111,7 +117,7 @@ CORE_GIT_BRANCH="unknown"
 CORE_GIT_DIRTY=false
 CORE_TREE_SHA=""
 
-# F-PROV-016 provenance check: Inspect DSP engine crate NeuralAmpModeler-rs
+# Provenance check: Inspect DSP engine crate NeuralAmpModeler-rs
 check_engine_provenance() {
     if [ -d "../NeuralAmpModeler-rs" ] && grep -q 'NeuralAmpModeler-rs.*path.*=.*"\.\./NeuralAmpModeler-rs"' Cargo.toml 2>/dev/null; then
         CORE_PATH="../NeuralAmpModeler-rs"
@@ -129,7 +135,7 @@ check_engine_provenance() {
 
         if [ "$CORE_GIT_DIRTY" = "true" ]; then
             if [ "$STRICT_MODE" = "1" ]; then
-                die "Engine repository '$CORE_PATH' has uncommitted changes in strict release mode (F-PROV-016 provenance fail-closed). Commit, stash or clean before generating a certified release."
+                die "Engine repository '$CORE_PATH' has uncommitted changes in strict release mode (provenance fail-closed). Commit, stash or clean before generating a certified release."
             else
                 warn "Engine repository '$CORE_PATH' is dirty (non-strict mode)."
             fi
@@ -139,7 +145,7 @@ check_engine_provenance() {
     fi
 }
 
-# T6.4 & F-PROV-016 provenance fail-closed: a certified release can never be produced from a
+# Provenance fail-closed: a certified release can never be produced from a
 # dirty work tree. In strict mode this aborts before any heavy work is started
 # and is re-verified immediately before receipt generation (Phase 8), so no
 # receipt is ever written for a dirty tree.
@@ -172,7 +178,7 @@ FLATPAK_REPO_DIR=""
 PROFRAW_DIR="$PGO_DIR/profraw"
 MERGED_PROFILE="$PGO_DIR/merged.profdata"
 
-# T6.4 provenance fail-closed: external RUSTFLAGS is rejected wholesale in
+# Provenance fail-closed: external RUSTFLAGS is rejected wholesale in
 # strict release mode. The certified pipeline uses exclusively the
 # CONFIG_RUSTFLAGS extracted from .cargo/config.toml below; any environment
 # flag (not just -Ctarget-cpu=) could otherwise alter the shipped bytes
@@ -374,7 +380,7 @@ if [ "$USE_BOLT" = true ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# PHASE 1.5: Preflight Quick QA & RT Heap Allocation Audit (F-QA-012)
+# PHASE 1.5: Preflight Quick QA & RT Heap Allocation Audit
 # -----------------------------------------------------------------------------
 echo -e "\n${BLUE}${BOLD}[Phase 1.5/7] Executing strict Quick QA & RT Heap Allocation Audit preflight...${NC}"
 
@@ -479,7 +485,7 @@ fi
 echo -e "  ${GREEN}✓${NC} Compilation completed successfully."
 
 # -----------------------------------------------------------------------------
-# PHASE 4: BOLT Instrumentation & Post-Link Optimization (F-BOLT-014)
+# PHASE 4: BOLT Instrumentation & Post-Link Optimization
 # -----------------------------------------------------------------------------
 CLAP_BOLT_APPLIED=false
 BOLT_PROFILE_SHA=""
@@ -523,7 +529,7 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
         if NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
             "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload"; then
             
-            # Verify workload completion receipt (F-BOLT-014)
+            # Verify workload completion receipt
             if [ -f "$PROJECT_DIR/target/pgo-workload-receipt.json" ] && grep -q '"status": "SUCCESS"' "$PROJECT_DIR/target/pgo-workload-receipt.json"; then
                 echo -e "  ${GREEN}✓${NC} CLAP profile collected and workload receipt verified."
             else
@@ -535,7 +541,7 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
             fi
         else
             echo -e "${RED}  Error: CLAP profiling workload failed during BOLT profile generation.${NC}"
-            # Clean partial fdata to prevent invalid partial optimization (F-BOLT-014)
+            # Clean partial fdata to prevent invalid partial optimization
             rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.*
             if [ "$STRICT_MODE" = "1" ]; then
                 die "CLAP BOLT profiling workload failed in strict release mode."
@@ -687,7 +693,7 @@ fi
 
 # Gate 3: Fail-closed AVX-512 absence certificate (EVEX byte decoding)
 echo -e "  [Gate 3/6] Running fail-closed AVX-512 absence scan on distributed artifact..."
-"$SCRIPT_DIR/verify_no_avx512_release.sh" "$CLAP_TARGET"
+"$SCRIPT_DIR/lib/verify_no_avx512_release.sh" "$CLAP_TARGET"
 ok "AVX-512 absence certificate passed on distributed artifact."
 
 # Discovery helper for NAMCore render oracle
@@ -753,7 +759,7 @@ CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
     test_cabsim_ir_changes_audio_release_artifact -- --ignored --nocapture
 ok "CabSim IR test passed on distributed artifact."
 
-# Gate 6: Distributed Artifact Performance Certification Gate (F-QA-011)
+# Gate 6: Distributed Artifact Performance Certification Gate
 echo -e "  [Gate 6/6] Running performance certification gate on distributed artifact..."
 PERF_REPORT_PATH="$PROJECT_DIR/target/perf-certification-report.json"
 PERF_REPORT_SHA=""

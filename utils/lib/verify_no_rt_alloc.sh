@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 #
-# Static RT-allocation guard (F-RT-003 / T2.2).
+# Static RT-allocation guard.
 #
 # Verifies that the audio-thread code under `src/clap/processor/` contains no
 # `Box::new` or implicit heap allocations outside the documented off-RT sites
@@ -13,7 +13,7 @@
 # empty scan scope or a scanner failure aborts with exit 1.
 #
 # Usage:
-#   utils/verify_no_rt_alloc.sh
+#   utils/lib/verify_no_rt_alloc.sh
 #
 # Exit codes:
 #   0 — RT path is allocation-free by static inspection
@@ -47,7 +47,7 @@ fi
 if ! matches=$(awk -f "$AWK_PROG" $SCAN_FILES 2>&1); then
     echo -e "  ${RED}${BOLD}RT-hostile allocation pattern found in src/clap/processor/:${NC}"
     printf '%s\n' "$matches" | sed 's/^/    /'
-    die "RT static allocation scan FAILED (F-RT-003/T2.2)"
+    die "RT static allocation scan FAILED"
 fi
 
 ok "RT allocation scan clean: no Box::new / implicit allocations on the audio-thread path (src/clap/processor/)."

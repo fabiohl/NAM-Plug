@@ -21,10 +21,10 @@ impl WindowHandler for NamPluginWindow {
         //
         // Exit conditions:
         // - the close signal was set (window closed by the user or teardown);
-        // - the alive fence is down (plugin destruction in progress — R-09:
+        // - the alive fence is down (plugin destruction in progress:
         //   the event loop must become a no-op and stop dereferencing shared
         //   state and the host handle);
-        // - the window is a degraded stub (GL initialization failed — R-11).
+        // - the window is a degraded stub (GL initialization failed).
         if self.close_signal.load(Ordering::Relaxed)
             || !self.alive_fence.load(Ordering::Acquire)
             || self.painter.is_none()
@@ -44,7 +44,7 @@ impl WindowHandler for NamPluginWindow {
             return;
         }
 
-        // Idle-skip (CLAP-F022): when the window is truly static — no input
+        // Idle-skip: when the window is truly static — no input
         // events, VU meters stable, no animations active — skip the entire
         // GL context acquisition, egui run, and paint cycle. This drops CPU
         // usage to ~0% when the window is open but idle.
@@ -198,7 +198,7 @@ impl WindowHandler for NamPluginWindow {
                 // Notify the host that the GUI was closed externally, then
                 // clean up GL resources and stop the render loop.
                 //
-                // R-09: the host notification is a no-op when the alive fence
+                // Teardown safety: the host notification is a no-op when the alive fence
                 // is down — during plugin destruction the host handle must not
                 // be dereferenced after teardown began.
                 if self.alive_fence.load(Ordering::Acquire)
@@ -299,7 +299,7 @@ impl WindowHandler for NamPluginWindow {
                                         .cold
                                         .ui_loading
                                         .store(true, std::sync::atomic::Ordering::Relaxed);
-                                    // R-09: fence re-check immediately before
+                                    // Fence re-check immediately before
                                     // the host call — the fence may have
                                     // dropped between safe_shared() and here.
                                     if self.alive_fence.load(Ordering::Acquire) {

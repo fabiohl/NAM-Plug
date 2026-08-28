@@ -231,7 +231,7 @@ pub(crate) fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
 }
 
 /// Returns true when `digest` is exactly 64 hex characters — the canonical
-/// SHA-256 hex form produced by [`compute_file_hash`] (T6.2).
+/// SHA-256 hex form produced by [`compute_file_hash`].
 pub(crate) fn is_valid_sha256_hex(digest: &str) -> bool {
     digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -334,7 +334,7 @@ fn build_model_resources(
         )
     })?);
 
-    // Streaming resample adapter (T1.2/F-PERF-002), sized for the host buffer.
+    // Streaming resample adapter, sized for the host buffer.
     // When `buffer_size` is 0 (pre-activation restore), `flush_pending_model()`
     // builds it at activate() time from the deferred `PendingModel`.
     let new_stream = crate::clap::plugin::build_stream_adapter(
@@ -442,7 +442,7 @@ fn validate_model_full(
     };
 
     if path.exists() {
-        // T6.2 (F-ROB-PLUG-08 residual): an asset is only adopted with a valid
+        // Mandatory asset identity: an asset is only adopted with a valid
         // SHA-256 digest that is verified in this same restore cycle. A missing,
         // malformed or divergent hash rejects this path — never a silent accept.
         let hash_valid = match loaded_params.model_hash.as_deref() {
@@ -543,7 +543,7 @@ fn validate_model_from_basename(
         ))
     })?;
 
-    // T6.2: a model reference without a valid expected digest is never adopted
+    // Mandatory asset identity: a model reference without a valid expected digest is never adopted
     // silently. Missing/malformed hash ⇒ explicit rejection in automatic
     // restore; the only migration path is an explicit GUI re-load (which
     // recomputes the digest from the file the user picks).
@@ -701,7 +701,7 @@ fn validate_ir(
         )));
     }
 
-    // T6.2: the same mandatory-digest rule applies to the IR. A missing or
+    // Mandatory asset identity: the same mandatory-digest rule applies to the IR. A missing or
     // malformed `ir_hash` never loads the WAV; the migration path is an
     // explicit GUI re-load of the IR file.
     let expected_hash = loaded_params.ir_hash.as_deref().ok_or_else(|| {
@@ -751,7 +751,7 @@ fn validate_ir(
     ))
 }
 
-/// Monotonic generation tag for restore transactions (T6.1).
+/// Monotonic generation tag for restore transactions.
 static NEXT_RESTORE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn next_restore_generation() -> u64 {
@@ -759,7 +759,7 @@ fn next_restore_generation() -> u64 {
 }
 
 /// Publishes the validated restore transactionally. Only reached after all
-/// validation passes (T6.1 / F-ROB-PLUG-07).
+/// validation passes.
 ///
 /// - Active (`buffer_size > 0`): the whole package (model, IR, params) is pushed
 ///   as a single [`RestoreTxn`] command. UI/paths/hashes are published only after
@@ -801,7 +801,7 @@ fn atomic_commit(
         &main_thread.shared.cold,
     )?;
 
-    // Check if the restore changes physical latency (T3.3 / F-LAT-005 / TR.1 Política A).
+    // Check if the restore changes physical latency (Strict Restart Policy / TR.1).
     let current_stream_latency = main_thread
         .shared
         .cold
@@ -958,7 +958,7 @@ fn build_restore_package(
         }
         None => match mode {
             RestoreMode::Full => {
-                // Explicitly clear the model on the RT thread (T6.1 defect #5).
+                // Explicitly clear the model on the RT thread.
                 // Building the passthrough resampler is part of the transaction:
                 // a failure aborts the entire commit — nothing is published.
                 let new_resampler = NamResampler::new(host_rate, 48000, 0).map_err(|e| {
@@ -1000,7 +1000,7 @@ fn build_restore_package(
             } = resources;
             // `adapter` is already `Option<Box<CabSimAdapter>>` — None clears
             // the IR. The box preserves the RT-safe end-to-end ownership
-            // contract (F-RT-003/T2.1).
+            // contract.
             Some(adapter)
         }
         None => match mode {
@@ -1062,8 +1062,8 @@ fn deliver_pending_restore(main_thread: &mut NamClapMainThread, mut pending: Pen
 }
 
 /// Advances the telemetry load counter once a restore carrying a model has been
-/// delivered to the audio thread. Kept at delivery (push) time — like the
-/// pre-T6.1 commit — so synchronous callers observe the counter advance without
+/// delivered to the audio thread. Kept at delivery (push) time
+/// so synchronous callers observe the counter advance without
 /// waiting for the ack; UI/path/hash publication still waits for the ack.
 fn note_model_delivered(main_thread: &mut NamClapMainThread, publish: &RestorePublish) {
     if publish.model.is_some() {
@@ -1512,7 +1512,7 @@ fn local_commit(
 
 impl<'a> NamClapMainThread<'a> {
     /// Retries delivery of a pending restore transaction and, once the audio
-    /// thread acks it, publishes the UI/paths/hashes (T6.1 ack phase).
+    /// thread acks it, publishes the UI/paths/hashes (ack phase).
     ///
     /// Called from `housekeeping()`. Latest-wins: a newer restore replaces an
     /// older still-pending one; the older transaction already in the ring still

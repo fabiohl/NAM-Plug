@@ -22,7 +22,7 @@ pub struct NamPluginWindow {
     /// Glow Painter for rendering via OpenGL.
     ///
     /// `None` when the window was created in degraded mode (GL initialization
-    /// failed — R-11): the event loop closes the window on its first frame.
+    /// failed): the event loop closes the window on its first frame.
     pub(crate) painter: Option<egui_glow::Painter>,
     /// Accumulated raw input for Egui.
     pub(crate) raw_input: egui::RawInput,
@@ -59,7 +59,7 @@ impl NamPluginWindow {
     /// Initializes the main plugin window with baseview, creating the graphics context
     /// and setting up the custom dark theme.
     ///
-    /// # FFI Robustness (R-11)
+    /// # FFI Robustness
     ///
     /// This function is called by the GUI thread via baseview callback (C ABI). Panics that
     /// cross this boundary are UB in C++ hosts. OpenGL context or Painter initialization
@@ -133,7 +133,7 @@ impl NamPluginWindow {
     }
 
     /// Initializes the glow painter and VU shader program from an optional
-    /// OpenGL context (R-11).
+    /// OpenGL context.
     ///
     /// A missing context — headless sessions, SSH/X11 forwarding, broken GPU
     /// drivers — yields a structured error instead of panicking through the
@@ -189,8 +189,7 @@ impl NamPluginWindow {
         Ok((painter, vu_program, vu_vao))
     }
 
-    /// Builds a degraded (stub) window handler used when GL initialization
-    /// fails (R-11).
+    /// Builds a degraded (stub) window handler used when GL initialization fails.
     ///
     /// The baseview build callback must always return a handler, so on
     /// failure the extension records the error, returns it to the host and
@@ -234,7 +233,7 @@ impl NamPluginWindow {
     ///
     /// Must be called with the GL context *current*. Idempotent — safe to call
     /// multiple times. No-op for degraded windows (no GL resources were ever
-    /// created — R-11).
+    /// created).
     pub(crate) fn destroy_gl_resources(&mut self) {
         let Some(painter) = &mut self.painter else {
             return;

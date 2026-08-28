@@ -166,7 +166,7 @@ pub fn draw_ui(
         activation_id,
     );
 
-    // Repaint driver (CLAP-F022):
+    // Repaint driver:
     // Request repaints only when something is actively changing. The baseview
     // event loop drives frames at ~15 ms. The idle early-exit in on_frame()
     // returns immediately when nothing changed, dropping per-frame cost to

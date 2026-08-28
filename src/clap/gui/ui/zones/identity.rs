@@ -388,7 +388,7 @@ fn render_ir_section(
 
         if clear_ir_clicked {
             shared.cold.ui_clear_ir.store(true, Ordering::Relaxed);
-            // R-09: fence-gate the host notification — a stale
+            // Teardown safety: fence-gate the host notification — a stale
             // request_callback after destroy would dispatch to a
             // freed clap_plugin_t.
             if shared.cold.alive_fence.load(Ordering::Acquire) {

@@ -8,11 +8,11 @@ use super::super::shared::{ClapParamPayload, LoadModelPayload, NamModelMetadata,
 use super::NamClapMainThread;
 use crate::clap::plugin::command_scheduler::PushError;
 use neural_amp_modeler_rs::common::diagnostics::{NamDiagnostic, NamErrorCode};
+use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::loader::load_and_build_model;
-use neural_amp_modeler_rs::models::NamModel;
-use neural_amp_modeler_rs::models::StaticModel;
 use neural_amp_modeler_rs::models::slimmable::clone_wavenet_for_slimmable_storage;
+use neural_amp_modeler_rs::models::{NamModel, StaticModel};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -61,13 +61,14 @@ impl<'a> NamClapMainThread<'a> {
                  resampler will convert internally"
             );
         }
-        let new_resampler = Box::new(NamResampler::new(host_rate, model_rate, 0).map_err(|e| {
-            Box::new(
-                NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
-                    .message("Failed to build resampler")
-                    .param("error", e.to_string()),
-            )
-        })?);
+        let _new_resampler =
+            Box::new(NamResampler::new(host_rate, model_rate, 0).map_err(|e| {
+                Box::new(
+                    NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                        .message("Failed to build resampler")
+                        .param("error", e.to_string()),
+                )
+            })?);
 
         self.params.model_path = Some(path.to_path_buf());
         self.params.model_basename = path
@@ -81,7 +82,7 @@ impl<'a> NamClapMainThread<'a> {
             }
         }
 
-        // Compute content hash for portable asset identity (T6.2). The GUI load
+        // Compute content hash for portable asset identity. The GUI load
         // is the explicit user override path — but the asset is only adopted
         // when its digest can actually be computed, so persisted state always
         // carries a valid `model_hash`.
@@ -135,19 +136,21 @@ impl<'a> NamClapMainThread<'a> {
         let input_mult_adj = model_pair.input_mult_adj;
         let output_mult_adj = model_pair.output_mult_adj;
 
-        // T3.2/F-CONC-006: allocate a fresh monotonic model generation for this
+        // Allocate a fresh monotonic model generation for this
         // identity now (before any deferral/retry) so the model keeps a stable
         // generation tag through `PendingModel` → `flush_pending_model()`.
         let generation = self.shared.cold.allocate_model_generation();
 
-        // Store full WaveNet weights for main-thread slimmable rebuild
+        // Derive and store full WaveNet weights for main-thread slimmable rebuild.
+        // LoadedModelPair no longer carries a pre-computed `full_wavenet` field;
+        // we clone it from `model_l` using the same helper used in state_transaction.rs.
         {
             let mut storage = self
                 .shared
                 .cold
                 .full_wavenet_model
                 .lock()
-                .unwrap_or_else(|e| e.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *storage = model_l.as_ref().and_then(|m| {
                 if let StaticModel::WavenetDyn(w) = m.as_ref() {
                     clone_wavenet_for_slimmable_storage(w).ok()
@@ -159,19 +162,29 @@ impl<'a> NamClapMainThread<'a> {
 
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
         if buffer_size > 0 {
-            // Main path: buffer_size known, pre-size and send immediately.
+            // Buffer size is known: create resampler with real host sample rate and capacity
+            let buf_capacity = buffer_size.max(MAX_RESAMP_BUF);
+            let new_resampler = Box::new(
+                NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
+                    Box::new(
+                        NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                            .message("Failed to build polyphase resampler for model")
+                            .param("error", e.to_string()),
+                    )
+                })?,
+            );
+
             if let Some(ref mut model) = model_l
                 && let Err(e) = model.set_max_buffer_size(buffer_size)
             {
                 return Err(Box::new(
                     NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
-                        .message("Failed to resize model buffers for host buffer size")
-                        .param("buffer_size", buffer_size.to_string())
+                        .message("Failed to set model max buffer size")
                         .param("error", e.to_string()),
                 ));
             }
 
-            // Streaming resample adapter (T1.2/F-PERF-002), sized for the
+            // Streaming resample adapter, sized for the
             // worst-case host block — built off-RT like the resampler.
             let new_stream =
                 crate::clap::plugin::build_stream_adapter(host_rate, model_rate, buffer_size)
@@ -186,7 +199,7 @@ impl<'a> NamClapMainThread<'a> {
             // Explicit user load supersedes any pending staged restore (TR.1 #5).
             self.staged_restore = None;
 
-            // T3.3/F-LAT-005 (Política A): a model swap only changes the
+            // Strict Restart Policy: a model swap only changes the
             // physical latency when the streaming adapter's latency changes
             // (i.e. the model rate differs). The audio thread publishes the
             // latency contribution of the *installed* stream in
@@ -199,8 +212,8 @@ impl<'a> NamClapMainThread<'a> {
                 .load(Ordering::Relaxed);
             let new_stream_latency = new_stream.latency_samples();
             if new_stream_latency == current_stream_latency {
-                // Same exact latency ⇒ continuous hot swap (Política-A
-                // optimization): deliver through the SPSC and supersede any
+                // Same exact latency ⇒ continuous hot swap:
+                // deliver through the SPSC and supersede any
                 // previously staged model (latest user intent already landed).
                 if let Some(staged) = self.staged_swap.as_mut() {
                     staged.clear_model();
@@ -342,7 +355,7 @@ impl<'a> NamClapMainThread<'a> {
             )
         })?;
 
-        // T6.2: the IR digest is computed up-front so persisted state always
+        // The IR digest is computed up-front so persisted state always
         // carries a valid `ir_hash`. A file whose digest cannot be computed is
         // never adopted — even on this explicit user override path.
         let ir_hash =
@@ -368,7 +381,7 @@ impl<'a> NamClapMainThread<'a> {
         // with the correct partition size, avoiding a stale fallback-sized
         // adapter overwriting the activate-built one.
         //
-        // T3.3/F-LAT-005 (Política A): the cabsim latency contribution is
+        // Strict Restart Policy: the cabsim latency contribution is
         // exactly the partition size (0 without an IR). Loading the *first* IR
         // (0 → partition) or clearing the active IR (partition → 0) changes the
         // physical latency, so the swap is staged and a host restart is
@@ -378,7 +391,7 @@ impl<'a> NamClapMainThread<'a> {
             // Explicit user IR load supersedes any pending staged restore (TR.1 #5).
             self.staged_restore = None;
 
-            // F-RT-003/T2.1: box here on the main thread so the SPSC payload
+            // Box here on the main thread so the SPSC payload
             // carries `Box<CabSimAdapter>` and the audio-thread swap moves the
             // old `Box` by value to the GC with zero allocations.
             let adapter = Some(Box::new(CabSimAdapter::new(Box::new(engine)).map_err(

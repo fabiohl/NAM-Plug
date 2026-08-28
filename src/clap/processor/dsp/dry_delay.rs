@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Pre-allocated circular dry delay line for bypass time-alignment (T4.1 /
-//! F-DSP-008).
+//! Pre-allocated circular dry delay line for bypass time-alignment.
 //!
 //! The wet DSP chain applies a fixed algorithmic latency
 //! (`cached_effective_latency` = streaming resampler + oversampling + cab-sim
-//! partition, in host-rate samples). Before T4.1 the dry (bypass/crossfade)
-//! path bypassed this latency entirely: the bypass crossfade blended two
+//! partition, in host-rate samples). The dry (bypass/crossfade) path must
+//! match this latency: otherwise the bypass crossfade blends two
 //! signals representing *different* temporal instants of the input, producing
 //! comb filtering and transient cancellation during the ramp, and the
-//! fully-bypassed state returned to zero physical latency while the plugin kept
+//! fully-bypassed state returns to zero physical latency while the plugin keeps
 //! announcing the wet latency — a PDC inconsistency.
 //!
 //! [`DryDelayLine`] is a bounded ring buffer that delays the dry signal by
@@ -196,7 +195,7 @@ mod dry_delay_test {
     #[test]
     fn test_impulse_peak_aligned_at_delay() {
         // Impulse at index 0 must reappear exactly `delay` samples later —
-        // the dry/wet time-alignment invariant (F-DSP-008 acceptance).
+        // verifying the dry/wet time-alignment invariant.
         for &delay in &[1usize, 12, 64, 256, 511] {
             let cap = delay + 16;
             let mut input = vec![0.0f32; delay + 64];
@@ -214,7 +213,7 @@ mod dry_delay_test {
 
     #[test]
     fn test_steady_state_gain_and_dc_unchanged() {
-        // Rollback condition (T4.1): the delay line must not alter gain or DC
+        // Rollback condition: the delay line must not alter gain or DC
         // in steady state. A constant signal comes out unchanged after the
         // initial zero-priming.
         let delay = 37usize;

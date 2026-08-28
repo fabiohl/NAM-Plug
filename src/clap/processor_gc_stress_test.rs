@@ -358,13 +358,13 @@ mod tests {
         drop(plugin_instance);
     }
 
-    // R-04: teardown must hand the RT parking lot to the final off-RT
+    // Teardown contract: plugin teardown must hand the RT parking lot to the final off-RT
     // drain. Parks exactly 16 items in the processor's parking lot (SPSC 32 +
     // lot 16 + 1 overflow = 49 items after 25 swaps with no housekeeping),
     // then deactivates. Before the fix, drain_gc_final never saw the lot and
     // only 33 items were accounted; now the full 49 are drained off-RT.
     #[test]
-    #[ignore = "R-04 teardown: 25 model swaps"]
+    #[ignore = "Teardown stress: 25 model swaps"]
     fn test_teardown_drains_rt_parking_lot_off_rt() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
@@ -444,7 +444,7 @@ mod tests {
 
         // Shutdown: stop the audio thread and deactivate. deactivate() hands
         // `&mut processor.parking_lot` to drain_gc_final — the single-owner
-        // handoff of R-04 — so one call drops SPSC + overflow + 16 slots off-RT.
+        // handoff — so one call drops SPSC + overflow + 16 slots off-RT.
         let stopped = started_processor.stop_processing();
         plugin_instance.deactivate(stopped);
 
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(
             drains_delta, 49,
             "deactivate must account for all 49 in-flight GcItems \
-             (32 SPSC + 16 RT parking lot + 1 overflow); before R-04 the \
+             (32 SPSC + 16 RT parking lot + 1 overflow); before the fix the \
              parking lot was invisible and only 33 were drained"
         );
 

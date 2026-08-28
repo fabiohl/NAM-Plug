@@ -3,10 +3,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 -->
 
-# Postmortem: ELF symbol-interposition hang (BUG-3)
+# Postmortem: ELF Symbol-Interposition Hang
 
 This document replaces the working notes used during the investigation and fix of a real,
-indefinite hang in `--release` builds (confirmed in integration test binaries and the CLAP `cdylib`). It intentionally does **not** preserve the
+indefinite hang in `--release` builds (confirmed in integration test binaries, benchmark/guard workloads, and the CLAP `cdylib`). It intentionally does **not** preserve the
 investigation's chronology, dead ends, or every experiment run — that
 detail no longer has operational value. What follows is the durable
 knowledge: what the bug actually was, why it was hard to see, and the
@@ -58,12 +58,12 @@ class of bug.
 
 **Verification:** confirmed by reading the *actual runtime value* written
 into the GOT slot from a live, attached process (not just the relocation
-*type*, which is not sufficient — see §3). Confirmed clean across `NAM-Plug` output targets: the harness unit/integration tests (`--test clap`), the workload binary (`pgo_profiling_workload`), and the CLAP plugin shared library (`cdylib` target `libnam_plug.so`).
+*type*, which is not sufficient — see §3). Confirmed clean across `NAM-Plug` output targets: the harness unit/integration tests (`--test clap`), the workload/guard binaries (`src/bin/pgo_profiling_workload.rs`, `src/bin/nam_perf_guard.rs`, `src/bin/nam_bin_guard.rs`), and the CLAP plugin shared library (`cdylib` target `libnam_plug.so`).
 
 ## 2. Why this was hard to find
 
 The DSP algorithm exercised by the failing test (`X2Stage::upsample`/
-`downsample`, `HalfBandFilter::design`) was innocent, and static analysis
+`downsample`, `HalfBandFilter::design` in `NeuralAmpModeler-rs`) was innocent, and static analysis
 of it (loop bounds, indexing, allocation invariants) was thorough and
 correct — and still pointed nowhere, because the bug was never in that
 code. The actual blocker was that **the standard tools' first answers were
@@ -169,7 +169,7 @@ interposition is confirmed.
   `.cargo/config.toml` — that also applies to every dependency's own
   build-script helper binaries, which resolve the version script's
   relative path from a different working directory and fail to find it.
-- **Engine-level repro guard** — `NeuralAmpModeler-rs/utils/debug/repro_oversample_hang.sh` provides a general-purpose safety wrapper for reproducing any suspected hang with cgroup-scoped `RuntimeMaxSec` and automated process cleanup checks.
+- **Engine-level repro guard** — `NeuralAmpModeler-rs`'s `utils/debug/repro_oversample_hang.sh` provides a general-purpose safety wrapper for reproducing any suspected hang with cgroup-scoped `RuntimeMaxSec` and automated process cleanup checks.
 - **The reactivated DSP test** — `test_x2_aliasing_rejection` in `NeuralAmpModeler-rs` (`NeuralAmpModeler-rs/src/dsp/oversample_test.rs`) runs unignored in both debug and release. In `NAM-Plug`, multi-sample-rate oversampling parity is exercised by `tests/clap/clap_parity_multi_sr.rs` and validated via `utils/tests-quick.sh`.
 
 ## 5. Guidance for future dependency/toolchain changes

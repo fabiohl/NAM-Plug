@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T1.3 — Strict Cardinality: 100% host output write coverage.
+//! Strict Cardinality: 100% host output write coverage.
 //!
-//! The streaming resample adapter (T1.2/F-PERF-002) guarantees that **every**
+//! The streaming resample adapter guarantees that **every**
 //! audio callback writes exactly `frames_count` samples to each active output
 //! channel. These tests fill the output ports with a distinctive non-zero
 //! sentinel before `process()` and assert that no sentinel survives in
@@ -27,11 +27,11 @@ mod tests {
     /// proves the plugin never wrote that output slot.
     const SENTINEL: f32 = f32::from_bits(0xDEADBEEF);
 
-    /// Irregular host block sizes (from the T1.2 acceptance matrix) plus the
+    /// Irregular host block sizes plus the
     /// maximum supported sub-block, covering single-sample through 8192.
     const IRREGULAR_BLOCKS: &[usize] = &[1, 7, 31, 63, 64, 65, 127, 256, 512, 1024, 8192];
 
-    /// Full sample-rate matrix from the T1.3 acceptance criteria.
+    /// Full sample-rate test matrix.
     const RATES: &[u32] = &[44100, 48000, 88200, 96000, 176400, 192000];
 
     /// Builds a test plugin with a real 48 kHz model loaded (so every host rate

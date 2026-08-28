@@ -4,9 +4,9 @@
 # _lib.sh — Common bash utilities for NAM-Plug scripts.
 #
 # Source with:
-#   PHASE_TOTAL=<N>; source "$(dirname "$0")/_lib.sh"
+#   PHASE_TOTAL=<N>; source "$(dirname "$0")/lib/_lib.sh"
 # or for scripts that manage their own working directory (e.g. build-release.sh):
-#   NAM_LIB_NO_CD=1 PHASE_TOTAL=<N>; source "$(dirname "$0")/_lib.sh"
+#   NAM_LIB_NO_CD=1 PHASE_TOTAL=<N>; source "$(dirname "$0")/lib/_lib.sh"
 #
 # Then call:
 #   phase "Description of the current step"
@@ -60,7 +60,8 @@ warn() {
 # Resolve project root dynamically relative to this helper script.
 # ---------------------------------------------------------------------------
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$LIB_DIR")"
+UTILS_DIR="$(dirname "$LIB_DIR")"
+PROJECT_DIR="$(dirname "$UTILS_DIR")"
 
 if [ -z "$PROJECT_DIR" ]; then
     echo -e "${RED}${BOLD}[FATAL]${NC} _lib.sh: could not resolve PROJECT_DIR." >&2

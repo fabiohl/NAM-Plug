@@ -13,7 +13,7 @@
 # Phases:
 #   1. Structural (debug)   — unit + integration tests with debug assertions ON.
 #   2. Release verification — CLAP .so artifact build + CLAP × NAMCore float
-#      parity oracle (S1-T06; release-only scope per S6-T04 / RES-04) when the
+#      parity oracle (release-only scope) when the
 #      C++ render binary, release .so and model fixture exist; otherwise
 #      reported as an explicit GAP (or FAIL in NAM_QUICK_STRICT=1).
 #   3. RT-Safety heap-audit — zero-alloc process() gate (--features heap-audit).
@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 PHASE_TOTAL=3
-source "$SCRIPT_DIR/_lib.sh"
+source "$SCRIPT_DIR/lib/_lib.sh"
 
 # Re-execute with low CPU and I/O priority (nice and ionice) to prevent overloading the system.
 if [ "${NAM_LOW_PRIORITY:-0}" != "1" ] && [ "${NAM_NO_LOW_PRIORITY:-0}" != "1" ]; then
@@ -105,7 +105,7 @@ find_stale_artifact_input() {
 }
 
 # verify_artifact_fresh <artifact> <profile> <cargo_flag>
-#   T6.4 fail-closed staleness gate: the artifact must be newer than every
+#   Fail-closed staleness gate: the artifact must be newer than every
 #   source input it is compiled from. In strict mode a stale artifact aborts —
 #   there is NO silent rebuild, because validating a stale .so is exactly the
 #   defect being closed; the operator must build explicitly first.
@@ -116,7 +116,7 @@ verify_artifact_fresh() {
     local stale sha
     stale=$(find_stale_artifact_input "$artifact") || true
     if [ -n "$stale" ]; then
-        die "FATAL: CLAP artifact ($profile) is STALE — '$stale' is newer than $artifact. Run 'cargo build --locked${flag:+ $flag}' first; strict mode never validates a stale artifact (T6.4 fail-closed)."
+        die "FATAL: CLAP artifact ($profile) is STALE — '$stale' is newer than $artifact. Run 'cargo build --locked${flag:+ $flag}' first; strict mode never validates a stale artifact (fail-closed staleness gate)."
     fi
     sha=$(sha256sum "$artifact" | cut -d' ' -f1)
     echo -e "  ${GREEN}✓ CLAP artifact ($profile, fresh):${NC} $artifact (sha256: ${sha:0:16}...)"
@@ -128,7 +128,7 @@ verify_artifact_fresh() {
 # Accepts profile "debug" or "release". Checks for the exact profile artifact
 # first; does NOT silently fall back to the other profile, since that could
 # mask build-time failures specific to debug assertions or release codegen.
-# In NAM_QUICK_STRICT=1 the artifact is also freshness-checked (T6.4): a
+# In NAM_QUICK_STRICT=1 the artifact is also freshness-checked: a
 # stale .so aborts the suite instead of being validated.
 ensure_clap_artifact() {
     local profile="${1:-debug}"
@@ -206,7 +206,7 @@ timeout 300 cargo test --features testing --lib \
 assert_ran_tests target/logs/quick-phase1.log 1
 emit "PHASE1: PASS log=target/logs/quick-phase1.log"
 
-# ── Phase 2: Release verification (release, S6-T04 / RES-04) ─────────────────
+# ── Phase 2: Release verification (release) ─────────────────────────────────
 declare -a GAPS=()
 
 phase "Release verification: CLAP .so artifact + float parity oracle (release)..."
@@ -215,7 +215,7 @@ ensure_clap_artifact release
 release_artifact="${CLAP_PLUGIN_UNDER_TEST:-${CLAP_PLUGIN_PATH:-${CARGO_TARGET_DIR:-target}/release/libnam_plug.so}}"
 export CLAP_PLUGIN_UNDER_TEST="$release_artifact"
 
-"$SCRIPT_DIR/verify_no_avx512_release.sh" "$release_artifact"
+"$SCRIPT_DIR/lib/verify_no_avx512_release.sh" "$release_artifact"
 
 # Mirrors the Rust-side discovery order: NAM_CORE_RENDER_BIN first, then
 # build/namcore_render in this repo, then the sibling NeuralAmpModeler-rs
@@ -337,8 +337,8 @@ if [ ${#GAPS[@]} -gt 0 ]; then
         emit "OVERALL: FAIL reason=strict_gaps"
         exit 1
     fi
-    emit "OVERALL: PASSED_WITH_GAPS"
-    echo -e "${YELLOW}${BOLD}OVERALL: PASSED_WITH_GAPS${NC}"
+    emit "OVERALL: COMPLETED_WITH_GAPS"
+    echo -e "${YELLOW}${BOLD}OVERALL: COMPLETED_WITH_GAPS${NC}"
     exit 0
 fi
 

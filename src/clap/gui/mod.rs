@@ -26,7 +26,7 @@ pub const GUI_HEIGHT: u32 = 275;
 /// remains valid for the plugin's entire lifetime (including any spawned
 /// GUI threads).
 ///
-/// # R-09 fence protocol
+/// # Teardown safety fence protocol
 ///
 /// GUI threads only dereference this bridge (or `NamClapShared`) while the
 /// `alive_fence` is up: `NamClapMainThread::drop` lowers the fence and
@@ -52,7 +52,7 @@ impl GuiHostBridge {
     /// plugin. The caller must ensure:
     /// 1. The host outlives the plugin (CLAP spec guarantee).
     /// 2. Any GUI thread holding this bridge dereferences it only while the
-    ///    `alive_fence` is up (fence-gated event loops, R-09).
+    ///    `alive_fence` is up (fence-gated event loops).
     #[inline]
     pub fn new(host: &clack_plugin::host::HostSharedHandle<'_>) -> Self {
         // HostSharedHandle is repr(transparent) over NonNull<clap_host>.
@@ -70,7 +70,7 @@ impl GuiHostBridge {
     /// The returned handle is only valid while the host is alive — which the
     /// CLAP spec guarantees is longer than the plugin's lifetime. Callers must
     /// not cache this handle beyond the plugin's `destroy()` call, and every
-    /// dereference from a GUI thread must be fenced by `alive_fence` (R-09).
+    /// dereference from a GUI thread must be fenced by `alive_fence`.
     #[inline]
     pub fn as_static(&self) -> clack_plugin::host::HostSharedHandle<'static> {
         // SAFETY: HostSharedHandle is repr(transparent) over NonNull<()>.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T2.3 / F-RT-007 — Command Budgeting and Structural Command Classification.
+//! Command Budgeting and Structural Command Classification.
 //!
 //! Verifies that a burst of structural (heavy-swap) commands never executes all
 //! in a single audio callback: at most one structural transaction is applied
@@ -114,10 +114,10 @@ fn make_adapter(ir_len: usize) -> Box<CabSimAdapter> {
     )
 }
 
-/// T2.3 edge: a structural command deferred by the final callback must be
-/// resolved at `deactivate()` — its resources drop on the main thread and its
-/// rolled-back sequence slot is consumed, so a subsequent deactivate/activate
-/// cycle keeps the ack mapping gapless (an ack-gated `RestoreTxn` pushed after
+/// Structural command deferred by the final callback must be resolved at
+/// `deactivate()` — its resources drop on the main thread and its rolled-back
+/// sequence slot is consumed, so a subsequent deactivate/activate cycle keeps
+/// the ack mapping gapless (an ack-gated `RestoreTxn` pushed after
 /// reactivation must still be published).
 #[test]
 fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
@@ -180,7 +180,7 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
     );
 }
 
-/// T2.3 acceptance: a burst of structural commands never executes all in one
+/// Acceptance criterion: a burst of structural commands never executes all in one
 /// callback. With `MAX_STRUCTURAL_COMMANDS_PER_CALLBACK == 1`, a burst of 8
 /// atomic restores applies exactly one generation per block, in FIFO order,
 /// with no loss and no reordering — the excess is deferred, never dropped.
@@ -245,7 +245,7 @@ fn test_structural_budget_one_per_callback() {
     );
 }
 
-/// T2.3: command coalescing — a deferred coalescible command superseded by a
+/// Command coalescing: a deferred coalescible command superseded by a
 /// newer same-kind ring head is never applied; its obsolete resources are
 /// discarded off-RT through the GC cascade (latest-wins, no intermediate state
 /// observed by the DSP).
@@ -338,7 +338,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
     );
 }
 
-/// T2.3 invariant + acceptance: a burst of 64 structural commands cannot
+/// Invariant + acceptance: a burst of 64 structural commands cannot
 /// degrade the callback time — p99/max stays within the performance contract
 /// (`p99 < 1.33 ms` per 64-sample block at 48 kHz). The bypass path keeps DSP
 /// cost negligible so the measurement isolates the *drain* cost.

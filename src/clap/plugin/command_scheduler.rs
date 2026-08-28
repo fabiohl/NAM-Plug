@@ -124,7 +124,7 @@ impl CoalesceBuffer {
 
     /// Re-inserts a snapshot taken by [`take_snapshot`](Self::take_snapshot) back
     /// into the coalescing buffer. Used to retain the latest values on SPSC
-    /// `Full` instead of silently dropping them (R-10 / T6.1).
+    /// `Full` instead of silently dropping them.
     fn restore_snapshot(&mut self, params: RtProcessingParams) {
         self.set(0, params.input_gain_db as f64);
         self.set(1, params.output_gain_db as f64);
@@ -200,7 +200,7 @@ impl CommandScheduler {
     /// Creates a new command scheduler with a ring buffer of `capacity` slots.
     ///
     /// Used by tests to exercise saturation/atomicity guarantees at minimal
-    /// ring sizes (capacity 1/2 per T6.1 acceptance evidence).
+    /// ring sizes.
     pub fn with_capacity(capacity: usize) -> Self {
         let (tx, rx) = rtrb::RingBuffer::new(capacity);
         Self {
@@ -343,7 +343,7 @@ impl<'a> CommandProducer<'a> {
     /// stays gapless.
     ///
     /// On `Full` the snapshot is **retained** in the coalescing buffer
-    /// (R-10 / T6.1) so a subsequent `force_flush` retry delivers it —
+    /// so a subsequent `force_flush` retry delivers it —
     /// the caller must surface the `Err` and schedule a retry (e.g. via
     /// `host.request_callback()`), never discard it with `let _ =`.
     pub fn force_flush(&mut self) -> Result<u64, PushError> {
@@ -355,7 +355,7 @@ impl<'a> CommandProducer<'a> {
                 }
                 Err(rtrb::PushError::Full(_)) => {
                     // Retain the snapshot so the retry does not lose the
-                    // latest parameter values (T6.1 defect #4).
+                    // latest parameter values.
                     self.coalescing.restore_snapshot(snapshot);
                     Err(PushError::Full)
                 }
@@ -422,7 +422,7 @@ impl<'a> CommandConsumer<'a> {
     /// Returns a shared reference to the next command in the ring without
     /// consuming it (peek). Used by the RT drain loop to decide whether a
     /// deferred structural command can be superseded by a newer same-kind
-    /// command already queued (command coalescing, T2.3/F-RT-007).
+    /// command already queued (command coalescing).
     pub(crate) fn peek(&self) -> Option<&ClapParamPayload> {
         self.rx.peek().ok()
     }

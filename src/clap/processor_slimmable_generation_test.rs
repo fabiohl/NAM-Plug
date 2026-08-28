@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T3.2 / F-CONC-006 — monotonic `model_generation` rejects stale slimmable rebuilds.
+//! Concurrency Safety — Monotonic `model_generation` rejects stale slimmable rebuilds.
 //!
 //! Deterministic concurrency test: a slimmable rebuild delivered after its
 //! source model was swapped out (stale generation) must be discarded straight

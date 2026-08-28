@@ -392,7 +392,7 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
             //   - Oracle receives stress × input_mult_adj (plugin applies this internally)
             //   - Plugin receives raw stress
             //   - Oracle output × output_mult_adj ≈ plugin output (loudness-normalized).
-            // See loader::build.rs:177-183 and R-4.
+            // See loudness-normalization pipeline for gain adjustment details.
             let stress_for_oracle: Vec<f32> = stress.iter().map(|s| s * input_mult_adj).collect();
             let stress_wav = tmp_dir.join(format!("stress_{model_sr:.0}.wav"));
             let ref_wav = tmp_dir.join(format!("ref_{model_sr:.0}.wav"));

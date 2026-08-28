@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T6.1 (F-ROB-PLUG-07): transactional restore — stage/commit/ack.
+//! Transactional state restore — stage/commit/ack protocol.
 //!
 //! Verifies that under SPSC saturation the restore transaction is retained
 //! whole (never partially published), UI/paths/hashes/params are published only
@@ -163,7 +163,7 @@ fn test_restore_ui_not_published_until_ack() {
     // Drain the 256 saturated commands, then housekeeping retries the
     // transaction push (the ring now has room).
     //
-    // T2.3 / F-RT-007 Command Budgeting changed the drain rate for structural
+    // Command Budgeting changed the drain rate for structural
     // bursts: at most one structural apply per callback, and same-kind
     // coalescible commands (LoadCabIr here) are superseded at the same rate
     // (1 apply + 1 superseded discard per block). 256 same-kind clears
@@ -320,7 +320,7 @@ fn test_restore_hash_rejected_keeps_previous_dsp() {
     assert_eq!(counter_after_valid, 1);
 
     // 2. Restore the same path with the hash omitted → must be rejected
-    //    (T6.2: no asset is adopted without a digest in the same cycle).
+    //    (asset integrity requires a SHA-256 digest in the same cycle).
     let hashless = ProcessingParams {
         model_path: Some(model),
         model_basename: Some("lstm.nam".to_string()),

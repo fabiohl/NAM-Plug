@@ -703,7 +703,7 @@ mod tests {
         }
     }
 
-    /// T6.5: the non-finite reset must use the effective model rate of the
+    /// The non-finite reset must use the effective model rate of the
     /// active chain (post-resample), never a hard-coded 48 kHz. Exercised at
     /// host rates 44.1 kHz and 96 kHz with a NaN burst followed by a sine;
     /// output must be finite and the subsequent valid block must have a

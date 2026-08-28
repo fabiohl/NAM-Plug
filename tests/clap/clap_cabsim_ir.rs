@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! S4-T1 (R-08): the production `.so` must load and apply a cab-sim IR.
+//! Production CDYLIB verification: the production `.so` must load and apply a cab-sim IR.
 //!
 //! Dynamically loads the freshly built CLAP artifact and asserts that loading
 //! an IR measurably changes the audio output versus the dry (no-IR) path. This

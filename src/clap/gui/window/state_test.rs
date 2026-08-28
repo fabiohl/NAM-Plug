@@ -47,7 +47,7 @@ fn test_window_safe_shared_boundary() {
 }
 
 // -----------------------------------------------------------------------
-// R-11: GL initialization failures must be structured errors, never
+// FFI Robustness: GL initialization failures must be structured errors, never
 // panics crossing the baseview/CLAP FFI boundary.
 // -----------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T4.2 / F-DSP-009 — Reactive rearming of the CabSim tail counter.
+//! Reactive rearming of the CabSim tail counter.
 //!
 //! Validates that `cabsim_tail_remaining` is re-armed to the full impulse
 //! response duration whenever active audio is fed into the convolution module,
@@ -15,8 +15,8 @@
 //! * No infinite idle processing: after each tail completes, the output stays
 //!   silent (the drain is bounded and the plugin can return to rest).
 //! * Telemetry: `cabsim_tail_samples` is published on the restart install path
-//!   (`activate()`), not only on the continuous SPSC swap (T4.1 gap).
-//! * The rearm + drain paths are zero-alloc (F-RT-003).
+//!   (`activate()`), not only on the continuous SPSC swap.
+//! * The rearm + drain paths are strictly zero-alloc on the real-time audio thread.
 
 #[cfg(test)]
 mod tests {
@@ -101,7 +101,7 @@ mod tests {
     }
 
     /// Asserts that a tail profile is audible across its whole window and ends
-    /// in silence. The conv engine is same-block (group delay ≈ 0, T4.1 note),
+    /// in silence. The conv engine is same-block (group delay ≈ 0),
     /// so the IR occupies `PARTITIONS` blocks starting at the impulse block;
     /// the drain then flushes `TAIL_DRAIN` samples and finally yields silence.
     fn assert_tail_profile(profile: &[f32], start: usize, label: &str) {
@@ -162,7 +162,7 @@ mod tests {
             shared.rt_to_ui.cabsim_tail_samples.load(Ordering::Relaxed),
             TAIL_TELEMETRY,
             "cabsim_tail_samples must be published by the restart install path (activate), \
-             not only by the continuous SPSC swap (T4.1 telemetry gap)"
+             not only by the continuous SPSC swap"
         );
 
         // ── Impulse 1 → silence: full tail, then silence ──
@@ -215,7 +215,7 @@ mod tests {
         let started = stopped.start_processing().expect("start_processing");
 
         let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
-        let ir = write_decay_ir("t42_zalloc");
+        let ir = write_decay_ir("rearm_zalloc");
         mt.load_cabsim(&ir).expect("load decay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
         let _ = shared;
@@ -226,9 +226,9 @@ mod tests {
         let _ = process_block(&mut started, &impulse);
 
         // Rearm happens on the open-gate conv path; the drain runs on the
-        // closed-gate path. Both must be zero-alloc (F-RT-003).
+        // closed-gate path. Both must be zero-alloc.
         let silence = [0.0f32; BLOCK];
-        assert_zero_alloc("T4.2 tail rearm + drain (open-gate rearm)", || {
+        assert_zero_alloc("cabsim tail rearm + drain (open-gate rearm)", || {
             for _ in 0..12 {
                 let _ = process_block(&mut started, &silence);
             }

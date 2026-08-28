@@ -6,7 +6,7 @@
 //! Executes a deterministic, versioned manifest of representative production scenarios
 //! (covering all neural topologies, sample rates, block sizes, oversampling factors,
 //! offline rendering, parameter automation, and CabSim IR convolution) to generate
-//! optimal compiler profiles for PGO and BOLT (F-PGO-015, F-BOLT-014).
+//! optimal compiler profiles for PGO and BOLT.
 //!
 //! Strictly fail-closed: aborts with exit code 1 if any fixture is missing or if any
 //! scenario fails. Generates a structured JSON receipt upon successful completion.

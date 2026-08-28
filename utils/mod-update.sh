@@ -8,7 +8,7 @@
 set -euo pipefail
 
 PHASE_TOTAL=3
-source "$(dirname "$0")/_lib.sh"
+source "$(dirname "$0")/lib/_lib.sh"
 
 echo -e "${BLUE}${BOLD}================================================================${NC}"
 echo -e "${BLUE}${BOLD}           NAM-Plug Supply Chain Update Pipeline                ${NC}"

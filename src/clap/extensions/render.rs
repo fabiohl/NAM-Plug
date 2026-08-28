@@ -42,7 +42,7 @@ impl<'a> PluginRenderImpl for NamClapMainThread<'a> {
             };
             // Report actual oversample factor from shared state, not a
             // hard-coded "max quality" claim. The audio thread does NOT
-            // activate a 4x engine during offline mode (CLAP-F009).
+            // silently activate a 4x engine during offline mode unless requested.
             let os_factor = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(
                 self.shared
                     .ui_to_rt

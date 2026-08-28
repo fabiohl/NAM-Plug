@@ -152,7 +152,7 @@ mod tests {
         );
     }
 
-    /// F-LAT-004/T3.1 acceptance matrix over the full host restart cycle:
+    /// Acceptance matrix over the full host restart cycle:
     /// requested vs applied must be distinct while a restart is pending,
     /// `deactivate()` must persist the **applied** factor (never the eagerly
     /// updated requested one), and after the restart the engines must match
@@ -212,7 +212,7 @@ mod tests {
         let stopped = started.stop_processing();
         plugin_instance.deactivate(stopped);
 
-        // F-LAT-004 regression: deactivate() must persist the APPLIED factor
+        // Deactivate contract: deactivate() must persist the APPLIED factor
         // (Off engines), NOT the requested X2.
         assert_eq!(
             deactivated_factor(),
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(
             PendingRestartOs::load(&shared.cold.pending_restart_os_factor, Ordering::Relaxed,),
             PendingRestartOs::Pending(OversampleFactor::Off),
-            "a pending transition to Off must be representable (T3.1/F-LAT-004)"
+            "a pending transition to Off must be representable"
         );
         assert_eq!(
             shared.rt_to_ui.current_latency.load(Ordering::Relaxed),
@@ -328,7 +328,7 @@ mod tests {
         );
     }
 
-    /// T3.1/F-LAT-004 coalescence: multiple user clicks before the host
+    /// Oversampling factor coalescing: multiple user clicks before the host
     /// responds to the restart must be latest-wins — only the final requested
     /// factor survives into the next `activate()`, and a round-trip
     /// Off→X4→Off resolves to unchanged Off engines (no spurious latency).

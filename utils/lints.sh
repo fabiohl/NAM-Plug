@@ -14,7 +14,7 @@
 set -euo pipefail
 
 PHASE_TOTAL=9
-source "$(dirname "$0")/_lib.sh"
+source "$(dirname "$0")/lib/_lib.sh"
 
 echo -e "${BLUE}${BOLD}========================================${NC}"
 echo -e "${BLUE}${BOLD}    NAM-Plug Linting & Quality Suite    ${NC}"
@@ -67,7 +67,7 @@ rs_dirs=( src tests )
 spdx_scope=$(
     {
         find "${rs_dirs[@]}" -type f -name '*.rs'
-        find utils -maxdepth 1 -type f -name '*.sh'
+        find utils -type f -name '*.sh'
         test -f build.rs && echo build.rs
         test -f Cargo.toml && echo Cargo.toml
     } || true
@@ -100,7 +100,7 @@ fi
 ok "No '#[test]' in tests/common/."
 
 # ---------------------------------------------------------------------------
-# [6/9] RT-path static allocation scan (F-RT-003 / T2.2)
+# [6/9] RT-path static allocation scan
 #
 # Verifies that the audio-thread code under `src/clap/processor/` contains no
 # `Box::new` or implicit heap allocations outside the documented off-RT sites
@@ -108,7 +108,7 @@ ok "No '#[test]' in tests/common/."
 # contract; the dynamic half is the heap-audit CI lane.
 # ---------------------------------------------------------------------------
 phase "Checking RT path for heap allocations (static scan)..."
-"$(dirname "$0")/verify_no_rt_alloc.sh"
+"$(dirname "$0")/lib/verify_no_rt_alloc.sh"
 
 # ---------------------------------------------------------------------------
 # [7/9] Undocumented #[allow(clippy::)] check (enforce allow_attributes policy)
@@ -155,7 +155,7 @@ ok "All #[allow(clippy::)] suppressions are documented."
 # [8/9] Binary scan: zero EVEX/ZMM and zero AVX-512 symbols in default release
 # ---------------------------------------------------------------------------
 phase "Validating CLAP binary artifact (zero AVX-512 in default release build)..."
-"$(dirname "$0")/verify_no_avx512_release.sh"
+"$(dirname "$0")/lib/verify_no_avx512_release.sh"
 ok "CLAP binary artifact is clean of AVX-512 symbols and EVEX instructions."
 
 # ---------------------------------------------------------------------------

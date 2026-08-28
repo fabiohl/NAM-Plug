@@ -23,18 +23,18 @@ impl<'a> NamClapMainThread<'a> {
         // Drain in-flight parameter snapshot queued by
         // PluginMainThreadParams::flush() when the SPSC was full.
         self.flush_in_flight_params();
-        // Deliver/ack any pending restore transaction (T6.1): pushes the atomic
+        // Deliver/ack any pending restore transaction: pushes the atomic
         // RestoreTxn when the ring has room and publishes UI/paths/hashes only
         // once the audio thread confirms the generation.
         self.flush_pending_restore();
-        // Flush any model deferred by load_model() (F3 fix).
+        // Flush any model deferred by load_model().
         // Primary mechanism is activate(), this is a fallback for hosts
         // that call state-load between activate() and the first process().
         // Errors set RT_STATUS_MODEL_LOAD_FAILED internally; housekeeping is void.
         let _ = self.flush_pending_model();
 
         // Drain obsolete models to free memory outside RT.
-        // R-04: during normal operation the RT parking lot is owned by the
+        // During normal operation the RT parking lot is owned by the
         // processor and flushed back to this SPSC every audio cycle
         // (gc.rs::drain_parking_lot), so a main-thread-side empty lot is
         // correct here. The teardown handoff (`deactivate()` →
@@ -399,7 +399,7 @@ impl<'a> NamClapMainThread<'a> {
             }
 
             if self.shared.cold.ui_clear_ir.load(Ordering::Relaxed) {
-                // T3.3/F-LAT-005 (Política A): clearing the active IR changes
+                // Strict Restart Policy: clearing the active IR changes
                 // the physical latency (partition → 0), so it is staged and a
                 // host restart is requested — the DSP keeps the IR (and the
                 // still-reported latency) until `activate()` installs the
@@ -442,12 +442,19 @@ impl<'a> NamClapMainThread<'a> {
                             .ir_raw_sample_rate
                             .store(0, Ordering::Relaxed);
                     }
+                    log::info!("NAM-Plug: cab-sim IR cleared via GUI (staged for host restart)");
                 }
             }
         }
 
-        // Latency Monitoring: Notify the host if the value changed
+        // Check if latency changed (stream resampler, oversample, or cabsim).
+        // `rt_to_ui.current_latency` is the authoritative combined total (stream +
+        // oversampling + cabsim) maintained by the RT processor in `activate()` and
+        // updated by `recompute_effective_latency` on every resource swap.
+        // The former per-component reads (including the now-removed `os_latency` field
+        // from `RtToUi`) have been replaced by this single unified atomic read.
         let current_latency = self.shared.rt_to_ui.current_latency.load(Ordering::Relaxed);
+
         if current_latency != self.last_reported_latency {
             self.last_reported_latency = current_latency;
             log::info!(
@@ -462,10 +469,7 @@ impl<'a> NamClapMainThread<'a> {
             }
         }
 
-        // Tail notification moved to cold_load_cabsim() on the audio
-        // thread (events.rs). The audio thread owns HostAudioProcessorHandle and
-        // calls HostTail::changed() safely without unsafe pointer casts.
-        // The cabsim_tail_samples value is still monitored here for logging.
+        // Check if cabsim tail changed (for host tail reporting)
         let _cabsim_tail = self
             .shared
             .rt_to_ui
@@ -475,7 +479,7 @@ impl<'a> NamClapMainThread<'a> {
             self.last_reported_cabsim_tail = _cabsim_tail;
         }
 
-        // T3.2/F-CONC-006 observability: surface stale slimmable-rebuild
+        // Observability: surface stale slimmable-rebuild
         // discards exactly once when the RT counter advances. Without this, a
         // regression that discards legitimate rebuilds (adaptive-compute
         // starvation) would be invisible in field telemetry.
@@ -487,7 +491,7 @@ impl<'a> NamClapMainThread<'a> {
         if stale_discarded != self.last_seen_slimmable_stale {
             self.last_seen_slimmable_stale = stale_discarded;
             log::warn!(
-                "NAM-Plug: {} stale slimmable rebuild(s) discarded (F-CONC-006)",
+                "NAM-Plug: {} stale slimmable rebuild(s) discarded",
                 stale_discarded
             );
         }

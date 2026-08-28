@@ -206,7 +206,7 @@ fn assert_reported_latency_matches_physical(
     );
 }
 
-/// F-QA-017 / T3.4 — deterministic CLAP latency notification harness.
+/// Deterministic CLAP latency notification harness.
 ///
 /// Induces real structural transitions (OS Off→2x→4x, a same-latency model
 /// swap, a latency-changing 44.1k model over a 48k host) and asserts:

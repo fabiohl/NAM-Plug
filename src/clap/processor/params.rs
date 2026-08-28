@@ -120,10 +120,10 @@ impl<'a> NamClapProcessor<'a> {
         // structural changes that alter latency must request a host restart
         // and defer the rebuild to the next `activate()`.
         //
-        // T3.1/F-LAT-004: the pending request uses the `PendingRestartOs`
-        // encoding, so a pending transition *to Off* is representable (the
-        // legacy `0` no longer collides with "no restart pending"). Coalescing
-        // is latest-wins: if a restart for the *same* target factor is already
+        // The pending request uses the `PendingRestartOs` encoding, so a
+        // pending transition *to Off* is representable (the `None` variant no
+        // longer collides with "no restart pending"). Coalescing is
+        // latest-wins: if a restart for the *same* target factor is already
         // pending, we skip the redundant `request_restart()` (exactly one
         // restart per coalesced relevant transition).
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);

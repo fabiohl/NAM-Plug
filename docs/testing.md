@@ -36,9 +36,12 @@ Integration tests execute against the dynamically compiled `.so` plugin binary r
 2. Computes the SHA-256 fingerprint of the `.so` binary to ensure test traceability.
 3. Loads the plugin entrypoint dynamically via `PluginEntry::load(&artifact.path)`.
 
-### 2.2 RT Heap Allocation Audit ([`tests/common/alloc_audit.rs`](../tests/common/alloc_audit.rs))
+### 2.2 RT Heap Allocation Audit & Static Guard
 
-When compiled with `--features "testing heap-audit"`, `tests/clap.rs` registers `CountingAllocator` as the `#[global_allocator]`. The test harness captures allocation counters before and after calling `started_processor.process()`, enforcing **zero heap allocations** on the audio thread.
+RT memory safety is enforced via a two-layer defense-in-depth approach:
+
+- **Dynamic Interceptor ([`tests/common/alloc_audit.rs`](../tests/common/alloc_audit.rs)):** When compiled with `--features "testing heap-audit"`, `tests/clap.rs` registers `CountingAllocator` as the `#[global_allocator]`. The test harness captures allocation counters before and after calling `started_processor.process()`, enforcing **zero heap allocations** on the audio thread.
+- **Static AST-Light Scanner ([`utils/lib/verify_no_rt_alloc.sh`](../utils/lib/verify_no_rt_alloc.sh) / [`utils/lib/rt_alloc_scan.awk`](../utils/lib/rt_alloc_scan.awk)):** Runs during static analysis (`lints.sh`). Parses `src/clap/processor/` Rust sources, tracks brace depth while stripping comments and string literals, excludes whitelisted off-RT lifecycle hooks (`activate`, `deactivate`, panic handlers, test modules), and flags any illegal heap allocation or dynamic collection types (`Box::new`, `Vec::new`, `format!`, `Arc::new`, `HashMap`, etc.).
 
 ---
 
@@ -83,11 +86,12 @@ Tests plugin bypass processing, verifying bit-transparent phase cancellation (< 
 
 ## 4. Benchmark Suite Architecture — `benches/clap_bench.rs`
 
-The benchmark suite under [`../benches/`](../benches/) uses [Criterion.rs](https://bheisler.github.io/criterion.rs/book/index.html) to measure host process block throughput, parameter modulation overhead, neural model inference across topologies, sample rate transitions, quality modes, and CabSim IR convolution (F-BENCH-013).
+The benchmark suite under [`../benches/`](../benches/) uses [Criterion.rs](https://bheisler.github.io/criterion.rs/book/index.html) to measure host process block throughput, parameter modulation overhead, neural model inference across topologies, sample rate transitions, quality modes, and CabSim IR convolution.
 
 ### 4.1 Measured Execution Groups
 
 1. **`CLAP_Infrastructure` (Zero-Inference Base Overheads):**
+
    - **`Passthrough`**: Measures baseline CLAP `process()` execution duration with empty event queues across buffer sizes:
      - **32, 64 samples** (ultra-low latency mode)
      - **128 samples** (standard Live mode)
@@ -96,6 +100,7 @@ The benchmark suite under [`../benches/`](../benches/) uses [Criterion.rs](https
    - **`Bypass`**: Measures latency-compensated bit-transparent dry-path processing time at block size 64.
 
 2. **`CLAP_Inference` (Real Neural Model Processing Matrix):**
+
    - **Neural Architecture Sweeps (Block Sizes 32..1024)**:
      - **`WaveNet_A1_Standard`**: Deep dilated convolution network (`wavenet_a1_standard.nam`).
      - **`WaveNet_A2_Slimmable`**: Slimmable dilated convolution container (`a2_example.nam`).
@@ -116,21 +121,30 @@ The benchmark suite under [`../benches/`](../benches/) uses [Criterion.rs](https
 
 All test and benchmark execution commands **must be executed inside `./NAM-Plug/`**:
 
-### 5.1 Verification Scripts (`utils/`)
+### 5.1 Verification Scripts (`utils/` & `utils/lib/`)
+
+Top-level workflow entrypoints reside in `utils/`, while shared libraries and modular guard scanners reside in `utils/lib/` (`_lib.sh`, `rt_alloc_scan.awk`, `verify_no_rt_alloc.sh`, `verify_no_avx512_release.sh`):
 
 ```bash
-# 1. Static analysis quality gate (formatting, SPDX headers, cargo check, cargo clippy)
+# 1. Static analysis quality gate (formatting, SPDX headers, cargo check, cargo clippy, static RT scan, AVX-512 check)
 ./utils/lints.sh
 
 # 2. Agile first line of defense QA suite
 ./utils/tests-quick.sh
 ```
 
+`utils/lints.sh` executes a 9-phase static and quality audit matrix:
+
+- **Fmt & Matrix Compilation:** `cargo fmt`, multi-target `cargo check` and strict `cargo clippy -D warnings`.
+- **SPDX & Code Style Policies:** SPDX license headers validation, anti-pattern checks, and documented `#[allow(clippy::)]` verification.
+- **Static RT Allocation Guard:** Invokes `utils/lib/verify_no_rt_alloc.sh` (backed by `utils/lib/rt_alloc_scan.awk`) to statically verify zero heap allocations in `src/clap/processor/`.
+- **Binary & Metadata Checks:** Invokes `utils/lib/verify_no_avx512_release.sh` to certify zero AVX-512 symbols or EVEX machine instructions, followed by AppStream metainfo version synchronization.
+
 `utils/tests-quick.sh` runs three phases, each persisting its output to `target/logs/quick-phaseN.log`, and closes with a typed receipt (`target/logs/quick-receipt.txt`). The artifact under test is selected by `ensure_clap_artifact` — honoring the authoritative `CLAP_PLUGIN_UNDER_TEST` (or `CLAP_PLUGIN_PATH`) override first — and the chosen path is exported as `CLAP_PLUGIN_UNDER_TEST` so every `dlopen`-based integration test and the release gates run against the exact same `.so` whose SHA256 is logged:
 
-1. **Structural (debug)** — unit + integration tests with debug assertions ON. `ensure_clap_artifact debug` validates the `.so` artifact (fail-closed: missing artifact aborts with `FATAL:`) and logs its SHA256 before any test that `dlopen`s it. Under `NAM_QUICK_STRICT=1` the artifact is additionally freshness-gated (T6.4): a `.so` older than any source input (`Cargo.toml`/`Cargo.lock`/`.cargo/config.toml`/`src/**`, including the patched sibling `NeuralAmpModeler-rs` tree) aborts the suite instead of being silently validated.
-2. **Release verification (release)** — the release-only surface (S6-T04 / RES-04): `ensure_clap_artifact release` builds the `.so` under release codegen, then:
-   - **Fail-closed AVX-512 absence certificate** — `utils/verify_no_avx512_release.sh` runs the `nam_bin_guard` scanner (`src/bin/nam_bin_guard.rs`, reuse of `neural_amp_modeler_rs::testing::bin_guard`) against the release `.so`: an EVEX prefix (`0x62`) binary decoder plus a forbidden AVX-512 symbol scan. Any EVEX/ZMM instruction or forbidden symbol aborts the suite (exit ≠ 0); tool/format errors are also fail-closed (never a silent empty pass).
+1. **Structural (debug)** — unit + integration tests with debug assertions ON. `ensure_clap_artifact debug` validates the `.so` artifact (fail-closed: missing artifact aborts with `FATAL:`) and logs its SHA256 before any test that `dlopen`s it. Under `NAM_QUICK_STRICT=1` the artifact is additionally freshness-gated: a `.so` older than any source input (`Cargo.toml`/`Cargo.lock`/`.cargo/config.toml`/`src/**`, including the patched sibling `NeuralAmpModeler-rs` tree) aborts the suite instead of being silently validated.
+2. **Release verification (release)** — the release-only surface: `ensure_clap_artifact release` builds the `.so` under release codegen, then:
+   - **Fail-closed AVX-512 absence certificate** — `utils/lib/verify_no_avx512_release.sh` runs the `nam_bin_guard` scanner (`src/bin/nam_bin_guard.rs`, reuse of `neural_amp_modeler_rs::testing::bin_guard`) against the release `.so`: an EVEX prefix (`0x62`) binary decoder plus a forbidden AVX-512 symbol scan. Any EVEX/ZMM instruction or forbidden symbol aborts the suite (exit ≠ 0); tool/format errors are also fail-closed (never a silent empty pass).
    - **CLAP × NAMCore parity oracle** — `test_clap_parity_multi_rate` (ESR < 1e-8, SNR > 80 dB) compares the release `.so` against the C++ render binary (`NAM_CORE_RENDER_BIN` or `build/namcore_render`), executing when the render binary, the release `.so` and the model fixture are all present. The Phase 1 targets are not re-run under `--release` — debug assertions ON already validate that logic, and release codegen of the `.so` is exactly what the oracle measures. Missing prerequisites are never masked — they are recorded as `GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")` and reported as a `WARN GAP`.
    - **CabSim IR artifact test** — `test_cabsim_ir_changes_audio_release_artifact` `dlopen`s the release `.so` to prove a loaded IR changes the audio output.
 3. **RT-Safety heap-audit (debug)** — zero-allocation `process()` gate via `--features testing,heap-audit` (`processor_heap_audit_test`).
@@ -197,15 +211,15 @@ partial receipt that looks valid.
 
 The receipt's mandatory fields are:
 
-| Field | Meaning |
-|:------|:--------|
-| `status` | `CERTIFIED` **only** if every gate below actually ran (`skipped_gates` empty) **and** `git_dirty=false`; any skip, missing oracle/fixture/validator, or dirty tree ⇒ `INCOMPLETE` (not certified). |
-| `skipped_gates` | List of gates skipped in non-strict mode (`NAM_STRICT_RELEASE=0`), e.g. `clap_validator:unavailable`, `namcore_parity:missing_oracle_bin`. |
-| `package` | `name` + `version` (`nam-plug` v0.7.0). |
-| `provenance` | `git_commit`, `git_dirty`, `cargo_lock_sha256`, `rustc_version`, `rustflags` (the sanitized `CONFIG_RUSTFLAGS` actually used). |
-| `optimizations` | `pgo_applied`, `bolt_applied`. |
-| `artifacts` | `clap_installed_path` + `clap_installed_sha256`, plus tarball/Flatpak paths and SHA-256 when built. |
-| `oracles_and_fixtures` | `oracle_render_bin` + SHA-256, `fixture_model_path` + SHA-256. |
+| Field                  | Meaning                                                                                                                                                                                            |
+|:---------------------- |:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`               | `CERTIFIED` **only** if every gate below actually ran (`skipped_gates` empty) **and** `git_dirty=false`; any skip, missing oracle/fixture/validator, or dirty tree ⇒ `INCOMPLETE` (not certified). |
+| `skipped_gates`        | List of gates skipped in non-strict mode (`NAM_STRICT_RELEASE=0`), e.g. `clap_validator:unavailable`, `namcore_parity:missing_oracle_bin`.                                                         |
+| `package`              | `name` + `version` (`nam-plug` v0.7.0).                                                                                                                                                            |
+| `provenance`           | `git_commit`, `git_dirty`, `cargo_lock_sha256`, `rustc_version`, `rustflags` (the sanitized `CONFIG_RUSTFLAGS` actually used).                                                                     |
+| `optimizations`        | `pgo_applied`, `bolt_applied`.                                                                                                                                                                     |
+| `artifacts`            | `clap_installed_path` + `clap_installed_sha256`, plus tarball/Flatpak paths and SHA-256 when built.                                                                                                |
+| `oracles_and_fixtures` | `oracle_render_bin` + SHA-256, `fixture_model_path` + SHA-256.                                                                                                                                     |
 
 The five release gates run **against the distributed artifact** — not against
 `target/release/libnam_plug.so`, which the quick QA validates and which is a
@@ -214,7 +228,7 @@ the gates at the exact installed `.so`:
 
 1. **Symbol & SONAME validation** of the distributed artifact.
 2. **External `clap-validator`** against the distributed artifact (skipped ⇒ `skipped_gates` entry; fail-closed in strict mode).
-3. **AVX-512 absence certificate** — `verify_no_avx512_release.sh` + `nam_bin_guard` EVEX (`0x62`) scan on the distributed artifact (see §5.1).
+3. **AVX-512 absence certificate** — `utils/lib/verify_no_avx512_release.sh` + `nam_bin_guard` EVEX (`0x62`) scan on the distributed artifact (see §5.1).
 4. **NAMCore float parity** — `NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_clap_parity_multi_rate`.
 5. **CabSim IR artifact test** — `CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_cabsim_ir_changes_audio_release_artifact`.
 
@@ -229,12 +243,12 @@ build of the exact artifact that is distributed.
 
 ## 6. Quality Gates & Baseline Standards
 
-| Metric / Test Gate       | Threshold / Constraint                        | Enforced In                  |
-|:------------------------ |:--------------------------------------------- |:---------------------------- |
-| **CLAP vs NAMCore Parity** | ESR < 1e-8, SNR > 80 dB                    | `clap_parity_multi_sr.rs` (Phase 2 of `tests-quick.sh`) |
-| **Bypass Transparency**  | Phase cancellation < -120 dBFS                | `processor_bypass_test.rs`   |
-| **RT Allocation Budget** | Exactly 0 heap allocations during `process()` | `alloc_audit.rs` / `clap.rs` |
-| **CLAP Event Handling**  | 0 panics / unhandled boundary conditions      | `clap_e2_proptest.rs`        |
+| Metric / Test Gate         | Threshold / Constraint                        | Enforced In                                                   |
+|:-------------------------- |:--------------------------------------------- |:------------------------------------------------------------- |
+| **CLAP vs NAMCore Parity** | ESR < 1e-8, SNR > 80 dB                       | `clap_parity_multi_sr.rs` (Phase 2 of `tests-quick.sh`)       |
+| **Bypass Transparency**    | Phase cancellation < -120 dBFS                | `processor_bypass_test.rs`                                    |
+| **RT Allocation Budget**   | Exactly 0 heap allocations during `process()` | `verify_no_rt_alloc.sh` (static) & `alloc_audit.rs` (dynamic) |
+| **CLAP Event Handling**    | 0 panics / unhandled boundary conditions      | `clap_e2_proptest.rs`                                         |
 
 ### 6.1 Reference Performance Baseline (Criterion Benchmark Matrix)
 
@@ -242,28 +256,28 @@ The following baseline metrics were measured using `cargo bench --features testi
 
 #### Neural Architecture Inference (Live Mode, Native 48 kHz, Stereo)
 
-| Topology Family | Model Fixture | Block 32 | Block 64 | Block 128 | Block 256 | Block 512 | Block 1024 | Steady ns/sample |
-|:---|:---|:---|:---|:---|:---|:---|:---|:---|
-| **WaveNet A1 Standard** | `wavenet_a1_standard.nam` | 21.8 µs | 42.3 µs | 83.9 µs | 167.8 µs | 335.7 µs | 671.6 µs | **~655 ns/sample** |
-| **WaveNet A2 Slimmable** | `a2_example.nam` | 18.4 µs | 34.4 µs | 70.2 µs | 138.6 µs | 276.7 µs | 553.4 µs | **~540 ns/sample** |
-| **LSTM 1×3** | `lstm.nam` | 2.6 µs | 4.8 µs | 9.2 µs | 17.9 µs | 35.4 µs | 70.1 µs | **~69 ns/sample** |
+| Topology Family          | Model Fixture             | Block 32 | Block 64 | Block 128 | Block 256 | Block 512 | Block 1024 | Steady ns/sample   |
+|:------------------------ |:------------------------- |:-------- |:-------- |:--------- |:--------- |:--------- |:---------- |:------------------ |
+| **WaveNet A1 Standard**  | `wavenet_a1_standard.nam` | 21.8 µs  | 42.3 µs  | 83.9 µs   | 167.8 µs  | 335.7 µs  | 671.6 µs   | **~655 ns/sample** |
+| **WaveNet A2 Slimmable** | `a2_example.nam`          | 18.4 µs  | 34.4 µs  | 70.2 µs   | 138.6 µs  | 276.7 µs  | 553.4 µs   | **~540 ns/sample** |
+| **LSTM 1×3**             | `lstm.nam`                | 2.6 µs   | 4.8 µs   | 9.2 µs    | 17.9 µs   | 35.4 µs   | 70.1 µs    | **~69 ns/sample**  |
 
 #### CLAP Infrastructure & Processing Overhead
 
-| Execution Group | Block 32 | Block 64 | Block 128 | Block 256 | Block 512 | Block 1024 | Unit Cost |
-|:---|:---|:---|:---|:---|:---|:---|:---|
-| **Passthrough (Zero-Inference)** | 474 ns | 576 ns | 841 ns | 1.21 µs | 2.01 µs | 3.83 µs | ~3.7 ns/sample |
-| **ParamModulation (Active Automation)** | 690 ns | 890 ns | 1.23 µs | 1.90 µs | 3.17 µs | 3.85 µs | ~3.8 ns/sample |
-| **Bypass (Latency-Compensated)** | — | 463 ns | — | — | — | — | ~7.2 ns/sample |
+| Execution Group                         | Block 32 | Block 64 | Block 128 | Block 256 | Block 512 | Block 1024 | Unit Cost      |
+|:--------------------------------------- |:-------- |:-------- |:--------- |:--------- |:--------- |:---------- |:-------------- |
+| **Passthrough (Zero-Inference)**        | 474 ns   | 576 ns   | 841 ns    | 1.21 µs   | 2.01 µs   | 3.83 µs    | ~3.7 ns/sample |
+| **ParamModulation (Active Automation)** | 690 ns   | 890 ns   | 1.23 µs   | 1.90 µs   | 3.17 µs   | 3.85 µs    | ~3.8 ns/sample |
+| **Bypass (Latency-Compensated)**        | —        | 463 ns   | —         | —         | —         | —          | ~7.2 ns/sample |
 
 #### Quality Modes, Sample Rates & CabSim Convolution (WaveNet A1, Block Size 64)
 
-| Configuration / Mode | Mean Latency / Duration | Incremental Cost vs Live Native 48k | Notes |
-|:---|:---|:---|:---|
-| **Native 48 kHz (Live, OS Off)** | 41.9 µs | Baseline (1.00×) | Zero added latency |
-| **Resample 44.1 kHz (Live, OS Off)** | 52.5 µs | +10.6 µs (+25.3%) | Polyphase minimum-phase bandlimited FIR |
-| **Downsample 96.0 kHz (Live, OS Off)**| 23.7 µs | -18.2 µs (-43.4%) | 64 input samples = 32 internal DSP samples |
-| **Oversample 2× (Live)** | 84.7 µs | +42.8 µs (+102%) | 2× internal neural iterations |
-| **Oversample 4× (Live)** | 167.3 µs | +125.4 µs (+299%) | 4× internal neural iterations |
-| **RenderMode Offline HQ (4×)** | 168.0 µs | +126.1 µs (+301%) | Deterministic HQ mastering mode |
-| **CabSim IR Convolution (512-sample)** | 42.6 µs | +1.2 µs (+2.8%) | Partitioned time-domain / SIMD FIR convolution |
+| Configuration / Mode                   | Mean Latency / Duration | Incremental Cost vs Live Native 48k | Notes                                          |
+|:-------------------------------------- |:----------------------- |:----------------------------------- |:---------------------------------------------- |
+| **Native 48 kHz (Live, OS Off)**       | 41.9 µs                 | Baseline (1.00×)                    | Zero added latency                             |
+| **Resample 44.1 kHz (Live, OS Off)**   | 52.5 µs                 | +10.6 µs (+25.3%)                   | Polyphase minimum-phase bandlimited FIR        |
+| **Downsample 96.0 kHz (Live, OS Off)** | 23.7 µs                 | -18.2 µs (-43.4%)                   | 64 input samples = 32 internal DSP samples     |
+| **Oversample 2× (Live)**               | 84.7 µs                 | +42.8 µs (+102%)                    | 2× internal neural iterations                  |
+| **Oversample 4× (Live)**               | 167.3 µs                | +125.4 µs (+299%)                   | 4× internal neural iterations                  |
+| **RenderMode Offline HQ (4×)**         | 168.0 µs                | +126.1 µs (+301%)                   | Deterministic HQ mastering mode                |
+| **CabSim IR Convolution (512-sample)** | 42.6 µs                 | +1.2 µs (+2.8%)                     | Partitioned time-domain / SIMD FIR convolution |

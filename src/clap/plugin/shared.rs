@@ -44,7 +44,7 @@ pub(crate) fn next_instance_id() -> u64 {
     NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Builds the strict-cardinality streaming resample adapter (F-PERF-002 / T1.2)
+/// Builds the strict-cardinality streaming resample adapter
 /// on the main thread, sized for the worst-case host block.
 ///
 /// `max_block` is the host buffer size (clamped to the adapter's supported
@@ -64,7 +64,7 @@ pub(crate) fn build_stream_adapter(
     .map(Box::new)
 }
 
-/// Pending host-restart oversampling request (T3.1 / F-LAT-004).
+/// Pending host-restart oversampling request.
 ///
 /// Replaces the legacy raw `AtomicU32` whose `0` value collided between
 /// `OversampleFactor::Off` and "no restart pending". The new encoding is
@@ -139,7 +139,7 @@ pub enum ClapParamPayload {
     Params(RtProcessingParams),
     /// Loading of a new model pair (transferred/constructed outside RT) and its resampler.
     LoadModel {
-        /// Monotonic model generation this load belongs to (T3.2 / F-CONC-006).
+        /// Monotonic model generation this load belongs to.
         /// Allocated on the main thread when the model identity is adopted and
         /// used by the audio thread to reject stale slimmable rebuilds.
         generation: u64,
@@ -147,8 +147,8 @@ pub enum ClapParamPayload {
         model_l: Option<Box<StaticModel>>,
         /// Polyphase sinc resampler
         new_resampler: Box<NamResampler>,
-        /// Streaming resample adapter with strict host cardinality (F-PERF-002 /
-        /// T1.2), built on the main thread to match the model rate.
+        /// Streaming resample adapter with strict host cardinality,
+        /// built on the main thread to match the model rate.
         new_stream: Box<neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer>,
         /// Model input gain calibration multiplier (from input_level_dbu metadata).
         input_mult_adj: f32,
@@ -158,7 +158,7 @@ pub enum ClapParamPayload {
     /// Loading of a new cab-sim convolution adapter via SPSC.
     /// Follows the same pattern as `LoadModel`: the adapter is boxed and
     /// constructed outside the RT thread, then swapped atomically in the
-    /// audio thread — the old `Box` moves by value to the GC (F-RT-003/T2.1).
+    /// audio thread — the old `Box` moves by value to the GC.
     LoadCabIr {
         /// Pre-built, boxed convolution adapter (None = bypass cabsim).
         adapter: Option<Box<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter>>,
@@ -179,7 +179,7 @@ pub enum ClapParamPayload {
     RestoreTxn(RestoreTxn),
 }
 
-/// Classification of a [`ClapParamPayload`] for Command Budgeting (T2.3/F-RT-007).
+/// Classification of a [`ClapParamPayload`] for Command Budgeting.
 ///
 /// The SPSC drain loop distinguishes **light** parameter updates (unlimited per
 /// callback, up to the queue-drain cap) from **structural** transactions that
@@ -204,7 +204,7 @@ impl StructuralKind {
     /// same-kind command already queued in the ring (command coalescing).
     ///
     /// [`StructuralKind::Restore`] is deliberately **not** coalescible: a
-    /// [`RestoreTxn`] is ack-gated by the main thread (T6.1) and must always be
+    /// [`RestoreTxn`] is ack-gated by the main thread and must always be
     /// applied atomically as the exact package the host committed — skipping one
     /// would desynchronize UI/path/hash publication from the applied DSP state.
     pub const fn is_coalescible(self) -> bool {
@@ -215,7 +215,7 @@ impl StructuralKind {
 impl ClapParamPayload {
     /// Returns the [`StructuralKind`] for structural commands, or `None` for
     /// light parameter updates (`Params`). Used by the RT drain loop for
-    /// Command Budgeting (T2.3/F-RT-007).
+    /// Command Budgeting.
     pub const fn structural_kind(&self) -> Option<StructuralKind> {
         match self {
             ClapParamPayload::Params(_) => None,
@@ -236,7 +236,7 @@ impl ClapParamPayload {
 
 /// Model component of a [`RestoreTxn`] (or a standalone model load).
 pub struct LoadModelPayload {
-    /// Monotonic model generation this load belongs to (T3.2 / F-CONC-006).
+    /// Monotonic model generation this load belongs to.
     /// Allocated on the main thread when the model identity is adopted.
     pub generation: u64,
     /// The encapsulated model for neural inference (Left Channel).
@@ -244,7 +244,7 @@ pub struct LoadModelPayload {
     pub model_l: Option<Box<StaticModel>>,
     /// Polyphase sinc resampler matching the model rate.
     pub new_resampler: Box<NamResampler>,
-    /// Streaming resample adapter with strict host cardinality (F-PERF-002 / T1.2),
+    /// Streaming resample adapter with strict host cardinality,
     /// matching the model rate and the host buffer size.
     pub new_stream: Box<neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer>,
     /// Model input gain calibration multiplier.
@@ -254,7 +254,7 @@ pub struct LoadModelPayload {
 }
 
 /// A latency-affecting resource swap staged to land only on the next host
-/// restart cycle (F-LAT-005 / T3.3 — Política A com otimização).
+/// restart cycle (Strict Restart Policy / TR.1).
 ///
 /// Built entirely on the main thread (off-RT) exactly like the SPSC payloads.
 /// When a model/IR swap would change the *physical* latency applied by the DSP,
@@ -311,7 +311,7 @@ pub struct RestoreTxn {
     pub model: Option<LoadModelPayload>,
     /// IR component: `Some(Some(adapter))` loads, `Some(None)` clears,
     /// `None` leaves the active IR untouched (ForPreset without IR).
-    /// The adapter travels `Box`ed end-to-end for RT-safe swaps (F-RT-003/T2.1).
+    /// The adapter travels `Box`ed end-to-end for RT-safe swaps.
     pub ir: Option<Option<Box<CabSimAdapter>>>,
     /// Full RT parameter snapshot applied atomically with the model/IR.
     pub params: RtProcessingParams,
@@ -348,7 +348,7 @@ pub struct RestorePublish {
     pub model_search_path_to_add: Option<PathBuf>,
     /// IR path on disk for `ir_path` / state save.
     pub ir_path_on_disk: Option<String>,
-    /// IR SHA-256 hex digest (T6.2: mandatory for any persisted IR reference).
+    /// IR SHA-256 hex digest (mandatory for any persisted IR reference).
     pub ir_hash: Option<String>,
     /// IR raw samples for `ir_raw_samples` (adapter is rebuilt by `activate()`).
     pub ir_raw_samples: Option<Vec<f32>>,
@@ -373,7 +373,7 @@ pub struct PendingRestore {
 }
 
 /// A validated restore transaction staged on the main thread to land only on
-/// the next host restart cycle (F-LAT-005 / TR.1 — Política A estendida ao
+/// the next host restart cycle (Strict Restart Policy / TR.1 extended to
 /// RestoreTxn).
 ///
 /// Holds the entire atomic transaction and its publication payload together so
@@ -498,16 +498,16 @@ pub struct ColdShared {
     /// Host buffer size.
     pub buffer_size: AtomicU32,
     /// Latency contribution (host-rate samples) of the streaming resample
-    /// adapter **currently installed** on the audio thread (T3.3 / F-LAT-005).
+    /// adapter **currently installed** on the audio thread.
     ///
     /// Written by the audio thread (Relaxed) at the exact instant a stream is
     /// installed — `activate()` and `cold_load_model()` — and read by the main
     /// thread during `load_model()` to decide whether a model swap changes the
-    /// physical latency (Política A: same latency ⇒ continuous swap, different
+    /// physical latency (Strict Restart Policy: same latency ⇒ continuous swap, different
     /// latency ⇒ staged + `request_restart()`).
     pub current_stream_latency: AtomicU32,
     /// Latency contribution (host-rate samples) of the cab-sim convolution
-    /// adapter **currently installed** on the audio thread (T3.3 / F-LAT-005).
+    /// adapter **currently installed** on the audio thread.
     /// `0` when no IR is loaded.
     ///
     /// Written by the audio thread (Relaxed) at the exact instant an adapter is
@@ -524,7 +524,7 @@ pub struct ColdShared {
     pub param_indication_color: [AtomicU32; 9],
     /// Model load counter (incremented on each successful model load).
     pub model_load_counter: AtomicU32,
-    /// Monotonic model-generation allocator (T3.2 / F-CONC-006).
+    /// Monotonic model-generation allocator.
     /// Written only by the main thread via [`ColdShared::allocate_model_generation`]
     /// each time a new model identity is adopted (load, restore-with-model, or
     /// clear). The returned value tags the payload that installs that model so
@@ -556,7 +556,7 @@ pub struct ColdShared {
     /// Active cab-sim IR file path (for state save/load and GUI display).
     pub ir_path: Mutex<Option<String>>,
     /// SHA-256 hex digest of the active cab-sim IR file — kept in lockstep with
-    /// `ir_path` so persisted state always carries the digest (T6.2).
+    /// `ir_path` so persisted state always carries the digest.
     pub ir_hash: Mutex<Option<String>>,
     /// Pending IR path to be loaded by the Main Thread. Written by the UI thread.
     pub ui_pending_ir: Mutex<Option<PathBuf>>,
@@ -579,13 +579,12 @@ pub struct ColdShared {
     /// SPSC channel: Main Thread -> Audio Thread (Slimmable model consumer).
     pub slimmable_rx: Mutex<Option<Consumer<SlimmableRebuild>>>,
     /// Slimmable rebuild request payload: the monotonic model generation the
-    /// audio thread was running when it requested the rebuild (T3.2 /
-    /// F-CONC-006). Written by the audio thread (Relaxed, ordered by the
+    /// audio thread was running when it requested the rebuild. Written by the audio thread (Relaxed, ordered by the
     /// `RT_STATUS_NEEDS_SLIMMABLE_REBUILD` Release flag), read by the main
     /// thread (after Acquire on the flag) to tag the rebuilt delivery.
     pub requested_slimmable_generation: AtomicU64,
     /// Telemetry: total slimmable rebuilds discarded by the audio thread
-    /// because their generation was stale (T3.2 / F-CONC-006). Written by the
+    /// because their generation was stale. Written by the
     /// audio thread (Relaxed); read by tests/housekeeping for observability.
     pub slimmable_stale_discarded_total: AtomicU32,
     /// Full WaveNet model weights stored for main-thread slimmable rebuild.
@@ -603,7 +602,7 @@ pub struct ColdShared {
     /// the audio thread. Written by the audio thread (Relaxed) after applying a
     /// [`RestoreTxn`]; read by tests/main thread to verify which restore is live.
     pub last_applied_generation: AtomicU64,
-    /// Pending restart oversampling request (T3.1 / F-LAT-004).
+    /// Pending restart oversampling request.
     /// Set by the audio thread (via `host.request_restart()`) when
     /// oversampling changes during active processing. Consumed by
     /// `activate()` to build engines at the correct factor. Stored with the
@@ -622,7 +621,7 @@ pub struct ColdShared {
     /// `HostPresetLoad::loaded()` or `on_error()` after async loads.
     pub pending_preset_load: Mutex<std::collections::VecDeque<PendingPresetLoad>>,
     /// Model loaded before `activate()` (state restore while `buffer_size == 0`),
-    /// deferred to avoid heap allocation on the audio thread (F3 fix).
+    /// deferred to avoid heap allocation on the audio thread.
     /// See `flush_pending_model()` in load.rs and housekeeping.rs.
     pub pending_model: Mutex<Option<PendingModel>>,
     /// Heavy DSP resources preserved across deactivate/activate cycles.
@@ -653,9 +652,9 @@ pub struct ColdShared {
 /// (state-restore-before-activate scenario). Carries the model and enough
 /// metadata for `flush_pending_model()` to construct the resampler with the
 /// correct host sample rate and buffer capacity — both unknown during pre-activation
-/// state restore. See CLAP-F003.
+/// state restore.
 pub struct PendingModel {
-    /// Monotonic model generation this model was adopted with (T3.2 / F-CONC-006).
+    /// Monotonic model generation this model was adopted with.
     /// Preserved through the deferral so the deferred model keeps its identity.
     pub generation: u64,
     /// The encapsulated model for neural inference (Left Channel).
@@ -671,8 +670,7 @@ pub struct PendingModel {
 }
 
 /// A slimmable-rebuilt model delivered from the main thread to the audio
-/// thread, tagged with the model generation it was sliced from (T3.2 /
-/// F-CONC-006).
+/// thread, tagged with the model generation it was sliced from.
 ///
 /// The audio thread installs the rebuilt model only when `generation` matches
 /// the generation of the model it is currently running; a stale rebuild
@@ -763,7 +761,7 @@ impl ColdShared {
     /// Called only on the main thread whenever a new model identity is adopted
     /// — a model load, a restore carrying a model, or an explicit clear. The
     /// returned value tags the payload that installs that model so the audio
-    /// thread can reject a stale slimmable rebuild (T3.2 / F-CONC-006).
+    /// thread can reject a stale slimmable rebuild.
     /// `0` is reserved for "no model installed yet".
     #[inline]
     pub(crate) fn allocate_model_generation(&self) -> u64 {

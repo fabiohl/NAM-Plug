@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! CLI entry point for the fail-closed AVX-512 absence certificate (Sprint 4 / F-ROB-PLUG-10).
+//! CLI entry point for the fail-closed AVX-512 absence certificate.
 //!
 //! Reuses the authoritative EVEX prefix (`0x62`) binary decoder and defensive
 //! symbol scanner from `neural_amp_modeler_rs::testing::bin_guard`.

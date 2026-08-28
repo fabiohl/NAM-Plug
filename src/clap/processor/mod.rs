@@ -231,7 +231,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // Priority: pending restart > UiToRt atomic > Off (fresh).
             // The pending restart is consumed atomically here; if any later
             // fallible stage fails, the rollback guard restores it so the
-            // request survives into the next activate() attempt (T3.1).
+            // request survives into the next activate() attempt.
             let pending_restart =
                 PendingRestartOs::take(&shared.cold.pending_restart_os_factor, Ordering::Acquire);
             if pending_restart != PendingRestartOs::None {
@@ -368,17 +368,17 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 (res, stream, cab, Some((os_l, os_r)))
             };
 
-            // F3: flush any model deferred by load_model() (state-restore-before-activate).
+            // Flush any model deferred by load_model() (state-restore-before-activate).
             // This calls set_max_buffer_size on the main thread before process() starts.
             main_thread.flush_pending_model()?;
 
-            // ── T3.3/F-LAT-005 / TR.1 (Política A): consume any latency-affecting
-            // restore or swap staged for this restart cycle. All fallible stages above
-            // already succeeded, so staged items are never stranded by a failure
-            // between here and `Self` construction. The staged resources were fully
-            // built off-RT by the main thread; they take precedence over preserved
-            // (`DeactivatedDspState`) ones, and superseded preserved resources drop
-            // here on the main thread.
+            // Consume any latency-affecting restore or swap staged for this
+            // restart cycle. All fallible stages above already succeeded, so
+            // staged items are never stranded by a failure between here and
+            // `Self` construction. The staged resources were fully built off-RT
+            // by the main thread; they take precedence over preserved
+            // (`DeactivatedDspState`) ones, and superseded preserved resources
+            // drop here on the main thread.
             let staged_restore = main_thread.staged_restore.take();
             let staged_restore_valid = staged_restore.as_ref().is_some_and(|r| {
                 if let Some(ref m) = r.txn.model {
@@ -691,19 +691,19 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 "Invariant: smoother_out must start from the same output_gain_db atomics"
             );
 
-            // 5. Report initial latency to shared state
-            // The streaming adapter (T1.2/F-PERF-002) owns the resampler and
-            // zero-primes exactly `latency_samples()` host samples, so its
-            // declared latency is the authoritative PDC value.
+            // 5. Report initial latency to shared state.
+            // The streaming adapter owns the resampler and zero-primes exactly
+            // `latency_samples()` host samples, so its declared latency is the
+            // authoritative PDC value.
             let mut initial_latency = stream.latency_samples();
             initial_latency += os_l.latency_samples() as u32;
             if let Some(ref adapter) = cabsim_adapter {
                 initial_latency += adapter.latency_samples() as u32;
             }
-            // T3.3/F-LAT-005: publish the installed latency contributions so
-            // the main thread can decide Política-A swaps (same latency ⇒
-            // continuous, different ⇒ staged + restart) for future model/IR
-            // loads. Written at the exact instant the resources land.
+            // Publish the installed latency contributions so the main thread
+            // can decide continuous-vs-staged swaps (same latency ⇒ continuous,
+            // different ⇒ staged + restart) for future model/IR loads. Written
+            // at the exact instant the resources land.
             shared
                 .cold
                 .current_stream_latency
@@ -714,10 +714,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     .map_or(0, |a| a.latency_samples() as u32),
                 Ordering::Relaxed,
             );
-            // T4.2/F-DSP-009: publish the CabSim tail telemetry on the restart
-            // install path too — `cold_load_cabsim` only covers the continuous
-            // SPSC swap, leaving the atomic at 0 (and the host tail extension
-            // wrong) after a staged IR lands via `activate()` (T4.1 gap).
+            // Publish the CabSim tail telemetry on the restart install path
+            // too — `cold_load_cabsim` only covers the continuous SPSC swap,
+            // leaving the atomic at 0 (and the host tail extension wrong) after
+            // a staged IR lands via `activate()`.
             shared.rt_to_ui.cabsim_tail_samples.store(
                 cabsim_adapter
                     .as_ref()
@@ -738,7 +738,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .buffer_size
                 .store(audio_config.max_frames_count, Ordering::Relaxed);
 
-            // F3: flush any model deferred by load_model() (state-restore-before-activate).
+            // Flush any model deferred by load_model() (state-restore-before-activate).
             // This calls set_max_buffer_size on the main thread before process() starts.
             main_thread.flush_pending_model()?;
 
@@ -750,13 +750,13 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
             let cabsim_tail_initial = cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
 
-            // T4.1/F-DSP-008: pre-allocate the circular dry delay line sized
-            // for the maximum possible DSP latency (cab-sim partition == host
-            // block size, plus the resampler/oversampler group-delay headroom).
-            // Its delay tracks `initial_latency` and is kept in sync whenever a
+            // Pre-allocate the circular dry delay line sized for the maximum
+            // possible DSP latency (cab-sim partition == host block size, plus
+            // the resampler/oversampler group-delay headroom). Its delay tracks
+            // `initial_latency` and is kept in sync whenever a
             // latency-affecting resource is swapped (recompute_effective_latency).
             // Allocation happens here in `activate()` — the plugin's single
-            // documented allocation site (F-RT-003/T2.2 static scan).
+            // documented allocation site.
             let dry_delay_capacity = (audio_config.max_frames_count as usize)
                 .max(MAX_RESAMP_BUF)
                 .saturating_add(DRY_DELAY_MAX_EXTRA);
@@ -850,12 +850,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     fn deactivate(mut self, _main_thread: &mut NamClapMainThread<'a>) {
         // Isolate panics during cleanup.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // T2.3/F-RT-007: a structural command deferred by the final
-            // callback is resolved before teardown. The parked payload's heap
-            // resources drop here on the main thread (safe — never on the
-            // audio thread), and its rolled-back sequence slot is consumed so
-            // the ack stays gapless across a subsequent deactivate/activate
-            // cycle (the ring may still hold commands for the next activate).
+            // A structural command deferred by the final callback is resolved
+            // before teardown. The parked payload's heap resources drop here on
+            // the main thread (safe — never on the audio thread), and its
+            // rolled-back sequence slot is consumed so the ack stays gapless
+            // across a subsequent deactivate/activate cycle (the ring may still
+            // hold commands for the next activate).
             if self.deferred_structural.take().is_some() {
                 self.cmd_consumer.advance_pending();
                 self.cmd_consumer.ack_processed();
@@ -885,17 +885,17 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .unwrap_or_else(|e| e.into_inner());
             *slimmable_rx_guard = Some(self.slimmable_rx);
 
-            // Preserve heavy DSP resources across deactivate/activate
-            // cycles to avoid I/O, filter-bank recompute, and FFT setup on the
-            // next activate(). Resources are validated on restore against the
-            // current audio configuration.
+            // Preserve heavy DSP resources across deactivate/activate cycles
+            // to avoid I/O, filter-bank recompute, and FFT setup on the next
+            // activate(). Resources are validated on restore against the current
+            // audio configuration.
             //
-            // T3.1/F-LAT-004: persist the *applied* oversampling factor — the
-            // one the preserved engines were actually built for — NEVER the
-            // user/DAW-requested `params.oversample`, which may still be ahead
-            // of the engines while a host restart is pending. Otherwise the
-            // next activate() would consider the old engines compatible with
-            // the new requested factor and reuse them incorrectly.
+            // Persist the *applied* oversampling factor — the one the preserved
+            // engines were actually built for — NEVER the user/DAW-requested
+            // `params.oversample`, which may still be ahead of the engines while
+            // a host restart is pending. Otherwise the next activate() would
+            // consider the old engines compatible with the new requested factor
+            // and reuse them incorrectly.
             let deactivated = DeactivatedDspState {
                 model_l: self.model_l,
                 model_generation: self.model_generation,
@@ -917,11 +917,11 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(deactivated);
 
-            // R-04: handoff single-owner do parking lot RT para o drain final
-            // off-RT. A thread de áudio já parou (o host chama deactivate()
-            // depois do stop_processing) e o processador ainda não foi
-            // dropado — uma única chamada a drain_gc_channels libera SPSC +
-            // overflow + os 16 slots no main thread, nunca no RT.
+            // Hand off single-owner parking-lot items to the final off-RT GC
+            // drain. The audio thread has already stopped (the host calls
+            // deactivate() after stop_processing) and the processor has not been
+            // dropped yet — a single drain_gc_final call releases the SPSC +
+            // overflow + the 16 parking-lot slots on the main thread.
             _main_thread.drain_gc_final(&mut self.parking_lot);
         }));
         if let Err(err) = result {
@@ -958,10 +958,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             let should_measure = self.cycles_since_telemetry & 0xF == 0;
             self.cycles_since_telemetry = self.cycles_since_telemetry.wrapping_add(1);
 
-            // NOTE (Architecture Limitation / F11): rdtsc_nanos() relies on hardware TSC reading (x86_64).
+            // NOTE (Architecture): rdtsc_nanos() relies on hardware TSC reading (x86_64).
             // While x86-64-v3 is the mandatory baseline target architecture for this project,
-            // conditionally guarding the call with target_arch ensures transparent compilation and fallback
-            // (returning 0) on non-x86_64 targets (e.g. ARM64 / AArch64).
+            // conditionally guarding the call with target_arch ensures transparent compilation
+            // and fallback (returning 0) on non-x86_64 targets (e.g. ARM64 / AArch64).
             let start_nanos = if should_measure {
                 #[cfg(target_arch = "x86_64")]
                 {
@@ -1046,9 +1046,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     }
 
     fn reset(&mut self) {
-        // T4.3 / F-CLAP-010 — full in-place, zero-alloc DSP state reset on
-        // timeline discontinuity (seek / loop relocation, `steady_time`
-        // regression).
+        // Full in-place, zero-alloc DSP state reset on timeline discontinuity
+        // (seek / loop relocation, `steady_time` regression).
         //
         // Reset target: "a freshly-initialized instance with the same
         // configuration". Every *temporal* state (filter/delay-line history,
@@ -1066,9 +1065,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 let _ = model.reset(self.resampler.nam_rate(), self.max_frames_count);
             }
 
-            // 2. Streaming resample adapter (T1.2/F-PERF-002): clears its
-            //    FIFOs, resets the inner resampler and re-arms the priming
-            //    budget — post-reset cardinality matches a fresh activation.
+            // 2. Streaming resample adapter: clears its FIFOs, resets the
+            //    inner resampler and re-arms the priming budget — post-reset
+            //    cardinality matches a fresh activation.
             self.stream.reset();
 
             // 3. Polyphase resampler: clears phase accumulators and delay
@@ -1132,8 +1131,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
             // 12. Tail counter re-armed to the full IR duration like a fresh
             //     activation — the FDL is empty, so the post-reset drain is
-            //     silence (T4.2: the decision is "re-arm", never "drain a
-            //     stale tail").
+            //     silence (the correct choice is to re-arm, not to drain a
+            //     stale tail).
             self.cabsim_tail_remaining =
                 self.cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
 

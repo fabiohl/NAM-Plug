@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! T4.1 / F-DSP-008 — Dry delay line: bypass/crossfade time-alignment tests.
+//! Dry Delay Line — Bypass and Crossfade Time-Alignment Tests.
 //!
 //! Validates the invariant that the delayed dry signal and the wet signal
 //! represent the same temporal instant of the input audio at every output
@@ -179,7 +179,7 @@ mod tests {
         // ── Invariant: dry and wet peaks coincide at the same output sample ──
         assert_eq!(
             wet_peak, dry_peak,
-            "dry and wet impulse peaks must coincide at the same output index (T4.1 invariant)"
+            "dry and wet impulse peaks must coincide at the same output index (dry delay invariant)"
         );
 
         let _ = std::fs::remove_file(&ir);
@@ -249,7 +249,7 @@ mod tests {
 
         assert_eq!(
             wet_peak, dry_peak,
-            "dry and wet impulse peaks must coincide (T4.1 invariant)"
+            "dry and wet impulse peaks must coincide (dry delay invariant)"
         );
     }
 
@@ -403,7 +403,7 @@ mod tests {
         let mut ol = vec![0.0f32; 256];
         let mut or_buf = vec![0.0f32; 256];
 
-        assert_zero_alloc("bypass crossfade entry (T4.1)", || {
+        assert_zero_alloc("bypass crossfade entry", || {
             let _ = process_block_harness(
                 &mut started,
                 &mut il,
@@ -420,7 +420,7 @@ mod tests {
             let mut ir_buf = input.to_vec();
             let mut ol = vec![0.0f32; 256];
             let mut or_buf = vec![0.0f32; 256];
-            assert_zero_alloc("bypass steady-state (T4.1)", || {
+            assert_zero_alloc("bypass steady-state", || {
                 let _ = process_block_harness(
                     &mut started,
                     &mut il,
@@ -447,7 +447,7 @@ mod tests {
         let mut ol = vec![0.0f32; 256];
         let mut or_buf = vec![0.0f32; 256];
 
-        assert_zero_alloc("bypass crossfade exit (T4.1)", || {
+        assert_zero_alloc("bypass crossfade exit", || {
             let _ = process_block_harness(
                 &mut started,
                 &mut il,

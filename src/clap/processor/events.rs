@@ -24,7 +24,7 @@ impl<'a> NamClapProcessor<'a> {
         self.drain_parking_lot();
 
         // 1. Event Processing (Main Thread SPSC)
-        // Command Budgeting (T2.3 / F-RT-007):
+        // Command Budgeting:
         // - Light parameter updates (Params) drain freely up to the queue cap.
         // - Structural commands (model/IR/oversample swaps, full restores) are
         //   budgeted to at most MAX_STRUCTURAL_COMMANDS_PER_CALLBACK per
@@ -159,7 +159,7 @@ impl<'a> NamClapProcessor<'a> {
                 // ── Entering Offline ──
                 // Capture an immutable snapshot of the realtime state BEFORE
                 // overwriting it. This snapshot is restored when returning to
-                // Realtime (CLAP-F009).
+                // Realtime.
                 self.realtime_activation = self.params.activation_precision;
                 self.adaptive_compute.set_mode(
                     neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Off,
@@ -249,7 +249,7 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     /// Discards the heap resources of a superseded structural command off-RT
-    /// (command coalescing, T2.3 / F-RT-007).
+    /// (command coalescing — latest-wins).
     ///
     /// When a deferred structural command is superseded by a newer same-kind
     /// command already queued in the ring, it is never applied and never
@@ -308,18 +308,18 @@ impl<'a> NamClapProcessor<'a> {
         input_mult_adj: f32,
         output_mult_adj: f32,
     ) {
-        // T3.2/F-CONC-006: bind the processor's active model generation to the
-        // generation carried by the install payload. This is what the slimmable
-        // staleness check compares against — it must come from the payload, not
-        // a read of the shared atomic (a later load could have already bumped
-        // the counter past this model).
+        // Bind the processor's active model generation to the generation
+        // carried by the install payload. This is what the slimmable staleness
+        // check compares against — it must come from the payload, not a read of
+        // the shared atomic (a later load could have already bumped the counter
+        // past this model).
         self.model_generation = generation;
         if let Some(old_l) = std::mem::replace(&mut self.model_l, model_l) {
             self.push_to_gc(GcItem::Model(old_l));
         }
         if let Some(ref mut model) = self.model_l {
             model.inject_rt_status(std::sync::Arc::clone(&self.shared.cold.rt_status));
-            // F3: buffer sizing is guaranteed on the main thread before SPSC delivery
+            // Buffer sizing is guaranteed on the main thread before SPSC delivery
             // (load.rs when buffer_size > 0, or flush_pending_model() in activate/housekeeping
             // when buffer_size was 0). set_max_buffer_size is NEVER called here anymore.
             // The heap-audit CI lane catches any regression.
@@ -332,10 +332,10 @@ impl<'a> NamClapProcessor<'a> {
         let old_stream = std::mem::replace(&mut self.stream, new_stream);
         self.push_to_gc(GcItem::Streaming(old_stream));
 
-        // T3.3/F-LAT-005: publish the stream latency contribution of the
-        // *installed* stream. The main thread reads this to decide whether a
-        // model swap changes the physical latency (Política A: same ⇒
-        // continuous swap, different ⇒ staged + `request_restart()`).
+        // Publish the stream latency contribution of the *installed* stream.
+        // The main thread reads this to decide whether a model swap changes
+        // the physical latency (same ⇒ continuous swap, different ⇒ staged +
+        // `request_restart()`).
         self.shared
             .cold
             .current_stream_latency
@@ -359,13 +359,13 @@ impl<'a> NamClapProcessor<'a> {
     /// a latency-affecting resource (model/resampler, cab-sim IR, or
     /// oversample engines) — never on the per-block hot path.
     ///
-    /// T4.1/F-DSP-008: the dry delay line is re-aligned to the new latency at
-    /// the exact instant the wet resources land, so the delayed dry tracks the
-    /// applied wet latency continuously.
+    /// The dry delay line is re-aligned to the new latency at the exact
+    /// instant the wet resources land, so the delayed dry tracks the applied
+    /// wet latency continuously.
     #[cold]
     fn recompute_effective_latency(&mut self) {
-        // The streaming adapter (T1.2/F-PERF-002) zero-primes exactly
-        // `latency_samples()` host samples, so its value is authoritative.
+        // The streaming adapter zero-primes exactly `latency_samples()` host
+        // samples, so its value is authoritative.
         let mut effective_latency = self.stream.latency_samples();
         effective_latency += self.os_l.latency_samples() as u32;
         if let Some(ref adapter) = self.cabsim_adapter {
@@ -380,15 +380,15 @@ impl<'a> NamClapProcessor<'a> {
         &mut self,
         adapter: Option<Box<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter>>,
     ) {
-        // F-RT-003/T2.1: the incoming adapter is already heap-boxed by the main
-        // thread; `mem::replace` moves the old `Box` by value into the GC queue
-        // with zero allocations on the audio thread. The off-RT GC drops it.
+        // The incoming adapter is already heap-boxed by the main thread;
+        // `mem::replace` moves the old `Box` by value into the GC queue with
+        // zero allocations on the audio thread. The off-RT GC drops it.
         if let Some(old_adapter) = std::mem::replace(&mut self.cabsim_adapter, adapter) {
             self.push_to_gc(GcItem::CabConvAdapter(old_adapter));
         }
-        // T3.3/F-LAT-005: publish the cabsim latency contribution of the
-        // *installed* adapter (0 = no IR). The main thread reads this to decide
-        // whether an IR load/clear changes the physical latency.
+        // Publish the cabsim latency contribution of the *installed* adapter
+        // (0 = no IR). The main thread reads this to decide whether an IR
+        // load/clear changes the physical latency.
         self.shared.cold.current_cabsim_latency.store(
             self.cabsim_adapter
                 .as_ref()
@@ -423,10 +423,10 @@ impl<'a> NamClapProcessor<'a> {
         os_l: Box<neural_amp_modeler_rs::dsp::oversample::OversampleEngine>,
         os_r: Box<neural_amp_modeler_rs::dsp::oversample::OversampleEngine>,
     ) {
-        // T3.1/F-LAT-004: the applied factor is derived from the engine that
-        // actually landed (the main thread built it off-RT), never from the
-        // requested `params.oversample` — the two may legitimately diverge
-        // while a host restart is pending.
+        // The applied factor is derived from the engine that actually landed
+        // (the main thread built it off-RT), never from the requested
+        // `params.oversample` — the two may legitimately diverge while a host
+        // restart is pending.
         self.applied_os_factor = os_l.factor();
         let old_l = std::mem::replace(&mut self.os_l, os_l);
         let old_r = std::mem::replace(&mut self.os_r, os_r);
@@ -471,10 +471,10 @@ impl<'a> NamClapProcessor<'a> {
     /// The audio thread ONLY sets the atomic flag and target channel count.
     /// All allocation, prewarm, and mmap happen on the main thread.
     ///
-    /// T3.2/F-CONC-006: the active model generation is recorded in the request
-    /// payload (`requested_slimmable_generation`) before the Release flag is
-    /// set, so the main thread tags the rebuilt delivery with the exact
-    /// generation the audio thread was running when it asked for the rebuild.
+    /// The active model generation is recorded in the request payload
+    /// (`requested_slimmable_generation`) before the Release flag is set, so
+    /// the main thread tags the rebuilt delivery with the exact generation the
+    /// audio thread was running when it asked for the rebuild.
     fn signal_slimmable_rebuild(&mut self) {
         let Some(target_ch) = self.adaptive_compute.take_slimmable_rebuild() else {
             return;
@@ -495,12 +495,11 @@ impl<'a> NamClapProcessor<'a> {
     /// The main thread has already done slice_channels, prewarm, and set_max_buffer_size.
     /// The audio thread only swaps the pointer and sends the old model to GC.
     ///
-    /// T3.2/F-CONC-006: each delivery carries the model generation it was
-    /// sliced from. If that generation is older than the active model (a model
-    /// swap happened while the rebuild was in flight), the stale result is
-    /// discarded straight to the GC without touching the active DSP state — a
-    /// slimmable rebuild of model A can never overwrite a subsequently loaded
-    /// model B.
+    /// Each delivery carries the model generation it was sliced from. If that
+    /// generation is older than the active model (a model swap happened while
+    /// the rebuild was in flight), the stale result is discarded straight to
+    /// the GC without touching the active DSP state — a slimmable rebuild of
+    /// model A can never overwrite a subsequently loaded model B.
     fn drain_slimmable_models(&mut self) {
         while let Ok(rebuild) = self.slimmable_rx.pop() {
             if rebuild.generation != self.model_generation {

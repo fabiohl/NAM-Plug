@@ -24,8 +24,8 @@ use std::sync::Arc;
 pub const BYPASS_XFADE_SAMPLES: usize = 64;
 pub(crate) const BYPASS_XFADE_INV: f32 = 1.0 / BYPASS_XFADE_SAMPLES as f32;
 
-/// Command Budgeting (T2.3 / F-RT-007): maximum number of structural (heavy
-/// swap) commands applied per audio callback.
+/// Command Budgeting: maximum number of structural (heavy swap) commands
+/// applied per audio callback.
 ///
 /// Structural applies (model/resampler swap, cab-sim IR swap, oversample engine
 /// rebuild, full state restore) recompute latency, feed the GC cascade and may
@@ -108,8 +108,7 @@ impl BypassCrossfader {
 pub struct NamClapProcessor<'a> {
     /// Active model for the left channel (None = bypass).
     pub(crate) model_l: Option<Box<StaticModel>>,
-    /// Monotonic generation of the currently active model identity (T3.2 /
-    /// F-CONC-006).
+    /// Monotonic generation of the currently active model identity.
     ///
     /// Set to the generation carried by the model-install payload in
     /// `cold_load_model()` — never read back from the shared atomic, which may
@@ -119,13 +118,12 @@ pub struct NamClapProcessor<'a> {
     pub(crate) model_generation: u64,
     /// Active cab-sim convolution adapter (None = bypass, zero cost).
     /// Held in `Box` end-to-end (main thread → SPSC → RT swap → GC) so
-    /// installing/swapping/clearing an IR never allocates on the audio thread
-    /// (F-RT-003/T2.1).
+    /// installing/swapping/clearing an IR never allocates on the audio thread.
     pub(crate) cabsim_adapter: Option<Box<CabSimAdapter>>,
     /// Polyphase sinc resampler (bypass when sample_rate == 48000).
     /// Held in Box for RT-safe disposal without allocation.
     pub(crate) resampler: Box<NamResampler>,
-    /// Strict-cardinality streaming resample adapter (T1.2/F-PERF-002).
+    /// Strict-cardinality streaming resample adapter.
     /// Owns the bounded FIFO pipeline that guarantees exactly `frames_count`
     /// host samples are produced per callback. Built off-RT; swapped on the
     /// audio thread via SPSC with the old box disposed by GC.
@@ -137,7 +135,7 @@ pub struct NamClapProcessor<'a> {
     /// Current parameters on the audio thread (snapshotted from SPSC at each process()).
     pub(crate) params: RtProcessingParams,
     /// Oversampling factor **actually applied** by the active engines
-    /// (`os_l`/`os_r`) (T3.1 / F-LAT-004).
+    /// (`os_l`/`os_r`).
     ///
     /// Updated **only** at the instant engines are installed — `activate()`
     /// and `cold_load_os()` (derived from the incoming engine itself). Never
@@ -180,13 +178,13 @@ pub struct NamClapProcessor<'a> {
     pub(crate) scheduled_events: Vec<ScheduledEvent>,
     /// Bypass crossfade state machine for click-free bypass transitions.
     pub(crate) bypass_xfade: BypassCrossfader,
-    /// Pre-allocated circular dry delay line (T4.1 / F-DSP-008): delays the
-    /// dry (bypass/crossfade) signal by exactly the applied wet latency
-    /// (`cached_effective_latency`) so dry and wet always represent the same
-    /// temporal instant, and the fully-bypassed path keeps the physical
-    /// latency declared to the host. Zero allocations on the audio thread.
+    /// Pre-allocated circular dry delay line: delays the dry (bypass/crossfade)
+    /// signal by exactly the applied wet latency (`cached_effective_latency`)
+    /// so dry and wet always represent the same temporal instant, and the
+    /// fully-bypassed path keeps the physical latency declared to the host.
+    /// Zero allocations on the audio thread.
     pub(crate) dry_delay: DryDelayLine,
-    /// Dry input signal storage for bypass crossfade blending (T4.1 / F-DSP-008).
+    /// Dry input signal storage for bypass crossfade blending.
     /// `dry_delay` writes the latency-compensated dry here each sub-block;
     /// the pipeline modifies `buf_host_l/r` in place, and these preserve the
     /// *delayed* dry signal for the bypass output and the crossfade blend.
@@ -221,7 +219,7 @@ pub struct NamClapProcessor<'a> {
     pub(crate) parking_lot: [Option<GcItem>; 16],
     /// Command consumer with acknowledgment.
     pub(crate) cmd_consumer: CommandConsumer<'a>,
-    /// Single-slot deferral for Command Budgeting (T2.3 / F-RT-007).
+    /// Single-slot deferral for Command Budgeting.
     ///
     /// When the per-callback structural budget is exhausted, the drained
     /// structural command is parked here (its sequence slot is rolled back so
@@ -268,7 +266,7 @@ pub struct NamClapProcessor<'a> {
     /// Last seen render mode for transition detection (0 = Realtime, 1 = Offline).
     pub(crate) last_render_mode: u32,
     /// Immutable snapshot of activation precision captured when entering
-    /// Offline mode. Restored when returning to Realtime (CLAP-F009).
+    /// Offline mode. Restored when returning to Realtime.
     /// Initialized to the same value as `params.activation_precision`
     /// during activate().
     pub(crate) realtime_activation: ActivationPrecision,

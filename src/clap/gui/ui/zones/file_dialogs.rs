@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// and call `host_static.request_callback()` so `housekeeping()` always
 /// processes the result — preventing stale `ui_loading` flags.
 ///
-/// R-09: if the plugin is destroyed while the picker is open (`alive_fence`
+/// Teardown safety: if the plugin is destroyed while the picker is open (`alive_fence`
 /// drops), the outcome is **discarded**: the path is never written to
 /// `pending_model` and the host is never notified — `request_callback` on a
 /// destroyed instance would be a use-after-free in the host event loop.
@@ -40,7 +40,7 @@ pub(crate) fn spawn_file_dialog(
 
 /// Testable core of [`spawn_file_dialog`]: the picker and the host
 /// notification are injected so a fake picker can complete the dialog after
-/// the fence is lowered (R-09 criterion: zero `request_callback` observed,
+/// the fence is lowered (Teardown safety criterion: zero `request_callback` observed,
 /// zero path written to `pending_model`).
 fn spawn_file_dialog_inner(
     state: Arc<DialogSharedState>,
@@ -64,7 +64,7 @@ fn spawn_file_dialog_inner(
 
 /// Spawns an IR file-picker dialog in a background thread.
 ///
-/// Same outcome guarantees as `spawn_file_dialog` (including the R-09 fence
+/// Same outcome guarantees as `spawn_file_dialog` (including the teardown safety fence
 /// discard: `pending_ir` is never written and the host is never notified
 /// after the plugin is destroyed).
 pub(crate) fn spawn_ir_file_dialog(
@@ -107,7 +107,7 @@ fn spawn_ir_file_dialog_inner(
     })
 }
 
-/// Single source of truth for the R-09 dialog-completion protocol, shared by
+/// Single source of truth for the dialog-completion protocol, shared by
 /// the model and IR pickers (one copy of the teardown-safety logic — a fix
 /// here applies to both dialogs).
 ///
@@ -125,11 +125,11 @@ fn complete_dialog(
     sentinel_cancel: PathBuf,
     notify_host: impl FnOnce(),
 ) {
-    // R-09: the plugin instance may have been destroyed while the picker
+    // Teardown safety: the plugin instance may have been destroyed while the picker
     // was open. Lower the fence ⇒ discard the outcome entirely: no write to
     // the pending slot and no `request_callback`.
     if !alive_fence.load(Ordering::Acquire) {
-        log::debug!("NAM-Plug: file dialog completed after teardown — outcome discarded (R-09)");
+        log::debug!("NAM-Plug: file dialog completed after teardown — outcome discarded");
         active.store(false, Ordering::Release);
         return;
     }
@@ -148,7 +148,7 @@ fn complete_dialog(
     }
 
     active.store(false, Ordering::Release);
-    // R-09 re-check immediately before the host call: the fence may have
+    // Fence re-check immediately before the host call: the fence may have
     // dropped while the outcome was being written (TOCTOU closure).
     if alive_fence.load(Ordering::Acquire) {
         notify_host();

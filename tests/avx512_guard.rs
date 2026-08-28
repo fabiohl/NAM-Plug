@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
 //! Binary surface guard for NAM-Plug: fail-closed proof of zero EVEX/AVX-512
-//! machine code in the default (non-avx512) build (Sprint 4 / F-ROB-PLUG-10).
+//! machine code in the default (non-avx512) build.
 
 use neural_amp_modeler_rs::testing::bin_guard::{
     EvexScanReport, ToolKind, resolve_llvm_tool, scan_for_evex, scan_symbols,

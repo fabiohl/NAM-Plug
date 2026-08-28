@@ -59,7 +59,7 @@ pub(crate) fn serialize_envelope(params: &ProcessingParams) -> Result<Vec<u8>, P
         .map_err(|e| PluginError::Error(Box::new(StateError::Serialize(e))))
 }
 
-/// T6.2: no asset reference may be persisted without a valid SHA-256 digest.
+/// Mandatory asset identity: no asset reference may be persisted without a valid SHA-256 digest.
 /// Defensive fail-closed guard on the save path — every adoption path already
 /// computes the digest, so a violation here means a programming error. The only
 /// migration path for legacy hashless state is an explicit GUI re-load.

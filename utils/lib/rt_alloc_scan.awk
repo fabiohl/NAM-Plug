@@ -3,7 +3,7 @@
 #
 # rt_alloc_scan.awk — fail-closed static scanner for RT-path allocations.
 #
-# Usage: awk -f rt_alloc_scan.awk <file.rs>...
+# Usage: awk -f utils/lib/rt_alloc_scan.awk <file.rs>...
 #
 # Flags any RT-hostile allocation pattern found on the real-time processing
 # path of NAM-Plug's `src/clap/processor/`, excluding the documented off-RT

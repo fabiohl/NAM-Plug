@@ -62,7 +62,7 @@ impl PluginFactoryImpl for NamPluginFactory {
     ) -> Option<PluginInstance<'a>> {
         // Step 1: Validate requested plugin ID against current descriptor
         if plugin_id == self.descriptor.id().unwrap_or_default() {
-            // Step 2: Instaniate plugin with shared state constructor and main-thread context
+            // Step 2: Instantiate plugin with shared state constructor and main-thread context
             Some(PluginInstance::new::<NamClapPlugin>(
                 host_info,
                 &self.descriptor,

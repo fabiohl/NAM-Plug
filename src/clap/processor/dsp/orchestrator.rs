@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
+//! DSP Orchestrator: manages parameter event scheduling, channel routing, and chunked audio processing.
+
 pub mod audio_loop;
 pub mod worker;
 
@@ -23,7 +25,7 @@ use std::sync::atomic::Ordering;
 /// Maximum number of host input events scheduled within a single block.
 ///
 /// Saturation past this budget is **explicit, not invisible**: the scheduler
-/// stops draining, raises `RT_STATUS_SPSC_DRAIN_TRUNCATED` (kept, see T6.3),
+/// stops draining, raises `RT_STATUS_SPSC_DRAIN_TRUNCATED`,
 /// and the main thread logs the overflow off-RT via `emit_pending_logs()`.
 /// The remaining events of the block are rejected — the plugin never silently
 /// drops a partial automation envelope in release without a flag.
@@ -38,7 +40,7 @@ impl<'a> NamClapProcessor<'a> {
         start_nanos: u64,
     ) -> Result<ProcessStatus, PluginError> {
         // Track pending restart factor for latency-policy enforcement.
-        // T3.1/F-LAT-004: decode via `PendingRestartOs` so a pending
+        // Decode via `PendingRestartOs` so a pending
         // transition *to Off* is observable (raw 0 == "no pending").
         let pending_before = PendingRestartOs::load(
             &self.shared.cold.pending_restart_os_factor,
@@ -58,7 +60,7 @@ impl<'a> NamClapProcessor<'a> {
                     );
                     debug_assert!(
                         false,
-                        "CLAP-F007: event flood > {MAX_SCHEDULED_EVENTS} in one block; truncating"
+                        "Event flood > {MAX_SCHEDULED_EVENTS} in one block; truncating"
                     );
                     break;
                 }
@@ -139,7 +141,7 @@ impl<'a> NamClapProcessor<'a> {
                 continue;
             };
 
-            // Non-finite input sample detection & containment (T2.3)
+            // Non-finite input sample detection & containment
             let mut non_finite = false;
             for &s in &self.buf_host_l[..n_samples] {
                 if !s.is_finite() {
@@ -165,7 +167,7 @@ impl<'a> NamClapProcessor<'a> {
                     // Reset the model at the effective rate of the active chain
                     // (post-resample model rate), never a hard-coded 48 kHz —
                     // models may be native 44.1/48 kHz and the host may run at
-                    // 44.1/48/96 kHz (F-ROB-PLUG-04 / T2.3 residual).
+                    // 44.1/48/96 kHz.
                     let _ = model.reset(self.resampler.nam_rate(), n_samples);
                 }
                 self.buf_mid_l.fill(0.0);
@@ -182,7 +184,7 @@ impl<'a> NamClapProcessor<'a> {
                 self.buf_xfade_dry_r.fill(0.0);
                 self.buf_xfd_scratch_l.fill(0.0);
                 self.buf_xfd_scratch_r.fill(0.0);
-                // T4.1/F-DSP-008: the dry delay line must not replay pre-fault
+                // The dry delay line must not replay pre-fault
                 // history (which would leak the pre-containment audio through
                 // the bypass/crossfade path); reset it to a zeroed ring.
                 self.dry_delay.reset();
@@ -282,6 +284,7 @@ impl<'a> NamClapProcessor<'a> {
                             adaptive: &mut self.adaptive_compute,
                             bridge_writer: None,
                             conv: self.cabsim_adapter.as_deref_mut(),
+                            conv_pair: None,
                         };
 
                         audio_loop::process_sub_block(
@@ -423,7 +426,7 @@ impl<'a> NamClapProcessor<'a> {
         // If an oversampling change was detected during active
         // processing, request host restart so latency can be updated
         // legally during the next activate(). A pending *Off* target is
-        // representable and also triggers the restart (T3.1/F-LAT-004).
+        // representable and also triggers the restart.
         let pending_after = PendingRestartOs::load(
             &self.shared.cold.pending_restart_os_factor,
             Ordering::Relaxed,

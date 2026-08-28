@@ -27,7 +27,7 @@ Designed for seamless integration into modern Linux digital audio workstations (
 
 ## ⚡ Key Strengths & Architectural Highlights
 
-* **Native CLAP 1.2+ Standard Integration:** Built on top of the `clack` framework, exposing a clean, robust implementation of the CLever Audio Plug-in (CLAP) standard with zero translation overhead, sample-accurate parameter automation, and native host extension compliance (`audio-ports`, `params`, `state`, `state-context`, `latency`, `gui`, `track-info`, `remote-controls`, `param-indication`, `preset-discovery`, `render`, `tail`, `log`).
+* **Native CLAP 1.2+ Standard Integration:** Built on top of the `clack` framework, exposing a clean, robust implementation of the CLever Audio Plug-in (CLAP) standard with zero translation overhead, sample-accurate parameter automation, and native host extension compliance (`audio-ports`, `audio-ports-activation`, `params`, `state`, `state-context`, `latency`, `gui`, `track-info`, `remote-controls`, `param-indication`, `preset-discovery`, `render`, `tail`, `log`).
 * **Inherited Neural Engine Excellence:** Powered by [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs), supporting WaveNet (A1/A2 standard & slimmable profiles), LSTM (1-layer and 2-layer topologies), ConvNet, Linear FIR, and partitioned FFT speaker cabinet impulse responses (.wav).
 * **Strict Zero-Allocation RT Safety & 3-Tier GC Cascade:** The audio callback thread runs with strict real-time determinism — no heap allocations, no mutex locks, and no blocking I/O on the hot path. Dropped models, IRs, and oversamplers cascade through lock-free SPSC channels (32 slots) → processor parking lot (16 slots) → atomic overflow ring buffer with poison-resilient rollback guards (`ActivateRollbackGuard`).
 * **Branchless FMA-Optimized Bypass Crossfader:** 32 ms equal-power crossfade blending during bypass transitions, executing branchlessly with FMA vectorization and adaptive handling of fractional phase discrepancies between dry capture and resampled wet streams.
@@ -38,29 +38,29 @@ Designed for seamless integration into modern Linux digital audio workstations (
 * **Half-Band Anti-Aliasing Oversampling:** Optional `2x` and `4x` polyphase oversampling centered around the neural inference stage to eliminate high-frequency aliasing foldover in high-gain amp models.
 * **Selectable Activation Precision:** Supports both `Standard` (exact-grade, default) and `Fast` (Padé polynomial minimax approximations) math modes to balance precision against CPU consumption on demanding setups.
 * **Real-Time DSP Telemetry & Diagnostics:** Live footer display reporting sample rate (`SR`), buffer latency (`Lat`), DSP CPU load percentage (`DSP %`), CPU cycles per block, block size (`Last N`), real-time thread priority (`RT Prio`), overload xrun count, and diagnostic status flags (`Flags`).
-* **5-Phase Advanced Optimization Pipeline (PGO + LLVM-BOLT):** Automated compilation suite (`build-release.sh`) leveraging synthetic neural DSP profiling, Profile-Guided Optimization (PGO), and LLVM-BOLT machine code layout optimization to maximize Instruction Cache locality.
+* **5-Phase Advanced Optimization Pipeline (PGO + LLVM-BOLT):** Automated compilation suite (`build-release.sh`) leveraging synthetic neural DSP profiling, Profile-Guided Optimization (PGO), LLVM-BOLT machine code layout optimization, and 6 strict verification gates (SONAME/symbols, clap-validator, AVX-512 absence, NAMCore float parity, CabSim IR, and `nam_perf_guard` performance certification).
 * **Linker-Level Symbol Isolation:** Scoped version script (`hide-libm-shadow.map`) ensuring libm symbols resolve dynamically to `glibc` without dangerous PLT/GOT self-referential loops in release builds.
 
 ---
 
 ## 🥊 Feature Showcase ("Roofshoot")
 
-| Feature / Attribute            | Technical Implementation                                                 | Benefit & Impact                                                   |
-|:------------------------------ |:------------------------------------------------------------------------ |:------------------------------------------------------------------ |
-| **Inference Engine**           | Core `NeuralAmpModeler-rs` engine (WaveNet A1/A2, LSTM, ConvNet, Linear) | Full model compatibility with exact C++ f32 & f64 reference parity |
-| **Plugin Standard**            | Native CLAP API wrapper (`clack-plugin` & `clack-extensions`)            | Sub-millisecond buffer sizes and sample-accurate DAW automation    |
-| **RT Determinism**             | Strict Zero Heap Drop, Zero Locks, Zero Hot-Path Logging                 | Guaranteed audio stability without buffer underruns (xruns)        |
-| **SIMD Hardware Acceleration** | Engine `x86-64-v3` (AVX2/FMA) production backend                         | Ultra-low CPU usage (WaveNet Std ≪ 1.33 ms deadline)               |
-| **Bypass Crossfader**          | 32 ms equal-power crossfade with branchless FMA loop & phase compensation| Smooth, pop-free bypass transitions with zero phase cancellation   |
-| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`    | Instant host Plugin Delay Compensation with 0 per-block overhead   |
-| **Cabinet IR Convolution**     | Partitioned FFT & Direct FIR convolution engine (.wav IRs)               | Seamless, zero-latency speaker cabinet simulation                  |
-| **Graphical User Interface**   | `egui 0.36` vector UI with `glow 0.17` (OpenGL 3.3) via `baseview`       | Responsive, framerate-independent UI with GLSL shader meters       |
-| **GUI Idle Throttling**        | 2-tier frame lifecycle & dirty-state early exit (CLAP-F022)              | 0% GPU/CPU consumption when plugin UI is open and stationary       |
-| **Oversampling**               | Half-band polyphase FIR filters (`Off`, `2x`, `4x`)                      | Eliminates aliasing distortion in high-gain amp models             |
-| **Activation Precision**       | `Standard` (exact-grade, default) vs `Fast` (Padé approximations)        | User-selectable trade-off between math precision and CPU latency   |
-| **CLAP State Persistence**     | Lock-free atomic synchronization & JSON serialization                    | Full preset saving/loading and seamless DAW project restoration    |
-| **Diagnostics & Telemetry**    | Atomic telemetry bitmask & `LogBuffer` ring buffer integration           | Real-time CPU, latency, overload, and flag telemetry in GUI footer |
-| **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly report          | Minimized I-Cache misses and maximum instruction throughput        |
+| Feature / Attribute            | Technical Implementation                                                  | Benefit & Impact                                                   |
+|:------------------------------ |:------------------------------------------------------------------------- |:------------------------------------------------------------------ |
+| **Inference Engine**           | Core `NeuralAmpModeler-rs` engine (WaveNet A1/A2, LSTM, ConvNet, Linear)  | Full model compatibility with exact C++ f32 & f64 reference parity |
+| **Plugin Standard**            | Native CLAP API wrapper (`clack-plugin` & `clack-extensions`)             | Sub-millisecond buffer sizes and sample-accurate DAW automation    |
+| **RT Determinism**             | Strict Zero Heap Drop, Zero Locks, Zero Hot-Path Logging                  | Guaranteed audio stability without buffer underruns (xruns)        |
+| **SIMD Hardware Acceleration** | Engine `x86-64-v3` (AVX2/FMA) production backend                          | Ultra-low CPU usage (WaveNet Std ≪ 1.33 ms deadline)               |
+| **Bypass Crossfader**          | 32 ms equal-power crossfade with branchless FMA loop & phase compensation | Smooth, pop-free bypass transitions with zero phase cancellation   |
+| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`     | Instant host Plugin Delay Compensation with 0 per-block overhead   |
+| **Cabinet IR Convolution**     | Partitioned FFT & Direct FIR convolution engine (.wav IRs)                | Seamless, zero-latency speaker cabinet simulation                  |
+| **Graphical User Interface**   | `egui 0.36` vector UI with `glow 0.17` (OpenGL 3.3) via `baseview`        | Responsive, framerate-independent UI with GLSL shader meters       |
+| **GUI Idle Throttling**        | 2-tier frame lifecycle & dirty-state early exit (CLAP-F022)               | 0% GPU/CPU consumption when plugin UI is open and stationary       |
+| **Oversampling**               | Half-band polyphase FIR filters (`Off`, `2x`, `4x`)                       | Eliminates aliasing distortion in high-gain amp models             |
+| **Activation Precision**       | `Standard` (exact-grade, default) vs `Fast` (Padé approximations)         | User-selectable trade-off between math precision and CPU latency   |
+| **CLAP State Persistence**     | Lock-free atomic synchronization & JSON serialization                     | Full preset saving/loading and seamless DAW project restoration    |
+| **Diagnostics & Telemetry**    | Atomic telemetry bitmask & `LogBuffer` ring buffer integration            | Real-time CPU, latency, overload, and flag telemetry in GUI footer |
+| **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly report           | Minimized I-Cache misses and maximum instruction throughput        |
 
 ---
 
@@ -129,20 +129,26 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 3. **Phase 3 — PGO-Optimized Compilation:** Recompiles `libnam_plug.so` using `-Cprofile-use=merged.profdata` and relocation symbols (`-Clink-arg=-Wl,-q`), allowing LLVM to optimize hot loops, inline activation functions, and unroll vector SIMD loops.
 4. **Phase 4 — LLVM BOLT Machine Code Reordering:** Reorders machine code instructions via `llvm-bolt` to minimize Instruction Cache (I-Cache) misses and TLB pressure during real-time processing.
 5. **Phase 4.5 — Assembly Hotspot Disassembly Report:** Outputs an AI-ready demangled disassembly report at `target/dsp_hotpath.asm`.
-6. **Phase 5 — Automated Deployment:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap`.
+6. **Phase 5 — Automated Deployment & Strict Certification:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap`, executing 6 release certification gates:
+   * **Gate 1:** Exported symbols and SONAME validation (`clap_entry`, SONAME presence).
+   * **Gate 2:** External `clap-validator` test suite compliance.
+   * **Gate 3:** Fail-closed AVX-512 absence scan (`nam_bin_guard` EVEX bytecode decoder).
+   * **Gate 4:** NAMCore C++ float parity oracle (`test_clap_parity_multi_rate`).
+   * **Gate 5:** CabSim IR artifact test against distributed `.so` (`test_cabsim_ir_changes_audio_release_artifact`).
+   * **Gate 6:** Distributed artifact performance certification gate (`nam_perf_guard` latency distributions and real-time deadline margins).
 7. **Phase 6 — Release Packaging (.tar.zst):** Generates a release distribution archive at `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst` containing the plugin, documentation, license, and a 1-click installation script.
 8. **Phase 7 — Release Packaging (.flatpak):** Builds and exports the standalone Flatpak plugin extension bundle (`~/nam-plug-vx.y.z-linux-x86_64-v3.flatpak`) with AppStream metadata for sandboxed DAWs (Bitwig, REAPER).
 
 #### CLI Options
 
-| Option          | Description                                                                                                     |
-|:--------------- |:--------------------------------------------------------------------------------------------------------------- |
-| `--install`     | Automatically installs the Flatpak extension locally (`flatpak install --user`) in addition to `~/.clap/`.      |
-| `--no-flatpak`  | Skips Phase 7 (Flatpak bundle creation).                                                                        |
-| `--no-tarball`  | Skips Phase 6 (.tar.zst archive creation).                                                                      |
-| `--no-pgo`      | Skips Phase 2/3 (Profile-Guided Optimization) and compiles directly with the `dist` release profile.            |
-| `--no-bolt`     | Skips Phase 4 (LLVM BOLT post-link optimization).                                                               |
-| `-h, --help`    | Displays command-line help screen and exits.                                                                    |
+| Option         | Description                                                                                                |
+|:-------------- |:---------------------------------------------------------------------------------------------------------- |
+| `--install`    | Automatically installs the Flatpak extension locally (`flatpak install --user`) in addition to `~/.clap/`. |
+| `--no-flatpak` | Skips Phase 7 (Flatpak bundle creation).                                                                   |
+| `--no-tarball` | Skips Phase 6 (.tar.zst archive creation).                                                                 |
+| `--no-pgo`     | Skips Phase 2/3 (Profile-Guided Optimization) and compiles directly with the `dist` release profile.       |
+| `--no-bolt`    | Skips Phase 4 (LLVM BOLT post-link optimization).                                                          |
+| `-h, --help`   | Displays command-line help screen and exits.                                                               |
 
 ---
 
@@ -218,10 +224,10 @@ flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 
 ### 3. Staging & Performance Tuning
 
-1. **Gain Staging:** Use the **`INPUT`** and **`OUTPUT`** rotary knobs to balance signal levels.
-2. **Noise Gate:** Adjust the **`GATE`** knob (default `-70.0 dB`) to eliminate hum and background noise when not playing.
+1. **Gain Staging:** Use the **`INPUT`** and **`OUTPUT`** rotary knobs to balance signal levels (`-20.0 dB` to `+20.0 dB`, default `0.0 dB`).
+2. **Noise Gate:** Adjust the **`GATE`** knob (`-90.0 dB` to `-40.0 dB`, default `-70.0 dB`) to eliminate hum and background noise when not playing.
 3. **Anti-Aliasing Oversampling:** Select **`2x`** or **`4x`** polyphase oversampling when running high-gain amplifier models to eliminate aliasing foldover distortion.
-4. **Activation Math Mode:** Switch between **`Standard`** (exact precision) and **`Fast`** (Padé polynomial approximations) to optimize CPU usage on large sessions.
+4. **Activation Math Mode:** Switch between **`Standard`** (exact precision, default) and **`Fast`** (Padé polynomial approximations) to optimize CPU usage on large sessions.
 5. **Active / Bypass:** Toggle the **`ACTIVE`** button to bypass or re-engage processing seamlessly with 32 ms equal-power crossfading.
 
 ### 4. Telemetry Footer Monitoring

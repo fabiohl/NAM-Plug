@@ -49,7 +49,7 @@ pub struct NamClapMainThread<'a> {
     /// Cached last CabSim tail length reported to the host to avoid redundant notifications.
     pub last_reported_cabsim_tail: u32,
     /// Last-seen value of `ColdShared::slimmable_stale_discarded_total`, used to
-    /// log stale-slimmable-rebuild discards exactly once (T3.2 / F-CONC-006).
+    /// log stale-slimmable-rebuild discards exactly once.
     pub last_seen_slimmable_stale: u32,
     /// Baseview window handle for GUI lifecycle control (embedded mode).
     pub window_handle: Option<baseview::WindowHandle>,
@@ -57,17 +57,17 @@ pub struct NamClapMainThread<'a> {
     pub floating_thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Close signal for the floating window.
     pub floating_close_signal: Option<Arc<AtomicBool>>,
-    /// Handle da thread de file-dialog de modelo (se ativa). Joinado no teardown.
+    /// Handle for the model file-dialog background thread (if active). Joined during teardown.
     #[expect(dead_code, reason = "held for join on teardown, never read directly")]
     pub(crate) dialog_handle: Option<std::thread::JoinHandle<()>>,
-    /// Estado compartilhado com a thread de file-dialog de modelo.
+    /// Shared state synchronized with the model file-dialog background thread.
     #[expect(dead_code, reason = "held for Arc lifecycle, never read directly")]
     pub(crate) dialog_state:
         Option<Arc<crate::clap::gui::ui::zones::dialog_state::DialogSharedState>>,
-    /// Handle da thread de file-dialog de IR (se ativa). Joinado no teardown.
+    /// Handle for the IR file-dialog background thread (if active). Joined during teardown.
     #[expect(dead_code, reason = "held for join on teardown, never read directly")]
     pub(crate) ir_dialog_handle: Option<std::thread::JoinHandle<()>>,
-    /// Estado compartilhado com a thread de file-dialog de IR.
+    /// Shared state synchronized with the IR file-dialog background thread.
     #[expect(dead_code, reason = "held for Arc lifecycle, never read directly")]
     pub(crate) ir_dialog_state:
         Option<Arc<crate::clap::gui::ui::zones::dialog_state::IrDialogSharedState>>,
@@ -77,18 +77,18 @@ pub struct NamClapMainThread<'a> {
     /// Flag indicating whether hugepage status has been synced for this instance.
     pub(crate) hugepage_synced: bool,
     /// A validated restore staged on the main thread awaiting atomic delivery
-    /// to the audio thread and ack-gated publication (T6.1). Private slot —
+    /// to the audio thread and ack-gated publication. Private slot —
     /// never shared with the audio thread or GUI.
     pub(crate) pending_restore: Option<PendingRestore>,
     /// Latency-affecting full state restore staged to land only on the next
-    /// host restart cycle (F-LAT-005 / TR.1, Política A estendida).
+    /// host restart cycle (Strict Restart Policy / TR.1).
     ///
     /// Set by `atomic_commit()` when the restore package changes physical
     /// stream latency, physical cabsim latency, or oversampling factor.
     /// Parked here until `activate()` installs the entire package atomically.
     pub(crate) staged_restore: Option<StagedRestore>,
     /// Latency-affecting model/IR swap staged to land only on the next host
-    /// restart cycle (T3.3 / F-LAT-005, Política A).
+    /// restart cycle (Strict Restart Policy / TR.1).
     ///
     /// Set by `load_model()`/`load_cabsim()`/IR-clear when the swap would
     /// change the physical latency: the resources are fully built off-RT here,
@@ -270,7 +270,7 @@ impl<'a> NamClapMainThread<'a> {
         if let Ok(ir_guard) = self.shared.cold.ir_path.lock() {
             self.params.ir_path = ir_guard.as_ref().map(std::path::PathBuf::from);
         }
-        // T6.2: keep the IR digest in lockstep with the path — no persisted IR
+        // Mandatory asset identity: keep the IR digest in lockstep with the path — no persisted IR
         // reference without its SHA-256 digest, and no stale digest when the
         // IR was cleared.
         if let Ok(hash_guard) = self.shared.cold.ir_hash.lock() {

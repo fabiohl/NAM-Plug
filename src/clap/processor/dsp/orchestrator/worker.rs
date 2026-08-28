@@ -120,10 +120,9 @@ pub(crate) fn apply_scheduled_event(
                         .store(factor.to_f32() as u32, Ordering::Relaxed);
                     // If the plugin is active, defer the rebuild
                     // via host restart; otherwise flag the main thread.
-                    // T3.1/F-LAT-004: the pending restart uses the
-                    // `PendingRestartOs` encoding so a transition *to Off*
-                    // is representable (the raw 0 no longer collides with
-                    // "no restart pending").
+                    // The pending restart uses the `PendingRestartOs` encoding
+                    // so a transition *to Off* is representable (the raw 0
+                    // no longer collides with "no restart pending").
                     if buffer_size > 0 {
                         PendingRestartOs::Pending(factor)
                             .store(pending_restart_os_factor, Ordering::Release);

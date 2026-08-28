@@ -50,12 +50,12 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ## 2. Compilation Strategy & Feature Flags
 
-`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.7.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing binaries (`pgo_profiling_workload` and `nam_bin_guard` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
+`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.7.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload`, `nam_bin_guard`, and `nam_perf_guard` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
 
 The crate feature flags defined in `Cargo.toml` are:
 
 - **`stereo` (default):** Enables dual-channel L/R audio processing and dynamic adaptive stereo VU metering.
-- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, `nam_bin_guard`, and the `pgo_profiling_workload` binary.
+- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, `nam_bin_guard`, `nam_perf_guard`, and the `pgo_profiling_workload` binary.
 - **`heap-audit`:** Activates the allocation counting allocator interceptor (`CountingAllocator`) for RT-safety heap audits.
 
 ```bash
@@ -86,19 +86,19 @@ Core DSP neural inference is mono by definition. Buffer extraction and VU meteri
 
 ### 3.2 Parameter Surface Catalog
 
-Exposed via `NamPluginParams` (`src/common/params.rs`) and registered in `src/clap/extensions/params/`. Parameter IDs are `u32` constants (`PARAM_*`, 0–8):
+Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `neural_amp_modeler_rs::common::params::RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–8):
 
-| Parameter                | ID                         | Type    | Range / Options                     | Description                                               |
-|:------------------------ |:-------------------------- |:------- |:----------------------------------- |:--------------------------------------------------------- |
-| **Input Gain**           | `input_gain_db` (0)        | dB      | `-20.0` to `+20.0`                  | Pre-inference gain, sample-accurate smoothed.             |
-| **Output Gain**          | `output_gain_db` (1)       | dB      | `-20.0` to `+20.0`                  | Post-inference gain, sample-accurate smoothed.            |
-| **Gate Threshold**       | `gate_threshold_db` (2)    | dB      | `-100.0` to `0.0`                   | Noise-gate opening threshold.                             |
-| **Bypass**               | `bypass` (3)               | Binary  | `false` / `true`                    | Disables neural processing (32 ms crossfaded passthrough) |
-| **Active Model**         | `active_model` (4)         | String  | Read-only                           | Filename of currently loaded model.                       |
-| **Adaptive Compute**     | `adaptive_compute` (5)     | Stepped | `Off`, `Conservative`, `Aggressive` | CPU-based dynamic degradation FSM.                        |
-| **Slim Override**        | `slim_override` (6)        | Stepped | `Auto`, `ForceFull`, `ForceLite`    | Slimmable A2 container submodel selection.                |
-| **Oversampling**         | `oversample` (7)           | Stepped | `Off`, `2x`, `4x`                   | Activation oversampling factor.                           |
-| **Activation Precision** | `activation_precision` (8) | Stepped | `Standard`, `Fast`                  | Math mode (`Standard` exact-grade / `Fast` Padé-minimax). |
+| Parameter                | ID                         | Type    | Range / Options                                                 | Description                                                |
+|:------------------------ |:-------------------------- |:------- |:--------------------------------------------------------------- |:---------------------------------------------------------- |
+| **Input Gain**           | `input_gain_db` (0)        | dB      | `-20.0` to `+20.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.              |
+| **Output Gain**          | `output_gain_db` (1)       | dB      | `-20.0` to `+20.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.             |
+| **Gate Threshold**       | `gate_threshold_db` (2)    | dB      | `-90.0` to `-40.0` (default `-70.0`)                            | Noise-gate opening threshold.                              |
+| **Bypass**               | `bypass` (3)               | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables neural processing (32 ms crossfaded passthrough). |
+| **Active Model**         | `active_model` (4)         | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.       |
+| **Adaptive Compute**     | `adaptive_compute` (5)     | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                         |
+| **Slim Override**        | `slim_override` (6)        | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                 |
+| **Oversampling**         | `oversample` (7)           | Stepped | `0` (`Off` / default), `1` (`2x`), `2` (`4x`)                   | Activation oversampling factor.                            |
+| **Activation Precision** | `activation_precision` (8) | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact-grade / `Fast` Padé-minimax).  |
 
 Model file paths (`.nam`/`.namb`) and Cabsim IR file paths (`.wav`) are managed as **DAW State Properties** (`clap_plugin_state`), enabling project-level serialization and restoration.
 
@@ -106,18 +106,18 @@ Model file paths (`.nam`/`.namb`) and Cabsim IR file paths (`.wav`) are managed 
 
 Every asset reference persisted in state **must** carry its SHA-256 hex digest
 (`model_hash` / `ir_hash`, exactly 64 hex characters) — the content-based
-portable identity of the file (T6.2 / F-ROB-PLUG-08 residual). The invariant:
+portable identity of the file. The invariant:
 
 > **No asset is adopted without a valid digest that was verified in the same
 > restore cycle** — except an explicit user override, which is always logged.
 
-| Path | Policy |
-|:-----|:-------|
-| **Full restore** (project / duplicate) | `model_path` exists: the digest is mandatory and must match the file at restore time. Missing, malformed or divergent digest rejects that path; the basename fallback only runs when the *expected* digest exists and matches a candidate. Full state without any expected digest ⇒ explicit failure — the previously active DSP stays intact. |
-| **Basename search** (portable / cross-machine) | A candidate is adopted only when its computed digest equals the saved `model_hash`. A reference without a saved hash is rejected outright — the first candidate is never accepted silently. |
-| **IR** | The same rule applies: an `ir_path` without a valid `ir_hash` never loads the WAV. |
-| **Presets without hash** (legacy) | Single documented policy: **rejected in automatic restore**; the migration path is the explicit GUI action — re-load the model/IR file via the dialog, which recomputes the digest from the file the user picked and re-saves the preset. There is no silent fail-open. |
-| **Save** | `state.save` / `state-context.save` refuse to persist any asset reference lacking a well-formed digest (defensive guard; every adoption path already computes it). |
+| Path                                           | Policy                                                                                                                                                                                                                                                                                                                                         |
+|:---------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Full restore** (project / duplicate)         | `model_path` exists: the digest is mandatory and must match the file at restore time. Missing, malformed or divergent digest rejects that path; the basename fallback only runs when the *expected* digest exists and matches a candidate. Full state without any expected digest ⇒ explicit failure — the previously active DSP stays intact. |
+| **Basename search** (portable / cross-machine) | A candidate is adopted only when its computed digest equals the saved `model_hash`. A reference without a saved hash is rejected outright — the first candidate is never accepted silently.                                                                                                                                                    |
+| **IR**                                         | The same rule applies: an `ir_path` without a valid `ir_hash` never loads the WAV.                                                                                                                                                                                                                                                             |
+| **Presets without hash** (legacy)              | Single documented policy: **rejected in automatic restore**; the migration path is the explicit GUI action — re-load the model/IR file via the dialog, which recomputes the digest from the file the user picked and re-saves the preset. There is no silent fail-open.                                                                        |
+| **Save**                                       | `state.save` / `state-context.save` refuse to persist any asset reference lacking a well-formed digest (defensive guard; every adoption path already computes it).                                                                                                                                                                             |
 
 All adoption paths (GUI model/IR load, preset-load extension, transactional
 restore) compute the digest up-front and **fail closed** if it cannot be
@@ -130,20 +130,21 @@ without a digest is never adopted, and therefore never persisted.
 
 Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-extensions`:
 
-| Extension                      | Reference File                            | Purpose                                                                                    |
-|:------------------------------ |:----------------------------------------- |:------------------------------------------------------------------------------------------ |
-| `clap_plugin_audio_ports`      | `src/clap/extensions/audio_ports.rs`      | Mono input/output audio ports, in-place processing pair enabled.                           |
-| `clap_plugin_params`           | `src/clap/extensions/params/`             | Parameter mapping, DAW automation, gesture tracking, and `flush()`.                        |
-| `clap_plugin_state`            | `src/clap/extensions/state.rs`            | DAW project state serialization (parameters + model path + IR path).                       |
-| `clap_plugin_state_context`    | `src/clap/extensions/state_context.rs`    | Context-aware state restore (distinguishes portable preset vs project duplicate).          |
-| `clap_plugin_latency`          | `src/clap/extensions/latency.rs`          | Dynamic latency reporting (resampler + oversample + cabsim total delay).                   |
-| `clap_plugin_track_info`       | `src/clap/extensions/track_info.rs`       | Host track color synchronization to GUI accent theme.                                      |
-| `clap_plugin_remote_controls`  | `src/clap/extensions/remote_controls.rs`  | "Main" and "Gate" control pages for hardware controllers / device panels.                  |
-| `clap_plugin_param_indication` | `src/clap/extensions/param_indication.rs` | GUI visual cues for mapped/automated/overridden parameter status.                          |
-| `clap_plugin_preset_load`      | `src/clap/extensions/preset_load.rs`      | Direct model loading (`.nam`/`.namb`) from host preset browser.                            |
-| `clap_plugin_render`           | `src/clap/extensions/render.rs`           | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision. |
-| `clap_plugin_tail`             | `src/clap/extensions/tail.rs`             | Host tail query reporting remaining cab-sim IR ring-out frames.                            |
-| `clap_plugin_gui`              | `src/clap/extensions/gui.rs`              | Native `egui` windowing via `baseview` (`CLAP_WINDOW_API_X11`).                            |
+| Extension                            | Reference File                                  | Purpose                                                                                    |
+|:------------------------------------ |:----------------------------------------------- |:------------------------------------------------------------------------------------------ |
+| `clap_plugin_audio_ports`            | `src/clap/extensions/audio_ports.rs`            | Mono input/output audio ports, in-place processing pair enabled.                           |
+| `clap_plugin_audio_ports_activation` | `src/clap/extensions/audio_ports_activation.rs` | Dynamic channel deactivation (e.g. right channel on mono tracks) saving gain/copy compute. |
+| `clap_plugin_params`                 | `src/clap/extensions/params/`                   | Parameter mapping, DAW automation, gesture tracking, and `flush()`.                        |
+| `clap_plugin_state`                  | `src/clap/extensions/state.rs`                  | DAW project state serialization (parameters + model path + IR path).                       |
+| `clap_plugin_state_context`          | `src/clap/extensions/state_context.rs`          | Context-aware state restore (distinguishes portable preset vs project duplicate).          |
+| `clap_plugin_latency`                | `src/clap/extensions/latency.rs`                | Dynamic latency reporting (resampler + oversample + cabsim total delay).                   |
+| `clap_plugin_track_info`             | `src/clap/extensions/track_info.rs`             | Host track color synchronization to GUI accent theme.                                      |
+| `clap_plugin_remote_controls`        | `src/clap/extensions/remote_controls.rs`        | "Main" and "Gate" control pages for hardware controllers / device panels.                  |
+| `clap_plugin_param_indication`       | `src/clap/extensions/param_indication.rs`       | GUI visual cues for mapped/automated/overridden parameter status.                          |
+| `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                            |
+| `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision. |
+| `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining cab-sim IR ring-out frames.                            |
+| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Native `egui` windowing via `baseview` (`CLAP_WINDOW_API_X11`).                            |
 
 > **Host Compatibility Note:** Native X11 window embedding (`CLAP_WINDOW_API_X11`) is verified and functional across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. A known host-side window management limitation exists in **PreSonus Studio One / Fender Studio Pro for Linux**, where the host currently fails to initialize or attach embedded X11/XWayland surfaces. Audio DSP and parameter automation remain fully functional.
 
@@ -266,8 +267,8 @@ Calling `deactivate()` returns SPSC channel consumers (`param_rx`, `gc_tx`, `sli
 
 State restoration (`clap_plugin_state`, `clap_plugin_state_context`, and the
 preset-load extension) is applied through a transactional **Stage → Commit →
-Ack** protocol that keeps UI, disk and audio observing the *same* generation
-(T6.1 / F-ROB-PLUG-07 residual). The invariant is **"old-complete or
+Ack** protocol that keeps UI, disk and audio observing the *same* generation.
+The invariant is **"old-complete or
 new-complete"**: no observer ever sees a hybrid of two restore generations.
 
 1. **Stage** — `build_restore_package(validated, current_params, host_rate, mode)`
@@ -365,18 +366,17 @@ To prevent audible clicks, pops, or abrupt phase shifts when toggling the plugin
 
 - **Equal-Power 32 ms Crossfade:** Ramps `crossfader.mix` linearly towards the target mix (`0.0` for pure dry, `1.0` for pure wet) across sub-blocks.
 - **Branchless FMA Vector Loop:** Inner blend loop executes across `n_xfade` samples without internal branching (`wet[i] = dry[i] + (wet[i] - dry[i]) * mix`), allowing complete auto-vectorization and FMA generation.
-- **Cardinality Defensive Guard:** with the strict-cardinality streaming adapter (T1.2) `n_out == n_samples == dry_n` always; the legacy overflow region (`n_xfade..n_xfade_raw`, wet count exceeding the dry capture) remains as a cheap defensive guard with dry=0.0 semantics.
+- **Cardinality Defensive Guard:** with the strict-cardinality streaming adapter `n_out == n_samples == dry_n` always; the legacy overflow region (`n_xfade..n_xfade_raw`, wet count exceeding the dry capture) remains as a cheap defensive guard with dry=0.0 semantics.
 - **Mix Value Clamping:** Mix parameters are clamped to `[0.0, 1.0]` at each step, ensuring saturation cannot overflow even with extreme buffer sizes.
 
-#### 6.2.1 Latency-Compensated Dry Path (`DryDelayLine`, T4.1 / F-DSP-008)
+#### 6.2.1 Latency-Compensated Dry Path (`DryDelayLine`)
 
 The wet DSP chain applies a fixed algorithmic latency (`cached_effective_latency` =
 streaming resampler + oversampling half-band delay + cab-sim partition, in
-host-rate samples). Before T4.1 the dry path bypassed this latency entirely:
-the crossfade blended two signals representing *different* temporal instants
-of the input (comb filtering / transient cancellation), and the fully-bypassed
-state returned to zero physical latency while the plugin kept announcing the
-wet latency (PDC inconsistency).
+host-rate samples). The dry path is latency-compensated:
+the crossfade blends signals representing the exact same temporal instant of the input,
+preventing comb filtering or transient cancellation, and the fully-bypassed
+state matches the declared plugin latency for seamless host PDC.
 
 - **Pre-allocated circular delay line:** `DryDelayLine` (`dsp/dry_delay.rs`)
   is a bounded L/R ring buffer allocated once in `activate()` (capacity =
@@ -394,7 +394,7 @@ wet latency (PDC inconsistency).
   resource-swap handlers) calls `dry_delay.set_delay()` at the exact instant
   the new wet resources land; `activate()` initializes the delay from
   `initial_latency`. A staged + restart swap keeps the old delay until
-  `activate()` consumes it (Política A, T3.3). Non-finite input containment
+  `activate()` consumes it (strict restart policy). Non-finite input containment
   resets the ring.
 - **Bypass keeps the declared latency:** in the fully-bypassed state the
   output is the input delayed by exactly the declared latency, so the plugin's
@@ -492,7 +492,7 @@ NAM-Plug utilizes typed diagnostic codes (`NamErrorCode` in `NeuralAmpModeler-rs
 
 ## 9. Test Infrastructure & Contract Validation
 
-Automated CLAP integration testing and specification validation are implemented across four dedicated testing layers:
+Automated CLAP integration testing, static analysis, and specification validation are implemented across seven dedicated testing and certification layers:
 
 ### 9.1 Host Harness (`src/clap/host_harness.rs`)
 
@@ -506,13 +506,37 @@ A fully functional simulated DAW host environment built within library unit test
 
 Integration tests dynamic-link against the compiled `.so` binary using `PluginEntry::load(&artifact.path)` rather than static linking, asserting ABI symbol compliance and recording SHA256 binary hashes for CI traceability.
 
-### 9.3 Headless GUI Testing (Xvfb)
+### 9.3 Binary Surface & AVX-512 Absence Guard (`tests/avx512_guard.rs`, `src/bin/nam_bin_guard.rs`)
+
+Guarantees strict adherence to the baseline `x86-64-v3` architecture:
+
+- Binary machine code scanner decoding ELF `.text` sections for EVEX prefix bytes (`0x62`).
+- Symbol table scanner forbidding AVX-512 specific mangled symbols in default builds.
+- Fail-closed execution in both integration tests and release verification scripts (`utils/lib/verify_no_avx512_release.sh`).
+
+### 9.4 Real-Time Heap Allocation Audit (`CountingAllocator` / `tests/clap.rs`, `src/clap/processor/heap_audit.rs`)
+
+Enforces zero heap allocation on the audio thread:
+
+- Global memory interceptor (`CountingAllocator`) active under `--features "testing,heap-audit"`.
+- Static AST-light scanner (`utils/lib/verify_no_rt_alloc.sh`) parsing `src/clap/processor/` to verify zero `Box`, `Vec`, or `format!` invocations on the audio thread.
+
+### 9.5 Headless GUI Testing (Xvfb)
 
 Floating window lifecycle (`create` $\to$ `set_transient` $\to$ `destroy`) and clipboard integration (`arboard`) are validated under a headless virtual X11 display (`Xvfb :99`) with Mesa software rendering (`llvmpipe`), executed on-demand (manually or in extended CI) since they require the Xvfb headless display stack.
 
-### 9.4 E2E CLAP vs NAMCore Parity (`tests/clap/clap_parity_multi_sr.rs`)
+### 9.6 E2E CLAP vs NAMCore Parity & CabSim IR Test (`tests/clap/clap_parity_multi_sr.rs`, `tests/clap/clap_cabsim_ir.rs`)
 
-Loads `.so`, loads target models via CLAP state, processes stress signals across irregular buffer sizes, and compares output against the reference C++ NAMCore oracle with conservative gates `ESR < 1e-8`, `SNR > 80 dB` (measured 2026-08-13: ESR ≈ 7.9e-12 / 111 dB). Runs under `utils/tests-quick.sh` Phase 2 (release-only scope, S6-T04 / RES-04) when the C++ render binary, the release `.so` and the model fixture are present; otherwise reported as an explicit GAP.
+- **NAMCore Float Parity:** Loads `.so`, loads target models via CLAP state, processes stress signals across irregular buffer sizes, and compares output against the reference C++ NAMCore oracle with conservative gates `ESR < 1e-8`, `SNR > 80 dB` (typical measured baseline: ESR ≈ 7.9e-12 / 111 dB). Runs under `utils/tests-quick.sh` Phase 2 when prerequisites are present.
+- **CabSim IR Artifact Test:** `dlopen`s the release `.so` to prove a loaded `.wav` impulse response actively transforms audio output.
+
+### 9.7 Distributed Artifact Performance Certification Gate (`src/bin/nam_perf_guard.rs`)
+
+CLI gate executing realistic inference workloads against the finalized, stripped, and post-BOLT `.so` binary:
+
+- Measures statistical latency distributions (p50, p95, p99, max, mean, ns/sample) across core topologies (WaveNet A1 Standard, WaveNet A2 Slimmable, LSTM) and block sizes (64 and 128 samples).
+- Validates real-time deadline margins against strict thresholds.
+- Detects host environmental noise / thermal anomalies, emitting a structured JSON certification report (`target/perf-certification-report.json`).
 
 ---
 
@@ -531,7 +555,7 @@ Freedesktop Flatpak audio applications utilize a standardized extension point ar
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Mount Point: /app/extensions/Plugins/                                      │
 │    └── clap/                                                                │
-│         └── nam_plug.clap ◄── Mounted dynamically from host runtime        │
+│         └── nam_plug.clap ◄── Mounted dynamically from host runtime         │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  AppStream Catalog: /app/extensions/Plugins/share/metainfo/                 │
 │    └── org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml              │

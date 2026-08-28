@@ -4,10 +4,10 @@
 #
 # Binary artifact inspection guard: verifies zero AVX-512 symbols and zero
 # EVEX/ZMM instructions in default (non-avx512) release compilation artifacts
-# using the fail-closed nam_bin_guard scanner (Sprint 4 / F-ROB-PLUG-10).
+# using the fail-closed nam_bin_guard scanner.
 #
 # Usage:
-#   utils/verify_no_avx512_release.sh [path/to/artifact.so|.rlib|binary]
+#   utils/lib/verify_no_avx512_release.sh [path/to/artifact.so|.rlib|binary]
 
 set -euo pipefail
 

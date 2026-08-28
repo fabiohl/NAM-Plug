@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
 //! RAII rollback guard for `activate()` resource extraction.
-//! CLAP-F026: If any allocation stage in `activate()` fails
+//!
+//! If any allocation stage in `activate()` fails
 //! (resampler, ConvEngine, oversampling engines, buffer pre-allocation),
 //! the guard restores ownership of SPSC channel ends and `DeactivatedDspState`
 //! back into `ColdShared`, leaving the plugin in a clean deactivated state

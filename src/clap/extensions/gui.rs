@@ -49,7 +49,7 @@ fn try_join_until(
 /// Spawns a lightweight "reaper" thread whose sole responsibility is to join
 /// `handle` when the target thread finishes, reclaiming its OS resources.
 ///
-/// # Last resort only (R-09)
+/// # Last resort thread resource cleanup
 ///
 /// The reaper must only be spawned after every raw pointer held by the target
 /// thread has been invalidated (`alive_fence` lowered): from that point on the
@@ -70,7 +70,7 @@ impl<'a> NamClapMainThread<'a> {
     ///
     /// Idempotent — safe to call even when no windows are open.
     ///
-    /// # R-09 teardown protocol
+    /// # GUI teardown lifecycle protocol
     ///
     /// During plugin destruction (`NamClapMainThread::drop`) the caller lowers
     /// `alive_fence` **before** invoking this method, so any GUI thread that
@@ -271,10 +271,10 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
 
             let alive_fence = self.shared.cold.alive_fence.clone();
 
-            // R-11: `NamPluginWindow::new` returns a structured error (never
-            // panics) and the baseview build callback is additionally wrapped
-            // in `catch_unwind`, so a panic can never cross the CLAP FFI
-            // boundary into the C++ host. On failure the callback returns a
+            // Fail-closed initialization protocol: `NamPluginWindow::new` returns
+            // a structured error (never panics) and the baseview build callback
+            // is additionally wrapped in `catch_unwind`, so a panic can never cross
+            // the CLAP FFI boundary into the C++ host. On failure the callback returns a
             // degraded stub window (which closes on its first frame) and the
             // error message is recorded here for a friendly `Err` return.
             // (A `&'static str` is used — `PluginError` itself is not `Send`.)
@@ -385,8 +385,8 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
 
             let alive_fence = self.shared.cold.alive_fence.clone();
 
-            // R-11: same fail-closed protocol as `set_parent` — the build
-            // callback never panics (Result + catch_unwind) and records the
+            // Fail-closed initialization protocol: same protocol as `set_parent` —
+            // the build callback never panics (Result + catch_unwind) and records the
             // error message so `set_transient` can report a friendly `Err`
             // while the window thread degrades to a stub and exits.
             let init_outcome = Arc::new(std::sync::Mutex::new(None::<&'static str>));

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! CLI entry point for the Distributed Artifact Performance Certification Gate (`F-QA-011`).
+//! CLI entry point for the Distributed Artifact Performance Certification Gate.
 //!
 //! Dynamically loads the final distributed CLAP artifact (post-strip and post-BOLT),
 //! executes authentic neural inference benchmarks across core topologies (WaveNet A1 Standard,

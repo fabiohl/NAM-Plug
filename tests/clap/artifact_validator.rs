@@ -5,7 +5,7 @@
 //! its SHA256, and ensure integration tests run against the real build
 //! artifact, not a stale install or static-link path.
 //!
-//! # Rationale (CLAP-F025)
+//! # Architectural Rationale
 //!
 //! Static-link tests (`PluginEntry::load_from_clack`) exercise a compile-time
 //! code path that can differ from the dynamically-loaded `.so`. Installed
@@ -67,7 +67,7 @@ fn is_strict_artifact_mode() -> bool {
         || env::var("CLAP_STRICT_ARTIFACT").as_deref() == Ok("1")
 }
 
-/// T6.4 fail-closed staleness gate. In strict mode the resolved artifact must
+/// Fail-closed staleness gate. In strict mode the resolved artifact must
 /// be newer than every source input it is compiled from; a stale `.so` aborts
 /// the suite instead of being silently validated (defect: `ensure_clap_artifact`
 /// used to accept any pre-existing artifact without rebuild).
@@ -77,7 +77,7 @@ pub fn verify_artifact_freshness(path: &Path) {
     }
     if let Some(stale) = first_stale_source_input(path) {
         panic!(
-            "STALE CLAP artifact (fail-closed, T6.4): '{}' is newer than {path:?}.\n\
+            "STALE CLAP artifact (fail-closed staleness gate): '{}' is newer than {path:?}.\n\
              Rebuild with `cargo build --locked` before running the suite in strict mode;\
              a stale artifact is never validated.",
             stale.display()
@@ -161,7 +161,7 @@ fn stale_input_against(artifact_mtime: SystemTime, inputs: &[PathBuf]) -> Option
 /// **Does NOT fall back** to `~/.clap/nam-plug.clap` unless explicitly pointed to by
 /// `CLAP_PLUGIN_UNDER_TEST`. In strict mode (`NAM_QUICK_STRICT=1` or `CLAP_STRICT_ARTIFACT=1`),
 /// missing explicit artifacts or profile mismatches fail immediately (fail-closed), and
-/// `TestedArtifact::resolve_and_hash` additionally enforces the T6.4 staleness gate
+/// `TestedArtifact::resolve_and_hash` additionally enforces the fail-closed staleness gate
 /// (the `.so` must be newer than every source input it is compiled from).
 pub fn resolve_plugin_artifact_path() -> PathBuf {
     let is_strict = is_strict_artifact_mode();

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Unit tests for the R-09 GUI teardown protocol.
+//! Unit tests for the GUI teardown lifecycle protocol.
 //!
 //! Covers the bounded-join teardown helpers and the `NamClapMainThread::drop`
 //! contract: the alive fence is lowered before teardown, and any fake
@@ -83,7 +83,7 @@ fn test_try_join_until_times_out_and_returns_handle_for_reaper() {
 }
 
 // ---------------------------------------------------------------------------
-// Drop teardown contract (R-09)
+// Drop teardown contract
 // ---------------------------------------------------------------------------
 
 /// Destroying the plugin without ever calling `gui.destroy()` must lower the
@@ -106,7 +106,7 @@ fn test_drop_teardown_lowers_fence_and_joins_floating_thread() {
     mt.floating_thread_handle = Some(handle);
     mt.floating_close_signal = Some(close_signal);
 
-    // The R-09 scenario: host destroys the plugin without gui.destroy().
+    // Host destroys the plugin without gui.destroy().
     drop(plugin_instance);
 
     assert!(
@@ -119,7 +119,7 @@ fn test_drop_teardown_lowers_fence_and_joins_floating_thread() {
 }
 
 /// Repeatedly opening and destroying the plugin with an active floating
-/// window must never panic, hang, or leave the fence raised (R-09 acceptance:
+/// window must never panic, hang, or leave the fence raised (acceptance:
 /// stress with rapid floating window open/close).
 #[test]
 fn test_stress_rapid_teardown_cycles() {
