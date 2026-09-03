@@ -31,6 +31,7 @@ pub use state::BypassCrossfader;
 pub(crate) use state::MAX_STRUCTURAL_COMMANDS_PER_CALLBACK;
 pub(crate) use state::NamClapProcessor;
 
+use crate::clap::plugin::errors::{self, static_plugin_error};
 use crate::clap::plugin::{
     CommandConsumer, NamClapMainThread, NamClapShared, PendingRestartOs, StagedRestore,
 };
@@ -51,38 +52,38 @@ use neural_amp_modeler_rs::models::NamModel;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-/// Helper to construct a `PluginError::Message` with a leaked string slice.
-///
-/// NOTE: Intentional leak — `PluginError::Message` requires `'static` lifetime.
-/// Since initialization errors and panic handling occur rarely during plugin setup
-/// or emergency unwinding (and crash details are captured to disk), leaking a small
-/// error string slice is an intentional design trade-off to satisfy `clack_plugin`
-/// API signatures (Finding F01).
-#[inline]
-fn leak_error_msg(msg: impl Into<String>) -> PluginError {
-    // NOTE: Intentional leak — PluginError requires 'static lifetime
-    PluginError::Message(Box::leak(msg.into().into_boxed_str()))
-}
-
 /// Converts a panic payload into `PluginError` for `catch_unwind` guards.
 ///
 /// The panic hook has already written the full crash report to
 /// `~/.cache/nam-rs/crash-*.txt`. This function extracts a human-readable
 /// message from the payload so the host can display it.
 ///
-/// NOTE: Intentional leak — PluginError requires 'static lifetime. Dynamic panic
-/// payload strings are converted and intentionally leaked via [`leak_error_msg`] to
-/// satisfy the `'static` requirement of `PluginError::Message` (Finding F01).
+/// NOTE: this is the ONLY sanctioned intentional heap-leak of an error string
+/// in the plugin error paths (T-4.1.2 / SA-04): panic payload strings need a
+/// `'static` message for `PluginError::Message`, and the process is already
+/// recovering from a critical failure — the leak is trivial and one-shot. All
+/// other runtime error formatting goes through the static catalog
+/// (`plugin::errors`).
 #[cold]
 fn panic_to_error(panic_info: Box<dyn std::any::Any + Send>) -> PluginError {
     // NOTE: Intentional leak — PluginError requires 'static lifetime
     if let Some(s) = panic_info.downcast_ref::<String>() {
-        leak_error_msg(s.clone())
+        PluginError::Message(Box::leak(s.clone().into_boxed_str()))
     } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-        leak_error_msg(s.to_string())
+        PluginError::Message(Box::leak(s.to_string().into_boxed_str()))
     } else {
         PluginError::Message("Plugin panicked — crash report saved to ~/.cache/nam-rs/")
     }
+}
+
+/// Builds an `activate()` DSP buffer pre-allocation error (SA-04): the DAW
+/// receives a static catalog message; the stage name and underlying cause are
+/// emitted to the logger only.
+fn buffer_prealloc_error(stage: &str, error: impl std::fmt::Debug) -> PluginError {
+    static_plugin_error(
+        errors::activation::BUFFER_PREALLOC_FAILED,
+        format_args!("pre-allocation of {stage} buffer failed: {error:?}"),
+    )
 }
 
 /// Note: the entire `PluginAudioProcessor` impl must live in a single block
@@ -115,7 +116,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .ok_or_else(|| {
-                    PluginError::Message("param_rx consumer has already been extracted")
+                    PluginError::Message(errors::activation::PARAM_RX_ALREADY_EXTRACTED)
                 })?;
 
             let mut rollback = rollback::ActivateRollbackGuard::new(shared);
@@ -127,7 +128,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
-                .ok_or_else(|| PluginError::Message("gc_tx producer has already been extracted"))?;
+                .ok_or_else(|| PluginError::Message(errors::activation::GC_TX_ALREADY_EXTRACTED))?;
             rollback.gc_tx = Some(gc_tx);
 
             let slimmable_rx = shared
@@ -137,7 +138,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .ok_or_else(|| {
-                    PluginError::Message("slimmable_rx consumer has already been extracted")
+                    PluginError::Message(errors::activation::SLIMMABLE_RX_ALREADY_EXTRACTED)
                 })?;
             rollback.slimmable_rx = Some(slimmable_rx);
 
@@ -146,80 +147,48 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .max(MAX_RESAMP_BUF)
                 .max(1024)
                 * 2;
-            let buf_host_l = AlignedVec::new(buf_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!("pre-allocation of host buffer failed: {e:?}"))
-            })?;
-            let buf_host_r = AlignedVec::new(buf_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!("pre-allocation of host buffer failed: {e:?}"))
-            })?;
-            let buf_mid_l = AlignedVec::new(buf_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!("pre-allocation of mid buffer failed: {e:?}"))
-            })?;
-            let buf_mid_r = AlignedVec::new(buf_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!("pre-allocation of mid buffer failed: {e:?}"))
-            })?;
-            let buf_model_l = AlignedVec::new(buf_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!("pre-allocation of model buffer failed: {e:?}"))
-            })?;
-            let buf_model_r = AlignedVec::new(buf_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!("pre-allocation of model buffer failed: {e:?}"))
-            })?;
-            let buf_out_l = AlignedVec::new(buf_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!("pre-allocation of output buffer failed: {e:?}"))
-            })?;
-            let buf_out_r = AlignedVec::new(buf_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!("pre-allocation of output buffer failed: {e:?}"))
-            })?;
+            let buf_host_l = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("host", e))?;
+            let buf_host_r = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("host", e))?;
+            let buf_mid_l = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("mid", e))?;
+            let buf_mid_r = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("mid", e))?;
+            let buf_model_l = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("model", e))?;
+            let buf_model_r = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("model", e))?;
+            let buf_out_l = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("output", e))?;
+            let buf_out_r = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("output", e))?;
 
             // 2b. Oversample buffer pre-allocation (MAX_RESAMP_BUF * 4 for X4)
             let os_capacity = MAX_RESAMP_BUF * 4;
-            let buf_os_in_l = AlignedVec::new(os_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!(
-                    "pre-allocation of oversample input buffer failed: {e:?}"
-                ))
-            })?;
-            let buf_os_in_r = AlignedVec::new(os_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!(
-                    "pre-allocation of oversample input buffer failed: {e:?}"
-                ))
-            })?;
-            let buf_os_model_l = AlignedVec::new(os_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!(
-                    "pre-allocation of oversample model buffer failed: {e:?}"
-                ))
-            })?;
-            let buf_os_model_r = AlignedVec::new(os_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!(
-                    "pre-allocation of oversample model buffer failed: {e:?}"
-                ))
-            })?;
+            let buf_os_in_l = AlignedVec::new(os_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("oversample input", e))?;
+            let buf_os_in_r = AlignedVec::new(os_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("oversample input", e))?;
+            let buf_os_model_l = AlignedVec::new(os_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("oversample model", e))?;
+            let buf_os_model_r = AlignedVec::new(os_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("oversample model", e))?;
 
             // 2c. Bypass crossfade dry storage (one sub-block of input samples, max_frames_count).
             let xfade_capacity = audio_config.max_frames_count as usize;
-            let buf_xfade_dry_l = AlignedVec::new(xfade_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!(
-                    "pre-allocation of bypass xfade dry buffer failed: {e:?}"
-                ))
-            })?;
-            let buf_xfade_dry_r = AlignedVec::new(xfade_capacity, 0.0f32).map_err(|e| {
-                leak_error_msg(format!(
-                    "pre-allocation of bypass xfade dry buffer failed: {e:?}"
-                ))
-            })?;
+            let buf_xfade_dry_l = AlignedVec::new(xfade_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("bypass xfade dry", e))?;
+            let buf_xfade_dry_r = AlignedVec::new(xfade_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("bypass xfade dry", e))?;
 
             // 2d. WaveNet crossfade scratch buffers (0.5.0 run_inference): used
             // as the second-pass output when processing is chunked, so it must
             // not alias any accumulated output buffer. MAX_RESAMP_BUF each.
-            let buf_xfd_scratch_l = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32).map_err(|e| {
-                leak_error_msg(format!(
-                    "pre-allocation of crossfade scratch buffer failed: {e:?}"
-                ))
-            })?;
-            let buf_xfd_scratch_r = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32).map_err(|e| {
-                leak_error_msg(format!(
-                    "pre-allocation of crossfade scratch buffer failed: {e:?}"
-                ))
-            })?;
+            let buf_xfd_scratch_l = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("crossfade scratch", e))?;
+            let buf_xfd_scratch_r = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("crossfade scratch", e))?;
 
             // 3. DSP component initialization
             let model_rate = shared.cold.model_sample_rate.load(Ordering::Relaxed);
@@ -275,7 +244,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 } else {
                     Some(Box::new(
                         NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
-                            leak_error_msg(format!("Failed to create NamResampler: {:?}", e))
+                            static_plugin_error(
+                                errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                                format_args!("{e:?}"),
+                            )
                         })?,
                     ))
                 };
@@ -290,10 +262,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                             host_buffer as usize,
                         )
                         .map_err(|e| {
-                            leak_error_msg(format!(
-                                "Failed to create streaming resample buffer: {:?}",
-                                e
-                            ))
+                            static_plugin_error(
+                                errors::dsp_resources::STREAM_BUILD_FAILED,
+                                format_args!("{e:?}"),
+                            )
                         })?,
                     )
                 };
@@ -313,18 +285,18 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 } else {
                     let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
                         |e| {
-                            leak_error_msg(format!(
-                                "Failed to create oversample engine (L): {:?}",
-                                e
-                            ))
+                            static_plugin_error(
+                                errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
+                                format_args!("(L) engine: {e:?}"),
+                            )
                         },
                     )?);
                     let os_r = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
                         |e| {
-                            leak_error_msg(format!(
-                                "Failed to create oversample engine (R): {:?}",
-                                e
-                            ))
+                            static_plugin_error(
+                                errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
+                                format_args!("(R) engine: {e:?}"),
+                            )
                         },
                     )?);
                     Some((os_l, os_r))
@@ -334,7 +306,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             } else {
                 let res = Some(Box::new(
                     NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
-                        leak_error_msg(format!("Failed to create NamResampler: {:?}", e))
+                        static_plugin_error(
+                            errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                            format_args!("{e:?}"),
+                        )
                     })?,
                 ));
 
@@ -345,10 +320,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         host_buffer as usize,
                     )
                     .map_err(|e| {
-                        leak_error_msg(format!(
-                            "Failed to create streaming resample buffer: {:?}",
-                            e
-                        ))
+                        static_plugin_error(
+                            errors::dsp_resources::STREAM_BUILD_FAILED,
+                            format_args!("{e:?}"),
+                        )
                     })?,
                 );
 
@@ -359,10 +334,20 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 )?);
 
                 let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
-                    |e| leak_error_msg(format!("Failed to create oversample engine (L): {:?}", e)),
+                    |e| {
+                        static_plugin_error(
+                            errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
+                            format_args!("(L) engine: {e:?}"),
+                        )
+                    },
                 )?);
                 let os_r = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
-                    |e| leak_error_msg(format!("Failed to create oversample engine (R): {:?}", e)),
+                    |e| {
+                        static_plugin_error(
+                            errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
+                            format_args!("(R) engine: {e:?}"),
+                        )
+                    },
                 )?);
 
                 (res, stream, cab, Some((os_l, os_r)))
@@ -517,8 +502,14 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         (
                             None,
                             0,
-                            new_resampler.expect("Fresh resampler must have been built"),
-                            new_stream.expect("Fresh streaming buffer must have been built"),
+                            new_resampler.ok_or_else(|| {
+                                PluginError::Message(
+                                    errors::activation::RESAMPLER_UNAVAILABLE_STAGED,
+                                )
+                            })?,
+                            new_stream.ok_or_else(|| {
+                                PluginError::Message(errors::activation::STREAM_UNAVAILABLE_STAGED)
+                            })?,
                             1.0,
                             1.0,
                         )
@@ -527,10 +518,14 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     let cabsim_adapter = if let Some(ir) = txn.ir {
                         ir
                     } else {
-                        new_cabsim.expect("Fresh cabsim must have been built")
+                        new_cabsim.ok_or_else(|| {
+                            PluginError::Message(errors::activation::CABSIM_UNAVAILABLE_STAGED)
+                        })?
                     };
 
-                    let (os_l, os_r) = new_os.expect("Fresh oversamplers must have been built");
+                    let (os_l, os_r) = new_os.ok_or_else(|| {
+                        PluginError::Message(errors::activation::OVERSAMPLER_UNAVAILABLE_STAGED)
+                    })?;
 
                     (
                         model_l,
@@ -617,8 +612,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     (
                         None,
                         0,
-                        new_resampler.expect("Fresh resampler must have been built"),
-                        new_stream.expect("Fresh streaming buffer must have been built"),
+                        new_resampler.ok_or_else(|| {
+                            PluginError::Message(errors::activation::RESAMPLER_UNAVAILABLE_FRESH)
+                        })?,
+                        new_stream.ok_or_else(|| {
+                            PluginError::Message(errors::activation::STREAM_UNAVAILABLE_FRESH)
+                        })?,
                         1.0,
                         1.0,
                     )
@@ -626,9 +625,13 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 let cabsim_adapter = if let Some(ir) = staged_ir {
                     ir
                 } else {
-                    new_cabsim.expect("Fresh cabsim must have been built")
+                    new_cabsim.ok_or_else(|| {
+                        PluginError::Message(errors::activation::CABSIM_UNAVAILABLE_FRESH)
+                    })?
                 };
-                let (os_l, os_r) = new_os.expect("Fresh oversamplers must have been built");
+                let (os_l, os_r) = new_os.ok_or_else(|| {
+                    PluginError::Message(errors::activation::OVERSAMPLER_UNAVAILABLE_FRESH)
+                })?;
                 (
                     model_l,
                     model_generation,
@@ -761,16 +764,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .max(MAX_RESAMP_BUF)
                 .saturating_add(DRY_DELAY_MAX_EXTRA);
             let dry_delay = DryDelayLine::new(
-                AlignedVec::new(dry_delay_capacity, 0.0f32).map_err(|e| {
-                    leak_error_msg(format!(
-                        "pre-allocation of dry delay buffer (L) failed: {e:?}"
-                    ))
-                })?,
-                AlignedVec::new(dry_delay_capacity, 0.0f32).map_err(|e| {
-                    leak_error_msg(format!(
-                        "pre-allocation of dry delay buffer (R) failed: {e:?}"
-                    ))
-                })?,
+                AlignedVec::new(dry_delay_capacity, 0.0f32)
+                    .map_err(|e| buffer_prealloc_error("dry delay (L)", e))?,
+                AlignedVec::new(dry_delay_capacity, 0.0f32)
+                    .map_err(|e| buffer_prealloc_error("dry delay (R)", e))?,
                 initial_latency as usize,
             );
 
@@ -1168,11 +1165,12 @@ fn build_cab_sim_from_raw_samples(
     use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
     use std::sync::atomic::Ordering;
 
-    let raw_guard = shared
-        .cold
-        .ir_raw_samples
-        .lock()
-        .map_err(|e| leak_error_msg(format!("ir_raw_samples lock poisoned: {e}")))?;
+    let raw_guard = shared.cold.ir_raw_samples.lock().map_err(|e| {
+        static_plugin_error(
+            errors::dsp_resources::CABSIM_STORAGE_LOCK_POISONED,
+            format_args!("{e}"),
+        )
+    })?;
     let Some(ref samples) = *raw_guard else {
         return Ok(None);
     };
@@ -1182,10 +1180,10 @@ fn build_cab_sim_from_raw_samples(
     let resolved_samples: std::borrow::Cow<'_, [f32]> =
         if stored_rate > 0 && stored_rate != host_rate {
             let resampled = CabSimIr::resample(samples, stored_rate, host_rate).map_err(|e| {
-                leak_error_msg(format!(
-                    "IR resample failed: {} Hz → {} Hz: {e}",
-                    stored_rate, host_rate
-                ))
+                static_plugin_error(
+                    errors::dsp_resources::CABSIM_IR_RESAMPLE_FAILED,
+                    format_args!("{stored_rate} Hz → {host_rate} Hz: {e}"),
+                )
             })?;
             std::borrow::Cow::Owned(resampled)
         } else {
@@ -1200,11 +1198,22 @@ fn build_cab_sim_from_raw_samples(
         &resolved_samples,
         partition_size,
     )
-    .map_err(|e| leak_error_msg(format!("ConvEngine allocation failed: {e:?}")))?;
+    .map_err(|e| {
+        static_plugin_error(
+            errors::dsp_resources::CABSIM_BUILD_FAILED,
+            format_args!("ConvEngine::new failed: {e:?}"),
+        )
+    })?;
 
     Ok(Some(Box::new(
-        neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter::new(Box::new(engine))
-            .map_err(|e| leak_error_msg(format!("CabSimAdapter allocation failed: {e:?}")))?,
+        neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter::new(Box::new(engine)).map_err(
+            |e| {
+                static_plugin_error(
+                    errors::dsp_resources::CABSIM_BUILD_FAILED,
+                    format_args!("CabSimAdapter::new failed: {e:?}"),
+                )
+            },
+        )?,
     )))
 }
 

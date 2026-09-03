@@ -253,6 +253,7 @@ pub fn handle_knob(
     indication: u8,
     indication_color: egui::Color32,
     tooltip_suffix: &str,
+    off_threshold: Option<f32>,
 ) {
     const GESTURE_BITS_PER_PARAM: u32 = 3;
     const GESTURE_CHANGED_SHIFT: u32 = 0;
@@ -335,8 +336,21 @@ pub fn handle_knob(
                     .color(COL_MUTED),
             );
             let val_color = if ui.is_enabled() { COL_TEXT } else { COL_MUTED };
+            // When an `off_threshold` is configured (e.g. the GATE knob) and the
+            // current value has reached it, show "OFF" instead of the raw dB
+            // number. -90.0 dB is below the practical noise floor of virtually
+            // any signal chain, so showing "-90.0 dB" reads to users as "a very
+            // subtle but still-active gate" rather than "effectively disabled".
+            // This is a display-only affordance: the underlying CLAP parameter,
+            // automation, and stored value are untouched (still a plain dB
+            // float) — same vocabulary already used by the Oversampling control
+            // ("Off"/"2x"/"4x"). See TODO-Gate-NAM-Plug.md.
+            let display_text = match off_threshold {
+                Some(threshold) if final_val <= threshold => "OFF".to_string(),
+                _ => format!("{:.1} dB", final_val),
+            };
             ui.label(
-                egui::RichText::new(format!("{:.1} dB", final_val))
+                egui::RichText::new(display_text)
                     .font(egui::FontId::monospace(10.0))
                     .color(val_color),
             );

@@ -4,6 +4,7 @@
 //! NAM-Plug plugin definition and its CLAP lifecycle components.
 
 pub mod command_scheduler;
+pub mod errors;
 pub mod shared;
 pub use command_scheduler::{
     CMD_QUEUE_CAPACITY, CommandConsumer, CommandProducer, CommandScheduler,
@@ -98,7 +99,10 @@ impl DefaultPluginFactory for NamClapPlugin {
             ui_to_rt: UiToRt {
                 param_input_gain: AtomicU32::new(0.0f32.to_bits()),
                 param_output_gain: AtomicU32::new(0.0f32.to_bits()),
-                param_gate_thresh: AtomicU32::new((-70.0f32).to_bits()),
+                // Gate off by default: parked at the range minimum (-90 dB), the most
+                // permissive setting available, so the noise gate practically never
+                // closes out of the box. See TODO-Gate-NAM-Plug.md.
+                param_gate_thresh: AtomicU32::new((-90.0f32).to_bits()),
                 param_bypass: AtomicU32::new(0),
                 param_adaptive_compute: AtomicU32::new(1), // Conservative by default in CLAP plugin
                 param_slim_override: AtomicU32::new(0),    // Auto by default
@@ -315,7 +319,14 @@ impl DefaultPluginFactory for NamClapPlugin {
         #[cfg_attr(test, allow(unused_mut, clippy::allow_attributes))]
         let main_thread = NamClapMainThread {
             shared,
-            params: ProcessingParams::default(),
+            // Gate off by default (product decision, see TODO-Gate-NAM-Plug.md): the
+            // upstream crate default (-70.0 dB) is overridden here to the range
+            // minimum (-90.0 dB), the most permissive setting, so the gate practically
+            // never closes unless the user/host explicitly tightens the threshold.
+            params: ProcessingParams {
+                gate_threshold_db: -90.0,
+                ..ProcessingParams::default()
+            },
             host,
             sys: SystemSnapshot::capture(),
             cmd_producer,

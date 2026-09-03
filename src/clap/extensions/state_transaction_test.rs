@@ -654,3 +654,148 @@ fn test_build_restore_package_for_preset_with_model() {
     );
     assert_eq!(publish.model_basename.as_deref(), Some("lstm.nam"));
 }
+
+// ── SA-04 / T-4.1.2: heap stability under 10.000 corrupted states ─────────────
+//
+// A host replaying corrupted project/preset states in a loop must not grow the
+// plugin heap. Before the static error catalog (plugin::errors) every
+// validation failure below leaked its formatted message via `Box::leak`; each
+// submission added a permanent allocation. This stress test runs 10.000
+// submissions through the real CLAP state extension and asserts the number of
+// live heap allocations stays flat (heap-audit feature only: the counting
+// allocator must be the process `#[global_allocator]`).
+
+#[cfg(feature = "heap-audit")]
+const CORRUPTED_STATE_WARMUP: usize = 2000;
+#[cfg(feature = "heap-audit")]
+const CORRUPTED_STATE_SUBMISSIONS: usize = 10_000;
+
+/// Serialized state blobs that either deserialize into `ProcessingParams` and
+/// then fail transactional validation, or fail deserialisation outright. The
+/// model/IR validation variants (indices 0–5) and the appended malformed-IR-hash
+/// blob exercise `state_transaction` error paths that used to `Box::leak` their
+/// message on every submission (SA-04); the corrupted-bytes and empty-stream
+/// blobs assert rejection only.
+#[cfg(feature = "heap-audit")]
+fn corrupted_state_blobs() -> Vec<Vec<u8>> {
+    let mut blobs: Vec<Vec<u8>> = vec![
+        // Full restore with a non-existent model path and no portable fallback.
+        br#"{"model_path":"/nonexistent/nam_sa04_missing_model.nam"}"#.to_vec(),
+        // Same failure encoded as a v1 state envelope.
+        br#"{"version":1,"params":{"model_path":"/nonexistent/nam_sa04_missing_model.nam"}}"#
+            .to_vec(),
+        // Portable model basename rejected by the security sanitisation.
+        br#"{"model_path":null,"model_basename":"../evil.nam"}"#.to_vec(),
+        // Portable model basename without a saved SHA-256 digest.
+        br#"{"model_path":null,"model_basename":"ghost-model.nam"}"#.to_vec(),
+        // Portable model basename with a malformed SHA-256 digest.
+        br#"{"model_path":null,"model_basename":"ghost-model.nam","model_hash":"not-a-sha256"}"#
+            .to_vec(),
+        // IR path that does not exist on disk.
+        br#"{"ir_path":"/nonexistent/nam_sa04_missing_ir.wav"}"#.to_vec(),
+        // Totally corrupted bytes → deserialisation failure.
+        b"\x00\x01\x02\xff not-a-json-state".to_vec(),
+        // Empty state stream → early rejection.
+        Vec::new(),
+    ];
+
+    // Existing IR file whose saved digest is malformed → IR hash validation error.
+    let ir_file = std::env::temp_dir().join("nam_sa04_stress_ir.wav");
+    let _ = std::fs::remove_file(&ir_file);
+    let samples: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.05).sin()).collect();
+    neural_amp_modeler_rs::testing::wav::write_wav_f32(&ir_file, &samples, 48000)
+        .expect("failed to write synthetic IR for SA-04 stress test");
+    blobs.push(
+        serde_json::json!({ "ir_path": ir_file, "ir_hash": "malformed" })
+            .to_string()
+            .into_bytes(),
+    );
+
+    blobs
+}
+
+/// Raw pointer to the plugin's main thread object. The pointer stays valid for
+/// as long as `instance` is alive; callers must dereference it as
+/// `&mut NamClapMainThread<'static>`.
+#[cfg(feature = "heap-audit")]
+fn main_thread_ptr(
+    instance: &mut clack_host::plugin::PluginInstance<crate::clap::test_util::TestHost>,
+) -> *mut crate::clap::plugin::NamClapMainThread<'static> {
+    let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    unsafe {
+        clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
+            raw_ptr,
+            |w| Ok(w.main_thread().as_ptr()),
+        )
+        .expect("failed to get main-thread pointer")
+    }
+}
+
+/// Feeds one state blob through the plugin's real CLAP state-load pipeline (the
+/// exact code path a DAW triggers via the state extension) and reports whether
+/// the load was rejected.
+#[cfg(feature = "heap-audit")]
+fn plugin_state_load_fails(
+    main_thread: &mut crate::clap::plugin::NamClapMainThread,
+    blob: &[u8],
+) -> bool {
+    use clack_common::stream::InputStream;
+    use clack_extensions::state::PluginStateImpl;
+    let mut reader = blob;
+    let mut input = InputStream::from_reader(&mut reader);
+    PluginStateImpl::load(main_thread, &mut input).is_err()
+}
+
+#[cfg(feature = "heap-audit")]
+#[test]
+fn test_corrupted_states_10000_heap_stable() {
+    use neural_amp_modeler_rs::common::alloc_audit::get_dealloc_count;
+    use neural_amp_modeler_rs::common::alloc_audit::{TrackingGuard, get_alloc_count};
+
+    let (_entry, _host_info, mut plugin_instance) = crate::clap::test_util::make_test_plugin();
+    let blobs = corrupted_state_blobs();
+    let main_thread = unsafe { &mut *main_thread_ptr(&mut plugin_instance) };
+
+    let _guard = TrackingGuard::new();
+    // Exact live allocations: realloc is counted as +1 alloc with no matching
+    // dealloc for the superseded buffer, so it must be subtracted here.
+    let net_live = || {
+        use neural_amp_modeler_rs::common::alloc_audit::get_realloc_count;
+        get_alloc_count() - get_dealloc_count() - get_realloc_count()
+    };
+
+    // Warm-up reaches steady state for any one-shot lazy retention (logger ring,
+    // serde/CLAP lazily initialised caches, etc.) before the measured window
+    // opens. Every submission must be rejected — a corrupted state that
+    // "restores" would mutate the plugin and invalidate the measurement.
+    for i in 0..CORRUPTED_STATE_WARMUP {
+        let blob = &blobs[i % blobs.len()];
+        assert!(
+            plugin_state_load_fails(main_thread, blob),
+            "corrupted state {i} (warm-up) unexpectedly restored"
+        );
+    }
+    let baseline_live = net_live();
+
+    // Measured window: 10.000 consecutive corrupted-state submissions through
+    // the plugin's CLAP state pipeline. The number of live heap allocations
+    // must not grow (SA-04/T-4.1.2 invariant).
+    for i in 0..CORRUPTED_STATE_SUBMISSIONS {
+        let blob = &blobs[i % blobs.len()];
+        assert!(
+            plugin_state_load_fails(main_thread, blob),
+            "corrupted state {i} unexpectedly restored"
+        );
+    }
+    let final_live = net_live();
+
+    let _ = std::fs::remove_file(std::env::temp_dir().join("nam_sa04_stress_ir.wav"));
+
+    assert!(
+        final_live <= baseline_live + 128,
+        "heap grew by {} live allocations across {CORRUPTED_STATE_SUBMISSIONS} \
+         corrupted-state submissions (baseline {baseline_live} → final {final_live}) — \
+         SA-04 Box::leak regression",
+        final_live.saturating_sub(baseline_live)
+    );
+}

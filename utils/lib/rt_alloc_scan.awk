@@ -12,10 +12,11 @@
 #     excluded by the caller (repo convention: test modules included via
 #     `#[cfg(test)] #[path = "..."] mod`).
 #   - the off-RT lifecycle/helper functions in `processor/mod.rs`
-#     (`leak_error_msg`, `panic_to_error`, `activate`, `deactivate`,
+#     (`buffer_prealloc_error`, `panic_to_error`, `activate`, `deactivate`,
 #     `build_cab_sim_from_raw_samples`). `activate` is the documented ONLY
-#     allocation site (main thread, CLAP lifecycle); the panic helpers only
-#     run during exceptional unwinding.
+#     allocation site (main thread, CLAP lifecycle); the panic helper only
+#     runs during exceptional unwinding (its `Box::leak` is the sole
+#     sanctioned leak — SA-04).
 #   - `Arc::clone` is a refcount bump, never an allocation — not flagged.
 #
 # Exit status: 0 when the scanned code is clean, 1 when any pattern matches
@@ -171,7 +172,7 @@ FNR == 1 {
 
     # --- Whitelisted off-RT functions in processor/mod.rs ---
     if (skipping == 0 &&
-        $0 ~ /^[ \t]*(pub(\(crate\)|\(super\))? )?fn (leak_error_msg|panic_to_error|activate|deactivate|build_cab_sim_from_raw_samples)[ \t]*\(/) {
+        $0 ~ /^[ \t]*(pub(\(crate\)|\(super\))? )?fn (buffer_prealloc_error|panic_to_error|activate|deactivate|build_cab_sim_from_raw_samples)[ \t]*\(/) {
         begin_region()
         depth_count(s)
         maybe_close_region()

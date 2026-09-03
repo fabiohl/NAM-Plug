@@ -28,7 +28,7 @@ pub(crate) fn make_test_shared() -> NamClapShared {
         ui_to_rt: UiToRt {
             param_input_gain: AtomicU32::new(0.0f32.to_bits()),
             param_output_gain: AtomicU32::new(0.0f32.to_bits()),
-            param_gate_thresh: AtomicU32::new((-70.0f32).to_bits()),
+            param_gate_thresh: AtomicU32::new((-90.0f32).to_bits()),
             param_bypass: AtomicU32::new(0),
             param_adaptive_compute: AtomicU32::new(1),
             param_slim_override: AtomicU32::new(0),

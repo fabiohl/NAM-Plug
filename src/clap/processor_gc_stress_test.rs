@@ -35,9 +35,9 @@ mod tests {
 
         // Perform exactly 24 model swaps first to test limit of SPSC + parking lot (48 slots).
         // CLAP is native mono — model_r was removed.
-        // 1st swap pushes 1 item (old_resampler, since model_l is initially None).
-        // Subsequent swaps push 2 items each (old_model_l + old_resampler).
-        // Total items pushed for 24 swaps (i = 0 to 23) is exactly 1 + 23 * 2 = 47 items.
+        // 1st swap pushes 2 items (old_resampler + old_stream, since model_l is initially None).
+        // Subsequent swaps push 3 items each (old_model_l + old_resampler + old_stream).
+        // Total items pushed for 24 swaps (i = 0 to 23) is exactly 2 + 23 * 3 = 71 items.
         for i in 0..24 {
             let model_name = models[i % models.len()];
             let path = crate::clap::test_util::model_path(model_name);
@@ -86,15 +86,16 @@ mod tests {
                 .unwrap();
         }
 
-        // Verify that no GC overflow/leak occurred as we have not exceeded SPSC + parking lot (47 <= 48)
+        // Verify that no actual overwrite/leak occurred: the GC overflow flag is
+        // only set on slot overwrite in the overflow buffer, not on first entry.
         assert!(
             !rt_status.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_OVERFLOW),
             "GC overflow flag was set prematurely!"
         );
 
-        // Perform 1 more swap (the 25th swap). This pushes 2 more items.
-        // Total items pushed = 47 + 2 = 49 items.
-        // This exceeds SPSC + parking lot limit of 48 items, so 1 item spills into the
+        // Perform 1 more swap (the 25th swap). This pushes 3 more items.
+        // Total items pushed = 71 + 3 = 74 items.
+        // This exceeds SPSC + parking lot limit of 48 items, so items spill into the
         // overflow buffer. RT_STATUS_GC_OVERFLOW is NOT triggered here: the flag is
         // conditioned on `push` returning `true` (actual overwrite/leak), and the 64-slot
         // buffer is still far from full.
@@ -147,13 +148,13 @@ mod tests {
         }
 
         // Verify that the GC overflow flag is NOT set: the overflow buffer has 64 slots,
-        // so a single spill doesn't cause an overwrite.
+        // so spills don't yet cause an overwrite.
         assert!(
             !rt_status.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_OVERFLOW),
             "GC overflow flag was set prematurely — only 1 item entered the 64-slot overflow buffer!"
         );
 
-        // Perform a complete drain to reclaim all 49 items from the channels and overflow buffer
+        // Perform a complete drain to reclaim all 74 items from the channels and overflow buffer
         plugin_instance.call_on_main_thread_callback();
         // One process cycle to move items from the parking lot to the now empty SPSC channel
         {
@@ -188,7 +189,7 @@ mod tests {
         rt_status.clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_OVERFLOW);
 
         // Perform the remaining 975 model swaps to reach 1000 model swaps in total.
-        // We will drain every 10 swaps (20 items), which fits comfortably within the 32-capacity SPSC channel,
+        // We will drain every 10 swaps (30 items: 10 * 3), which fits comfortably within the 32-capacity SPSC channel,
         // so no overflow should occur during this loop.
         for i in 25..1000 {
             let model_name = models[i % models.len()];
@@ -359,10 +360,10 @@ mod tests {
     }
 
     // Teardown contract: plugin teardown must hand the RT parking lot to the final off-RT
-    // drain. Parks exactly 16 items in the processor's parking lot (SPSC 32 +
-    // lot 16 + 1 overflow = 49 items after 25 swaps with no housekeeping),
-    // then deactivates. Before the fix, drain_gc_final never saw the lot and
-    // only 33 items were accounted; now the full 49 are drained off-RT.
+    // drain. With current GcItem layout (Model + Resampler + Streaming = 3 per swap):
+    // swap #1 pushes 2 (model None → no Model, only resampler + stream), each later
+    // swap pushes 3: 2 + 24 * 3 = 74 items (SPSC 32 + lot 16 + overflow 26).
+    // Before the parking-lot handoff fix only SPSC + overflow were drained (58 items).
     #[test]
     #[ignore = "Teardown stress: 25 model swaps"]
     fn test_teardown_drains_rt_parking_lot_off_rt() {
@@ -388,11 +389,11 @@ mod tests {
         let rt_status = &shared.cold.rt_status;
 
         // 25 swaps WITHOUT main-thread housekeeping: the GC SPSC (32) fills up,
-        // then the 16-slot RT parking lot parks items (gc_cascade), and the
-        // 49th item spills into the 64-slot overflow buffer. Total in flight:
-        // 32 (SPSC) + 16 (lot) + 1 (overflow) = 49 GcItems.
-        // Swap #1 pushes 1 item (old resampler — model was None); each later
-        // swap pushes 2 (old model + old resampler): 1 + 24 * 2 = 49.
+        // then the 16-slot RT parking lot parks items (gc_cascade), and remaining
+        // items spill into the 64-slot overflow buffer. Total in flight:
+        // 32 (SPSC) + 16 (lot) + 26 (overflow) = 74 GcItems.
+        // Swap #1 pushes 2 items (old resampler + old stream — model was None); each later
+        // swap pushes 3 (old model + old resampler + old stream): 2 + 24 * 3 = 74.
         for i in 0..25 {
             let model_name = models[i % models.len()];
             let path = crate::clap::test_util::model_path(model_name);
@@ -433,11 +434,11 @@ mod tests {
                 .unwrap();
         }
 
-        // Confirm the cascade reached the parking lot: no overflow overwrite
-        // occurred (64-slot buffer), so the flag stays clear.
+        // Confirm the cascade reached the parking lot: no overwrite
+        // occurred in the overflow buffer (still far from 64-slot overwrite), so the flag stays clear.
         assert!(
             !rt_status.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_OVERFLOW),
-            "GC overflow flag was set prematurely — only 1 item entered the 64-slot overflow buffer!"
+            "GC overflow flag was set prematurely — items spilled into the overflow buffer but none were overwritten!"
         );
 
         let drains_before = rt_status.drains.load(Ordering::Relaxed);
@@ -450,10 +451,10 @@ mod tests {
 
         let drains_delta = rt_status.drains.load(Ordering::Relaxed) - drains_before;
         assert_eq!(
-            drains_delta, 49,
-            "deactivate must account for all 49 in-flight GcItems \
-             (32 SPSC + 16 RT parking lot + 1 overflow); before the fix the \
-             parking lot was invisible and only 33 were drained"
+            drains_delta, 74,
+            "deactivate must account for all 74 in-flight GcItems \
+             (32 SPSC + 16 RT parking lot + 26 overflow); before the fix the \
+             parking lot was invisible and only 58 were drained"
         );
 
         // The last quantum must not have allocated on the audio thread.

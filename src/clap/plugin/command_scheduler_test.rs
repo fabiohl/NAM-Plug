@@ -219,7 +219,12 @@ fn stress_10k_param_burst_no_loss_no_deadlock() {
         }
         let last_seq = producer.force_flush().unwrap();
 
-        producer.wait_for_ack(last_seq);
+        // T-3.1.1: production ack-wait is the bounded variant — a stalled
+        // audio engine must never hang the producer thread forever.
+        assert!(
+            producer.wait_for_ack_timeout(last_seq, std::time::Duration::from_secs(2)),
+            "ack must arrive within the 2 s safety timeout"
+        );
         last_seq
     });
 
@@ -327,8 +332,69 @@ fn spin_wait_for_ack_does_not_deadlock() {
         consumer.ack_up_to(next_seq2.load(Ordering::Relaxed));
     });
 
-    producer.wait_for_ack(seq);
+    producer.wait_for_ack_timeout(seq, std::time::Duration::from_secs(2));
     assert!(producer.is_acked(seq));
+}
+
+/// SA-03 / T-3.1.1: the production ack-wait must time out instead of
+/// spin-waiting forever when the audio thread never acknowledges.
+///
+/// The atomic is left untouched at 0 while the producer waits for a
+/// never-issued sequence: the method must return `false` shortly after the
+/// deadline, bounding the busy-wait and never freezing the caller.
+#[test]
+fn wait_for_ack_timeout_times_out_when_ack_never_arrives() {
+    let next_seq = Arc::new(AtomicU64::new(0));
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (tx, _rx) = rtrb::RingBuffer::new(256);
+    let producer = CommandProducer::new(tx, &next_seq, &last_ack);
+
+    // A sequence that can never be acknowledged: nothing was ever pushed and
+    // no consumer thread exists to advance `last_ack`.
+    let timeout = std::time::Duration::from_millis(50);
+    let start = std::time::Instant::now();
+    let acked = producer.wait_for_ack_timeout(42, timeout);
+    let elapsed = start.elapsed();
+
+    assert!(
+        !acked,
+        "a never-acknowledged sequence must time out as false"
+    );
+    assert!(
+        elapsed >= timeout,
+        "the wait must not return before the deadline (elapsed={elapsed:?})"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the wait must stop at the deadline, not keep spinning (elapsed={elapsed:?})"
+    );
+    assert!(!producer.is_acked(42));
+}
+
+/// SA-03 / T-3.1.1: success path — the bounded wait returns `true` as soon as
+/// the audio-thread consumer acknowledges the requested sequence.
+#[test]
+fn wait_for_ack_timeout_returns_true_when_ack_arrives() {
+    let next_seq = Arc::new(AtomicU64::new(0));
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (tx, rx) = rtrb::RingBuffer::new(256);
+    let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
+
+    let p = RtProcessingParams {
+        input_gain_db: 1.0,
+        ..Default::default()
+    };
+    producer.push_params(p);
+    let seq = producer.force_flush().unwrap();
+
+    let mut consumer = CommandConsumer::new(rx, &last_ack);
+    consumer.drain_and_process(256, |_| {});
+    consumer.ack_up_to(seq);
+
+    assert!(
+        producer.wait_for_ack_timeout(seq, std::time::Duration::from_secs(2)),
+        "an already-acknowledged sequence must return true immediately"
+    );
 }
 
 #[test]

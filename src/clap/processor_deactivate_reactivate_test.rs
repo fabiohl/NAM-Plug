@@ -168,7 +168,7 @@ mod tests {
         plugin_instance.deactivate(stopped);
 
         // Bypass: output ≈ input signal passing through untouched gate.
-        // Gate defaults to -70 dB, so -8 dB signal passes through.
+        // Gate defaults to -90 dB (off-by-default), so -8 dB signal passes through.
         assert!((rms1_l - rms(&bufs2.out_l)).abs() < 1e-6);
         assert!((rms1_r - rms(&bufs2.out_r)).abs() < 1e-6);
         assert!(rms1_l > 0.1, "bypass signal should pass through gate");

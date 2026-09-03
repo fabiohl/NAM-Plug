@@ -236,14 +236,7 @@ fn extract_namb_metadata(path: &Path) -> Option<NamMetadata> {
         return None;
     }
 
-    // Parse header from raw bytes (packed struct, safe pointer cast for fixed-size slice)
-    let header_slice: &[u8; NAMB_HEADER_SIZE] = bytes[..NAMB_HEADER_SIZE].try_into().ok()?;
-    let header: &NambHeader = unsafe { &*(header_slice.as_ptr() as *const _) };
-
-    // Validate magic number
-    if header.magic != 0x4E414D42 {
-        return None;
-    }
+    let header = NambHeader::from_slice(&bytes).ok()?;
 
     let weights_offset = header.weights_offset as usize;
     // The JSON metadata section is between the header and the weights block

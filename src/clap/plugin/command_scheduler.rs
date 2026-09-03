@@ -372,11 +372,38 @@ impl<'a> CommandProducer<'a> {
     }
 
     /// Spin-waits until the audio thread has acknowledged `seq`
-    /// (or any higher sequence number).
+    /// (or any higher sequence number), bounded by `timeout`.
+    ///
+    /// Returns `true` if the acknowledgment arrived within `timeout`,
+    /// `false` if the deadline expired first.
+    ///
+    /// This is the **only** blocking-acknowledgment variant available in
+    /// production builds (SA-03 / T-3.1.1): if the DAW pauses or tears down
+    /// the audio engine, the main/UI thread returns `false` after the
+    /// deadline instead of spinning forever at 100% CPU and freezing the
+    /// interface.
     ///
     /// Call this only on the main thread when blocking is acceptable
     /// (e.g. synchronous API calls). Do **not** call on the audio
     /// thread.
+    pub fn wait_for_ack_timeout(&self, seq: u64, timeout: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        while self.last_ack.load(Ordering::Acquire) < seq {
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            std::hint::spin_loop();
+        }
+        true
+    }
+
+    /// Unbounded spin-wait variant, restricted to `#[cfg(test)]`.
+    ///
+    /// Unit tests rely on the ack eventually arriving (cooperative consumer
+    /// thread), so an infinite wait is acceptable there and the test either
+    /// completes or deadlocks loudly. Production code must use
+    /// [`wait_for_ack_timeout`](Self::wait_for_ack_timeout).
+    #[cfg(test)]
     pub fn wait_for_ack(&self, seq: u64) {
         while self.last_ack.load(Ordering::Acquire) < seq {
             std::hint::spin_loop();

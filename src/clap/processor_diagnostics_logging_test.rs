@@ -39,16 +39,27 @@ fn test_flag_set_and_clear_mechanism() {
     );
 }
 
+// Mutex to synchronize tests inspecting or mutating the global NamLogger / LogBuffer state
+static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Task 4.3.1 — verify flag-to-log messages reach LogBuffer
 #[test]
 fn test_emit_pending_logs_messages_reach_log_buffer() {
+    let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
-    let snapshot_before =
-        neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()
-            .expect("LogBuffer should be accessible")
-            .len();
+    let logger = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
+        .expect("NamLogger should be initialized");
+    let original_level = log::max_level();
+    log::set_max_level(log::LevelFilter::Debug);
+    logger.set_max_level(log::LevelFilter::Debug);
+
+    let buffer = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()
+        .expect("LogBuffer should be accessible");
+    let snapshot_before = buffer.len();
+    let capacity = buffer.capacity();
 
     shared
         .cold
@@ -68,23 +79,21 @@ fn test_emit_pending_logs_messages_reach_log_buffer() {
         .check_and_clear_flag(RT_STATUS_MODEL_LOAD_FAILED);
     log::error!("NAM-Plug: Critical failure! No active model for processing.");
 
-    let snapshot_after =
-        neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::log_buffer()
-            .expect("LogBuffer should be accessible")
-            .len();
+    let snapshot_after = buffer.len();
     assert!(
-        snapshot_after > snapshot_before + 2,
-        "LogBuffer should grow after log entries are emitted"
+        snapshot_after > snapshot_before + 2 || snapshot_after >= capacity,
+        "LogBuffer should grow after log entries are emitted (or remain at capacity)"
     );
 
     test_util::assert_log_buffer_contains("Output clipping detected");
     test_util::assert_log_buffer_contains("GC channel overflow");
     test_util::assert_log_buffer_contains("Critical failure! No active model for processing");
+
+    log::set_max_level(original_level);
+    logger.set_max_level(original_level);
 }
 
 // Task 4.3.1 — verify state save emits confirmation log
-static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[test]
 fn test_state_save_emits_confirmation_log() {
     use log::LevelFilter;

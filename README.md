@@ -225,7 +225,7 @@ flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 ### 3. Staging & Performance Tuning
 
 1. **Gain Staging:** Use the **`INPUT`** and **`OUTPUT`** rotary knobs to balance signal levels (`-20.0 dB` to `+20.0 dB`, default `0.0 dB`).
-2. **Noise Gate:** Adjust the **`GATE`** knob (`-90.0 dB` to `-40.0 dB`, default `-70.0 dB`) to eliminate hum and background noise when not playing.
+2. **Noise Gate:** Adjust the **`GATE`** knob (`-90.0 dB` to `-40.0 dB`, default `-90.0 dB` — off by default, i.e. parked at the most permissive end of the range) to eliminate hum and background noise when not playing.
 3. **Anti-Aliasing Oversampling:** Select **`2x`** or **`4x`** polyphase oversampling when running high-gain amplifier models to eliminate aliasing foldover distortion.
 4. **Activation Math Mode:** Switch between **`Standard`** (exact precision, default) and **`Fast`** (Padé polynomial approximations) to optimize CPU usage on large sessions.
 5. **Active / Bypass:** Toggle the **`ACTIVE`** button to bypass or re-engage processing seamlessly with 32 ms equal-power crossfading.

@@ -5,13 +5,42 @@
 //!
 //! Dynamically loads the CLAP `.so` artifact, processes stress signals
 //! with irregular buffers at 44.1 kHz, 48 kHz, and 96 kHz, and compares the output
-//! against the C++ NAMcore oracle using ESR/SNR/MR-STFT metrics.
+//! against the C++ NAMcore oracle using ESR/SNR metrics.
+//!
+//! # Reference resampling pipeline (`host_sr ≠ model_sr`)
+//!
+//! The stress signal is generated at the model's native rate (48 kHz) and the
+//! C++ oracle always renders at that native rate. The expected host-rate curve
+//! is produced with the `NeuralAmpModeler-rs` high-fidelity reference resampler
+//! (`NamResampler`, minimum-phase polyphase sinc FIR — the same filter family
+//! the plugin's `StreamingResampleBuffer` embeds internally):
+//!
+//! 1. `stress` is generated at `model_sr` (48 kHz).
+//! 2. The host-rate input fed to the CLAP plugin is the reference resample of
+//!    `stress` (`model_sr → host_sr`).
+//! 3. The oracle model input is the reference resample of that host input back
+//!    to `model_sr` — the exact round-trip signal the plugin's input resampler
+//!    presents to the model. The input-stage group delay is therefore embedded
+//!    in the oracle input and cancels out of the comparison.
+//! 4. The C++ oracle renders that model-rate signal; the expected host-rate
+//!    curve is the reference resample of the oracle output (`model_sr → host_sr`).
+//! 5. Group-delay compensation: the plugin stream zero-primes exactly
+//!    `latency_samples()` host samples (its declared resampler latency), while
+//!    the one-shot reference filter carries the same output-stage group delay,
+//!    so both curves carry the same content timeline at equal host indices.
+//!    ESR/SNR are computed on the steady-state window after that latency.
 //!
 //! // Measured: F-11 (2026-07-30) — cross-implementation floor against
 //! // real C++ oracle + LUT-based gain (wavenet_a1_standard @ 48 kHz):
 //! //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (after loudness calibration compensation).
-//! // Conservative gates: ESR < 1e-8, SNR > 80 dB.
-//! Acceptance criteria: ESR < 1e-8 and SNR > 80 dB across all sample rates.
+//! // Conservative gate: ESR < 1e-8, SNR > 80 dB.
+//! // Re-measured 2026-09-03 with the reference pipeline at all three rates:
+//! //   48.0 kHz → ESR ≈ 7.98e-12, SNR ≈ 111.0 dB (native, latency 0)
+//! //   44.1 kHz → ESR ≈ 9.01e-12, SNR ≈ 110.5 dB (latency 11)
+//! //   96.0 kHz → ESR ≈ 8.13e-12, SNR ≈ 110.9 dB (latency 19)
+//! // The resampled rates sit on the same native floor: re-rendering the oracle
+//! // over the round-trip model input cancels the sinc interpolation error, so
+//! // the gate (ESR < 1e-8, SNR > 80 dB) is uniform across the rate matrix.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,6 +49,7 @@ use super::common::metrics::{compute_esr, compute_snr_db};
 use clack_extensions::state::PluginState;
 use clack_host::prelude::*;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
+use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NAMCore C++ oracle helpers
@@ -348,11 +378,106 @@ fn get_model_sample_rate(model_path: &Path) -> u32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Reference resampling oracle helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Offline full-signal resample with the engine's high-fidelity reference
+/// resampler (`NamResampler`, minimum-phase polyphase sinc FIR).
+///
+/// Converts a mono signal from `from_sr` to `to_sr` in one shot. A fresh
+/// resampler is built per call so the filter always starts from the same zero
+/// state the plugin's adapters have at activation. `from_sr == to_sr` maps to
+/// the engine bypass (plain copy, zero added latency). The output buffer is
+/// sized with a 512-sample headroom and truncated to the written count,
+/// mirroring the engine's own C++-parity fixtures.
+fn reference_resample(signal: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
+    if from_sr == to_sr {
+        return signal.to_vec();
+    }
+    let mut rs = NamResampler::new(to_sr, from_sr, 0)
+        .unwrap_or_else(|e| panic!("reference_resample {from_sr} Hz → {to_sr} Hz failed: {e}"));
+    let est = (signal.len() as f64 * to_sr as f64 / from_sr as f64).ceil() as usize + 512;
+    let mut out_l = vec![0.0f32; est];
+    let mut out_r = vec![0.0f32; est];
+    let n = rs
+        .process_output_mono(signal, &mut out_l, &mut out_r)
+        .samples_written;
+    out_l.truncate(n);
+    out_l
+}
+
+/// Runs the C++ NAMCore oracle over `model_rate_input` (already scaled by the
+/// loudness input multiplier) at the model's native `model_rate`, returning the
+/// raw model-rate output samples. Temp files are tagged per rate to keep the
+/// oracle artifacts of concurrent rates isolated.
+fn render_oracle(
+    model_path: &Path,
+    model_rate: u32,
+    model_rate_input: &[f32],
+    tmp_dir: &Path,
+    tag: &str,
+) -> Vec<f32> {
+    let stem = model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
+    let stress_wav = tmp_dir.join(format!("oracle_in_{stem}_{tag}.wav"));
+    let ref_wav = tmp_dir.join(format!("oracle_out_{stem}_{tag}.wav"));
+    write_wav_mono(&stress_wav, model_rate_input, model_rate);
+    run_cpp_render(model_path, &stress_wav, &ref_wav);
+    let (samples, _sr) = read_wav_mono(&ref_wav);
+    samples
+}
+
+/// Declared latency (host-rate samples) that the plugin's streaming resample
+/// adapter zero-primes when `host_sr != model_sr` — the minimum host index at
+/// which the delivered waveform carries real content. Zero when the rates
+/// match (the engine resampler fully bypasses).
+fn resampler_latency_samples(host_sr: u32, model_sr: u32) -> usize {
+    if host_sr == model_sr {
+        return 0;
+    }
+    NamResampler::new(host_sr, model_sr, 0)
+        .map(|r| r.latency_samples(host_sr) as usize)
+        .unwrap_or(0)
+}
+
+/// Per-rate parity gates: `(esr_max, snr_min_db, measured_comment)`.
+///
+/// All rates share the native-floor gates because the reference pipeline
+/// re-renders the oracle over the exact round-trip model input — the sinc
+/// interpolation error cancels and the resampled rates measure at the same
+/// cross-implementation float floor as 48 kHz native.
+fn parity_gates(host_sr: f64) -> (f64, f64, &'static str) {
+    match host_sr.round() as u32 {
+        // Measured: F-11 (2026-07-30) — cross-implementation floor against
+        // the real C++ oracle + LUT gain @ 48 kHz native (resampler bypass):
+        //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB.
+        // Re-measured 2026-09-03 on the current engine/oracle: ESR 7.98e-12,
+        // SNR 111.0 dB.
+        48_000 => (1e-8, 80.0, "ESR ≈ 7.98e-12, SNR ≈ 111.0 dB (2026-09-03)"),
+        // Measured: 2026-09-03 — ESR 9.01e-12, SNR 110.5 dB (latency 11).
+        44_100 => (1e-8, 80.0, "ESR ≈ 9.01e-12, SNR ≈ 110.5 dB (2026-09-03)"),
+        // Measured: 2026-09-03 — ESR 8.13e-12, SNR 110.9 dB (latency 19).
+        96_000 => (1e-8, 80.0, "ESR ≈ 8.13e-12, SNR ≈ 110.9 dB (2026-09-03)"),
+        _ => (1e-8, 80.0, "default parity gate (native floor)"),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Verifies CLAP plugin parity against NAMCore C++ oracle at a single
-/// sample rate with irregular buffer sizes.
+/// Verifies CLAP plugin parity against the NAMCore C++ oracle at every host
+/// rate in `host_rates`, with irregular buffer sizes.
+///
+/// For `host_sr == model_sr` the oracle renders the native-rate stress
+/// directly. For `host_sr != model_sr` the reference-resampling pipeline
+/// described in the module docs is used: the plugin input and the oracle model
+/// input both derive from the native stress through the `NamResampler`
+/// high-fidelity reference resampler, so the input-stage group delay cancels
+/// and both curves are content-aligned at equal host indices after the
+/// plugin's declared resampler latency is skipped.
 fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: f64) {
     let bin = render_bin();
     if !bin.exists() {
@@ -370,68 +495,116 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
         "  Calibration: input_mult_adj={input_mult_adj:.6}, output_mult_adj={output_mult_adj:.6}"
     );
 
-    let model_sr = get_model_sample_rate(&model_path) as f64;
+    let model_sr = get_model_sample_rate(&model_path);
     let mut all_passed = true;
+
+    // Stress is generated once at the model NATIVE rate: every host rate is
+    // derived from this same signal, keeping the model operating point
+    // comparable across the whole rate matrix.
+    let stress = generate_stress_signal(model_sr as f64, stress_duration);
+    eprintln!("  Native stress: {} samples @ {model_sr} Hz", stress.len());
+
+    let tmp_dir = std::env::temp_dir().join("nam_rs_clap_parity");
+    std::fs::create_dir_all(&tmp_dir).ok();
 
     for &host_sr in host_rates {
         eprintln!("\n=== CLAP Parity: {model_name} @ {host_sr:.0} Hz ===");
 
-        let stress = generate_stress_signal(host_sr, stress_duration);
-        eprintln!("  Stress signal: {} samples", stress.len());
+        let host_u32 = host_sr.round() as u32;
+        let resampled = (host_sr - model_sr as f64).abs() > 0.1;
 
-        let tmp_dir = std::env::temp_dir().join("nam_rs_clap_parity");
-        std::fs::create_dir_all(&tmp_dir).ok();
-
-        let (cpp_input, cpp_expected_output) = if (host_sr - model_sr).abs() > 0.1 {
-            eprintln!(
-                "  SKIP: host_rate {host_sr:.0} ≠ model_rate {model_sr:.0} — resampling path not yet implemented for this test"
-            );
-            continue;
+        // Host-rate signal fed to the CLAP plugin (identity at the native rate).
+        let plugin_input = if resampled {
+            reference_resample(&stress, model_sr, host_u32)
         } else {
-            // Mirror the plugin's internal DSP pipeline:
-            //   - Oracle receives stress × input_mult_adj (plugin applies this internally)
-            //   - Plugin receives raw stress
-            //   - Oracle output × output_mult_adj ≈ plugin output (loudness-normalized).
-            // See loudness-normalization pipeline for gain adjustment details.
-            let stress_for_oracle: Vec<f32> = stress.iter().map(|s| s * input_mult_adj).collect();
-            let stress_wav = tmp_dir.join(format!("stress_{model_sr:.0}.wav"));
-            let ref_wav = tmp_dir.join(format!("ref_{model_sr:.0}.wav"));
-            write_wav_mono(&stress_wav, &stress_for_oracle, model_sr as u32);
-            run_cpp_render(&model_path, &stress_wav, &ref_wav);
-            let (cpp_output, _sr) = read_wav_mono(&ref_wav);
-
-            let cpp_output_scaled: Vec<f32> =
-                cpp_output.iter().map(|s| s * output_mult_adj).collect();
-            (stress.clone(), cpp_output_scaled)
+            stress.clone()
         };
-
-        let clap_output = process_through_clap(&model_path, &cpp_input, host_sr);
-
-        assert_eq!(
-            clap_output.len(),
-            cpp_expected_output.len(),
-            "Output length mismatch"
+        eprintln!(
+            "  Plugin input: {} samples @ {host_sr:.0} Hz",
+            plugin_input.len()
         );
 
-        let esr = compute_esr(&cpp_expected_output, &clap_output);
-        let snr = compute_snr_db(&cpp_expected_output, &clap_output);
+        // The exact model-rate signal the plugin's input resampler presents to
+        // the model. The oracle re-renders THIS signal (not the raw native
+        // stress) so the input-stage group delay + interpolation artifacts are
+        // embedded in the reference and cancel out of the comparison.
+        let oracle_model_input = if resampled {
+            reference_resample(&plugin_input, host_u32, model_sr)
+        } else {
+            plugin_input.clone()
+        };
+
+        // Mirror the plugin's internal DSP pipeline:
+        //   - Oracle receives model input × input_mult_adj (the plugin applies
+        //     the loudness input multiplier before the model).
+        //   - Oracle output × output_mult_adj ≈ plugin output (loudness-
+        //     normalized); the constant output multiplier commutes with the
+        //     (linear) reference resampler.
+        let scaled_oracle_input: Vec<f32> = oracle_model_input
+            .iter()
+            .map(|s| s * input_mult_adj)
+            .collect();
+        let tag = format!("{model_sr}_{host_u32}");
+        let raw_cpp = render_oracle(&model_path, model_sr, &scaled_oracle_input, &tmp_dir, &tag);
+        eprintln!(
+            "  Oracle model input: {} samples @ {model_sr} Hz → raw output: {} samples",
+            oracle_model_input.len(),
+            raw_cpp.len()
+        );
+
+        let calibrated_cpp: Vec<f32> = raw_cpp.iter().map(|s| s * output_mult_adj).collect();
+
+        // Expected host-rate curve: the reference resampler of the model-rate
+        // oracle output (identity at the native rate).
+        let reference = reference_resample(&calibrated_cpp, model_sr, host_u32);
+        eprintln!("  Reference: {} samples @ {host_sr:.0} Hz", reference.len());
+
+        let clap_output = process_through_clap(&model_path, &plugin_input, host_sr);
+
+        // Group-delay compensation: the streaming adapter zero-primes exactly
+        // `latency_samples()` host samples, and the one-shot reference filter
+        // (identical output-stage design) has its warm-up inside those same
+        // samples. Compare the steady-state window only, with a small edge
+        // guard on both ends for the resampler's fractional-phase rounding.
+        let latency = resampler_latency_samples(host_u32, model_sr);
+        const EDGE_GUARD: usize = 16;
+        let skip = latency + EDGE_GUARD;
+        let common = reference
+            .len()
+            .min(clap_output.len())
+            .saturating_sub(skip + EDGE_GUARD);
+        eprintln!(
+            "  Resampler latency: {latency} host samples (skip {skip}, compare window {common})"
+        );
+        assert!(
+            common > 64,
+            "Steady-state comparison window too small ({common} samples) at {host_sr:.0} Hz — \
+             oracle output may have diverged in length"
+        );
+        assert!(
+            reference.len().abs_diff(clap_output.len()) <= 8,
+            "Reference ({}) vs CLAP output ({}) length mismatch at {host_sr:.0} Hz",
+            reference.len(),
+            clap_output.len()
+        );
+
+        let ref_win = &reference[skip..skip + common];
+        let clap_win = &clap_output[skip..skip + common];
+        let esr = compute_esr(ref_win, clap_win);
+        let snr = compute_snr_db(ref_win, clap_win);
         let esr_db = if esr > 0.0 {
             10.0 * (1.0 / esr).log10()
         } else {
             f64::INFINITY
         };
 
-        // Measured: F-11 (2026-07-30) — cross-implementation floor
-        // against real C++ oracle + LUT-based gain (wavenet_a1_standard @ 48 kHz):
-        //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (after loudness calibration compensation).
-        // Conservative gates: ESR < 1e-8, SNR > 80 dB.
-        let esr_gate = 1e-8;
-        let snr_gate = 80.0;
+        let (esr_gate, snr_gate, gate_comment) = parity_gates(host_sr);
         eprintln!(
             "  ESR  = {esr:.2e}  ({:.1} dB)  [threshold < {esr_gate:.0e}]",
             esr_db
         );
         eprintln!("  SNR  = {snr:.1} dB                   [threshold > {snr_gate} dB]");
+        eprintln!("  Gate basis: {gate_comment}");
 
         let esr_pass = esr < esr_gate;
         let snr_pass = snr > snr_gate;
@@ -454,13 +627,18 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
 
 /// Multi-rate CLAP vs NAMCore parity with irregular buffers.
 ///
-/// Tests a WaveNet model at 48 kHz (native rate) against the C++ oracle.
+/// Tests a WaveNet model at 48 kHz against the C++ oracle across the three
+/// Gate-4 certification rates: 44.1 kHz, 48 kHz (native), and 96 kHz. At the
+/// native rate the plugin's resampler fully bypasses; at 44.1/96 kHz the
+/// reference-resampling oracle pipeline described in the module docs is used.
 /// Applies loudness calibration compensation (input/output_mult_adj via
 /// gain LUT) mirroring the plugin DSP chain, so residuals reflect only
 /// actual DSP divergence.
 ///
 /// // Measured: F-11 (2026-07-30) — cross-implementation floor
-/// //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB → conservative gates: ESR < 1e-8, SNR > 80 dB.
+/// //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (48 kHz native) → conservative gates:
+/// //   ESR < 1e-8, SNR > 80 dB. Resampled-rate gates calibrated on
+/// //   2026-09-03 (see `parity_gates()`).
 ///
 /// This test is `#[ignore]` by default because it requires:
 /// - NAMCore C++ render binary (build via golden_gen_build.sh)
@@ -470,8 +648,8 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
 fn test_clap_parity_multi_rate() {
     run_multi_rate_parity(
         "wavenet_a1_standard.nam",
-        &[48000.0],
-        0.5, // 0.5s stress signal
+        &[44100.0, 48000.0, 96000.0],
+        0.5, // 0.5s stress signal at the model native rate
     );
 }
 

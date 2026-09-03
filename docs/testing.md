@@ -55,7 +55,19 @@ The automated test targets under [`../tests/`](../tests/) are structured into ro
 
 ### 3.2 Modular Sub-Suites ([`tests/clap/`](../tests/clap/))
 
-The root harness declares modular sub-suites covering: dynamic artifact discovery and SHA256 integrity (`artifact_validator`), cross-machine determinism and float consistency across frame boundaries (`clap_cross_machine`), plugin lifecycle transitions and audio configuration renegotiation (`clap_lifecycle_test`), multi-instance concurrency and thread-safety (`clap_multi_instance`), CLAP × NAMCore C++ oracle parity with ESR/SNR gates (`clap_parity_multi_sr`), state persistence and version migration (`clap_state_migration`), and CLAP tail extension semantics (`tail_semantics`). Individual thresholds are defined at the top of each module and summarized in section 6, rather than duplicated in an inventory table.
+The root harness declares modular sub-suites covering: dynamic artifact discovery and SHA256 integrity (`artifact_validator`), cross-machine determinism and float consistency across frame boundaries (`clap_cross_machine`), plugin lifecycle transitions and audio configuration renegotiation (`clap_lifecycle_test`), multi-instance concurrency and thread-safety (`clap_multi_instance`), CLAP × NAMCore C++ oracle parity with ESR/SNR gates across the 44.1/48/96 kHz certification rates (`clap_parity_multi_sr`), state persistence and version migration (`clap_state_migration`), and CLAP tail extension semantics (`tail_semantics`). Individual thresholds are defined at the top of each module and summarized in section 6, rather than duplicated in an inventory table.
+
+#### 3.2.1 Multi-Rate Resampling Reference Oracle ([`tests/clap/clap_parity_multi_sr.rs`](../tests/clap/clap_parity_multi_sr.rs))
+
+`test_clap_parity_multi_rate` exercises the plugin at **44.1 kHz**, **48 kHz** (native) and **96 kHz** with irregular buffers against the C++ NAMCore oracle. For `host_sr ≠ model_sr` the expected host-rate curve is produced by the reference-resampling oracle:
+
+1. The stress signal is generated at the model's native rate (48 kHz) and rendered by the C++ oracle at that rate.
+2. The plugin input is the reference resample of the native stress (`model_sr → host_sr`).
+3. The oracle model input is the reference resample of that host input back to `model_sr` — the exact round-trip signal the plugin's input resampler presents to the model — so the input-stage group delay is embedded in the oracle input and cancels.
+4. The expected host-rate curve is the reference resample of the oracle output (`model_sr → host_sr`) using the `NeuralAmpModeler-rs` `NamResampler` (minimum-phase polyphase sinc FIR, the same filter family the plugin's `StreamingResampleBuffer` embeds).
+5. Group-delay compensation: both curves are content-aligned at equal host indices after the plugin's declared resampler latency (`latency_samples()`, zero-primed by the streaming adapter) is skipped; ESR/SNR are computed on the steady-state window.
+
+Re-rendering the oracle over the round-trip model input cancels the sinc interpolation error, so the resampled rates sit on the same cross-implementation float floor as native 48 kHz (measured 2026-09-03: 44.1 kHz ESR ≈ 9.01e-12 / SNR ≈ 110.5 dB; 96 kHz ESR ≈ 8.13e-12 / SNR ≈ 110.9 dB).
 
 ### 3.3 Epic E0 Regression Containment Suite ([`tests/clap_e0_containment_test.rs`](../tests/clap_e0_containment_test.rs))
 
@@ -145,7 +157,7 @@ Top-level workflow entrypoints reside in `utils/`, while shared libraries and mo
 1. **Structural (debug)** — unit + integration tests with debug assertions ON. `ensure_clap_artifact debug` validates the `.so` artifact (fail-closed: missing artifact aborts with `FATAL:`) and logs its SHA256 before any test that `dlopen`s it. Under `NAM_QUICK_STRICT=1` the artifact is additionally freshness-gated: a `.so` older than any source input (`Cargo.toml`/`Cargo.lock`/`.cargo/config.toml`/`src/**`, including the patched sibling `NeuralAmpModeler-rs` tree) aborts the suite instead of being silently validated.
 2. **Release verification (release)** — the release-only surface: `ensure_clap_artifact release` builds the `.so` under release codegen, then:
    - **Fail-closed AVX-512 absence certificate** — `utils/lib/verify_no_avx512_release.sh` runs the `nam_bin_guard` scanner (`src/bin/nam_bin_guard.rs`, reuse of `neural_amp_modeler_rs::testing::bin_guard`) against the release `.so`: an EVEX prefix (`0x62`) binary decoder plus a forbidden AVX-512 symbol scan. Any EVEX/ZMM instruction or forbidden symbol aborts the suite (exit ≠ 0); tool/format errors are also fail-closed (never a silent empty pass).
-   - **CLAP × NAMCore parity oracle** — `test_clap_parity_multi_rate` (ESR < 1e-8, SNR > 80 dB) compares the release `.so` against the C++ render binary (`NAM_CORE_RENDER_BIN` or `build/namcore_render`), executing when the render binary, the release `.so` and the model fixture are all present. The Phase 1 targets are not re-run under `--release` — debug assertions ON already validate that logic, and release codegen of the `.so` is exactly what the oracle measures. Missing prerequisites are never masked — they are recorded as `GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")` and reported as a `WARN GAP`.
+   - **CLAP × NAMCore parity oracle** — `test_clap_parity_multi_rate` (ESR < 1e-8, SNR > 80 dB at 44.1 kHz, 48 kHz native, and 96 kHz) compares the release `.so` against the C++ render binary (`NAM_CORE_RENDER_BIN` or `build/namcore_render`) through the multi-rate resampling reference oracle (see §3.2.1), executing when the render binary, the release `.so` and the model fixture are all present. The Phase 1 targets are not re-run under `--release` — debug assertions ON already validate that logic, and release codegen of the `.so` is exactly what the oracle measures. Missing prerequisites are never masked — they are recorded as `GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")` and reported as a `WARN GAP`.
    - **CabSim IR artifact test** — `test_cabsim_ir_changes_audio_release_artifact` `dlopen`s the release `.so` to prove a loaded IR changes the audio output.
 3. **RT-Safety heap-audit (debug)** — zero-allocation `process()` gate via `--features testing,heap-audit` (`processor_heap_audit_test`).
 
@@ -170,7 +182,9 @@ cargo test --features testing --test clap_e2_proptest
 cargo bench --features testing --bench clap_bench
 
 # 6. Run the CLAP × NAMCore parity oracle (requires the C++ render binary;
-#    also Phase 2 of tests-quick.sh when prerequisites are present)
+#    also Phase 2 of tests-quick.sh when prerequisites are present).
+#    Exercises 44.1 kHz, 48 kHz native and 96 kHz via the multi-rate
+#    resampling reference oracle (ESR < 1e-8, SNR > 80 dB per rate).
 NAM_REQUIRE_CPP_ORACLE=1 cargo test --features testing --release --test clap \
     test_clap_parity_multi_rate -- --ignored --nocapture
 ```
@@ -229,7 +243,7 @@ the gates at the exact installed `.so`:
 1. **Symbol & SONAME validation** of the distributed artifact.
 2. **External `clap-validator`** against the distributed artifact (skipped ⇒ `skipped_gates` entry; fail-closed in strict mode).
 3. **AVX-512 absence certificate** — `utils/lib/verify_no_avx512_release.sh` + `nam_bin_guard` EVEX (`0x62`) scan on the distributed artifact (see §5.1).
-4. **NAMCore float parity** — `NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_clap_parity_multi_rate`.
+4. **NAMCore float parity** — `NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_clap_parity_multi_rate` (all three certification rates — see §3.2.1).
 5. **CabSim IR artifact test** — `CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_cabsim_ir_changes_audio_release_artifact`.
 
 In strict mode (`NAM_STRICT_RELEASE=1`, default) the tree must be clean
@@ -243,12 +257,22 @@ build of the exact artifact that is distributed.
 
 ## 6. Quality Gates & Baseline Standards
 
-| Metric / Test Gate         | Threshold / Constraint                        | Enforced In                                                   |
-|:-------------------------- |:--------------------------------------------- |:------------------------------------------------------------- |
-| **CLAP vs NAMCore Parity** | ESR < 1e-8, SNR > 80 dB                       | `clap_parity_multi_sr.rs` (Phase 2 of `tests-quick.sh`)       |
+| Metric / Test Gate         | Threshold / Constraint                        | Enforced In                                                        |
+|:-------------------------- |:--------------------------------------------- |:------------------------------------------------------------------ |
+| **CLAP vs NAMCore Parity** | ESR < 1e-8, SNR > 80 dB @ 44.1/48/96 kHz      | `clap_parity_multi_sr.rs` (Phase 2 of `tests-quick.sh`, release Gate 4) |
 | **Bypass Transparency**    | Phase cancellation < -120 dBFS                | `processor_bypass_test.rs`                                    |
 | **RT Allocation Budget**   | Exactly 0 heap allocations during `process()` | `verify_no_rt_alloc.sh` (static) & `alloc_audit.rs` (dynamic) |
 | **CLAP Event Handling**    | 0 panics / unhandled boundary conditions      | `clap_e2_proptest.rs`                                         |
+
+Measured CLAP × NAMCore parity floor (2026-09-03, `wavenet_a1_standard.nam`, release artifact SHA256 `f07a7941…`):
+
+| Host rate  | Resampler latency | ESR          | SNR      |
+|:---------- |:----------------- |:------------ |:-------- |
+| 44.1 kHz   | 11 samples        | 9.01e-12     | 110.5 dB |
+| 48.0 kHz   | 0 (bypass)        | 7.98e-12     | 111.0 dB |
+| 96.0 kHz   | 19 samples        | 8.13e-12     | 110.9 dB |
+
+The resampled rates sit on the same cross-implementation float floor as native: the multi-rate reference oracle re-renders the C++ model over the exact round-trip input the plugin's resampler produces, cancelling the sinc interpolation error (the gate is therefore uniform across the rate matrix).
 
 ### 6.1 Reference Performance Baseline (Criterion Benchmark Matrix)
 

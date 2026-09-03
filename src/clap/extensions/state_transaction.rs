@@ -25,6 +25,7 @@ use crate::clap::plugin::RestoreTxn;
 use crate::clap::plugin::StagedRestore;
 use crate::clap::plugin::command_scheduler::PushError;
 use crate::clap::plugin::debug_assert_main_thread;
+use crate::clap::plugin::errors::{self, static_plugin_error};
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::{ModelInfo, NamDiagnostic, NamErrorCode};
 use neural_amp_modeler_rs::common::params::ProcessingParams;
@@ -90,7 +91,7 @@ pub(crate) fn restore_state_transactional(
 
     if buffer.is_empty() {
         log::debug!("Empty state buffer, returning error");
-        return Err(PluginError::Message("Empty state buffer"));
+        return Err(PluginError::Message(errors::state_txn::EMPTY_BUFFER));
     }
 
     // ══════ Phase 1: PREPARE — deserialise ══════
@@ -167,32 +168,34 @@ pub(crate) fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
     use std::io::Read;
 
     let metadata = std::fs::metadata(path).map_err(|e| {
-        PluginError::Message(Box::leak(
-            format!("Failed to read metadata for hashing ({path:?}): {e}").into_boxed_str(),
-        ))
+        static_plugin_error(
+            errors::assets::HASH_METADATA_FAILED,
+            format_args!("{path:?}: {e}"),
+        )
     })?;
 
     if !metadata.file_type().is_file() {
-        return Err(PluginError::Message(Box::leak(
-            format!("Target path for hashing is not a regular file: {path:?}").into_boxed_str(),
-        )));
+        return Err(static_plugin_error(
+            errors::assets::HASH_TARGET_NOT_REGULAR_FILE,
+            format_args!("{path:?}"),
+        ));
     }
 
     if metadata.len() > MAX_FILE_HASH_SIZE {
-        return Err(PluginError::Message(Box::leak(
-            format!(
-                "File size ({} bytes) exceeds maximum hash size ({} bytes): {path:?}",
-                metadata.len(),
-                MAX_FILE_HASH_SIZE
-            )
-            .into_boxed_str(),
-        )));
+        return Err(static_plugin_error(
+            errors::assets::HASH_FILE_TOO_LARGE,
+            format_args!(
+                "{} bytes > {MAX_FILE_HASH_SIZE} bytes: {path:?}",
+                metadata.len()
+            ),
+        ));
     }
 
     let file = std::fs::File::open(path).map_err(|e| {
-        PluginError::Message(Box::leak(
-            format!("Failed to open file for hashing ({path:?}): {e}").into_boxed_str(),
-        ))
+        static_plugin_error(
+            errors::assets::HASH_OPEN_FAILED,
+            format_args!("{path:?}: {e}"),
+        )
     })?;
 
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
@@ -202,10 +205,10 @@ pub(crate) fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
 
     loop {
         let bytes_read = reader.read(&mut buffer).map_err(|e| {
-            PluginError::Message(Box::leak(
-                format!("Failed to read file chunk during hashing ({path:?}): {e}")
-                    .into_boxed_str(),
-            ))
+            static_plugin_error(
+                errors::assets::HASH_READ_FAILED,
+                format_args!("{path:?}: {e}"),
+            )
         })?;
 
         if bytes_read == 0 {
@@ -214,13 +217,10 @@ pub(crate) fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
 
         total_read += bytes_read as u64;
         if total_read > MAX_FILE_HASH_SIZE {
-            return Err(PluginError::Message(Box::leak(
-                format!(
-                    "Stream exceeded maximum hash size ({} bytes): {path:?}",
-                    MAX_FILE_HASH_SIZE
-                )
-                .into_boxed_str(),
-            )));
+            return Err(static_plugin_error(
+                errors::assets::HASH_STREAM_TOO_LARGE,
+                format_args!("{MAX_FILE_HASH_SIZE} bytes: {path:?}"),
+            ));
         }
 
         hasher.update(&buffer[..bytes_read]);
@@ -509,9 +509,9 @@ fn validate_model_full(
     log::error!(
         "NAM-Plug: State restore failed — model not found or failed validation at {path:?}"
     );
-    Err(PluginError::Message(Box::leak(
-        format!("Saved model not found or invalid: {:?}", path).into_boxed_str(),
-    )))
+    Err(PluginError::Message(
+        errors::state_txn::MODEL_NOT_FOUND_OR_INVALID,
+    ))
 }
 
 fn validate_model_preset(
@@ -538,9 +538,7 @@ fn validate_model_from_basename(
 
     let clean_basename = sanitize_basename(raw_basename).ok_or_else(|| {
         log::error!("NAM-Plug: Insecure or invalid model basename: {raw_basename:?}");
-        PluginError::Message(Box::leak(
-            format!("Invalid model basename: {:?}", raw_basename).into_boxed_str(),
-        ))
+        PluginError::Message(errors::state_txn::MODEL_BASENAME_INVALID)
     })?;
 
     // Mandatory asset identity: a model reference without a valid expected digest is never adopted
@@ -552,12 +550,7 @@ fn validate_model_from_basename(
             "NAM-Plug: State restore rejected — model basename {raw_basename:?} carries no SHA-256 \
              hash. Re-load the model explicitly via the GUI to migrate this preset/project."
         );
-        PluginError::Message(Box::leak(
-            format!(
-                "Model has no saved hash: {clean_basename} (re-load it explicitly via the GUI to migrate)"
-            )
-            .into_boxed_str(),
-        ))
+        PluginError::Message(errors::state_txn::MODEL_HASH_MISSING)
     })?;
 
     if !is_valid_sha256_hex(expected_hash) {
@@ -566,13 +559,9 @@ fn validate_model_from_basename(
              hex) for basename {raw_basename:?}",
             expected_hash.len()
         );
-        return Err(PluginError::Message(Box::leak(
-            format!(
-                "Saved model hash is malformed: {clean_basename} ({} chars, expected 64 hex)",
-                expected_hash.len()
-            )
-            .into_boxed_str(),
-        )));
+        return Err(PluginError::Message(
+            errors::state_txn::MODEL_HASH_MALFORMED,
+        ));
     }
 
     // Search chain: loaded search paths first, then canonical dirs.
@@ -631,13 +620,9 @@ fn validate_model_from_basename(
     log::error!(
         "NAM-Plug: State restore failed — model basename {clean_basename:?} not found in: [{searched}]"
     );
-    Err(PluginError::Message(Box::leak(
-        format!(
-            "Preset/state model not found: {} (searched canonical dirs)",
-            clean_basename
-        )
-        .into_boxed_str(),
-    )))
+    Err(PluginError::Message(
+        errors::state_txn::MODEL_NOT_FOUND_PORTABLE,
+    ))
 }
 
 /// Builds IR resources from a filesystem path without side-effects.
@@ -696,9 +681,7 @@ fn validate_ir(
 
     if !ir_path.exists() {
         log::error!("NAM-Plug: State restore failed — IR not found at {ir_path:?}");
-        return Err(PluginError::Message(Box::leak(
-            format!("Saved IR not found: {:?}", ir_path).into_boxed_str(),
-        )));
+        return Err(PluginError::Message(errors::state_txn::IR_NOT_FOUND));
     }
 
     // Mandatory asset identity: the same mandatory-digest rule applies to the IR. A missing or
@@ -709,9 +692,7 @@ fn validate_ir(
             "NAM-Plug: State restore rejected — IR at {ir_path:?} carries no SHA-256 hash. \
              Re-load the IR explicitly via the GUI to migrate this project."
         );
-        PluginError::Message(
-            "Saved IR has no SHA-256 hash (re-load it explicitly via the GUI to migrate)",
-        )
+        PluginError::Message(errors::state_txn::IR_HASH_MISSING)
     })?;
 
     if !is_valid_sha256_hex(expected_hash) {
@@ -719,18 +700,12 @@ fn validate_ir(
             "NAM-Plug: State restore rejected — ir_hash is malformed ({} chars, expected 64 hex) for {ir_path:?}",
             expected_hash.len()
         );
-        return Err(PluginError::Message(Box::leak(
-            format!(
-                "Saved IR hash is malformed ({} chars, expected 64 hex)",
-                expected_hash.len()
-            )
-            .into_boxed_str(),
-        )));
+        return Err(PluginError::Message(errors::state_txn::IR_HASH_MALFORMED));
     }
 
     let actual_hash = compute_file_hash(ir_path).map_err(|e| {
         log::error!("NAM-Plug: Failed to hash IR file at {:?}: {}", ir_path, e);
-        PluginError::Message("Failed to hash saved IR file")
+        PluginError::Message(errors::state_txn::IR_HASH_FAILED)
     })?;
     if !actual_hash.eq_ignore_ascii_case(expected_hash) {
         log::error!(
@@ -739,7 +714,7 @@ fn validate_ir(
             expected_hash,
             actual_hash
         );
-        return Err(PluginError::Message("Saved IR file hash mismatch"));
+        return Err(PluginError::Message(errors::state_txn::IR_HASH_MISMATCH));
     }
 
     let resources = build_ir_resources(ir_path, host_rate, buffer_size, sys)
@@ -962,9 +937,10 @@ fn build_restore_package(
                 // Building the passthrough resampler is part of the transaction:
                 // a failure aborts the entire commit — nothing is published.
                 let new_resampler = NamResampler::new(host_rate, 48000, 0).map_err(|e| {
-                    PluginError::Message(Box::leak(
-                        format!("Failed to build clear-model resampler: {e:?}").into_boxed_str(),
-                    ))
+                    static_plugin_error(
+                        errors::dsp_resources::CLEAR_MODEL_RESAMPLER_FAILED,
+                        format_args!("{e:?}"),
+                    )
                 })?;
                 let new_stream = crate::clap::plugin::build_stream_adapter(
                     host_rate,
@@ -972,10 +948,10 @@ fn build_restore_package(
                     buffer_size.max(1) as usize,
                 )
                 .map_err(|e| {
-                    PluginError::Message(Box::leak(
-                        format!("Failed to build clear-model streaming buffer: {e:?}")
-                            .into_boxed_str(),
-                    ))
+                    static_plugin_error(
+                        errors::dsp_resources::CLEAR_MODEL_STREAM_FAILED,
+                        format_args!("{e:?}"),
+                    )
                 })?;
                 Some(LoadModelPayload {
                     generation: cold.allocate_model_generation(),

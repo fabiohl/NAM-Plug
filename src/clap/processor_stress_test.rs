@@ -938,7 +938,7 @@ mod tests {
         // NaN sanitization
         assert_eq!(sanitize_param_value(PARAM_INPUT_GAIN, f32::NAN), 0.0);
         assert_eq!(sanitize_param_value(PARAM_OUTPUT_GAIN, f32::NAN), 0.0);
-        assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, f32::NAN), -70.0);
+        assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, f32::NAN), -90.0);
         assert_eq!(sanitize_param_value(PARAM_BYPASS, f32::NAN), 0.0);
         assert_eq!(sanitize_param_value(PARAM_ACTIVE_MODEL, f32::NAN), 0.0);
         assert_eq!(sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, f32::NAN), 1.0);
@@ -954,11 +954,11 @@ mod tests {
         );
         assert_eq!(
             sanitize_param_value(PARAM_GATE_THRESH, f32::INFINITY),
-            -70.0
+            -90.0
         );
         assert_eq!(
             sanitize_param_value(PARAM_GATE_THRESH, f32::NEG_INFINITY),
-            -70.0
+            -90.0
         );
         assert_eq!(sanitize_param_value(PARAM_BYPASS, f32::INFINITY), 0.0);
         assert_eq!(sanitize_param_value(PARAM_BYPASS, f32::NEG_INFINITY), 0.0);

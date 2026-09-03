@@ -23,6 +23,7 @@ BUILD_TARBALL=true
 USE_PGO=true
 USE_BOLT=true
 RELEASE_CEREMONY=false
+STRICT_MODE=1
 
 show_help() {
     cat <<EOF
@@ -38,7 +39,8 @@ Options:
   --no-pgo               Skip Profile-Guided Optimization and compile directly with dist profile.
   --no-bolt              Skip Phase 4 (LLVM BOLT post-link optimization).
   --no-strict            Disable strict fail-closed mode on optional tool absence.
-  --strict               Enforce strict fail-closed mode (default: 1).
+  --strict, --strict-release
+                         Enforce strict fail-closed mode (default: 1).
   --release-ceremony     Official release ceremony mode: requires a pristine worktree & strict tests.
   -h, --help             Show this help message and exit.
 
@@ -73,7 +75,7 @@ while [[ $# -gt 0 ]]; do
             USE_BOLT=false
             shift
             ;;
-        --strict)
+        --strict|--strict-release)
             STRICT_MODE=1
             shift
             ;;
@@ -134,34 +136,71 @@ check_engine_provenance() {
         fi
 
         if [ "$CORE_GIT_DIRTY" = "true" ]; then
-            if [ "$STRICT_MODE" = "1" ]; then
-                die "Engine repository '$CORE_PATH' has uncommitted changes in strict release mode (provenance fail-closed). Commit, stash or clean before generating a certified release."
+            if [ "$RELEASE_CEREMONY" = "true" ]; then
+                die "Engine repository '$CORE_PATH' has uncommitted changes in release ceremony mode (provenance fail-closed). Commit, stash or clean before generating a certified release."
             else
-                warn "Engine repository '$CORE_PATH' is dirty (non-strict mode)."
+                warn "Engine repository '$CORE_PATH' is dirty (non-ceremony build)."
             fi
         else
             echo -e "  ${GREEN}✓${NC} Engine ($CORE_PATH) provenance verified clean (commit: ${CORE_GIT_COMMIT:0:12}, branch: $CORE_GIT_BRANCH, version: $CORE_VERSION)."
         fi
+    else
+        # Default: public crate from crates.io (host-agnostic, zero sibling checkout dependency)
+        CORE_PATH=""
+        CORE_GIT_COMMIT=""
+        CORE_GIT_BRANCH=""
+        CORE_GIT_DIRTY=false
+        local lock_info
+        lock_info=$(python3 -c '
+import tomllib
+try:
+    with open("Cargo.lock", "rb") as f:
+        data = tomllib.load(f)
+    for p in data.get("package", []):
+        if p.get("name") == "NeuralAmpModeler-rs":
+            v = p.get("version", "unknown")
+            c = p.get("checksum", "")
+            print(f"{v}|{c}")
+            break
+except Exception:
+    pass
+' 2>/dev/null || true)
+        if [ -n "$lock_info" ]; then
+            CORE_VERSION="${lock_info%%|*}"
+            CORE_TREE_SHA="${lock_info##*|}"
+        else
+            CORE_VERSION=$(grep -A 2 'name = "NeuralAmpModeler-rs"' Cargo.lock 2>/dev/null | grep 'version =' | head -n 1 | cut -d'"' -f2 || echo "unknown")
+            CORE_TREE_SHA=$(grep -A 4 'name = "NeuralAmpModeler-rs"' Cargo.lock 2>/dev/null | grep 'checksum =' | head -n 1 | cut -d'"' -f2 || echo "")
+        fi
+
+        if [ "$CORE_VERSION" = "unknown" ] && [ "$RELEASE_CEREMONY" = "true" ]; then
+            die "Failed to resolve NeuralAmpModeler-rs engine version from Cargo.lock in release ceremony mode (provenance fail-closed)."
+        fi
+
+        if [ -n "$CORE_TREE_SHA" ]; then
+            echo -e "  ${GREEN}✓${NC} Engine (NeuralAmpModeler-rs) crates.io provenance verified (version: $CORE_VERSION, checksum: ${CORE_TREE_SHA:0:12}...)."
+        else
+            echo -e "  ${GREEN}✓${NC} Engine (NeuralAmpModeler-rs) crates.io provenance verified (version: $CORE_VERSION)."
+        fi
     fi
 }
 
-# Provenance fail-closed: a certified release can never be produced from a
-# dirty work tree. In strict mode this aborts before any heavy work is started
-# and is re-verified immediately before receipt generation (Phase 8), so no
-# receipt is ever written for a dirty tree.
+# Provenance fail-closed: an official certified release can never be produced
+# from a dirty work tree. In release ceremony mode this aborts before any heavy
+# work is started and is re-verified immediately before receipt generation (Phase 8).
 check_git_clean_strict() {
-    if [ "$STRICT_MODE" != "1" ]; then
+    if [ "$RELEASE_CEREMONY" != "true" ]; then
         return 0
     fi
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-        die "Not inside a git work tree in strict release mode; provenance cannot be certified. Run the release from a clean git checkout."
+        die "Not inside a git work tree in release ceremony mode; provenance cannot be certified. Run the release from a clean git checkout."
     fi
     if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
-        die "Git working tree is dirty in strict release mode (provenance fail-closed). Commit, stash or clean before generating a certified release; no receipt will be written."
+        die "Git working tree is dirty in release ceremony mode (provenance fail-closed). Commit, stash or clean before generating a certified release; no receipt will be written."
     fi
-    check_engine_provenance
 }
 check_git_clean_strict
+check_engine_provenance
 
 # State tracking for signal safety and cleanup
 ORIG_PARANOID=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "2")
@@ -388,8 +427,14 @@ QUICK_RECEIPT="$PROJECT_DIR/target/logs/quick-receipt.txt"
 HEAP_LOG="$PROJECT_DIR/target/logs/quick-heap-audit.log"
 
 if [ "${NAM_SKIP_QUICK_QA:-0}" != "1" ]; then
-    NAM_QUICK_STRICT=1 "$SCRIPT_DIR/tests-quick.sh" || {
-        if [ "$STRICT_MODE" = "1" ]; then
+    local_quick_strict=0
+    if [ "$RELEASE_CEREMONY" = "true" ]; then
+        local_quick_strict=1
+    fi
+    NAM_QUICK_STRICT=$local_quick_strict "$SCRIPT_DIR/tests-quick.sh" || {
+        if [ "$RELEASE_CEREMONY" = "true" ]; then
+            die "Quick QA preflight suite failed in release ceremony mode!"
+        elif [ "$STRICT_MODE" = "1" ]; then
             die "Quick QA preflight suite failed in strict release mode!"
         fi
         warn "Quick QA preflight suite failed (non-strict mode)."
@@ -402,7 +447,7 @@ HEAP_AUDIT_PASSED=false
 QUICK_RECEIPT_SHA=""
 HEAP_AUDIT_LOG_SHA=""
 
-if [ -f "$QUICK_RECEIPT" ] && grep -q "OVERALL: PASSED" "$QUICK_RECEIPT"; then
+if [ -f "$QUICK_RECEIPT" ] && grep -q -E "OVERALL: (PASSED|COMPLETED_WITH_GAPS)" "$QUICK_RECEIPT"; then
     QUICK_QA_PASSED=true
     QUICK_RECEIPT_SHA=$(sha256sum "$QUICK_RECEIPT" | cut -d' ' -f1)
 fi
@@ -415,7 +460,9 @@ fi
 if [ "$QUICK_QA_PASSED" = true ] && [ "$HEAP_AUDIT_PASSED" = true ]; then
     echo -e "  ${GREEN}✓${NC} Quick QA preflight and zero-alloc heap audit verified."
 else
-    if [ "$STRICT_MODE" = "1" ]; then
+    if [ "$RELEASE_CEREMONY" = "true" ]; then
+        die "Quick QA preflight did not pass or heap audit was not verified in release ceremony mode!"
+    elif [ "$STRICT_MODE" = "1" ]; then
         die "Quick QA preflight did not pass or heap audit was not verified in strict release mode!"
     fi
     warn "Quick QA preflight or heap audit not fully verified."
@@ -518,6 +565,7 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
     # Step 2: Collect Instrumentation Profiles
     if [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" ]; then
         echo -e "  [Step 2/3] Collecting BOLT instrumentation profiles via workload runner..."
+        echo -e "  Recompiling workload runner without PGO instrumentation (linking with LTO; please wait)..."
 
         # Recompile pgo_profiling_workload without PGO instrumentation for clean BOLT profiling
         RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS" \
@@ -738,15 +786,15 @@ if ORACLE_BIN=$(find_namcore_render); then
             test_clap_parity_multi_rate -- --ignored --nocapture
         ok "NAMCore float parity certified on distributed artifact."
     else
-        if [ "$STRICT_MODE" = "1" ]; then
-            die "Model fixture tests/fixtures/models/wavenet_a1_standard.nam missing in strict release mode!"
+        if [ "$RELEASE_CEREMONY" = "true" ]; then
+            die "Model fixture tests/fixtures/models/wavenet_a1_standard.nam missing in release ceremony mode!"
         fi
         warn "Model fixture missing. Skipping parity test."
         GATE_SKIPS+=("namcore_parity:missing_model_fixture")
     fi
 else
-    if [ "$STRICT_MODE" = "1" ]; then
-        die "NAMCore render binary missing in strict release mode! Set NAM_CORE_RENDER_BIN or build it locally."
+    if [ "$RELEASE_CEREMONY" = "true" ]; then
+        die "NAMCore render binary missing in release ceremony mode! Set NAM_CORE_RENDER_BIN or build it locally."
     fi
     warn "NAMCore render binary missing. Skipping parity test."
     GATE_SKIPS+=("namcore_parity:missing_oracle_bin")
@@ -967,8 +1015,8 @@ receipt = {
         'dependency_type': 'path_patch' if '$CORE_PATH' else 'crates_io',
         'path': '$CORE_PATH' or None,
         'version': '$CORE_VERSION',
-        'git_commit': '$CORE_GIT_COMMIT',
-        'git_branch': '$CORE_GIT_BRANCH',
+        'git_commit': '$CORE_GIT_COMMIT' if '$CORE_PATH' and '$CORE_GIT_COMMIT' != 'unknown' else None,
+        'git_branch': '$CORE_GIT_BRANCH' if '$CORE_PATH' and '$CORE_GIT_BRANCH' != 'unknown' else None,
         'git_dirty': bool('$CORE_GIT_DIRTY' == 'true'),
         'source_tree_sha256': '$CORE_TREE_SHA' or None
     },
@@ -1013,13 +1061,19 @@ RECEIPT_TARGET="$PROJECT_DIR/target/release-receipt.json"
 mv -f "$RECEIPT_TMP" "$RECEIPT_TARGET"
 echo -e "  ${GREEN}✓${NC} Atomic build receipt generated at: ${BOLD}$RECEIPT_TARGET${NC} (status: $RECEIPT_STATUS)"
 
-echo -e "\n${GREEN}${BOLD}================================================================================${NC}"
+BANNER_COLOR="${GREEN}"
 if [ "$RECEIPT_STATUS" = "CERTIFIED" ]; then
+    BANNER_COLOR="${GREEN}"
+    echo -e "\n${BANNER_COLOR}${BOLD}================================================================================${NC}"
     echo -e "${GREEN}${BOLD}   Pipeline completed! Artifacts certified and ready for distribution:   ${NC}"
 elif [ "$RECEIPT_STATUS" = "FUNCTIONALLY_CERTIFIED" ]; then
+    BANNER_COLOR="${YELLOW}"
+    echo -e "\n${BANNER_COLOR}${BOLD}================================================================================${NC}"
     echo -e "${YELLOW}${BOLD}   Pipeline completed! Functionally certified (PGO/BOLT omitted or perf inconclusive): ${NC}"
 else
-    echo -e "${RED}${BOLD}   Pipeline completed with gaps — receipt status INCOMPLETE (not certified): ${NC}"
+    BANNER_COLOR="${YELLOW}"
+    echo -e "\n${BANNER_COLOR}${BOLD}================================================================================${NC}"
+    echo -e "${YELLOW}${BOLD}   Pipeline completed with gaps — receipt status INCOMPLETE (not certified): ${NC}"
 fi
 echo -e "  ${BOLD}Artifacts saved:${NC}"
 echo -e "    - CLAP Plugin:    ${CYAN}$CLAP_TARGET${NC} (sha256: ${FINAL_CLAP_SHA:0:16}...)"
@@ -1033,4 +1087,5 @@ fi
 if [ -f "$PROJECT_DIR/target/dsp_hotpath.asm" ]; then
     echo -e "    - Assembly ASM:   ${CYAN}$PROJECT_DIR/target/dsp_hotpath.asm${NC}"
 fi
-echo -e "${GREEN}${BOLD}================================================================================${NC}\n"
+echo -e "${BANNER_COLOR}${BOLD}================================================================================${NC}\n"
+

@@ -33,7 +33,7 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 - [ ] **T1.1 Load Model & CabSim IR:** Click `[📂 Load Model]` → select a valid `.nam` model → Click `[📂 Load IR]` → select a valid `.wav` IR.
   *Expected:* Both load without host UI freeze or audio dropouts. Audible amp modeling and IR convolution active immediately. Active model name and IR filename update in Zone 1.
 - [ ] **T1.2 Knobs & Double-Click Reset:** Drag **INPUT** knob to +6.0 dB, drag **GATE** to −50.0 dB → Double-click **INPUT**.
-  *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to −70.0 dB.
+  *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to −90.0 dB (off by default).
 - [ ] **T1.3 Bypass & Adaptive VU Meter:** Insert plugin on a mono track (1 bar), then move to a stereo track (2 bars L/R) → Toggle **BYPASS**.
   *Expected:* VU layout adapts dynamically (1 centered bar mono vs 2 bars L/R). Bypass toggle instantly silences DSP processing via a 64-sample click-free crossfade, yielding bit-transparent dry signal without clicks.
 - [ ] **T1.4 Host Parameter Automation (`[Bitwig]`):** Draw a quick automation ramp for `input_gain_db` or `output_gain_db` in DAW → start playback.

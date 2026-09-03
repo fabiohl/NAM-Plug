@@ -95,6 +95,7 @@ pub(crate) fn draw_zone2_controls(
                         ind_input,
                         ind_input_color,
                         " dB",
+                        None,
                     );
                 });
                 ui.add_space(2.0);
@@ -117,6 +118,7 @@ pub(crate) fn draw_zone2_controls(
                         ind_output,
                         ind_output_color,
                         " dB",
+                        None,
                     );
                 });
                 ui.add_space(2.0);
@@ -126,7 +128,7 @@ pub(crate) fn draw_zone2_controls(
                         ui.make_persistent_id("gate_thresh_knob"),
                         "GATE",
                         -90.0..=-40.0,
-                        -70.0,
+                        -90.0,
                         &shared.ui_to_rt.param_gate_thresh,
                         &shared.ui_to_rt.gesture_flags,
                         &shared.ui_to_rt.gui_param_generation,
@@ -137,7 +139,15 @@ pub(crate) fn draw_zone2_controls(
                         egui::vec2(42.0, 42.0),
                         ind_gate,
                         ind_gate_color,
-                        " dB (Threshold)",
+                        // -90 dB is the range minimum and is below the practical
+                        // noise floor of virtually any signal chain (16-bit
+                        // quantization noise alone sits at -96 dBFS); at this
+                        // setting the gate is effectively off/inaudible. Made
+                        // explicit here so users don't read "-90.0 dB" as "a
+                        // very subtle but still-active gate". See
+                        // TODO-Gate-NAM-Plug.md.
+                        " dB (Threshold — at -90 dB the gate is effectively OFF, below the practical noise floor)",
+                        Some(-89.99),
                     );
                 });
             });
