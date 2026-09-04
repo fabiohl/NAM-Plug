@@ -680,14 +680,100 @@ elif [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
 fi
 
 if [ -n "${ASM_BIN:-}" ]; then
+    OBJDUMP_TOOL=""
     if command -v llvm-objdump &>/dev/null; then
-        llvm-objdump -d --demangle --no-show-raw-insn "$ASM_BIN" > "$ASM_TARGET" 2>/dev/null || true
+        OBJDUMP_TOOL="llvm-objdump"
     elif command -v objdump &>/dev/null; then
-        objdump -d --demangle --no-show-raw-insn "$ASM_BIN" > "$ASM_TARGET" 2>/dev/null || true
+        OBJDUMP_TOOL="objdump"
+    fi
+
+    if [ -n "$OBJDUMP_TOOL" ]; then
+        python3 - "$ASM_BIN" "$ASM_TARGET" "$OBJDUMP_TOOL" << 'PYEOF'
+import sys, re, subprocess, os, hashlib
+
+asm_bin = sys.argv[1]
+asm_target = sys.argv[2]
+objdump_tool = sys.argv[3]
+
+bin_sha = "unknown"
+try:
+    with open(asm_bin, "rb") as bf:
+        bin_sha = hashlib.sha256(bf.read()).hexdigest()
+except Exception:
+    pass
+
+# Disassemble the active .text section (bypassing redundant pre-BOLT backup sections)
+cmd = [objdump_tool, "-d", "--demangle", "--no-show-raw-insn", "-j", ".text", asm_bin]
+try:
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=dict(os.environ, LC_ALL="C")
+    )
+except Exception:
+    cmd = [objdump_tool, "-d", "--demangle", "--no-show-raw-insn", asm_bin]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=dict(os.environ, LC_ALL="C")
+    )
+
+func_re = re.compile(r"^[0-9a-fA-F]+\s+<(.*)>:\s*$")
+include_re = re.compile(r"(neural_amp_modeler_rs::(models|math|dsp)|nam_plug::clap::processor)")
+exclude_re = re.compile(r"(drop_glue|fmt::|serde|deserialize|serialize|Display|Debug)")
+
+captured_funcs = 0
+captured_lines = 0
+body_lines = []
+is_capturing = False
+
+for line in proc.stdout:
+    m = func_re.match(line)
+    if m:
+        sym = m.group(1)
+        if include_re.search(sym) and not exclude_re.search(sym):
+            is_capturing = True
+            captured_funcs += 1
+        else:
+            is_capturing = False
+    if is_capturing:
+        body_lines.append(line)
+        captured_lines += 1
+
+proc.wait()
+
+# Fail-safe: if symbol filtering matched zero lines, fallback to raw disassembly
+if captured_lines == 0:
+    cmd_fallback = [objdump_tool, "-d", "--demangle", "--no-show-raw-insn", "-j", ".text", asm_bin]
+    try:
+        raw_out = subprocess.check_output(cmd_fallback, stderr=subprocess.DEVNULL, text=True, env=dict(os.environ, LC_ALL="C"))
+        body_lines = [raw_out]
+    except Exception:
+        pass
+
+with open(asm_target, "w") as out:
+    out.write("# =========================================================================\n")
+    out.write("# NAM-Plug AI-Ready DSP Hotpath Disassembly Report\n")
+    out.write(f"# Binary:           {os.path.basename(asm_bin)}\n")
+    out.write(f"# SHA-256:          {bin_sha}\n")
+    out.write("# Architecture:     x86-64-v3 (AVX2, FMA, BMI2)\n")
+    out.write("# Captured Scope:   neural_amp_modeler_rs::{models, math, dsp}, nam_plug::clap::processor\n")
+    out.write("# Excluded Noise:   cold runtime & formatting (drop_glue, serde, fmt)\n")
+    out.write(f"# Hot Functions:    {captured_funcs}\n")
+    out.write(f"# Captured Lines:   {captured_lines}\n")
+    out.write("# =========================================================================\n\n")
+    out.writelines(body_lines)
+PYEOF
     fi
 
     if [ -s "$ASM_TARGET" ]; then
-        echo -e "  ${GREEN}✓${NC} Assembly report generated at target/dsp_hotpath.asm ($(wc -l < "$ASM_TARGET") lines)"
+        ASM_LINES=$(wc -l < "$ASM_TARGET")
+        ASM_SIZE=$(du -h "$ASM_TARGET" | cut -f1)
+        echo -e "  ${GREEN}✓${NC} Assembly hotspot report generated at target/dsp_hotpath.asm (${ASM_LINES} lines, ${ASM_SIZE})"
     else
         echo -e "  ${YELLOW}Warning: Assembly disassembly failed or produced empty output.${NC}"
     fi
