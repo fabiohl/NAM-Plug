@@ -233,7 +233,7 @@ impl<'a> NamClapMainThread<'a> {
                     }) {
                     Ok(_seq) => {}
                     Err((PushError::Full, payload)) => {
-                        // R-10: fail-closed — retain the model for retry instead of
+                        // Fail-closed — retain the model for retry instead of
                         // dropping it. The UI is not advanced because the model is
                         // not yet installed on the audio thread; `flush_pending_model`
                         // will retry on the next housekeeping cycle.
@@ -420,7 +420,7 @@ impl<'a> NamClapMainThread<'a> {
                         self.staged_swap = None;
                     }
                 }
-                // R-10: fail-closed — if the SPSC is full, put the path back in
+                // Fail-closed — if the SPSC is full, put the path back in
                 // `ui_pending_ir` and request a callback so housekeeping retries.
                 // Do not commit ir_path / ir_raw_samples until the adapter is
                 // actually delivered (UI/state would otherwise claim IR is loaded

@@ -59,7 +59,7 @@ use std::sync::atomic::Ordering;
 /// message from the payload so the host can display it.
 ///
 /// NOTE: this is the ONLY sanctioned intentional heap-leak of an error string
-/// in the plugin error paths (T-4.1.2 / SA-04): panic payload strings need a
+/// in the plugin error paths: panic payload strings need a
 /// `'static` message for `PluginError::Message`, and the process is already
 /// recovering from a critical failure — the leak is trivial and one-shot. All
 /// other runtime error formatting goes through the static catalog
@@ -76,7 +76,7 @@ fn panic_to_error(panic_info: Box<dyn std::any::Any + Send>) -> PluginError {
     }
 }
 
-/// Builds an `activate()` DSP buffer pre-allocation error (SA-04): the DAW
+/// Builds an `activate()` DSP buffer pre-allocation error: the DAW
 /// receives a static catalog message; the stage name and underlying cause are
 /// emitted to the logger only.
 fn buffer_prealloc_error(stage: &str, error: impl std::fmt::Debug) -> PluginError {

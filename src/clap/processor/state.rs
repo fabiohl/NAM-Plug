@@ -76,7 +76,7 @@ impl BypassCrossfader {
     /// Trigger a crossfade towards the given bypass state.
     /// If already at or transitioning to `target`, does nothing.
     ///
-    /// # Design Rationale — Rapid Automation Toggling (Finding F12)
+    /// # Design Rationale — Rapid Automation Toggling
     ///
     /// If bypass toggles rapidly (faster than `BYPASS_XFADE_SAMPLES` = 64 samples),
     /// invoking `trigger()` while a crossfade is still active restarts the 64-sample

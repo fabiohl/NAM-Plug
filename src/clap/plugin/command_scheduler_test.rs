@@ -219,7 +219,7 @@ fn stress_10k_param_burst_no_loss_no_deadlock() {
         }
         let last_seq = producer.force_flush().unwrap();
 
-        // T-3.1.1: production ack-wait is the bounded variant — a stalled
+        // Production ack-wait is the bounded variant — a stalled
         // audio engine must never hang the producer thread forever.
         assert!(
             producer.wait_for_ack_timeout(last_seq, std::time::Duration::from_secs(2)),
@@ -336,7 +336,7 @@ fn spin_wait_for_ack_does_not_deadlock() {
     assert!(producer.is_acked(seq));
 }
 
-/// SA-03 / T-3.1.1: the production ack-wait must time out instead of
+/// Verifies that the production ack-wait times out instead of
 /// spin-waiting forever when the audio thread never acknowledges.
 ///
 /// The atomic is left untouched at 0 while the producer waits for a
@@ -371,7 +371,7 @@ fn wait_for_ack_timeout_times_out_when_ack_never_arrives() {
     assert!(!producer.is_acked(42));
 }
 
-/// SA-03 / T-3.1.1: success path — the bounded wait returns `true` as soon as
+/// Success path: the bounded wait returns `true` as soon as
 /// the audio-thread consumer acknowledges the requested sequence.
 #[test]
 fn wait_for_ack_timeout_returns_true_when_ack_arrives() {

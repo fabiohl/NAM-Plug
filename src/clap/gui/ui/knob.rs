@@ -344,7 +344,7 @@ pub fn handle_knob(
             // This is a display-only affordance: the underlying CLAP parameter,
             // automation, and stored value are untouched (still a plain dB
             // float) — same vocabulary already used by the Oversampling control
-            // ("Off"/"2x"/"4x"). See TODO-Gate-NAM-Plug.md.
+            // ("Off"/"2x"/"4x").
             let display_text = match off_threshold {
                 Some(threshold) if final_val <= threshold => "OFF".to_string(),
                 _ => format!("{:.1} dB", final_val),

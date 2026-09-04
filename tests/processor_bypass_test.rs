@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Integration test suite for BypassCrossfader rapid automation toggling (Finding F12, Task SP3-T03).
+//! Integration test suite for BypassCrossfader rapid automation toggling.
 
 use nam_plug::clap::processor::{BYPASS_XFADE_SAMPLES, BypassCrossfader};
 

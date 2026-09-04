@@ -4,10 +4,8 @@
 //! DSP block proper: channel extraction, gate, inference,
 //! resampling, output gain, peaks, and telemetry.
 
-pub mod bypass;
 pub mod channels;
 pub mod dry_delay;
-pub mod gain;
 pub mod orchestrator;
 pub mod peaks;
 pub mod telemetry;

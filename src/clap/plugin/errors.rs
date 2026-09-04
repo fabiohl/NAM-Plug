@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! # CLAP Static Error Catalog (Épico 4 / SA-04)
+//! # CLAP Static Error Catalog
 //!
 //! `clack_plugin` requires `PluginError::Message` to carry a `&'static str`.
 //! Historically, dynamic error text (formatted paths, causes, sizes) was leaked
 //! onto the heap via `Box::leak(format!(...))`, producing monotonic RAM growth
-//! whenever a host cyclically submitted corrupted presets/states (Finding SA-04).
+//! whenever a host cyclically submitted corrupted presets/states.
 //!
 //! This module centralises every DAW-facing plugin error as a catalog of static
 //! `&'static str` constants, grouped by error category:
@@ -17,7 +17,7 @@
 //! * [`state_txn`] — state JSON transaction validation failures.
 //! * [`assets`] — file hashing / asset identity failures.
 //!
-//! # Invariants (SA-04)
+//! # Invariants
 //!
 //! * No `Box::leak` is used to format runtime error strings. The single
 //!   remaining `Box::leak` in the plugin error paths is the emergency panic
@@ -99,7 +99,7 @@ pub mod dsp_resources {
 ///
 /// These are the messages a DAW surfaces when a project/preset state blob is
 /// corrupt, stale, or references assets that no longer exist. They are the
-/// primary target of the SA-04 heap-stability invariant: a host replaying a
+/// primary target of the heap-stability invariant: a host replaying a
 /// broken preset in a loop must not grow the plugin heap.
 pub mod state_txn {
     /// The state stream handed to the plugin was empty.
@@ -155,7 +155,7 @@ pub mod assets {
 /// emitted exclusively through the logger and never reaches the host error
 /// dialog, keeping both the dialog legible and the heap footprint constant.
 ///
-/// # SA-04 invariant
+/// # Heap-stability invariant
 ///
 /// Calling this repeatedly with the same `code` performs zero heap
 /// allocations, so a host replaying corrupted states cannot grow plugin RAM.

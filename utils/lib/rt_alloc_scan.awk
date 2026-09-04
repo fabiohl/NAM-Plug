@@ -16,7 +16,7 @@
 #     `build_cab_sim_from_raw_samples`). `activate` is the documented ONLY
 #     allocation site (main thread, CLAP lifecycle); the panic helper only
 #     runs during exceptional unwinding (its `Box::leak` is the sole
-#     sanctioned leak — SA-04).
+#     sanctioned leak).
 #   - `Arc::clone` is a refcount bump, never an allocation — not flagged.
 #
 # Exit status: 0 when the scanned code is clean, 1 when any pattern matches

@@ -30,7 +30,7 @@
 //!    so both curves carry the same content timeline at equal host indices.
 //!    ESR/SNR are computed on the steady-state window after that latency.
 //!
-//! // Measured: F-11 (2026-07-30) — cross-implementation floor against
+//! // Measured: (2026-07-30) — cross-implementation floor against
 //! // real C++ oracle + LUT-based gain (wavenet_a1_standard @ 48 kHz):
 //! //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (after loudness calibration compensation).
 //! // Conservative gate: ESR < 1e-8, SNR > 80 dB.
@@ -450,7 +450,7 @@ fn resampler_latency_samples(host_sr: u32, model_sr: u32) -> usize {
 /// cross-implementation float floor as 48 kHz native.
 fn parity_gates(host_sr: f64) -> (f64, f64, &'static str) {
     match host_sr.round() as u32 {
-        // Measured: F-11 (2026-07-30) — cross-implementation floor against
+        // Measured: (2026-07-30) — cross-implementation floor against
         // the real C++ oracle + LUT gain @ 48 kHz native (resampler bypass):
         //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB.
         // Re-measured 2026-09-03 on the current engine/oracle: ESR 7.98e-12,
@@ -635,7 +635,7 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
 /// gain LUT) mirroring the plugin DSP chain, so residuals reflect only
 /// actual DSP divergence.
 ///
-/// // Measured: F-11 (2026-07-30) — cross-implementation floor
+/// // Measured: (2026-07-30) — cross-implementation floor
 /// //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (48 kHz native) → conservative gates:
 /// //   ESR < 1e-8, SNR > 80 dB. Resampled-rate gates calibrated on
 /// //   2026-09-03 (see `parity_gates()`).

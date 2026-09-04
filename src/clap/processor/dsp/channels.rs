@@ -8,7 +8,7 @@ type ChannelResult<'a> = (Option<&'a mut [f32]>, Option<&'a mut [f32]>);
 
 /// Maps the host port channels into the contiguous working scratch buffers.
 ///
-/// Channel semantics (PO: mono is the priority default; authentic stereo only
+/// Channel semantics (mono is the priority default; authentic stereo only
 /// when the host track is stereo):
 ///
 /// * **Mono port** (host provides a single input channel, or channel R has no

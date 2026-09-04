@@ -38,7 +38,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ### 1.1 Thread Roles & Hard Contracts
 
-- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, background model (`.nam`/`.namb`) loading, IR reading via `src/loader/`, and Tier 1 Garbage Collection disposal.
+- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, background model (`.nam`/`.namb`) loading, IR reading via `src/clap/plugin/main_thread/load.rs` (using `neural_amp_modeler_rs::dsp::cabsim::loader`), and Tier 1 Garbage Collection disposal.
 
 - **Audio Thread (RT)** — Driven by the host `process()` callback (`PluginAudioProcessor::process` in `src/clap/processor/mod.rs`).
 
@@ -188,7 +188,7 @@ To prevent loading 8 atomic floats on every audio block when parameters are stat
 
 ### 5.3 Three-Tier Real-Time Garbage Collection Cascade
 
-Deallocating complex DSP structures (`Box<StaticModel>`, `Box<NamResampler>`, `ConvEngine`, `OversampleEngine`) on the audio thread causes kernel allocator locks and priority inversion. Disposal cascades through three lock-free tiers (`gc_cascade` in `NeuralAmpModeler-rs/src/common/spsc/gc.rs`):
+Deallocating complex DSP structures (`Box<StaticModel>`, `Box<NamResampler>`, `ConvEngine`, `OversampleEngine`) on the audio thread causes kernel allocator locks and priority inversion. Disposal cascades through three lock-free tiers (`gc_cascade` in `neural_amp_modeler_rs::common::spsc::gc`):
 
 ```text
 RT Thread (Replaced Asset)
@@ -226,7 +226,7 @@ therefore managed by the `Arc` — there is no scenario in which a GUI or dialog
 thread can dereference freed plugin state.
 
 - **`alive_fence` (`Arc<AtomicBool>`, lowered in `NamClapShared::drop`):** the
-  fence is a **logical validity** gate (protocol R-09), *not* a memory-lifetime
+  fence is a **logical validity** gate, *not* a memory-lifetime
   mechanism. During teardown the main thread lowers the fence and bounded-joins
   every GUI/dialog thread *before* the instance's shared state is released;
   window event loops and file-picker callbacks are fence-gated no-ops while
@@ -378,7 +378,7 @@ the crossfade blends signals representing the exact same temporal instant of the
 preventing comb filtering or transient cancellation, and the fully-bypassed
 state matches the declared plugin latency for seamless host PDC.
 
-- **Pre-allocated circular delay line:** `DryDelayLine` (`dsp/dry_delay.rs`)
+- **Pre-allocated circular delay line:** `DryDelayLine` (`src/clap/processor/dsp/dry_delay.rs`)
   is a bounded L/R ring buffer allocated once in `activate()` (capacity =
   `max(max_frames_count, MAX_RESAMP_BUF) + DRY_DELAY_MAX_EXTRA`, covering the
   cab-sim partition plus the worst-case resampler/oversampler group delay).
@@ -441,7 +441,7 @@ The graphical interface is built using an immediate-mode paradigm under `src/cla
 - `src/clap/gui/ui/status_bar/` — Zone 5 status bar (`orchestrator`, `telemetry`, `metadata`).
 - `src/clap/gui/ui/meter/` — VU metering logic: `orchestrator`, `glow` (GPU hardware path), `cpu` (fallback path).
 
-### 7.2 Two-Tier Frame Lifecycle & Idle Skip (CLAP-F022)
+### 7.2 Two-Tier Frame Lifecycle & Idle Skip
 
 To prevent idle CPU consumption when the plugin UI is open but static:
 
@@ -478,7 +478,7 @@ When closing a floating window:
 
 ## 8. Error Catalog Summary (`NamErrorCode`)
 
-NAM-Plug utilizes typed diagnostic codes (`NamErrorCode` in `NeuralAmpModeler-rs/src/common/diagnostics/error_codes.rs`) for structured logging and UI error toasts:
+NAM-Plug utilizes typed diagnostic codes (`NamErrorCode` in `neural_amp_modeler_rs::common::diagnostics`) for structured logging and UI error toasts:
 
 | Range   | Category            | Representative Examples                                                                                             |
 |:------- |:------------------- |:------------------------------------------------------------------------------------------------------------------- |

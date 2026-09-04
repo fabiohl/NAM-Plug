@@ -144,8 +144,7 @@ pub(crate) fn draw_zone2_controls(
                         // quantization noise alone sits at -96 dBFS); at this
                         // setting the gate is effectively off/inaudible. Made
                         // explicit here so users don't read "-90.0 dB" as "a
-                        // very subtle but still-active gate". See
-                        // TODO-Gate-NAM-Plug.md.
+                        // very subtle but still-active gate".
                         " dB (Threshold — at -90 dB the gate is effectively OFF, below the practical noise floor)",
                         Some(-89.99),
                     );

@@ -148,7 +148,7 @@ impl<'a> NamClapMainThread<'a> {
                                 .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
                         }
                         Err(rtrb::PushError::Full(_)) => {
-                            // R-10: keep NEEDS_SLIMMABLE_REBUILD so the FSM
+                            // Keep NEEDS_SLIMMABLE_REBUILD so the FSM
                             // retries on the next cycle instead of silently
                             // dropping the slimmed model and locking quality.
                             log::warn!("NAM-Plug: slimmable channel full — rebuild will retry");

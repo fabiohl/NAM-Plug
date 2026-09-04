@@ -6,8 +6,7 @@
 //! # Architecture
 //!
 //! The `CommandScheduler` provides a lossless, ordered channel between the
-//! Main Thread and the Audio Thread, solving three problems identified in
-//! CLAP-F004:
+//! Main Thread and the Audio Thread, solving three critical coordination challenges:
 //!
 //! 1. **Coalescing** — rapid parameter automation bursts are merged so the
 //!    SPSC never saturates. 10 000 host events reduce to ≤ 9 internal pushes
@@ -378,7 +377,7 @@ impl<'a> CommandProducer<'a> {
     /// `false` if the deadline expired first.
     ///
     /// This is the **only** blocking-acknowledgment variant available in
-    /// production builds (SA-03 / T-3.1.1): if the DAW pauses or tears down
+    /// production builds: if the DAW pauses or tears down
     /// the audio engine, the main/UI thread returns `false` after the
     /// deadline instead of spinning forever at 100% CPU and freezing the
     /// interface.

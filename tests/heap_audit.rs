@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Property-Based GC Cascade Idempotence Audit (F-01 / T-3.1.3).
+//! Property-Based GC Cascade Idempotence Audit.
 //!
-//! Sprint 3.1 — Blindagem Formal do GC. This integration target certifies the
+//! This integration target certifies the
 //! **exact GC cascade** that NAM-Plug's swap paths consume
 //! (`NeuralAmpModeler-rs::common::spsc::{gc_cascade, GcOverflowBuffer,
 //! drain_gc_channels}`): the SPSC channel (32 slots) → the 16-slot RT parking
@@ -28,7 +28,7 @@
 //!      tier (a case that never leaves the SPSC proves nothing).
 //!
 //! All work happens on off-RT test threads: there is no audio thread here, so
-//! the rollback condition of T-3.1.3 ("no dynamic allocation on the RT
+//! the rollback condition ("no dynamic allocation on the RT
 //! thread") is vacuous by construction.
 
 use neural_amp_modeler_rs::common::spsc::{
@@ -292,7 +292,7 @@ fn run_idempotence_case(total_swaps: usize, producer_threads: usize, prefill: us
     drainer.join().expect("drainer thread must not panic");
 
     // Final exhaustive drain: SPSC + overflow + the single-owner parking-lot
-    // handoff (the production teardown contract of R-04).
+    // handoff (the production teardown contract).
     {
         let mut consumer = drain_side.lock().expect("drain lock");
         let ids = drain_pass(&mut consumer, &overflow, &rt_status);
@@ -316,8 +316,8 @@ fn run_idempotence_case(total_swaps: usize, producer_threads: usize, prefill: us
         recorded.lock().expect("ledger lock").extend(ids);
     }
 
-    // ── Formal invariants (F-01 acceptance: Total(Alocados) == Total(Drenados)
-    // ── with strictly disjoint identifiers) ──────────────────────────────────
+    // ── Formal invariants: Total(Alocados) == Total(Drenados)
+    // ── with strictly disjoint identifiers ──────────────────────────────────
     let ledger = recorded.lock().expect("ledger lock");
     assert!(
         !rt_status.check_flag(RT_STATUS_GC_OVERFLOW),
@@ -358,7 +358,7 @@ fn run_idempotence_case(total_swaps: usize, producer_threads: usize, prefill: us
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
-    /// F-01 / T-3.1.3: 100–500 concurrent model/IR-style swaps, raced between
+    /// 100–500 concurrent model/IR-style swaps, raced between
     /// asynchronous requester threads and an off-RT drainer, must preserve
     /// strict GC idempotence — every unique identifier drained exactly once.
     #[test]

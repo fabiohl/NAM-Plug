@@ -95,7 +95,7 @@ pub fn sanitize_param_value(id: u32, val: f32) -> f32 {
         PARAM_GATE_THRESH => {
             if !val.is_finite() {
                 // Gate off by default: fall back to the range minimum (-90 dB), the
-                // most permissive setting. See TODO-Gate-NAM-Plug.md.
+                // most permissive setting.
                 -90.0
             } else {
                 val.clamp(-90.0, -40.0)

@@ -60,7 +60,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     max_value: -40.0,
                     // Gate off by default: parked at the most permissive end of the
                     // range so the noise gate practically never closes out of the box
-                    // (opt-in tightening via automation/GUI). See TODO-Gate-NAM-Plug.md.
+                    // (opt-in tightening via automation/GUI).
                     default_value: -90.0,
                 });
             }

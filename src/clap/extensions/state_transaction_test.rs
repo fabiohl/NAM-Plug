@@ -655,7 +655,7 @@ fn test_build_restore_package_for_preset_with_model() {
     assert_eq!(publish.model_basename.as_deref(), Some("lstm.nam"));
 }
 
-// ── SA-04 / T-4.1.2: heap stability under 10.000 corrupted states ─────────────
+// ── Heap stability under 10.000 corrupted states ─────────────────────────────
 //
 // A host replaying corrupted project/preset states in a loop must not grow the
 // plugin heap. Before the static error catalog (plugin::errors) every
@@ -674,7 +674,7 @@ const CORRUPTED_STATE_SUBMISSIONS: usize = 10_000;
 /// then fail transactional validation, or fail deserialisation outright. The
 /// model/IR validation variants (indices 0–5) and the appended malformed-IR-hash
 /// blob exercise `state_transaction` error paths that used to `Box::leak` their
-/// message on every submission (SA-04); the corrupted-bytes and empty-stream
+/// message on every submission; the corrupted-bytes and empty-stream
 /// blobs assert rejection only.
 #[cfg(feature = "heap-audit")]
 fn corrupted_state_blobs() -> Vec<Vec<u8>> {
@@ -704,7 +704,7 @@ fn corrupted_state_blobs() -> Vec<Vec<u8>> {
     let _ = std::fs::remove_file(&ir_file);
     let samples: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.05).sin()).collect();
     neural_amp_modeler_rs::testing::wav::write_wav_f32(&ir_file, &samples, 48000)
-        .expect("failed to write synthetic IR for SA-04 stress test");
+        .expect("failed to write synthetic IR for heap stability stress test");
     blobs.push(
         serde_json::json!({ "ir_path": ir_file, "ir_hash": "malformed" })
             .to_string()
@@ -779,7 +779,7 @@ fn test_corrupted_states_10000_heap_stable() {
 
     // Measured window: 10.000 consecutive corrupted-state submissions through
     // the plugin's CLAP state pipeline. The number of live heap allocations
-    // must not grow (SA-04/T-4.1.2 invariant).
+    // must not grow (heap-stability invariant).
     for i in 0..CORRUPTED_STATE_SUBMISSIONS {
         let blob = &blobs[i % blobs.len()];
         assert!(
@@ -795,7 +795,7 @@ fn test_corrupted_states_10000_heap_stable() {
         final_live <= baseline_live + 128,
         "heap grew by {} live allocations across {CORRUPTED_STATE_SUBMISSIONS} \
          corrupted-state submissions (baseline {baseline_live} → final {final_live}) — \
-         SA-04 Box::leak regression",
+         Box::leak regression",
         final_live.saturating_sub(baseline_live)
     );
 }

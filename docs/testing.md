@@ -69,15 +69,15 @@ The root harness declares modular sub-suites covering: dynamic artifact discover
 
 Re-rendering the oracle over the round-trip model input cancels the sinc interpolation error, so the resampled rates sit on the same cross-implementation float floor as native 48 kHz (measured 2026-09-03: 44.1 kHz ESR ≈ 9.01e-12 / SNR ≈ 110.5 dB; 96 kHz ESR ≈ 8.13e-12 / SNR ≈ 110.9 dB).
 
-### 3.3 Epic E0 Regression Containment Suite ([`tests/clap_e0_containment_test.rs`](../tests/clap_e0_containment_test.rs))
+### 3.3 Regression Containment Suite ([`tests/clap_e0_containment_test.rs`](../tests/clap_e0_containment_test.rs))
 
 TDD red/green containment suite guarding against specific architectural regression cases:
 
-- **CLAP-F001 (CabSim Participation):** Ensures loaded impulse responses participate directly in audio processing and latency calculations.
-- **CLAP-F004 (Parameter State Fidelity):** Asserts parameter changes remain faithful through save/restore cycles.
-- **CLAP-F009 (Reset Semantics):** Validates DSP internal state clear during `reset()`.
-- **CLAP-F014 (Sample Rate Negotiation):** Confirms DSP pipeline re-initializes upon host sample rate changes.
-- **CLAP-F007 (State Deserialization):** Guarantees corrupt or partial state payloads recover gracefully.
+- **CabSim Participation:** Ensures loaded impulse responses participate directly in audio processing and latency calculations.
+- **Parameter State Fidelity:** Asserts parameter changes remain faithful through save/restore cycles.
+- **Reset Semantics:** Validates DSP internal state clear during `reset()`.
+- **Sample Rate Negotiation:** Confirms DSP pipeline re-initializes upon host sample rate changes.
+- **State Deserialization:** Guarantees corrupt or partial state payloads recover gracefully.
 
 ### 3.4 Property-Based Testing ([`tests/clap_e2_proptest.rs`](../tests/clap_e2_proptest.rs))
 

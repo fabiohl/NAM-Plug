@@ -9,7 +9,7 @@ use neural_amp_modeler_rs::common::spsc::{
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-// Task 4.3.1 — flag set/clear mechanism for emit_pending_logs
+// Flag set/clear mechanism for emit_pending_logs
 #[test]
 fn test_flag_set_and_clear_mechanism() {
     let rt_status = Arc::new(RtStatusFlags::new());
@@ -42,7 +42,7 @@ fn test_flag_set_and_clear_mechanism() {
 // Mutex to synchronize tests inspecting or mutating the global NamLogger / LogBuffer state
 static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-// Task 4.3.1 — verify flag-to-log messages reach LogBuffer
+// Verify flag-to-log messages reach LogBuffer
 #[test]
 fn test_emit_pending_logs_messages_reach_log_buffer() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -93,7 +93,7 @@ fn test_emit_pending_logs_messages_reach_log_buffer() {
     logger.set_max_level(original_level);
 }
 
-// Task 4.3.1 — verify state save emits confirmation log
+// Verify state save emits confirmation log
 #[test]
 fn test_state_save_emits_confirmation_log() {
     use log::LevelFilter;

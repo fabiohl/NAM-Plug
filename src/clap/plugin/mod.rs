@@ -101,7 +101,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                 param_output_gain: AtomicU32::new(0.0f32.to_bits()),
                 // Gate off by default: parked at the range minimum (-90 dB), the most
                 // permissive setting available, so the noise gate practically never
-                // closes out of the box. See TODO-Gate-NAM-Plug.md.
+                // closes out of the box.
                 param_gate_thresh: AtomicU32::new((-90.0f32).to_bits()),
                 param_bypass: AtomicU32::new(0),
                 param_adaptive_compute: AtomicU32::new(1), // Conservative by default in CLAP plugin
@@ -268,7 +268,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                 let host_nn: std::ptr::NonNull<()> =
                     unsafe { std::mem::transmute_copy(&handle_copy) };
                 let host_addr = host_nn.as_ptr() as usize;
-                // R-09: the sink outlives the plugin (registered in the
+                // The sink outlives the plugin (registered in the
                 // global NamLogger), so every dereference of the stored
                 // host pointer must be gated by the alive_fence (Acquire).
                 // Once the fence drops, log forwarding becomes a no-op.
@@ -276,7 +276,7 @@ impl DefaultPluginFactory for NamClapPlugin {
 
                 let sink: Arc<HostLogFn> = Arc::new(move |severity_str, msg| {
                     if !fence.load(Ordering::Acquire) {
-                        // R-09: plugin destroyed — never dereference the
+                        // Plugin destroyed — never dereference the
                         // host handle from a dead instance's sink.
                         return;
                     }
@@ -291,7 +291,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                     // SAFETY: host_addr was obtained from a valid
                     // HostSharedHandle during init. The pointer is
                     // valid for the plugin's lifetime — guarded above
-                    // by the alive_fence (R-09).
+                    // by the alive_fence.
                     let ptr = host_addr as *mut ();
                     let nn = unsafe { std::ptr::NonNull::new_unchecked(ptr) };
                     let host_shared: HostSharedHandle<'static> =
@@ -319,10 +319,10 @@ impl DefaultPluginFactory for NamClapPlugin {
         #[cfg_attr(test, allow(unused_mut, clippy::allow_attributes))]
         let main_thread = NamClapMainThread {
             shared,
-            // Gate off by default (product decision, see TODO-Gate-NAM-Plug.md): the
-            // upstream crate default (-70.0 dB) is overridden here to the range
-            // minimum (-90.0 dB), the most permissive setting, so the gate practically
-            // never closes unless the user/host explicitly tightens the threshold.
+            // Gate off by default (product decision): the upstream crate default (-70.0 dB)
+            // is overridden here to the range minimum (-90.0 dB), the most permissive
+            // setting, so the gate practically never closes unless the user/host
+            // explicitly tightens the threshold.
             params: ProcessingParams {
                 gate_threshold_db: -90.0,
                 ..ProcessingParams::default()
