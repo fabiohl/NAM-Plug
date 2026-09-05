@@ -14,7 +14,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 
-TARGET="${1:-$PROJECT_DIR/target/release/libnam_plug.so}"
+TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}"
+if [[ "$TARGET_DIR" != /* ]]; then
+    TARGET_DIR="$PROJECT_DIR/$TARGET_DIR"
+fi
+TARGET="${1:-$TARGET_DIR/release/libnam_plug.so}"
 
 if [ ! -f "$TARGET" ]; then
     warn "Target artifact not found: $TARGET. Building default release..."
@@ -31,10 +35,22 @@ if [ -z "$HASH" ]; then
 fi
 echo -e "  ${CYAN}Scanning artifact:${NC} $TARGET (sha256: ${HASH:0:16}...)"
 
-GUARD_BIN="$PROJECT_DIR/target/debug/nam_bin_guard"
+GUARD_BIN="$TARGET_DIR/debug/nam_bin_guard"
+if [ ! -x "$GUARD_BIN" ] && [ -x "$PROJECT_DIR/target/debug/nam_bin_guard" ]; then
+    GUARD_BIN="$PROJECT_DIR/target/debug/nam_bin_guard"
+fi
+
 if [ ! -x "$GUARD_BIN" ]; then
     warn "Building QA scanner (nam_bin_guard)..."
     ( cd "$PROJECT_DIR" && cargo build --quiet --locked --features testing --bin nam_bin_guard )
+fi
+
+if [ ! -x "$GUARD_BIN" ]; then
+    if [ -x "$TARGET_DIR/debug/nam_bin_guard" ]; then
+        GUARD_BIN="$TARGET_DIR/debug/nam_bin_guard"
+    elif [ -x "$PROJECT_DIR/target/debug/nam_bin_guard" ]; then
+        GUARD_BIN="$PROJECT_DIR/target/debug/nam_bin_guard"
+    fi
 fi
 
 if [ ! -x "$GUARD_BIN" ]; then
