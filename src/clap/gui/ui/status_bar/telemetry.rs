@@ -173,7 +173,7 @@ pub(crate) fn draw_telemetry_strings(
                 .frame(false),
             );
             let info_btn =
-                info_btn.on_hover_text("Copy Diagnostic info to clipboard and ~/.cache/nam-rs/");
+                info_btn.on_hover_text("Copy Diagnostic info to clipboard and ~/.cache/neural-amp-modeler-rs/");
 
             if info_btn.clicked() {
                 let consumer_meta =
@@ -197,7 +197,7 @@ pub(crate) fn draw_telemetry_strings(
                 // (b) Save to file
                 if let Some(home_dir) = std::env::var_os("HOME") {
                     let mut cache_dir = std::path::PathBuf::from(home_dir);
-                    cache_dir.push(".cache/nam-rs");
+                    cache_dir.push(".cache/neural-amp-modeler-rs");
                     if std::fs::create_dir_all(&cache_dir).is_ok() {
                         #[cfg(unix)]
                         {

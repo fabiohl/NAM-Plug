@@ -70,7 +70,7 @@ pub(crate) fn draw_zone5_status_bar(
                 ui.horizontal(|ui| {
                     let toast_font = egui::FontId::proportional(9.0);
                     ui.label(
-                        egui::RichText::new("Diagnostic copied · file in ~/.cache/nam-rs/")
+                        egui::RichText::new("Diagnostic copied · file in ~/.cache/neural-amp-modeler-rs/")
                             .font(toast_font.clone())
                             .color(accent_color)
                             .strong(),
@@ -91,7 +91,7 @@ pub(crate) fn draw_zone5_status_bar(
                             let home_dir = std::env::var_os("HOME");
                             if let Some(home) = home_dir {
                                 let mut cache_dir = std::path::PathBuf::from(home);
-                                cache_dir.push(".cache/nam-rs");
+                                cache_dir.push(".cache/neural-amp-modeler-rs");
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg(cache_dir)
                                     .spawn();

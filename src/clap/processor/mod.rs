@@ -55,7 +55,7 @@ use std::sync::atomic::Ordering;
 /// Converts a panic payload into `PluginError` for `catch_unwind` guards.
 ///
 /// The panic hook has already written the full crash report to
-/// `~/.cache/nam-rs/crash-*.txt`. This function extracts a human-readable
+/// `~/.cache/neural-amp-modeler-rs/crash-*.txt`. This function extracts a human-readable
 /// message from the payload so the host can display it.
 ///
 /// NOTE: this is the ONLY sanctioned intentional heap-leak of an error string
@@ -72,7 +72,7 @@ fn panic_to_error(panic_info: Box<dyn std::any::Any + Send>) -> PluginError {
     } else if let Some(s) = panic_info.downcast_ref::<&str>() {
         PluginError::Message(Box::leak(s.to_string().into_boxed_str()))
     } else {
-        PluginError::Message("Plugin panicked — crash report saved to ~/.cache/nam-rs/")
+        PluginError::Message("Plugin panicked — crash report saved to ~/.cache/neural-amp-modeler-rs/")
     }
 }
 
