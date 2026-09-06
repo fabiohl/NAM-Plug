@@ -243,7 +243,7 @@ thread can dereference freed plugin state.
   `flush()` — wraps its body in `catch_unwind(AssertUnwindSafe(..))`
   (`src/clap/processor/mod.rs`, `src/clap/extensions/gui.rs`,
   `src/clap/extensions/params/audio.rs`). A Rust panic is converted to a typed
-  `PluginError` (full crash report written to `~/.cache/nam-rs/crash-*.txt` by
+  `PluginError` (full crash report written to `~/.cache/neural-amp-modeler-rs/crash-*.txt` by
   `install_panic_hook("clap")`) and returned as a clean failure code, never
   crossing the C-ABI boundary as Undefined Behavior.
 - **Multi-instance isolation (`instance_id`):** every plugin instance receives

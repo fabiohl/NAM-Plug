@@ -39,7 +39,7 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 - [ ] **T1.4 Host Parameter Automation (`[Bitwig]`):** Draw a quick automation ramp for `input_gain_db` or `output_gain_db` in DAW → start playback.
   *Expected:* GUI knob arc pulses/animates smoothly in sync with host automation; audio adjusts without zipper noise.
 - [ ] **T1.5 Telemetry & Diagnostic Export:** Hover over status bar `"ℹ"` icon → click `"ℹ"` → paste (Ctrl+V) into a text editor.
-  *Expected:* Status bar shows real-time telemetry (SR, Latency, DSP Load %, Cycles, Last N, RT Prio, Overloads, Flags). Visual toast confirmation (`"Diagnostic copied · file in ~/.cache/nam-rs/"`) appears; pasted text contains complete diagnostic dump.
+  *Expected:* Status bar shows real-time telemetry (SR, Latency, DSP Load %, Cycles, Last N, RT Prio, Overloads, Flags). Visual toast confirmation (`"Diagnostic copied · file in ~/.cache/neural-amp-modeler-rs/"`) appears; pasted text contains complete diagnostic dump.
 
 ---
 
@@ -115,9 +115,9 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 - [ ] **2D.1 Status Bar Cadence & Metrics:** Observe status bar for ≥20s during steady playback.
   *Expected:* Real-time telemetry (`SR: {sr} kHz | Lat: {lat} ms ({spl} spl) | DSP: {load}% | Cycles: {cycles} | Last N: {n} | RT Prio: {prio} | Overloads: {overloads} | Flags: {flags}`) and model metadata update smoothly at ~1 Hz without UI flickering.
 - [ ] **2D.2 Diagnostic Clipboard & File Export:** Click status bar `"ℹ"` icon.
-  *Expected:* Toast displays `"Diagnostic copied · file in ~/.cache/nam-rs/"`. Diagnostic file created under `~/.cache/nam-rs/diagnostic-{unix_ts}.txt` with `0o600` permissions.
+  *Expected:* Toast displays `"Diagnostic copied · file in ~/.cache/neural-amp-modeler-rs/"`. Diagnostic file created under `~/.cache/neural-amp-modeler-rs/diagnostic-{unix_ts}.txt` with `0o600` permissions.
 - [ ] **2D.3 Diagnostic Folder Open (`[xdg-open]`):** Click `"Open Folder"` next to toast → test fallback by removing `xdg-open` or unsetting `HOME`.
-  *Expected:* Opens `~/.cache/nam-rs/` in system file manager; missing `xdg-open` or headless server degrades gracefully without host crash.
+  *Expected:* Opens `~/.cache/neural-amp-modeler-rs/` in system file manager; missing `xdg-open` or headless server degrades gracefully without host crash.
 - [ ] **2D.4 Dynamic Sample Rate & PDC Recalculation:** With NAM-Plug active and audio playing, change the project sample rate (e.g., 44.1 kHz → 96 kHz).
   *Expected:* Status bar updates to the new sample rate (e.g., `"SR: 96.0 kHz"`). Reported latency updates immediately. The host (Bitwig) recalculates Plugin Delay Compensation without audio desync. No XRUNs in `pw-top`.
 - [ ] **2D.5 Bypass & Resampling PDC Update:** Toggle bypass or switch oversampling (e.g. Off → 4×) while audio is playing.
