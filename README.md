@@ -176,6 +176,10 @@ To verify the installed extension files on your system:
 ls -la ~/.local/share/flatpak/runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08/active/files/clap/
 ```
 
+> [!NOTE]
+> **AppStream Metadata in Local Bundles vs. Flathub Repositories:**
+> Single-file `.flatpak` bundles distribute exclusively the extension's runtime commit; they do not bundle repository-wide AppStream catalog branches (`appstream/x86_64`). Consequently, graphical Flatpak managers (such as Warehouse or GNOME Software) display bundles installed from a local origin (`namplug-origin`) with fallback labels (*"Sem metadados"* / *"No metadata"* and an empty `Versão` column in `flatpak list`). In production distributions via Flathub or remote OSTree repositories, the AppStream catalog is indexed automatically. See [`docs/architecture.md`](docs/architecture.md#105-appstream-catalog-dynamics-bundle-semantics--diagnostic-invariants) for architectural details.
+
 #### Developer Workflow (Building & Testing Flatpak Locally)
 
 You can build and package the Flatpak extension bundle locally using either the release pipeline or `flatpak-builder`:
