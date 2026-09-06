@@ -504,7 +504,7 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
     let stress = generate_stress_signal(model_sr as f64, stress_duration);
     eprintln!("  Native stress: {} samples @ {model_sr} Hz", stress.len());
 
-    let tmp_dir = std::env::temp_dir().join("nam_rs_clap_parity");
+    let tmp_dir = std::env::temp_dir().join("nam_plug_clap_parity");
     std::fs::create_dir_all(&tmp_dir).ok();
 
     for &host_sr in host_rates {
