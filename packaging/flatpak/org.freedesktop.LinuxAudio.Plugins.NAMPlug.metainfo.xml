@@ -53,6 +53,8 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
     <keyword>plugin</keyword>
   </keywords>
   <releases>
+    <release version="0.8.0" date="2026-09-08">
+    </release>
     <release version="0.7.0" date="2026-08-24">
     </release>
   </releases>

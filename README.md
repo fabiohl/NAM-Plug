@@ -169,7 +169,7 @@ This format enables sandboxed Flatpak DAWs (including Bitwig Studio `com.bitwig.
 Install the `.flatpak` bundle directly into your local user Flatpak repository:
 
 ```bash
-flatpak install --user --reinstall ~/nam-plug-v0.7.0-linux-x86_64-v3.flatpak
+flatpak install --user --reinstall ~/nam-plug-v0.8.0-linux-x86_64-v3.flatpak
 ```
 
 #### How DAW Discovery Works in Flatpak

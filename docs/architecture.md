@@ -51,7 +51,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ## 2. Compilation Strategy & Feature Flags
 
-`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.7.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload`, `nam_bin_guard`, and `nam_perf_guard` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
+`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.8.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload`, `nam_bin_guard`, and `nam_perf_guard` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
 
 The crate feature flags defined in `Cargo.toml` are:
 
@@ -626,7 +626,7 @@ When deploying and inspecting the Flatpak extension, several architectural behav
 - **Absence of AppStream Branch:** Standalone `.flatpak` bundles do **not** bundle or unpack the auxiliary repository-wide AppStream catalog branches (`appstream/x86_64` or `appstream2/x86_64`).
 - **Unindexed Local Origins:** Installing a bundle locally via `flatpak install --user bundle.flatpak` creates an unindexed local origin (e.g., `namplug-origin`). Because this is a static local origin without an HTTP remote URL, no background AppStream synchronization occurs, leaving `~/.local/share/flatpak/appstream/` unpopulated for that ref.
 - **Software Center Impact:** Graphical managers (like Warehouse) query the centralized AppStream database (`/var/lib/flatpak/appstream/` or `~/.local/share/flatpak/appstream/`) rather than scanning unpacked XML files inside `files/share/metainfo/`. Consequently, locally installed bundles display as *"No metadata"* (*"Sem metadados"*), show fallback IDs, and display generic system gear icons.
-- **Production Resolution on Flathub:** When distributed via Flathub or a standard remote OSTree repository, the build pipeline executes `flatpak build-update-repo` (using `appstream-compose`), which indexes [`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`](packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml) into the `appstream/x86_64` branch. Software centers downloading from Flathub immediately display the full human-readable title (*"NAM Plug"*), release version (`0.7.0`), category, summary, URLs, and release notes.
+- **Production Resolution on Flathub:** When distributed via Flathub or a standard remote OSTree repository, the build pipeline executes `flatpak build-update-repo` (using `appstream-compose`), which indexes [`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`](packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml) into the `appstream/x86_64` branch. Software centers downloading from Flathub immediately display the full human-readable title (*"NAM Plug"*), release version (`0.8.0`), category, summary, URLs, and release notes.
 
 #### 2. Semantic Versioning in `flatpak list`
 
