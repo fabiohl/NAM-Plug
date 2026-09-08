@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+export component ToggleSwitch inherits Rectangle {
+    in-out property <bool> checked: false;
+    in property <string> text-on: "ACTIVE";
+    in property <string> text-off: "BYPASS";
+    in property <color> active-color: #43E97B;
+    in property <color> inactive-color: #4A4F5A;
+    in property <bool> enabled: true;
+
+    callback toggled(bool);
+
+    width: 60px;
+    height: 32px;
+    background: transparent;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+
+        // Switch Track Pill
+        Rectangle {
+            width: 52px;
+            height: 26px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 13px;
+            background: root.checked ?
+                (touch.has-hover ? #1c3628 : #15291e) :
+                (touch.has-hover ? #252830 : #1c1e24);
+            border-width: 1.5px;
+            border-color: root.checked ?
+                (touch.has-hover ? #43E97B : #2b6140) :
+                (touch.has-hover ? #3c424e : #2b2e34);
+            animate background { duration: 120ms; }
+            animate border-color { duration: 120ms; }
+
+            // Sliding Thumb Knob
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                y: 3px;
+                x: root.checked ? 28px : 4px;
+                border-radius: 10px;
+                background: root.checked ?
+                    (touch.has-hover ? #5aff96 : root.active-color) :
+                    (touch.has-hover ? #aab4c4 : root.inactive-color);
+                border-width: 1px;
+                border-color: root.checked ? #8dffb6 : #5f6675;
+                animate x { duration: 120ms; easing: ease-out; }
+                animate background { duration: 120ms; }
+
+                // Center tactile grip notch
+                Rectangle {
+                    width: 2px;
+                    height: 8px;
+                    x: 9px;
+                    y: 6px;
+                    background: root.checked ? #1e5e3b : #2d3038;
+                    border-radius: 1px;
+                }
+            }
+        }
+    }
+}

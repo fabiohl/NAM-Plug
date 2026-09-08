@@ -25,11 +25,12 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
        ▼                                  ▼                           ▼
 ┌─────────────────────────────┐  ┌─────────────────────────┐  ┌────────────────────────┐
 │        Main Thread          │  │    Audio Thread (RT)    │  │       GUI Thread       │
-│  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - baseview Event Loop │
-│  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - egui v0.36 / glow   │
-│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - OpenGL 3.3 Render   │
-│  - Background Model Loading │  │  - Zero Blocking I/O    │  │  - Async rfd FileDialog│
-│  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - 5-Zone UI Layout    │
+│  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - Slint Event Loop    │
+│  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - "nam-slint-gui"     │
+│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.9 FemtoVG  │
+│  - Background Model Loading │  │  - Zero Blocking I/O    │  │  - Wayland & X11       │
+│  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - Async rfd FileDialog│
+│                             │  │                         │  │  - 5-Zone UI Layout    │
 └──────────────┬──────────────┘  └────────────▲────────────┘  └───────────┬────────────┘
                │                              │                           │
                │ SPSC Command Queues          │ Atomics & Peak Telemetry  │
@@ -44,7 +45,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
   > **Hard Real-Time Contract:** Zero heap allocations, zero mutex locks, zero blocking I/O, zero panics. Operates directly on host audio buffers using host-driven single-callback processing.
 
-- **GUI Thread** — Dedicated `baseview` X11 event loop thread driving an `egui`/`glow` OpenGL renderer (`src/clap/gui/`). Fully isolated from the audio thread.
+- **GUI Thread** — Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.9 (FemtoVG / winit backend). Fully isolated from the audio thread, synchronizing telemetry at 60 Hz via `SlintViewModel`.
 
 ---
 
@@ -144,9 +145,9 @@ Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-exten
 | `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                            |
 | `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision. |
 | `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining cab-sim IR ring-out frames.                            |
-| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Native `egui` windowing via `baseview` (`CLAP_WINDOW_API_X11`).                            |
+| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint declarative GUI with dual Wayland and X11 support (`CLAP_WINDOW_API_WAYLAND` and `CLAP_WINDOW_API_X11`). |
 
-> **Host Compatibility Note:** Native X11 window embedding (`CLAP_WINDOW_API_X11`) is verified and functional across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. A known host-side window management limitation exists in **PreSonus Studio One / Fender Studio Pro for Linux**, where the host currently fails to initialize or attach embedded X11/XWayland surfaces. Audio DSP and parameter automation remain fully functional.
+> **Host Compatibility Note:** Native Wayland and X11 window negotiation (`CLAP_WINDOW_API_WAYLAND` and `CLAP_WINDOW_API_X11`) is verified across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. PreSonus Studio One / Fender Studio Pro for Linux is supported via floating window mode with bounded join teardown (`nam-gui-reaper`).
 
 A separate **Preset Discovery Factory** (`src/clap/factory/preset_discovery.rs`) indexes local models in `~/.nam/models` with extracted metadata so hosts can list them natively.
 
@@ -407,72 +408,59 @@ NAM models supply embedded metadata (`input_level_dbu`, `loudness`). The loader 
 
 ---
 
-## 7. Graphical User Interface (GUI Architecture)
+## 7. Graphical User Interface (Slint GUI Architecture)
 
-The graphical interface is built using an immediate-mode paradigm under `src/clap/gui/`.
+The graphical interface is built using the declarative Slint UI framework (v1.9) under `src/clap/gui/`.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       NAM-Plug egui GUI Architecture                        │
+│                       NAM-Plug Slint GUI Architecture                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  5-Zone UI Layout (draw_ui)                                                 │
-│    Zone 1: Identity Bar (Brand, Active Model Readout, Load Buttons)         │
-│    Zone 2: Controls Grid (Input / Output Gain, Gate Threshold, Options)     │
-│    Zone 3: Meters Section (Adaptive VU Meter: Single Bar / Stereo Bars)     │
-│    Zone 4: Bypass Toggle                                                    │
-│    Zone 5: Status Bar (Orchestrator, Telemetry, A2 Slim Controls)           │
+│  5-Zone UI Layout (main.slint)                                              │
+│    Zone 1: Identity Bar (Brand, ModelCard, IrCard, Load Buttons, Toasts)   │
+│    Zone 2: Controls Grid (Input/Output Gain, Gate Threshold, Oversample,     │
+│                           Activation Math SelectorButtons)                  │
+│    Zone 3: Meters Section (Adaptive VuMeter: Mono / Stereo with IEC PPM)    │
+│    Zone 4: Bypass Toggle (ToggleSwitch with active glow & crossfader sync)  │
+│    Zone 5: Status Bar (Sample Rate, Latency, DSP Load, Oversample, XRuns)   │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Rendering Pipeline: egui v0.36 ──► egui_glow / glow v0.17 (OpenGL 3.3)     │
+│  Rendering Pipeline: Slint v1.9 ──► FemtoVG / OpenGL backend via winit      │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Windowing: baseview (Native Embedded X11 Window / RawWindowHandle 0.6)     │
+│  Windowing: Wayland (CLAP_WINDOW_API_WAYLAND) & X11 (CLAP_WINDOW_API_X11)   │
+│             RawWindowHandle 0.6 / Bounded Teardown Join (nam-gui-reaper)    │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Async File Picker: rfd (Background Thread File Dialog, Non-Blocking)       │
+│  Async File Picker: rfd (Background Worker File Dialog, Non-Blocking)       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 7.1 Module Organization
 
 - `src/clap/gui/mod.rs` — GUI entry point, window dimensions (`600x275`), `GuiHostBridge`.
-- `src/clap/gui/window/state.rs` — `NamPluginWindow`: GL context initialization, `egui_glow` painter setup, GLSL shader compilation, theme initialization, teardown.
-- `src/clap/gui/window/handler.rs` — `WindowHandler`: `on_frame`/`on_event`, baseview translation to `egui::RawInput`, drag-and-drop model loading, frame rendering.
-- `src/clap/gui/window/shaders.rs` — GLSL vertex and fragment shaders for hardware-accelerated VU rendering.
-- `src/clap/gui/ui/mod.rs` — 5-Zone UI layout orchestrator (`draw_ui`).
-- `src/clap/gui/ui/zones/` — Zone implementations: `identity` (Z1), `controls` (Z2), `meters` (Z3), `bypass_zone` (Z4).
-- `src/clap/gui/ui/status_bar/` — Zone 5 status bar (`orchestrator`, `telemetry`, `metadata`).
-- `src/clap/gui/ui/meter/` — VU metering logic: `orchestrator`, `glow` (GPU hardware path), `cpu` (fallback path).
+- `src/clap/gui/slint/main.slint` — 5-Zone declarative UI layout (`MainWindow`).
+- `src/clap/gui/slint/` — Modular Slint component definitions (`RotaryKnob`, `VuMeter`, `ToggleSwitch`, `LedIndicator`, `SelectorButton`, `ModelCard`, `IrCard`).
+- `src/clap/gui/slint_view_model.rs` — `SlintViewModel`: bridges Slint properties with plugin atomics (`NamClapShared`), drives the 60 Hz telemetry polling timer, applies IEC 60268-10 ballistics, and handles user interaction callbacks (`on_param_changed`, `on_bypass_toggled`, `on_load_model_clicked`, etc.).
+- `src/clap/gui/file_dialogs.rs` — `spawn_model_file_dialog`, `spawn_ir_file_dialog`: async background file selection via `rfd::AsyncFileDialog`.
+- `src/clap/gui/dialog_state.rs` — Lock-free state synchronization for file loading dialogs.
+- `src/bin/ui_preview.rs` — Standalone binary for instantaneous visual inspection and GUI prototyping without DAW hosting.
 
-### 7.2 Two-Tier Frame Lifecycle & Idle Skip
+### 7.2 Telemetry Synchronization & IEC 60268-10 Ballistics
 
-To prevent idle CPU consumption when the plugin UI is open but static:
+To provide smooth metering without degrading the audio thread:
+- A dedicated 60 Hz Slint `Timer` (`slint::Timer`) runs inside `"nam-slint-gui"`.
+- Polling reads atomic telemetry (`NamClapShared::rt_to_ui`, `sample_rate`, `effective_latency_samples`, `dsp_load_pct`).
+- Peak levels are processed with standard IEC 60268-10 Type I (DIN) ballistics:
+  - **Attack:** Immediate (single block peak capture).
+  - **Decay:** 1700 ms fallback to -20 dBFS.
+  - **Peak-hold indicator:** 1.5 seconds retention before release.
+- **Dynamic track configuration (`active_channel_count`):** Automatically adapts the meter between centered mono bar and independent stereo L/R bars.
 
-- **Tier 1 (Idle Early-Exit):** Executed before acquiring the GL context or running `egui`:
+### 7.3 Bounded Teardown & Reaper Pattern (`nam-gui-reaper`)
 
-  ```rust
-  if !self.dirty && !self.state.has_active_animations() && !peaks_changed {
-      return; // Early exit: 0% GL/CPU cost
-  }
-  ```
-
-  Returns immediately if no input events occurred (`!dirty`), no UI animations/toasts are active, and audio peaks are stationary.
-
-- **Tier 2 (Repaint Throttle):** Repaint driver requests 33 ms repaints only when VU meters are active or animations are running.
-
-### 7.3 Adaptive VU Metering
-
-The UI reads `RtToUi::active_channel_count` (`1` or `2`) updated by the audio thread:
-
-- **Mono Track:** Renders one centered 76 px wide VU bar.
-- **Stereo Track:** Renders dual 36 px wide Left/Right VU bars.
-
-Custom GLSL shaders (`shaders.rs`) render rounded 3-color dB gradient bars (green $\le -12$ dBFS, yellow $-12 \to -3$ dBFS, red $-3 \to +6$ dBFS) with dynamic peak-hold lines. If GL shader compilation fails, rendering automatically falls back to flat mesh rectangles (`meter/cpu.rs`).
-
-### 7.4 Floating Window Lifecycle & Reaper Pattern (`nam-gui-reaper`)
-
-When closing a floating window:
-
-1. `gui.destroy()` sets `close_signal = true`.
-2. Rather than blocking the main thread or abandoning detached threads (which caused UAF vectors in earlier architectures), a lightweight background thread named `nam-gui-reaper` is spawned.
-3. `nam-gui-reaper` joins the window handle asynchronously in the background while the main thread returns immediately to the host DAW.
+Window closing and destruction follow a deterministic, leak-free protocol:
+1. The DAW host invokes `gui.destroy()` or the user closes the floating window (`on_close_requested`).
+2. The plugin signals `floating_close_signal`, invokes `slint::quit_event_loop()`, and clears the local `slint_window` handle.
+3. The main thread performs a bounded join on the `"nam-slint-gui"` thread handle with a timeout of `TEARDOWN_JOIN_TIMEOUT` (2000 ms).
+4. If the windowing backend takes longer to release resources, the handle is handed off to a detached background thread named `"nam-gui-reaper"` (`spawn_reaper`), guaranteeing that the DAW main thread is never blocked while preventing thread abandonment and use-after-free conditions.
 
 ---
 

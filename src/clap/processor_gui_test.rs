@@ -8,6 +8,166 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
 
+    /// A process-wide lock that must be held by any test that reads or writes `WAYLAND_DISPLAY`.
+    /// Since all `#[test]` functions in a binary share the same process environment, mutation
+    /// of env vars must be serialized to avoid interfering with parallel test threads.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Verifies that `is_api_supported` accepts all valid configurations and rejects invalid ones.
+    ///
+    /// Valid:
+    ///   - X11 embedded (canonical path for X11 DAWs)
+    ///   - X11 floating (fallback path)
+    ///   - Wayland floating (only Wayland mode allowed by CLAP spec)
+    ///
+    /// Invalid:
+    ///   - Wayland embedded (no XEmbed equivalent on Wayland — rejected by spec)
+    ///   - WIN32 / COCOA (wrong OS)
+    #[test]
+    fn test_gui_is_api_supported_dual() {
+        use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGui};
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let gui_ext = plugin_instance
+            .plugin_handle()
+            .get_extension::<PluginGui>()
+            .expect("PluginGui extension not found");
+        let mut handle = plugin_instance.plugin_handle();
+
+        // ── X11 ─────────────────────────────────────────────────────────────
+        assert!(
+            gui_ext.is_api_supported(
+                &mut handle,
+                GuiConfiguration {
+                    api_type: GuiApiType::X11,
+                    is_floating: false
+                }
+            ),
+            "X11 embedded must be supported"
+        );
+        assert!(
+            gui_ext.is_api_supported(
+                &mut handle,
+                GuiConfiguration {
+                    api_type: GuiApiType::X11,
+                    is_floating: true
+                }
+            ),
+            "X11 floating must be supported"
+        );
+
+        // ── Wayland ──────────────────────────────────────────────────────────
+        assert!(
+            gui_ext.is_api_supported(
+                &mut handle,
+                GuiConfiguration {
+                    api_type: GuiApiType::WAYLAND,
+                    is_floating: true
+                }
+            ),
+            "Wayland floating must be supported"
+        );
+        assert!(
+            !gui_ext.is_api_supported(
+                &mut handle,
+                GuiConfiguration {
+                    api_type: GuiApiType::WAYLAND,
+                    is_floating: false
+                }
+            ),
+            "Wayland embedded must NOT be supported (no XEmbed on Wayland)"
+        );
+
+        // ── Other platforms ──────────────────────────────────────────────────
+        assert!(
+            !gui_ext.is_api_supported(
+                &mut handle,
+                GuiConfiguration {
+                    api_type: GuiApiType::WIN32,
+                    is_floating: false
+                }
+            ),
+            "WIN32 must not be supported on Linux"
+        );
+        assert!(
+            !gui_ext.is_api_supported(
+                &mut handle,
+                GuiConfiguration {
+                    api_type: GuiApiType::COCOA,
+                    is_floating: false
+                }
+            ),
+            "COCOA must not be supported on Linux"
+        );
+    }
+
+    /// Verifies that `get_preferred_api` returns Wayland floating when `WAYLAND_DISPLAY` is set,
+    /// and X11 embedded when it is not set.
+    #[test]
+    fn test_gui_get_preferred_api_wayland_session() {
+        use clack_extensions::gui::{GuiApiType, PluginGui};
+
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // Ensure Wayland session is simulated.
+            unsafe { std::env::set_var("WAYLAND_DISPLAY", "wayland-0") };
+
+            let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+            let gui_ext = plugin_instance
+                .plugin_handle()
+                .get_extension::<PluginGui>()
+                .expect("PluginGui extension not found");
+            let mut handle = plugin_instance.plugin_handle();
+
+            let pref = gui_ext
+                .get_preferred_api(&mut handle)
+                .expect("Preferred API must be Some in Wayland session");
+            assert_eq!(
+                pref.api_type,
+                GuiApiType::WAYLAND,
+                "Wayland session: preferred API must be Wayland"
+            );
+            assert!(
+                pref.is_floating,
+                "Wayland session: preferred mode must be floating"
+            );
+        }
+    }
+
+    /// Verifies that `get_preferred_api` returns X11 embedded when `WAYLAND_DISPLAY` is unset.
+    #[test]
+    fn test_gui_get_preferred_api_x11_session() {
+        use clack_extensions::gui::{GuiApiType, PluginGui};
+
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // Simulate pure X11 session.
+            unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+
+            let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+            let gui_ext = plugin_instance
+                .plugin_handle()
+                .get_extension::<PluginGui>()
+                .expect("PluginGui extension not found");
+            let mut handle = plugin_instance.plugin_handle();
+
+            let pref = gui_ext
+                .get_preferred_api(&mut handle)
+                .expect("Preferred API must be Some in X11 session");
+            assert_eq!(
+                pref.api_type,
+                GuiApiType::X11,
+                "X11 session: preferred API must be X11"
+            );
+            assert!(
+                !pref.is_floating,
+                "X11 session: preferred mode must be embedded"
+            );
+        }
+    }
+
+    /// Tests the full GUI extension surface (size, resize, create) with the X11 embedded path,
+    /// which is the historical baseline for this plugin.
     #[test]
     fn test_gui_extension_x11() {
         use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui};
@@ -21,45 +181,15 @@ mod tests {
 
         let mut handle = plugin_instance.plugin_handle();
 
-        // 1. Test is_api_supported
-        assert!(gui_ext.is_api_supported(
-            &mut handle,
-            GuiConfiguration {
-                api_type: GuiApiType::X11,
-                is_floating: false,
-            }
-        ));
-        assert!(!gui_ext.is_api_supported(
-            &mut handle,
-            GuiConfiguration {
-                api_type: GuiApiType::WAYLAND,
-                is_floating: false,
-            }
-        ));
-        assert!(gui_ext.is_api_supported(
-            &mut handle,
-            GuiConfiguration {
-                api_type: GuiApiType::X11,
-                is_floating: true,
-            }
-        ));
-
-        // 2. Test get_preferred_api
-        let pref = gui_ext
-            .get_preferred_api(&mut handle)
-            .expect("Preferred API not found");
-        assert_eq!(pref.api_type, GuiApiType::X11);
-        assert!(!pref.is_floating);
-
-        // 3. Test get_size
+        // 1. get_size
         let size = gui_ext.get_size(&mut handle).expect("Failed to get size");
         assert_eq!(size.width, 600);
         assert_eq!(size.height, 275);
 
-        // 4. Test can_resize
+        // 2. can_resize
         assert!(!gui_ext.can_resize(&mut handle));
 
-        // 5. Test set_size
+        // 3. set_size — accepted when dimensions match
         assert!(
             gui_ext
                 .set_size(
@@ -75,6 +205,48 @@ mod tests {
         // .is_some() on the Option<Result<(), PluginError>>, returning true (Ok) to the host even
         // when the plugin returns an Err. Thus we cannot assert gui_ext.set_size returns Err
         // from the host-side wrapper here.
+
+        // 4. create succeeds with X11 embedded
+        assert!(
+            gui_ext
+                .create(
+                    &mut handle,
+                    GuiConfiguration {
+                        api_type: GuiApiType::X11,
+                        is_floating: false
+                    },
+                )
+                .is_ok(),
+            "create with X11 embedded must succeed"
+        );
+
+        // 5. create succeeds with X11 floating
+        assert!(
+            gui_ext
+                .create(
+                    &mut handle,
+                    GuiConfiguration {
+                        api_type: GuiApiType::X11,
+                        is_floating: true
+                    },
+                )
+                .is_ok(),
+            "create with X11 floating must succeed"
+        );
+
+        // 6. create succeeds with Wayland floating
+        assert!(
+            gui_ext
+                .create(
+                    &mut handle,
+                    GuiConfiguration {
+                        api_type: GuiApiType::WAYLAND,
+                        is_floating: true
+                    },
+                )
+                .is_ok(),
+            "create with Wayland floating must succeed"
+        );
     }
 
     #[test]
@@ -228,8 +400,7 @@ mod tests {
     ///
     /// The floating window path (`is_floating: true`) is used because it does
     /// not require a parent window handle from the host — it creates its own
-    /// top-level window via `baseview::Window::open_blocking` on a background
-    /// thread.
+    /// top-level window via Slint's event loop on a background thread.
     ///
     /// Note: `show()` and `hide()` are NOT called because the floating
     /// window is immediately visible after `set_transient()`; the GUI
@@ -278,11 +449,10 @@ mod tests {
             "GUI create() must succeed"
         );
 
-        // 2. Open floating window — spawns background thread with
-        //    baseview::Window::open_blocking, waits for initialization
-        //    (up to 2 seconds). The `_window` parameter is unused in
-        //    the plugin's set_transient implementation (baseview lacks
-        //    transient window support), so we pass a dummy X11 window.
+        // 2. Open floating window — spawns background "nam-slint-gui" thread with
+        //    slint::run_event_loop(), waits for initialization (up to 2 seconds).
+        //    The `_window` parameter is unused in the plugin's set_transient
+        //    implementation, so we pass a dummy X11 window.
         // SAFETY: The dummy window handle is not dereferenced by the plugin.
         let result = unsafe {
             gui_ext.set_transient(

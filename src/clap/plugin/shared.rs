@@ -426,6 +426,10 @@ pub struct RtToUi {
     pub ui_peak_r: AtomicU32,
     /// Flag indicating whether clipping has occurred since the last UI frame. Read/reset by the UI thread.
     pub ui_clipped: AtomicBool,
+    /// Flag indicating whether output/input clipping is active for UI indicator display.
+    pub ui_clip_indicator: AtomicBool,
+    /// Flag indicating whether the noise gate is currently active (attenuating).
+    pub ui_gate_active: AtomicBool,
     /// Current latency reported to the host (in samples).
     pub current_latency: AtomicU32,
     /// CabSim tail length in samples (= num_partitions × partition_size).
@@ -631,11 +635,9 @@ pub struct ColdShared {
     /// deterministically — avoiding I/O and recompute. See [`DeactivatedDspState`].
     pub(crate) deactivated_dsp: Mutex<Option<DeactivatedDspState>>,
     /// Dialog state for model file-dialog (Arc-backed, UAF-safe). Initialized on main thread.
-    pub(crate) dialog_state:
-        Option<Arc<crate::clap::gui::ui::zones::dialog_state::DialogSharedState>>,
+    pub(crate) dialog_state: Option<Arc<crate::clap::gui::dialog_state::DialogSharedState>>,
     /// Dialog state for IR file-dialog (Arc-backed, UAF-safe). Initialized on main thread.
-    pub(crate) ir_dialog_state:
-        Option<Arc<crate::clap::gui::ui::zones::dialog_state::IrDialogSharedState>>,
+    pub(crate) ir_dialog_state: Option<Arc<crate::clap::gui::dialog_state::IrDialogSharedState>>,
     /// Sink for model dialog thread handle (written by UI, read by main thread for join).
     pub(crate) dialog_handle_sink: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Sink for IR dialog thread handle (written by UI, read by main thread for join).
@@ -771,17 +773,38 @@ impl ColdShared {
     }
 }
 
+/// Bitmask constants for the parameter in the `gesture_flags` field.
+pub const GESTURE_CHANGED_SHIFT: u32 = 0;
+pub const GESTURE_BEGIN_SHIFT: u32 = 1;
+pub const GESTURE_END_SHIFT: u32 = 2;
+pub const GESTURE_BITS_PER_PARAM: u32 = 3;
+
 impl GuiSharedState {
     /// Bitmask for the parameter in the `gesture_flags` field.
     /// 3 flags per parameter: Changed, GestureBegin, GestureEnd.
-    const GESTURE_CHANGED_SHIFT: u32 = 0;
-    const GESTURE_BEGIN_SHIFT: u32 = 1;
-    const GESTURE_END_SHIFT: u32 = 2;
-    const GESTURE_BITS_PER_PARAM: u32 = 3;
+    pub const GESTURE_CHANGED_SHIFT: u32 = GESTURE_CHANGED_SHIFT;
+    pub const GESTURE_BEGIN_SHIFT: u32 = GESTURE_BEGIN_SHIFT;
+    pub const GESTURE_END_SHIFT: u32 = GESTURE_END_SHIFT;
+    pub const GESTURE_BITS_PER_PARAM: u32 = GESTURE_BITS_PER_PARAM;
 
     /// Maps a CLAP param_id (0..8) to internal index 0..8.
-    const fn param_index(param_id: u32) -> usize {
+    pub const fn param_index(param_id: u32) -> usize {
         param_id as usize
+    }
+
+    /// Sets a begin gesture flag for the given CLAP param_id.
+    pub fn begin_gesture(&self, param_id: u32) {
+        self.set_gesture(Self::param_index(param_id), Self::GESTURE_BEGIN_SHIFT);
+    }
+
+    /// Sets an end gesture flag for the given CLAP param_id.
+    pub fn end_gesture(&self, param_id: u32) {
+        self.set_gesture(Self::param_index(param_id), Self::GESTURE_END_SHIFT);
+    }
+
+    /// Sets a changed flag for the given CLAP param_id.
+    pub fn mark_param_changed(&self, param_id: u32) {
+        self.set_gesture(Self::param_index(param_id), Self::GESTURE_CHANGED_SHIFT);
     }
 
     /// Sets a gesture flag for the parameter (store = true).
@@ -812,6 +835,140 @@ impl GuiSharedState {
         self.ui_to_rt
             .gui_param_generation
             .fetch_add(1, Ordering::Release); // pairs with Acquire loads in processor/events.rs, extensions/params/audio.rs
+    }
+
+    /// Returns whether the model file dialog is currently active.
+    pub fn is_model_dialog_active(&self) -> bool {
+        self.cold
+            .dialog_state
+            .as_ref()
+            .map(|d| d.active.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    /// Sets whether the model file dialog is currently active.
+    pub fn set_model_dialog_active(&self, active: bool) {
+        if let Some(d) = self.cold.dialog_state.as_ref() {
+            d.active.store(active, Ordering::Relaxed);
+        }
+    }
+
+    /// Test helper creating an `Arc<GuiSharedState>` initialized with valid dummy channels
+    /// and dialog states for unit and integration testing.
+    pub fn new_test() -> Arc<Self> {
+        use crate::clap::gui::dialog_state::{DialogSharedState, IrDialogSharedState};
+        use neural_amp_modeler_rs::common::spsc::{GcOverflowBuffer, RtStatusFlags};
+        use rtrb::RingBuffer;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64};
+
+        let (param_tx, param_rx) = RingBuffer::new(8);
+        let (gc_tx, gc_rx) = RingBuffer::new(32);
+        let (slimmable_tx, slimmable_rx) = RingBuffer::new(4);
+
+        Arc::new(Self {
+            rt_to_ui: RtToUi {
+                ui_peak_l: AtomicU32::new(0.0f32.to_bits()),
+                ui_peak_r: AtomicU32::new(0.0f32.to_bits()),
+                ui_clipped: AtomicBool::new(false),
+                ui_clip_indicator: AtomicBool::new(false),
+                ui_gate_active: AtomicBool::new(false),
+                current_latency: AtomicU32::new(0),
+                cabsim_tail_samples: AtomicU32::new(0),
+                active_channel_count: AtomicU32::new(1),
+            },
+            ui_to_rt: UiToRt {
+                param_input_gain: AtomicU32::new(0.0f32.to_bits()),
+                param_output_gain: AtomicU32::new(0.0f32.to_bits()),
+                param_gate_thresh: AtomicU32::new((-90.0f32).to_bits()),
+                param_bypass: AtomicU32::new(0),
+                param_adaptive_compute: AtomicU32::new(1),
+                param_slim_override: AtomicU32::new(0),
+                param_oversample: AtomicU32::new(0),
+                param_activation: AtomicU32::new(1), // Standard (exact-grade)
+                gesture_flags: AtomicU32::new(0),
+                gui_param_generation: AtomicU32::new(0),
+                host_r_deactivated: AtomicBool::new(false),
+            },
+            cold: ColdShared {
+                instance_id: 1,
+                param_tx: Mutex::new(Some(param_tx)),
+                param_rx: Mutex::new(Some(param_rx)),
+                gc_tx: Mutex::new(Some(gc_tx)),
+                gc_rx: Mutex::new(Some(gc_rx)),
+                gc_overflow: Arc::new(GcOverflowBuffer::new(
+                    neural_amp_modeler_rs::common::spsc::SPSC_CAPACITY,
+                )),
+                rt_status: Arc::new(RtStatusFlags::new()),
+                model_sample_rate: AtomicU32::new(48000),
+                sample_rate: AtomicU32::new(44100),
+                buffer_size: AtomicU32::new(0),
+                current_stream_latency: AtomicU32::new(0),
+                current_cabsim_latency: AtomicU32::new(0),
+                track_accent_color: AtomicU32::new(0),
+                param_indication: [
+                    AtomicU8::new(0),
+                    AtomicU8::new(0),
+                    AtomicU8::new(0),
+                    AtomicU8::new(0),
+                    AtomicU8::new(0),
+                    AtomicU8::new(0),
+                    AtomicU8::new(0),
+                    AtomicU8::new(0),
+                    AtomicU8::new(0),
+                ],
+                param_indication_color: [
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                ],
+                model_load_counter: AtomicU32::new(0),
+                model_generation: AtomicU64::new(0),
+                ui_model_name: Mutex::new(String::new()),
+                ui_model_metadata: Mutex::new(None),
+                ui_pending_model: Mutex::new(None),
+                ui_loading: AtomicBool::new(false),
+                ui_load_error: AtomicBool::new(false),
+                ui_load_error_msg: Mutex::new(String::new()),
+                ui_model_info: Mutex::new(None),
+                alive_fence: Arc::new(AtomicBool::new(true)),
+                render_mode: AtomicU32::new(RENDER_MODE_REALTIME),
+                gui_scale_factor: AtomicU32::new(0),
+                ir_path: Mutex::new(None),
+                ir_hash: Mutex::new(None),
+                ui_pending_ir: Mutex::new(None),
+                ui_ir_loading: AtomicBool::new(false),
+                ui_ir_load_error: AtomicBool::new(false),
+                ui_ir_load_error_msg: Mutex::new(String::new()),
+                ui_clear_ir: AtomicBool::new(false),
+                ir_raw_samples: Mutex::new(None),
+                ir_raw_sample_rate: AtomicU32::new(0),
+                slimmable_tx: Mutex::new(Some(slimmable_tx)),
+                slimmable_rx: Mutex::new(Some(slimmable_rx)),
+                requested_slimmable_generation: AtomicU64::new(0),
+                slimmable_stale_discarded_total: AtomicU32::new(0),
+                full_wavenet_model: Mutex::new(None),
+                cmd_next_seq: AtomicU64::new(0),
+                cmd_last_ack: AtomicU64::new(0),
+                last_applied_generation: AtomicU64::new(0),
+                pending_restart_os_factor: AtomicU32::new(0),
+                in_flight_params: Mutex::new(None),
+                pending_preset_load: Mutex::new(std::collections::VecDeque::new()),
+                pending_model: Mutex::new(None),
+                deactivated_dsp: Mutex::new(None),
+                dialog_state: Some(Arc::new(DialogSharedState::new())),
+                ir_dialog_state: Some(Arc::new(IrDialogSharedState::new())),
+                dialog_handle_sink: Mutex::new(None),
+                ir_dialog_handle_sink: Mutex::new(None),
+                host_log_sink: Mutex::new(None),
+            },
+        })
     }
 
     /// Flushes gestures and parameter updates initiated by the GUI

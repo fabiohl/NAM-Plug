@@ -4,7 +4,7 @@
 //! Main thread housekeeping: GC drain, status-flags sync, pending model load, latency.
 
 use super::NamClapMainThread;
-use crate::clap::gui::ui::zones::dialog_state;
+use crate::clap::gui::dialog_state;
 use crate::clap::plugin::shared::{PendingPresetLoad, SlimmableRebuild, StagedSwap};
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::host::HostMainThreadHandle;

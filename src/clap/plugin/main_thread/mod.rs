@@ -51,8 +51,8 @@ pub struct NamClapMainThread<'a> {
     /// Last-seen value of `ColdShared::slimmable_stale_discarded_total`, used to
     /// log stale-slimmable-rebuild discards exactly once.
     pub last_seen_slimmable_stale: u32,
-    /// Baseview window handle for GUI lifecycle control (embedded mode).
-    pub window_handle: Option<baseview::WindowHandle>,
+    /// Slint window handle for GUI lifecycle control.
+    pub slint_window: Option<slint::Weak<crate::clap::gui::MainWindow>>,
     /// Thread handle for the floating window event loop.
     pub floating_thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Close signal for the floating window.
@@ -62,15 +62,13 @@ pub struct NamClapMainThread<'a> {
     pub(crate) dialog_handle: Option<std::thread::JoinHandle<()>>,
     /// Shared state synchronized with the model file-dialog background thread.
     #[expect(dead_code, reason = "held for Arc lifecycle, never read directly")]
-    pub(crate) dialog_state:
-        Option<Arc<crate::clap::gui::ui::zones::dialog_state::DialogSharedState>>,
+    pub(crate) dialog_state: Option<Arc<crate::clap::gui::dialog_state::DialogSharedState>>,
     /// Handle for the IR file-dialog background thread (if active). Joined during teardown.
     #[expect(dead_code, reason = "held for join on teardown, never read directly")]
     pub(crate) ir_dialog_handle: Option<std::thread::JoinHandle<()>>,
     /// Shared state synchronized with the IR file-dialog background thread.
     #[expect(dead_code, reason = "held for Arc lifecycle, never read directly")]
-    pub(crate) ir_dialog_state:
-        Option<Arc<crate::clap::gui::ui::zones::dialog_state::IrDialogSharedState>>,
+    pub(crate) ir_dialog_state: Option<Arc<crate::clap::gui::dialog_state::IrDialogSharedState>>,
     /// Finite state machine tracking the GUI window lifecycle
     /// (Hidden → ShowRequested → Active → HideRequested → Destroyed).
     pub(crate) gui_lifecycle: GuiLifecycle,

@@ -5,12 +5,15 @@
 
 //! Implementation of the main graphical user interface window.
 
+/// Dialog state for asynchronous file dialogs.
+pub(crate) mod dialog_state;
+/// File dialog handling for NAM models and IR files.
+pub(crate) mod file_dialogs;
 /// GUI lifecycle finite state machine.
 pub mod lifecycle;
-/// egui rendering function and UI components.
-pub mod ui;
-/// Main window and event/draw manager with baseview + egui.
-pub mod window;
+/// Slint view-model and telemetry/event bridge.
+pub mod slint_view_model;
+pub use slint_view_model::{MainWindow, SlintViewModel};
 
 /// Default width of the plugin window.
 pub const GUI_WIDTH: u32 = 600;
@@ -39,7 +42,7 @@ pub const GUI_HEIGHT: u32 = 275;
 /// struct encapsulates the pointer with explicit safety documentation at
 /// the creation site — no transmute necessary.
 #[derive(Clone, Copy)]
-pub(crate) struct GuiHostBridge {
+pub struct GuiHostBridge {
     raw: std::ptr::NonNull<()>,
 }
 

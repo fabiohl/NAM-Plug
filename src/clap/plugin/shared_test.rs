@@ -21,6 +21,8 @@ pub(crate) fn make_test_shared() -> NamClapShared {
             ui_peak_l: AtomicU32::new(0.0f32.to_bits()),
             ui_peak_r: AtomicU32::new(0.0f32.to_bits()),
             ui_clipped: AtomicBool::new(false),
+            ui_clip_indicator: AtomicBool::new(false),
+            ui_gate_active: AtomicBool::new(false),
             current_latency: AtomicU32::new(0),
             cabsim_tail_samples: AtomicU32::new(0),
             active_channel_count: AtomicU32::new(1),

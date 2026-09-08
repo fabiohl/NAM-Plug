@@ -12,22 +12,13 @@ use clack_extensions::gui::{
     GuiApiType, GuiConfiguration, GuiSize, HostGui, PluginGui, PluginGuiImpl, Window,
 };
 use clack_plugin::plugin::PluginError;
+use slint::ComponentHandle;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum time the main thread waits for a floating window or dialog thread
 /// to exit during teardown before handing the handle to a reaper thread.
 const TEARDOWN_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Converts a `PluginError` into a `'static` message suitable for storing in
-/// cross-thread slots (`PluginError` itself is not `Send` because it can hold
-/// a `Box<dyn Error>`).
-fn plugin_error_message(err: &PluginError) -> &'static str {
-    match err {
-        PluginError::Message(msg) => msg,
-        PluginError::Error(boxed) => Box::leak(boxed.to_string().into_boxed_str()),
-    }
-}
 
 /// Tries to join `handle` until `deadline`. Returns the handle back when the
 /// thread is still running after the deadline — the caller must then hand it
@@ -84,19 +75,18 @@ impl<'a> NamClapMainThread<'a> {
             signal.store(true, Ordering::Release);
         }
 
-        // 2. Close the embedded window synchronously (baseview close()).
-        if let Some(mut window_handle) = self.window_handle.take() {
-            window_handle.close();
-        }
+        // 2. Quit Slint event loop and clear the window reference.
+        let _ = slint::quit_event_loop();
+        self.slint_window = None;
 
-        // 3. Join the floating window thread (bounded). On timeout the handle
+        // 3. Join the GUI window thread (bounded). On timeout the handle
         //    goes to a reaper — with the fence down the window event loop is
         //    a no-op from this point on, so no UAF window exists.
         if let Some(handle) = self.floating_thread_handle.take() {
             let deadline = std::time::Instant::now() + TEARDOWN_JOIN_TIMEOUT;
             if let Some(still_running) = try_join_until(handle, deadline) {
                 log::warn!(
-                    "NAM-Plug: floating window thread did not exit within {:?} — \
+                    "NAM-Plug: GUI window thread did not exit within {:?} — \
                      handing it to the reaper (thread holds no valid raw pointers \
                      once the fence is lowered)",
                     TEARDOWN_JOIN_TIMEOUT
@@ -147,21 +137,103 @@ impl<'a> NamClapMainThread<'a> {
         (host_static, shared_arc)
     }
 
-    /// Builds the common `baseview::WindowOpenOptions` for both embedded and floating windows.
-    ///
-    /// CLAP X11 sizes are physical pixels, but baseview interprets `Size` as logical
-    /// pixels and applies the scale policy. To create a window with the correct
-    /// physical size, we divide the design size by the scale factor and use
-    /// `WindowScalePolicy::with_scale_factor` — this ensures the physical window
-    /// matches `GUI_WIDTH × GUI_HEIGHT` while egui renders at the correct DPI.
-    fn window_options(title: &str, scale_factor: f32) -> baseview::WindowOpenOptions {
-        let logical_w = GUI_WIDTH as f64 / scale_factor as f64;
-        let logical_h = GUI_HEIGHT as f64 / scale_factor as f64;
-        baseview::WindowOpenOptions {
-            title: title.to_string(),
-            size: baseview::Size::new(logical_w, logical_h),
-            scale: baseview::WindowScalePolicy::ScaleFactor(scale_factor as f64),
-            gl_config: Some(baseview::gl::GlConfig::default()),
+    /// Spawns the dedicated Slint GUI thread and waits for the window to be created.
+    fn spawn_gui(&mut self, window_info: Option<Window>) -> Result<(), PluginError> {
+        self.teardown_gui_resources();
+
+        let (host_static, shared_arc) = self.host_static_and_shared();
+        let close_signal = Arc::new(AtomicBool::new(false));
+        let cs = Arc::clone(&close_signal);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+
+        if let Some(ref w) = window_info {
+            log::info!("NAM-Plug: spawning Slint GUI (API={:?})", w.api_type().0);
+        } else {
+            log::info!("NAM-Plug: spawning Slint GUI (floating mode)");
+        }
+
+        let thread_builder = std::thread::Builder::new().name("nam-slint-gui".to_string());
+        let handle = thread_builder
+            .spawn(move || {
+                let window = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::clap::gui::MainWindow::new()
+                })) {
+                    Ok(Ok(w)) => w,
+                    Ok(Err(err)) => {
+                        log::error!("NAM-Plug: failed to create Slint MainWindow: {err}");
+                        let _ = tx.send(Err("Failed to create Slint MainWindow"));
+                        return;
+                    }
+                    Err(_) => {
+                        log::error!("NAM-Plug: panic while creating Slint MainWindow");
+                        let _ = tx.send(Err("Panic while creating Slint MainWindow"));
+                        return;
+                    }
+                };
+
+                let weak = window.as_weak();
+                if tx.send(Ok(weak)).is_err() {
+                    log::warn!("NAM-Plug: GUI receiver dropped before window ready");
+                    return;
+                }
+
+                let host_close_notify = host_static;
+                window.window().on_close_requested(move || {
+                    if let Some(gui_host) = host_close_notify.get_extension::<HostGui>() {
+                        gui_host.closed(&host_close_notify, false);
+                    }
+                    slint::CloseRequestResponse::HideWindow
+                });
+
+                let host_bridge = crate::clap::gui::GuiHostBridge::new(&host_static);
+                let _view_model = crate::clap::gui::SlintViewModel::new(
+                    window.clone_strong(),
+                    shared_arc,
+                    Some(host_bridge),
+                );
+
+                if let Err(e) = window.show() {
+                    log::error!("NAM-Plug: failed to show Slint window: {e}");
+                }
+
+                // Run Slint event loop until quit_event_loop() or close_signal
+                log::debug!("NAM-Plug: Slint event loop running");
+                let _ = slint::run_event_loop();
+                cs.store(true, Ordering::Release);
+                log::debug!("NAM-Plug: Slint event loop exited");
+            })
+            .map_err(|e| {
+                log::error!("NAM-Plug: failed to spawn nam-slint-gui thread: {e}");
+                PluginError::Message("Failed to spawn GUI thread")
+            })?;
+
+        // Wait for window creation outcome with bounded timeout
+        match rx.recv_timeout(TEARDOWN_JOIN_TIMEOUT) {
+            Ok(Ok(weak)) => {
+                self.slint_window = Some(weak);
+                self.floating_thread_handle = Some(handle);
+                self.floating_close_signal = Some(close_signal);
+                Ok(())
+            }
+            Ok(Err(msg)) => {
+                close_signal.store(true, Ordering::Release);
+                let _ = slint::quit_event_loop();
+                self.floating_thread_handle = Some(handle);
+                self.floating_close_signal = Some(close_signal);
+                Err(PluginError::Message(msg))
+            }
+            Err(_) => {
+                log::error!(
+                    "NAM-Plug: GUI initialization timed out after {:?}",
+                    TEARDOWN_JOIN_TIMEOUT
+                );
+                close_signal.store(true, Ordering::Release);
+                let _ = slint::quit_event_loop();
+                self.floating_thread_handle = Some(handle);
+                self.floating_close_signal = Some(close_signal);
+                Err(PluginError::Message("GUI initialization timed out"))
+            }
         }
     }
 }
@@ -169,15 +241,42 @@ impl<'a> NamClapMainThread<'a> {
 impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// Indicates whether the given graphics API configuration and floating mode is supported.
     ///
-    /// Accepts X11 both embedded (preferred) and floating (fallback) modes,
-    /// so hosts that only offer floating windows are still usable.
+    /// Accepted configurations (per CLAP GUI extension v1.2+):
+    /// - **X11 embedded** (preferred on X11 sessions): the host reparents the plugin window.
+    /// - **X11 floating** (fallback): the plugin manages its own top-level X11 window.
+    /// - **Wayland floating**: the only Wayland mode allowed by the CLAP spec, because the
+    ///   Wayland protocol has no generic cross-client window-embedding primitive.
+    ///   Wayland embedded is therefore explicitly rejected.
     fn is_api_supported(&mut self, configuration: GuiConfiguration) -> bool {
-        configuration.api_type == GuiApiType::X11
+        match configuration.api_type {
+            // X11: both embedded and floating are supported.
+            t if t == GuiApiType::X11 => true,
+            // Wayland: only floating is supported (no XEmbed equivalent on Wayland).
+            t if t == GuiApiType::WAYLAND => configuration.is_floating,
+            // All other APIs (WIN32, COCOA, custom) are unsupported on Linux.
+            _ => false,
+        }
     }
 
-    /// Returns the preferred graphics configuration for the plugin (embedded X11).
-    /// Falls back to floating only when the host does not offer embedded mode.
+    /// Returns the preferred graphics configuration for the plugin.
+    ///
+    /// Priority:
+    /// 1. **Wayland floating** — when `WAYLAND_DISPLAY` is set (native Wayland session).
+    /// 2. **X11 embedded** — default for X11 sessions or XWayland fallback.
+    ///
+    /// The detection reads an environment variable once on the main thread; it is
+    /// strictly off-RT and safe to call here.
     fn get_preferred_api(&mut self) -> Option<GuiConfiguration<'_>> {
+        // Detect Wayland session: WAYLAND_DISPLAY being set is the canonical indicator.
+        // This is off-RT (main thread only) so std::env::var is acceptable.
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            log::debug!("GUI API negotiation: Wayland session detected via WAYLAND_DISPLAY");
+            return Some(GuiConfiguration {
+                api_type: GuiApiType::WAYLAND,
+                is_floating: true, // Wayland embedding is not supported by the CLAP spec.
+            });
+        }
+        log::debug!("GUI API negotiation: no WAYLAND_DISPLAY, preferring X11 embedded");
         Some(GuiConfiguration {
             api_type: GuiApiType::X11,
             is_floating: false,
@@ -190,12 +289,17 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
         if !self.is_api_supported(configuration) {
             return Err(PluginError::Message("GUI configuration not supported"));
         }
+        let api = if configuration.api_type == GuiApiType::WAYLAND {
+            "wayland"
+        } else {
+            "x11"
+        };
         let mode = if configuration.is_floating {
             "floating"
         } else {
             "embedded"
         };
-        log::info!("GUI mode selected = {mode}");
+        log::info!("GUI create: api={api} mode={mode}");
         {
             self.gui_lifecycle = GuiLifecycle::Hidden;
         }
@@ -217,7 +321,6 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
 
     /// Sets the absolute scale factor for the GUI.
     fn set_scale(&mut self, scale: f64) -> Result<(), PluginError> {
-        use std::sync::atomic::Ordering;
         self.shared
             .cold
             .gui_scale_factor
@@ -245,251 +348,36 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     }
 
     /// Sets the parent window (host) where the GUI should be embedded.
-    fn set_parent(&mut self, _window: Window) -> Result<(), PluginError> {
+    fn set_parent(&mut self, window: Window) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
-        {
-            use crate::clap::gui::window::NamPluginWindow;
-
-            if let Some(mut old_handle) = self.window_handle.take() {
-                old_handle.close();
-            }
-
-            let scale_factor = {
-                let stored = self.shared.cold.gui_scale_factor.load(Ordering::Relaxed);
-                if stored == 0 {
-                    1.0f32
-                } else {
-                    f32::from_bits(stored)
-                }
-            };
-
-            let options = Self::window_options("", scale_factor);
-            let (host_static, shared_arc) = self.host_static_and_shared();
-
-            let close_signal = Arc::new(AtomicBool::new(false));
-            let cs = Arc::clone(&close_signal);
-
-            let alive_fence = self.shared.cold.alive_fence.clone();
-
-            // Fail-closed initialization protocol: `NamPluginWindow::new` returns
-            // a structured error (never panics) and the baseview build callback
-            // is additionally wrapped in `catch_unwind`, so a panic can never cross
-            // the CLAP FFI boundary into the C++ host. On failure the callback returns a
-            // degraded stub window (which closes on its first frame) and the
-            // error message is recorded here for a friendly `Err` return.
-            // (A `&'static str` is used — `PluginError` itself is not `Send`.)
-            let init_outcome = Arc::new(std::sync::Mutex::new(None::<&'static str>));
-            let outcome_cb = Arc::clone(&init_outcome);
-            let outcome = Arc::clone(&init_outcome);
-
-            // Clones for the `new` call — the originals are moved into
-            // `degraded` on the failure arms (match arms are exclusive).
-            let cs_for_new = Arc::clone(&close_signal);
-            let fence_for_new = Arc::clone(&alive_fence);
-            let shared_for_new = Arc::clone(&shared_arc);
-
-            let window_handle = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                baseview::Window::open_parented(&_window, options, move |win| {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        NamPluginWindow::new(
-                            win,
-                            shared_for_new,
-                            host_static,
-                            cs_for_new,
-                            fence_for_new,
-                            scale_factor,
-                        )
-                    })) {
-                        Ok(Ok(window)) => window,
-                        Ok(Err(err)) => {
-                            log::error!("NAM-Plug: GUI initialization failed: {err}");
-                            if let Ok(mut guard) = outcome_cb.lock() {
-                                *guard = Some(plugin_error_message(&err));
-                            }
-                            NamPluginWindow::degraded(
-                                shared_arc,
-                                host_static,
-                                cs,
-                                alive_fence,
-                                scale_factor,
-                            )
-                        }
-                        Err(_) => {
-                            log::error!(
-                                "NAM-Plug: GUI initialization panicked (caught at FFI boundary)"
-                            );
-                            if let Ok(mut guard) = outcome_cb.lock() {
-                                *guard = Some("GUI initialization failed unexpectedly");
-                            }
-                            NamPluginWindow::degraded(
-                                shared_arc,
-                                host_static,
-                                cs,
-                                alive_fence,
-                                scale_factor,
-                            )
-                        }
-                    }
-                })
-            }));
-
-            match window_handle {
-                Ok(mut window_handle) => {
-                    let init_error = outcome.lock().map(|mut guard| guard.take()).unwrap_or(None);
-                    if let Some(msg) = init_error {
-                        window_handle.close();
-                        return Err(PluginError::Message(msg));
-                    }
-                    self.window_handle = Some(window_handle);
-                }
-                Err(_) => {
-                    return Err(PluginError::Message(
-                        "GUI initialization failed (window backend panicked)",
-                    ));
-                }
-            }
-        }
-        Ok(())
+        log::info!(
+            "NAM-Plug: set_parent requested with API {:?}",
+            window.api_type().0
+        );
+        self.spawn_gui(Some(window))
     }
 
     /// Configures the window to float above the host window (floating fallback mode).
-    ///
-    /// NOTE: The `_window` parameter provides the host window for a transient-for
-    /// stacking relationship (WM_TRANSIENT_FOR). baseview 0.1.1's `open_blocking` API
-    /// does not expose transient window support, so the floating window opens as an
-    /// independent top-level window. Tracked for future improvement when baseview adds
-    /// transient window capabilities.
-    fn set_transient(&mut self, _window: Window) -> Result<(), PluginError> {
+    fn set_transient(&mut self, window: Window) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
-        {
-            use crate::clap::gui::window::NamPluginWindow;
-
-            self.teardown_gui_resources();
-
-            let scale_factor = {
-                let stored = self.shared.cold.gui_scale_factor.load(Ordering::Relaxed);
-                if stored == 0 {
-                    1.0f32
-                } else {
-                    f32::from_bits(stored)
-                }
-            };
-
-            let options = Self::window_options("NAM-Plug", scale_factor);
-            let (host_static, shared_arc) = self.host_static_and_shared();
-
-            let close_signal = Arc::new(AtomicBool::new(false));
-            let cs = Arc::clone(&close_signal);
-            let window_ready = Arc::new(AtomicBool::new(false));
-            let ready = Arc::clone(&window_ready);
-
-            let alive_fence = self.shared.cold.alive_fence.clone();
-
-            // Fail-closed initialization protocol: same protocol as `set_parent` —
-            // the build callback never panics (Result + catch_unwind) and records the
-            // error message so `set_transient` can report a friendly `Err`
-            // while the window thread degrades to a stub and exits.
-            let init_outcome = Arc::new(std::sync::Mutex::new(None::<&'static str>));
-            let outcome_cb = Arc::clone(&init_outcome);
-            let outcome = Arc::clone(&init_outcome);
-
-            // Clones for the `new` call — the originals are moved into
-            // `degraded` on the failure arms (match arms are exclusive).
-            let cs_for_new = Arc::clone(&close_signal);
-            let fence_for_new = Arc::clone(&alive_fence);
-            let shared_for_new = Arc::clone(&shared_arc);
-
-            let handle = std::thread::spawn(move || {
-                baseview::Window::open_blocking(options, move |win| {
-                    let window =
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            NamPluginWindow::new(
-                                win,
-                                shared_for_new,
-                                host_static,
-                                cs_for_new,
-                                fence_for_new,
-                                scale_factor,
-                            )
-                        })) {
-                            Ok(Ok(window)) => window,
-                            Ok(Err(err)) => {
-                                log::error!("NAM-Plug: floating GUI initialization failed: {err}");
-                                if let Ok(mut guard) = outcome_cb.lock() {
-                                    *guard = Some(plugin_error_message(&err));
-                                }
-                                NamPluginWindow::degraded(
-                                    shared_arc,
-                                    host_static,
-                                    cs,
-                                    alive_fence,
-                                    scale_factor,
-                                )
-                            }
-                            Err(_) => {
-                                log::error!(
-                                    "NAM-Plug: floating GUI initialization panicked \
-                                 (caught at FFI boundary)"
-                                );
-                                if let Ok(mut guard) = outcome_cb.lock() {
-                                    *guard = Some("GUI initialization failed unexpectedly");
-                                }
-                                NamPluginWindow::degraded(
-                                    shared_arc,
-                                    host_static,
-                                    cs,
-                                    alive_fence,
-                                    scale_factor,
-                                )
-                            }
-                        };
-                    ready.store(true, Ordering::Relaxed);
-                    window
-                });
-            });
-
-            // Wait for the window thread to confirm initialization (up to 2 seconds).
-            // If NamPluginWindow::new fails or the X11 connection fails,
-            // `ready` will never be set and we report the error to the host.
-            let start = std::time::Instant::now();
-            while !window_ready.load(Ordering::Relaxed) {
-                if start.elapsed() > std::time::Duration::from_secs(2) {
-                    close_signal.store(true, Ordering::Relaxed);
-                    self.floating_thread_handle = Some(handle);
-                    self.floating_close_signal = Some(close_signal);
-                    return Err(PluginError::Message(
-                        "Floating window creation failed: initialization timed out",
-                    ));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-
-            let init_error = outcome.lock().map(|mut guard| guard.take()).unwrap_or(None);
-            if let Some(msg) = init_error {
-                // The window degraded to a stub — signal it to exit and
-                // report the friendly error to the host. The thread is kept
-                // for bounded join on teardown.
-                close_signal.store(true, Ordering::Relaxed);
-                self.floating_thread_handle = Some(handle);
-                self.floating_close_signal = Some(close_signal);
-                return Err(PluginError::Message(msg));
-            }
-
-            self.floating_thread_handle = Some(handle);
-            self.floating_close_signal = Some(close_signal);
-        }
-        Ok(())
+        log::info!(
+            "NAM-Plug: set_transient requested with API {:?}",
+            window.api_type().0
+        );
+        self.spawn_gui(Some(window))
     }
 
     /// Makes the GUI window visible.
     ///
     /// Transitions the lifecycle state from `Hidden` to `ShowRequested`.
-    /// The actual window mapping happens on the GUI thread (baseview callback),
-    /// which transitions to `Active` once the window is ready.
+    /// The window show is dispatched to the Slint event loop.
     fn show(&mut self) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
-        {
-            self.gui_lifecycle.transition(GuiEvent::Show)?;
+        self.gui_lifecycle.transition(GuiEvent::Show)?;
+        if let Some(weak) = &self.slint_window {
+            let _ = weak.upgrade_in_event_loop(|w| {
+                let _ = w.show();
+            });
         }
         Ok(())
     }
@@ -497,12 +385,15 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// Hides the GUI window.
     ///
     /// Transitions the lifecycle state from `Active` to `HideRequested`.
-    /// The actual window unmapping happens on the GUI thread.
+    /// The window hide is dispatched to the Slint event loop.
     /// Resources are preserved so `show()` can re-display the window.
     fn hide(&mut self) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
-        {
-            self.gui_lifecycle.transition(GuiEvent::Hide)?;
+        self.gui_lifecycle.transition(GuiEvent::Hide)?;
+        if let Some(weak) = &self.slint_window {
+            let _ = weak.upgrade_in_event_loop(|w| {
+                let _ = w.hide();
+            });
         }
         Ok(())
     }

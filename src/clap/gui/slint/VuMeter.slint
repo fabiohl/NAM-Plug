@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+export component VuMeter inherits Rectangle {
+    in property <float> level-l: 0.0;
+    in property <float> level-r: 0.0;
+    in property <float> peak-hold-l: 0.0;
+    in property <float> peak-hold-r: 0.0;
+    in property <bool> stereo: true;
+    in-out property <bool> clipped: false;
+
+    callback reset-clip();
+
+    width: 130px;
+    height: 216px;
+    background: transparent;
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 6px;
+
+        // Top Header: Title & Clip Indicator LED
+        HorizontalLayout {
+            alignment: space-between;
+            height: 16px;
+
+            Text {
+                text: "PEAK / VU METER";
+                font-size: 9px;
+                font-weight: 700;
+                color: #8fa1b3;
+                vertical-alignment: center;
+            }
+
+            // Clip LED with manual reset on click
+            TouchArea {
+                width: 24px;
+                height: 14px;
+                clicked => {
+                    root.clipped = false;
+                    root.reset-clip();
+                }
+
+                Rectangle {
+                    width: 22px;
+                    height: 12px;
+                    border-radius: 2px;
+                    background: root.clipped ? #F74E4E : (parent.has-hover ? #3d2224 : #281819);
+                    border-width: 1px;
+                    border-color: root.clipped ? #ff7675 : #3f2628;
+                    animate background { duration: 100ms; }
+
+                    Text {
+                        text: "CLIP";
+                        font-size: 7px;
+                        font-weight: 800;
+                        color: root.clipped ? #ffffff : #5c3538;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Main Metering Canvas: Scale + Bars
+        HorizontalLayout {
+            alignment: center;
+            spacing: 8px;
+            height: 168px;
+
+            // dB Graduation Scale
+            VerticalLayout {
+                width: 24px;
+                alignment: space-between;
+                padding-top: 2px;
+                padding-bottom: 2px;
+
+                Text { text: " 0"; font-size: 8px; font-weight: 700; color: #F74E4E; horizontal-alignment: right; }
+                Text { text: "-3"; font-size: 8px; font-weight: 600; color: #F5CE62; horizontal-alignment: right; }
+                Text { text: "-6"; font-size: 8px; color: #a6b0be; horizontal-alignment: right; }
+                Text { text: "-12"; font-size: 8px; color: #7f8c8d; horizontal-alignment: right; }
+                Text { text: "-18"; font-size: 8px; font-weight: 600; color: #43E97B; horizontal-alignment: right; }
+                Text { text: "-24"; font-size: 8px; color: #636e7b; horizontal-alignment: right; }
+                Text { text: "-36"; font-size: 8px; color: #505963; horizontal-alignment: right; }
+                Text { text: "-48"; font-size: 8px; color: #3e444c; horizontal-alignment: right; }
+            }
+
+            // Left Channel (L)
+            VerticalLayout {
+                width: 18px;
+                spacing: 4px;
+
+                Rectangle {
+                    width: 18px;
+                    height: 150px;
+                    background: #111215;
+                    border-radius: 2px;
+                    border-width: 1px;
+                    border-color: #2b2e34;
+                    clip: true;
+
+                    // Active Ballistic Signal Fill
+                    Rectangle {
+                        width: parent.width - 2px;
+                        height: (parent.height - 2px) * Math.max(0.0, Math.min(1.0, root.level-l));
+                        y: parent.height - self.height - 1px;
+                        x: 1px;
+                        background: @linear-gradient(180deg, #F74E4E 0%, #F5CE62 18%, #43E97B 55%, #2ecc71 100%);
+                        border-radius: 1px;
+                    }
+
+                    // Peak Hold Marker Line
+                    if root.peak-hold-l > 0.02 : Rectangle {
+                        width: parent.width - 2px;
+                        height: 2px;
+                        y: Math.max(1px, parent.height - (parent.height - 2px) * Math.min(1.0, root.peak-hold-l) - 2px);
+                        x: 1px;
+                        background: root.peak-hold-l >= 0.95 ? #F74E4E : (root.peak-hold-l >= 0.75 ? #F5CE62 : #43E97B);
+                    }
+                }
+
+                Text {
+                    text: root.stereo ? "L" : "M";
+                    font-size: 9px;
+                    font-weight: 700;
+                    color: #7f8c8d;
+                    horizontal-alignment: center;
+                }
+            }
+
+            // Right Channel (R) — Shown when stereo is enabled
+            if root.stereo : VerticalLayout {
+                width: 18px;
+                spacing: 4px;
+
+                Rectangle {
+                    width: 18px;
+                    height: 150px;
+                    background: #111215;
+                    border-radius: 2px;
+                    border-width: 1px;
+                    border-color: #2b2e34;
+                    clip: true;
+
+                    // Active Ballistic Signal Fill
+                    Rectangle {
+                        width: parent.width - 2px;
+                        height: (parent.height - 2px) * Math.max(0.0, Math.min(1.0, root.level-r));
+                        y: parent.height - self.height - 1px;
+                        x: 1px;
+                        background: @linear-gradient(180deg, #F74E4E 0%, #F5CE62 18%, #43E97B 55%, #2ecc71 100%);
+                        border-radius: 1px;
+                    }
+
+                    // Peak Hold Marker Line
+                    if root.peak-hold-r > 0.02 : Rectangle {
+                        width: parent.width - 2px;
+                        height: 2px;
+                        y: Math.max(1px, parent.height - (parent.height - 2px) * Math.min(1.0, root.peak-hold-r) - 2px);
+                        x: 1px;
+                        background: root.peak-hold-r >= 0.95 ? #F74E4E : (root.peak-hold-r >= 0.75 ? #F5CE62 : #43E97B);
+                    }
+                }
+
+                Text {
+                    text: "R";
+                    font-size: 9px;
+                    font-weight: 700;
+                    color: #7f8c8d;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

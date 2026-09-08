@@ -22,5 +22,9 @@ pub(super) fn store_peaks(shared: &NamClapShared, peak_l: f32, peak_r: f32) {
     }
     if peak_l > 1.0 || peak_r > 1.0 {
         shared.rt_to_ui.ui_clipped.store(true, Ordering::Relaxed);
+        shared
+            .rt_to_ui
+            .ui_clip_indicator
+            .store(true, Ordering::Relaxed);
     }
 }

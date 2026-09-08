@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+import { SelectorButton } from "SelectorButton.slint";
+
+export component ModelCard inherits Rectangle {
+    in property <string> model-name: "No model loaded";
+    in property <string> model-arch: "WaveNet (Standard)";
+    in property <string> model-sample-rate: "48 kHz";
+    in property <bool> is-loading: false;
+    in property <bool> is-error: false;
+    in property <string> error-message: "";
+    in property <color> accent-color: #00D4AA;
+
+    callback load-clicked();
+
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 3px;
+        alignment: space-between;
+
+        // Card Header Title
+        HorizontalLayout {
+            alignment: space-between;
+            height: 12px;
+            Text {
+                text: "AMP MODEL";
+                font-size: 8.5px;
+                font-weight: 700;
+                color: #8fa1b3;
+                vertical-alignment: center;
+            }
+            if root.is-loading : Text {
+                text: "LOADING...";
+                font-size: 8px;
+                font-weight: 700;
+                color: #F5A623;
+                vertical-alignment: center;
+            }
+        }
+
+        // Active Model Display Surface
+        Rectangle {
+            height: 44px;
+            background: #141518;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: root.is-error ? #F74E4E : #2E3440;
+            clip: true;
+
+            VerticalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                alignment: center;
+                spacing: 2px;
+
+                if root.is-loading : Text {
+                    text: "Loading weights...";
+                    font-size: 9.5px;
+                    font-weight: 600;
+                    color: #F5A623;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                if root.is-error : Text {
+                    text: root.error-message != "" ? root.error-message : "Load failed";
+                    font-size: 9.5px;
+                    font-weight: 600;
+                    color: #F74E4E;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                if !root.is-loading && !root.is-error : Text {
+                    text: root.model-name;
+                    font-size: 10px;
+                    font-weight: 600;
+                    color: root.model-name == "No model loaded" ? #8fa1b3 : #E5E9F0;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                // Subtitle metadata: Neural Architecture and Native Sample Rate
+                if !root.is-error : Text {
+                    text: root.model-name == "No model loaded" ? "Select .nam profile" :
+                        (root.model-arch != "" ? (root.model-arch + " • " + root.model-sample-rate) : root.model-sample-rate);
+                    font-size: 8.5px;
+                    color: #7f8c8d;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // Load Model Trigger Button
+        SelectorButton {
+            text: "LOAD .NAM";
+            badge: "AI";
+            accent-color: root.accent-color;
+            clicked => {
+                root.load-clicked();
+            }
+        }
+    }
+}

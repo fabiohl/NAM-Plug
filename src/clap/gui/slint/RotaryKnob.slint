@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+export component RotaryKnob inherits Rectangle {
+    in-out property <float> value: 0.0;
+    in property <float> minimum: -12.0;
+    in property <float> maximum: 12.0;
+    in property <float> default-value: 0.0;
+    in property <string> label: "GAIN";
+    in property <string> unit: "dB";
+    in property <color> accent-color: #00D4AA;
+    in property <bool> enabled: true;
+
+    callback value-changed(float);
+    callback editing-started(float);
+    callback editing-finished(float);
+
+    width: 64px;
+    height: 84px;
+
+    // Normalization and angle calculations (270 degree sweep from 135 to 405 deg)
+    property <float> range: Math.max(0.0001, root.maximum - root.minimum);
+    property <float> norm: Math.max(0.001, Math.min(0.999, (root.value - root.minimum) / root.range));
+    property <angle> a-start: 135deg;
+    property <angle> a-end: 405deg;
+    property <angle> a-curr: 135deg + root.norm * 270deg;
+
+    // Geometry constants (center at 32, 32; arc radius 22)
+    property <float> cx: 32.0;
+    property <float> cy: 32.0;
+    property <float> r-arc: 22.0;
+
+    // Track arc endpoints
+    property <float> track-x0: root.cx + root.r-arc * Math.cos(root.a-start);
+    property <float> track-y0: root.cy + root.r-arc * Math.sin(root.a-start);
+    property <float> track-x1: root.cx + root.r-arc * Math.cos(root.a-end);
+    property <float> track-y1: root.cy + root.r-arc * Math.sin(root.a-end);
+
+    // Active arc endpoint
+    property <float> act-x1: root.cx + root.r-arc * Math.cos(root.a-curr);
+    property <float> act-y1: root.cy + root.r-arc * Math.sin(root.a-curr);
+    property <int> act-large: root.norm > 0.6666 ? 1 : 0;
+
+    // Indicator tick line coordinates (radius 10 to 18)
+    property <float> tick-x0: root.cx + 9.0 * Math.cos(root.a-curr);
+    property <float> tick-y0: root.cy + 9.0 * Math.sin(root.a-curr);
+    property <float> tick-x1: root.cx + 17.0 * Math.cos(root.a-curr);
+    property <float> tick-y1: root.cy + 17.0 * Math.sin(root.a-curr);
+
+    // Drag tracking state
+    property <float> drag-start-val: 0.0;
+    property <length> drag-start-y: 0px;
+    property <bool> shift-held: false;
+
+    // Display string formatting
+    property <float> rounded-val: Math.round(root.value * 10.0) / 10.0;
+    property <string> display-text: (root.value > 0.0 ? "+" : "") + root.rounded-val + (root.unit != "" ? " " + root.unit : "");
+
+    VerticalLayout {
+        alignment: space-between;
+        spacing: 2px;
+
+        // Dial Area (64 x 64 px)
+        Rectangle {
+            width: 64px;
+            height: 64px;
+
+            // Background arc track (full 270 deg)
+            Path {
+                commands: "M " + root.track-x0 + " " + root.track-y0 + " A 22 22 0 1 1 " + root.track-x1 + " " + root.track-y1;
+                stroke: #252830;
+                stroke-width: 3.5px;
+            }
+
+            // Active glowing value arc
+            if root.norm > 0.005 : Path {
+                commands: "M " + root.track-x0 + " " + root.track-y0 + " A 22 22 0 " + root.act-large + " 1 " + root.act-x1 + " " + root.act-y1;
+                stroke: root.enabled ? root.accent-color : #555d6b;
+                stroke-width: 3.5px;
+            }
+
+            // Central Knob Beveled Cap
+            Rectangle {
+                x: 14px;
+                y: 14px;
+                width: 36px;
+                height: 36px;
+                border-radius: 18px;
+                background: touch.pressed ? #121316 : (touch.has-hover ? #20232b : #181a20);
+                border-width: 1.5px;
+                border-color: touch.pressed ? root.accent-color : (touch.has-hover ? #3c424e : #2b2f38);
+                animate background { duration: 80ms; }
+                animate border-color { duration: 80ms; }
+
+                // Inner radial ring
+                Rectangle {
+                    x: 3px;
+                    y: 3px;
+                    width: 30px;
+                    height: 30px;
+                    border-radius: 15px;
+                    background: #15161b;
+                    border-width: 1px;
+                    border-color: #23262d;
+                }
+            }
+
+            // Position Indicator Tick
+            Path {
+                commands: "M " + root.tick-x0 + " " + root.tick-y0 + " L " + root.tick-x1 + " " + root.tick-y1;
+                stroke: root.enabled ? (touch.has-hover || touch.pressed ? #ffffff : root.accent-color) : #6b7280;
+                stroke-width: 2.5px;
+            }
+
+            // Interactive TouchArea covering the knob dial
+            touch := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: row-resize;
+
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.down {
+                        root.editing-started(root.value);
+                        root.drag-start-val = root.value;
+                        root.drag-start-y = self.mouse-y;
+                        root.shift-held = event.modifiers.shift;
+                    }
+                    if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                        root.editing-finished(root.value);
+                    }
+                }
+
+                moved => {
+                    if self.pressed {
+                        let delta = (root.drag-start-y - self.mouse-y) / 1px;
+                        let step = root.range / 150.0;
+                        let factor = root.shift-held ? 0.1 : 1.0;
+                        let new-val = Math.max(root.minimum, Math.min(root.maximum, root.drag-start-val + delta * step * factor));
+                        root.value = new-val;
+                        root.value-changed(new-val);
+                    }
+                }
+
+                double-clicked => {
+                    root.editing-started(root.value);
+                    root.value = root.default-value;
+                    root.value-changed(root.value);
+                    root.editing-finished(root.value);
+                }
+
+                scroll-event(event) => {
+                    root.editing-started(root.value);
+                    let step = root.range / 50.0;
+                    let factor = root.shift-held ? 0.1 : 1.0;
+                    let delta = event.delta-y / 1px;
+                    let new-val = Math.max(root.minimum, Math.min(root.maximum, root.value + (delta > 0 ? step : -step) * factor));
+                    root.value = new-val;
+                    root.value-changed(new-val);
+                    root.editing-finished(new-val);
+                    accept
+                }
+            }
+        }
+
+        // Parameter Label
+        Text {
+            text: root.label;
+            font-size: 9px;
+            font-weight: 700;
+            color: #bdc3c7;
+            horizontal-alignment: center;
+        }
+
+        // Numeric Readout (Formatted dB value)
+        Text {
+            text: root.display-text;
+            font-size: 9px;
+            font-weight: 600;
+            color: root.enabled ? root.accent-color : #7f8c8d;
+            horizontal-alignment: center;
+        }
+    }
+}

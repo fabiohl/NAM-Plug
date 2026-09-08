@@ -27,7 +27,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
       <li>Hardware-accelerated SIMD AVX2/FMA vectorization with zero heap allocations on the audio thread.</li>
       <li>Integrated CabSim Impulse Response (IR) loader and convolver.</li>
       <li>Dual operational modes: Live (zero latency, adaptive compute) and HQ/Offline (4× oversampled linear-phase rendering).</li>
-      <li>Responsive hardware-accelerated OpenGL UI built with egui.</li>
+      <li>Responsive hardware-accelerated declarative UI built with Slint (native Wayland and X11 support).</li>
       <li>Extensive CLAP extension integration: Audio Ports, Latency, GUI, State, Track Info, and Tail.</li>
     </ul>
   </description>

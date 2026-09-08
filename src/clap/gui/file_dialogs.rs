@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-use super::dialog_state::{self, DialogSharedState, IrDialogSharedState};
+use crate::clap::gui::dialog_state::{self, DialogSharedState, IrDialogSharedState};
 use clack_plugin::host::HostSharedHandle;
 use std::path::PathBuf;
 use std::sync::Arc;

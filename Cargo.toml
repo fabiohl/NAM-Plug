@@ -28,7 +28,7 @@ clack-extensions = { version = "0.1", features = [
     "log",
     "params",
     "state",
-    "raw-window-handle_05",
+    "raw-window-handle_06",
     "thread-check",
     "track-info",
     "remote-controls",
@@ -39,13 +39,15 @@ clack-extensions = { version = "0.1", features = [
     "state-context",
     "tail",
 ] }
-# GUI Stack: egui 0.36 + glow 0.17 + baseview 0.1.4 (pinned for Clack raw-window-handle 0.5 compatibility)
-egui = "0.36"
-egui_glow = "0.36"
-glow = "0.17.0"
-baseview = { version = "0.1.4", features = ["opengl"] }
+# GUI Stack: Slint 1.9 (winit backend + femtovg renderer)
+raw-window-handle = "0.6"
+slint = { version = "1.9", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "compat-1-2",
+] }
 rfd = "0.17.2"
-keyboard-types = { version = "0.6", default-features = false }
 clack-host = { version = "0.1", features = ["clack-plugin"] }
 arboard = "3"
 serde = { version = "1.0", features = ["derive"] }
@@ -56,6 +58,9 @@ thiserror = "2.0"
 rtrb = "0.4.0"
 libc = "0.2"
 sha2 = "0.11"
+
+[build-dependencies]
+slint-build = "1.9"
 
 [dev-dependencies]
 NeuralAmpModeler-rs = { version = "0.7.3", features = ["testing"] }
@@ -70,6 +75,10 @@ serde_json = "1.0"
 [[bench]]
 name = "clap_bench"
 harness = false
+
+[[bin]]
+name = "ui_preview"
+path = "src/bin/ui_preview.rs"
 
 [[bin]]
 name = "pgo_profiling_workload"

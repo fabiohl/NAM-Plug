@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+export component LedIndicator inherits Rectangle {
+    in property <bool> active: false;
+    in property <color> color-on: #43E97B;
+    in property <color> color-off: #2e3440;
+    in property <string> label: "";
+    in property <length> size: 10px;
+
+    background: transparent;
+
+    HorizontalLayout {
+        alignment: start;
+        spacing: 6px;
+
+        // LED Lens & Glow Assembly
+        Rectangle {
+            width: root.size + 4px;
+            height: root.size + 4px;
+            y: (parent.height - self.height) / 2;
+
+            // Outer Glow Halo
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                border-radius: self.width / 2;
+                background: root.active ? root.color-on : transparent;
+                opacity: root.active ? 0.3 : 0.0;
+                animate opacity { duration: 100ms; }
+            }
+
+            // Main LED Core
+            Rectangle {
+                width: root.size;
+                height: root.size;
+                x: 2px;
+                y: 2px;
+                border-radius: root.size / 2;
+                background: root.active ? root.color-on : root.color-off;
+                border-width: 1px;
+                border-color: root.active ? #ffffff : #1e2229;
+                animate background { duration: 80ms; }
+
+                // Top Specular Highlight (3D glass lens effect)
+                if root.active : Rectangle {
+                    width: root.size / 3;
+                    height: root.size / 3;
+                    x: root.size / 5;
+                    y: root.size / 5;
+                    border-radius: self.width / 2;
+                    background: #ffffff;
+                    opacity: 0.6;
+                }
+            }
+        }
+
+        // Optional Accompanying Label
+        if root.label != "" : Text {
+            text: root.label;
+            font-size: 9px;
+            font-weight: 600;
+            color: root.active ? #E5E9F0 : #8B95A5;
+            vertical-alignment: center;
+            animate color { duration: 100ms; }
+        }
+    }
+}

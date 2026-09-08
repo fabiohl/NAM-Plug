@@ -330,6 +330,10 @@ impl<'a> NamClapProcessor<'a> {
                             .rt_to_ui
                             .ui_clipped
                             .store(true, Ordering::Relaxed);
+                        self.shared
+                            .rt_to_ui
+                            .ui_clip_indicator
+                            .store(true, Ordering::Relaxed);
                     }
 
                     output_offset += n_out;
@@ -413,6 +417,12 @@ impl<'a> NamClapProcessor<'a> {
 
                 block_offset = sub_end;
             }
+
+            let is_gate_active = any_active && last_gate_state == GateState::Closed;
+            self.shared
+                .rt_to_ui
+                .ui_gate_active
+                .store(is_gate_active, Ordering::Relaxed);
 
             if any_active {
                 gate_flags::report_gate_flags(&self.rt_status, last_gate_state);

@@ -5,13 +5,13 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # NAM-Plug
 
-![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.98%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-egui%200.36%20%7C%20Glow-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
+![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.98%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![GUI](https://img.shields.io/badge/GUI-Slint%201.17%20%7C%20FemtoVG%20%7C%20Wayland%20%26%20X11-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg)
 
 **NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs.
 
 It directly embeds [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) as its core neural DSP engine, inheriting all of its real-time guarantees: **zero heap allocations**, **zero locks**, and **zero blocking system calls** on the real-time audio thread, `x86-64-v3` (AVX2/FMA) baseline SIMD vectorization, and exact numerical parity against canonical C++ NAMCore and double-precision f64 reference oracles.
 
-Designed for seamless integration into modern Linux digital audio workstations (DAWs) such as Bitwig Studio, REAPER, NAM-Plug offers a vector-rendered `egui` GUI for loading `.nam` neural amp models and `.wav` impulse responses (IRs), gain staging, noise gating, oversampling, anti-aliasing filter configuration, and real-time DSP performance telemetry.
+Designed for seamless integration into modern Linux digital audio workstations (DAWs) such as Bitwig Studio and REAPER, NAM-Plug offers a declarative, hardware-accelerated Slint GUI (with native Wayland and X11 support) for loading `.nam` neural amp models and `.wav` impulse responses (IRs), gain staging, noise gating, oversampling, anti-aliasing filter configuration, and real-time DSP performance telemetry.
 
 > **❤️‍🔥 NAM-Plug is in active development.** Feedback, bug reports, performance metrics, and DAW compatibility notes are very welcome!
 
@@ -21,7 +21,7 @@ Designed for seamless integration into modern Linux digital audio workstations (
 
 ![NAM-Plug GUI](docs/gui_main.png)
 
-*The vector-rendered egui graphical interface running inside a Linux host. The interface features model and cabinet IR selectors, rotary controls for Input/Output gain staging and Noise Gate threshold, toggle selectors for half-band anti-aliasing Oversampling (`Off`, `2x`, `4x`) and Activation precision math (`Standard` vs `Fast`), an active/bypass state indicator, a high-resolution peak level meter, and a real-time DSP telemetry status bar.*
+*The declarative Slint graphical interface running inside a Linux host. The interface features model and cabinet IR selectors, rotary controls for Input/Output gain staging and Noise Gate threshold, toggle selectors for half-band anti-aliasing Oversampling (`Off`, `2x`, `4x`) and Activation precision math (`Standard` vs `Fast`), an active/bypass state indicator, high-resolution adaptive peak level meters with IEC 60268-10 ballistics, and a real-time DSP telemetry status bar.*
 
 ---
 
@@ -34,7 +34,7 @@ Designed for seamless integration into modern Linux digital audio workstations (
 * **Cold-Path Latency Caching & Dynamic PDC:** Effective latency (resampler + oversample + cab-sim) is cached on the audio thread and recomputed strictly during cold asset swaps, driving instant DAW Plugin Delay Compensation (`clap_plugin_latency`) without per-block audio thread overhead.
 * **Decoupled Gain Staging & Model Calibration:** Embedded model loudness metadata calibration (`input_mult_adj`/`output_mult_adj`) is isolated from sample-accurate DAW user-gain automation (`ParamSmoother`), preventing automation sweeps from altering static model calibration multipliers.
 * **Generation-Counter Fast Path (`gui_param_generation`):** Eliminates redundant atomic float loads when parameters are stationary, reading parameter targets only upon modification.
-* **Hardware-Accelerated egui + Glow GUI with 2-Tier Idle Throttling:** Vector-rendered OpenGL UI (`egui 0.36` + `glow 0.17` + `baseview`) featuring adaptive mono/stereo tricolor VU meters with custom GLSL shaders, sub-pixel peak-hold indicators, and an idle skip engine achieving 0% GPU/CPU overhead when static.
+* **Hardware-Accelerated Slint GUI with Native Wayland & X11 Support:** Declarative UI built with Slint 1.17 (FemtoVG / OpenGL rendering via `winit`), supporting native Wayland (`CLAP_WINDOW_API_WAYLAND`) and X11 (`CLAP_WINDOW_API_X11`) surfaces. Features 5-zone modular architecture, adaptive mono/stereo tricolor VU meters with IEC 60268-10 PPM ballistics, and dedicated 60 Hz lock-free telemetry polling via `SlintViewModel`.
 * **Half-Band Anti-Aliasing Oversampling:** Optional `2x` and `4x` polyphase oversampling centered around the neural inference stage to eliminate high-frequency aliasing foldover in high-gain amp models.
 * **Selectable Activation Precision:** Supports both `Standard` (exact-grade, default) and `Fast` (Padé polynomial minimax approximations) math modes to balance precision against CPU consumption on demanding setups.
 * **Real-Time DSP Telemetry & Diagnostics:** Live footer display reporting sample rate (`SR`), buffer latency (`Lat`), DSP CPU load percentage (`DSP %`), CPU cycles per block, block size (`Last N`), real-time thread priority (`RT Prio`), overload xrun count, and diagnostic status flags (`Flags`).
@@ -54,8 +54,8 @@ Designed for seamless integration into modern Linux digital audio workstations (
 | **Bypass Crossfader**          | 32 ms equal-power crossfade with branchless FMA loop & phase compensation | Smooth, pop-free bypass transitions with zero phase cancellation   |
 | **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`     | Instant host Plugin Delay Compensation with 0 per-block overhead   |
 | **Cabinet IR Convolution**     | Partitioned FFT & Direct FIR convolution engine (.wav IRs)                | Seamless, zero-latency speaker cabinet simulation                  |
-| **Graphical User Interface**   | `egui 0.36` vector UI with `glow 0.17` (OpenGL 3.3) via `baseview`        | Responsive, framerate-independent UI with GLSL shader meters       |
-| **GUI Idle Throttling**        | 2-tier frame lifecycle & dirty-state early exit                           | 0% GPU/CPU consumption when plugin UI is open and stationary       |
+| **Graphical User Interface**   | Slint 1.17 declarative UI (FemtoVG/OpenGL backend via `winit`)            | Native Wayland & X11 support, high-DPI scaling, IEC 60268-10 ballistics |
+| **GUI Event Loop & Telemetry** | Dedicated `"nam-slint-gui"` event loop thread with 60 Hz `SlintViewModel` | 0% audio thread overhead, lock-free atomics, smooth 60 FPS metering |
 | **Oversampling**               | Half-band polyphase FIR filters (`Off`, `2x`, `4x`)                       | Eliminates aliasing distortion in high-gain amp models             |
 | **Activation Precision**       | `Standard` (exact-grade, default) vs `Fast` (Padé approximations)         | User-selectable trade-off between math precision and CPU latency   |
 | **CLAP State Persistence**     | Lock-free atomic synchronization & JSON serialization                     | Full preset saving/loading and seamless DAW project restoration    |
@@ -110,6 +110,12 @@ For development and host-harness testing support:
 
 ```bash
 cargo build --features testing
+```
+
+To run the standalone GUI preview tool (live Slint interface without a DAW host):
+
+```bash
+cargo run --bin ui_preview
 ```
 
 ---
@@ -255,7 +261,7 @@ The status bar at the bottom of the plugin GUI provides real-time telemetry:
 |:------------------------------------------------------- |:----------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Bitwig Studio** (Linux)                               | ✅ Full Support         | Full GUI embedding, sample-accurate automation, state save/restore, and offline bounce.                                                                                                                                                                                        |
 | **REAPER** (Native Linux)                               | ✅ Full Support         | Full GUI embedding, parameter automation, and ultra-low latency playback.                                                                                                                                                                                                      |
-| **PreSonus Studio One** / **Fender Studio Pro** (Linux) | ⚠️ Known GUI Limitation | **Known issue:** Audio DSP processing and CLAP parameter control operate normally, but the host cannot currently initialize or attach the X11/XWayland GUI surface (`baseview` / `egui_glow`). This is a known host-side window management limitation in Studio One for Linux. |
+| **PreSonus Studio One** / **Fender Studio Pro** (Linux) | ⚠️ Known GUI Limitation | **Known issue:** Audio DSP processing and CLAP parameter control operate normally, but the host cannot currently initialize or attach the embedded X11 GUI surface. Dual Wayland / X11 negotiation and floating window mode (`CLAP_WINDOW_API_WAYLAND` / `CLAP_WINDOW_API_X11`) provide clean host compatibility with bounded teardown joins. |
 
 ---
 
@@ -277,7 +283,7 @@ The following technical documents are maintained in the source repository:
 
 | Document                                                                                                                         | Primary Focus & Topic Coverage                                                                        |
 |:-------------------------------------------------------------------------------------------------------------------------------- |:----------------------------------------------------------------------------------------------------- |
-| [`docs/architecture.md`](docs/architecture.md)                                                                                   | CLAP plugin architecture, SPSC GC thread model, egui GUI integration, lock-free state synchronization |
+| [`docs/architecture.md`](docs/architecture.md)                                                                                   | CLAP plugin architecture, SPSC GC thread model, Slint declarative GUI integration, lock-free state synchronization |
 | [`docs/testing.md`](docs/testing.md)                                                                                             | Test suite layout, host-harness verification phases, CLAP test policies, and test coverage matrix     |
 | [`docs/functional-tests.md`](docs/functional-tests.md)                                                                           | Plugin functional test checklist and verification matrices                                            |
 | [`docs/postmortem-libm-symbol-interposition.md`](docs/postmortem-libm-symbol-interposition.md)                                   | Technical postmortem on libm symbol interposition resolution on Linux dynamic linkers                 |
@@ -289,7 +295,7 @@ The following technical documents are maintained in the source repository:
 
 * **Steven Atkinson** — Creator of [Neural Amp Modeler (NAM)](https://github.com/sdatkinson/neural-amp-modeler) for pioneering deep learning guitar amplifier modeling.
 * **Clack Framework & CLAP Community** — For providing the Rust `clack` library and creating the open, modern CLever Audio Plug-in standard.
-* **Emilk & egui Community** — For the immediate-mode GUI framework powered by OpenGL.
+* **Slint Team & Community** — For the declarative GUI framework and high-performance FemtoVG/OpenGL renderer.
 
 ---
 

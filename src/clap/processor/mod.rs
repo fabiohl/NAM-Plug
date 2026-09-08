@@ -72,7 +72,9 @@ fn panic_to_error(panic_info: Box<dyn std::any::Any + Send>) -> PluginError {
     } else if let Some(s) = panic_info.downcast_ref::<&str>() {
         PluginError::Message(Box::leak(s.to_string().into_boxed_str()))
     } else {
-        PluginError::Message("Plugin panicked — crash report saved to ~/.cache/neural-amp-modeler-rs/")
+        PluginError::Message(
+            "Plugin panicked — crash report saved to ~/.cache/neural-amp-modeler-rs/",
+        )
     }
 }
 

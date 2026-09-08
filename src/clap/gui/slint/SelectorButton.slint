@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+export component SelectorButton inherits Rectangle {
+    in property <string> text: "SELECT";
+    in property <string> badge: "";
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <color> accent-color: #00D4AA;
+
+    callback clicked();
+
+    background: transparent;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+
+        clicked => {
+            root.clicked();
+        }
+
+        Rectangle {
+            border-radius: 4px;
+            background: root.active ?
+                (touch.has-hover ? #223b35 : #1a2e29) :
+                (touch.pressed ? #17191e : (touch.has-hover ? #2a2f38 : #232830));
+            border-width: 1px;
+            border-color: root.active ? root.accent-color : (touch.has-hover ? #404856 : #2E3440);
+            animate background { duration: 100ms; }
+            animate border-color { duration: 100ms; }
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                spacing: 6px;
+                alignment: center;
+
+                Text {
+                    text: root.text;
+                    font-size: 10px;
+                    font-weight: 700;
+                    color: root.active ? #ffffff : (touch.has-hover ? #E5E9F0 : #8B95A5);
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    animate color { duration: 100ms; }
+                }
+
+                if root.badge != "" : Rectangle {
+                    background: root.active ? root.accent-color : #2e3440;
+                    border-radius: 3px;
+                    height: 14px;
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        padding-right: 4px;
+                        Text {
+                            text: root.badge;
+                            font-size: 8px;
+                            font-weight: 800;
+                            color: root.active ? #121315 : #8B95A5;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

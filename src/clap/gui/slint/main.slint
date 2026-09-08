@@ -1,0 +1,601 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+import { RotaryKnob } from "RotaryKnob.slint";
+import { VuMeter } from "VuMeter.slint";
+import { ToggleSwitch } from "ToggleSwitch.slint";
+import { LedIndicator } from "LedIndicator.slint";
+import { SelectorButton } from "SelectorButton.slint";
+import { ModelCard } from "ModelCard.slint";
+import { IrCard } from "IrCard.slint";
+
+export component MainWindow inherits Window {
+    title: "NAM-Plug";
+    width: 600px;
+    height: 275px;
+    background: #1A1D23;
+    default-font-family: "sans-serif";
+
+    // ── Zone 1 Properties: Model & IR Metadata ───────────────
+    in-out property <string> model_name: "Clean Tweed Deluxe (Neural)";
+    in-out property <string> model_arch: "WaveNet (Standard)";
+    in-out property <string> model_sample_rate: "48 kHz";
+    in-out property <bool> model_loading: false;
+    in-out property <bool> model_error: false;
+    in-out property <string> model_error_msg: "";
+
+    in-out property <string> ir_name: "1x12 Greenback (CabSim)";
+    in-out property <string> ir_status: "48 kHz";
+    in-out property <bool> has_ir: true;
+    in-out property <bool> ir_loading: false;
+    in-out property <bool> ir_error: false;
+    in-out property <string> ir_error_msg: "";
+
+    // ── Zone 2 Properties: Analog Gain & Gate Stages ──────────
+    in-out property <float> input_gain_db: 0.0;
+    in-out property <float> output_gain_db: -3.0;
+    in-out property <float> gate_thresh_db: -90.0;
+    in-out property <string> input_gain_text: "0.0 dB";
+    in-out property <string> output_gain_text: "-3.0 dB";
+    in-out property <string> gate_thresh_text: "-90 dB";
+    in-out property <bool> gate_active: false;
+    in-out property <int> oversample_mode: 0; // 0: Off, 1: 2x, 2: 4x
+    in-out property <int> activation_mode: 0; // 0: Standard, 1: Fast
+
+    // ── Zone 3 Properties: Telemetry & VU Meters ──────────────
+    in-out property <float> peak_l: 0.72;
+    in-out property <float> peak_r: 0.68;
+    in-out property <float> peak_hold_l: 0.78;
+    in-out property <float> peak_hold_r: 0.74;
+    in-out property <bool> clip_active: false;
+    in-out property <bool> is_stereo: true;
+
+    // ── Zone 4 Properties: Master Bypass ──────────────────────
+    in-out property <bool> bypass_active: false;
+
+    // ── Zone 5 Properties: Status Bar & Host Telemetry ────────
+    in-out property <string> sample_rate_text: "48000 Hz";
+    in-out property <string> latency_text: "0 spl (0.0 ms)";
+    in-out property <string> dsp_load_text: "1.4% DSP";
+    in-out property <string> oversample_text: "1x (Off)";
+    in-out property <string> simd_badge: "AVX2+FMA";
+    in-out property <string> backend_text: "Wayland Native";
+
+    // ── Host Interaction Callbacks ────────────────────────────
+    callback toggle_bypass();
+    callback load_model_clicked();
+    callback load_ir_clicked();
+    callback clear_ir_clicked();
+    callback reset_clip_clicked();
+    callback input_gain_changed(float);
+    callback input_gain_gesture_begin();
+    callback input_gain_gesture_end();
+    callback output_gain_changed(float);
+    callback output_gain_gesture_begin();
+    callback output_gain_gesture_end();
+    callback gate_thresh_changed(float);
+    callback gate_thresh_gesture_begin();
+    callback gate_thresh_gesture_end();
+    callback oversample_changed(int);
+    callback activation_changed(int);
+    callback cycle_oversample();
+
+    VerticalLayout {
+        padding: 6px;
+        spacing: 5px;
+
+        // ═════════════════════════════════════════════════════════════════════
+        // Upper Area: Zones 1, 2, 3, 4 (232 px exact height)
+        // ═════════════════════════════════════════════════════════════════════
+        HorizontalLayout {
+            height: 232px;
+            spacing: 6px;
+
+            // ── Zone 1: Identity, Model & IR Cards (145 px width) ───────────
+            Rectangle {
+                width: 145px;
+                background: #232830;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: #2E3440;
+
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 4px;
+                    alignment: space-between;
+
+                    // Brand Header
+                    VerticalLayout {
+                        spacing: 2px;
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "NAM-Plug⚡";
+                                font-size: 13px;
+                                font-weight: 800;
+                                color: #00D4AA;
+                            }
+                            Rectangle {
+                                background: #2E3440;
+                                border-radius: 3px;
+                                height: 16px;
+                                HorizontalLayout {
+                                    padding-left: 4px;
+                                    padding-right: 4px;
+                                    Text {
+                                        text: root.simd_badge;
+                                        font-size: 8.5px;
+                                        font-weight: 700;
+                                        color: #8fa1b3;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "Neural Amp Modeler";
+                                font-size: 8.5px;
+                                color: #8fa1b3;
+                            }
+                            Text {
+                                text: "v0.7.0 • CLAP";
+                                font-size: 8.5px;
+                                color: #636e7b;
+                            }
+                        }
+                    }
+
+                    // Model Card
+                    ModelCard {
+                        model-name: root.model_name;
+                        model-arch: root.model_arch;
+                        model-sample-rate: root.model_sample_rate;
+                        is-loading: root.model_loading;
+                        is-error: root.model_error;
+                        error-message: root.model_error_msg;
+                        accent-color: #00D4AA;
+                        load-clicked => { root.load_model_clicked(); }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: #2E3440;
+                    }
+
+                    // Cabinet IR Card
+                    IrCard {
+                        ir-name: root.ir_name;
+                        ir-status: root.ir_status;
+                        has-ir: root.has_ir;
+                        is-loading: root.ir_loading;
+                        is-error: root.ir_error;
+                        error-message: root.ir_error_msg;
+                        accent-color: #3498db;
+                        load-clicked => { root.load_ir_clicked(); }
+                        clear-clicked => { root.clear_ir_clicked(); }
+                    }
+                }
+            }
+
+            // ── Zone 2: Analog Gain & Gate Stages (255 px width) ────────────
+            Rectangle {
+                width: 255px;
+                background: #232830;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: #2E3440;
+                opacity: root.bypass_active ? 0.45 : 1.0;
+                animate opacity { duration: 120ms; }
+
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 4px;
+                    alignment: space-between;
+
+                    // Section Title
+                    Text {
+                        text: "ANALOG GAIN & GATE STAGES";
+                        font-size: 8.5px;
+                        font-weight: 700;
+                        color: #8fa1b3;
+                        horizontal-alignment: center;
+                    }
+
+                    // 3 Rotary Knobs (Input, Output, Gate)
+                    HorizontalLayout {
+                        alignment: space-around;
+                        spacing: 4px;
+
+                        // Input Gain Knob (-20 to +20 dB)
+                        RotaryKnob {
+                            label: "INPUT";
+                            value <=> root.input_gain_db;
+                            minimum: -20.0;
+                            maximum: 20.0;
+                            default-value: 0.0;
+                            accent-color: #00D4AA;
+                            editing-started(_) => {
+                                root.input_gain_gesture_begin();
+                            }
+                            value-changed(v) => {
+                                root.input_gain_text = (v > 0.0 ? "+" : "") + Math.round(v * 10.0) / 10.0 + " dB";
+                                root.input_gain_changed(v);
+                            }
+                            editing-finished(_) => {
+                                root.input_gain_gesture_end();
+                            }
+                        }
+
+                        // Output Gain Knob (-40 to +20 dB)
+                        RotaryKnob {
+                            label: "OUTPUT";
+                            value <=> root.output_gain_db;
+                            minimum: -40.0;
+                            maximum: 20.0;
+                            default-value: -3.0;
+                            accent-color: #3498db;
+                            editing-started(_) => {
+                                root.output_gain_gesture_begin();
+                            }
+                            value-changed(v) => {
+                                root.output_gain_text = (v > 0.0 ? "+" : "") + Math.round(v * 10.0) / 10.0 + " dB";
+                                root.output_gain_changed(v);
+                            }
+                            editing-finished(_) => {
+                                root.output_gain_gesture_end();
+                            }
+                        }
+
+                        // Gate Threshold Knob (-90 to 0 dB)
+                        RotaryKnob {
+                            label: "GATE";
+                            value <=> root.gate_thresh_db;
+                            minimum: -90.0;
+                            maximum: 0.0;
+                            default-value: -90.0;
+                            accent-color: #F5A623;
+                            editing-started(_) => {
+                                root.gate_thresh_gesture_begin();
+                            }
+                            value-changed(v) => {
+                                root.gate_thresh_text = Math.round(v) + " dB";
+                                root.gate_thresh_changed(v);
+                            }
+                            editing-finished(_) => {
+                                root.gate_thresh_gesture_end();
+                            }
+                        }
+                    }
+
+                    // Noise Gate Dynamic Status LED
+                    HorizontalLayout {
+                        alignment: center;
+                        LedIndicator {
+                            active: root.gate_active;
+                            color-on: #43E97B;
+                            color-off: #2E3440;
+                            label: root.gate_active ? "GATE ACTIVE" : "GATE OPEN";
+                            size: 8px;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: #2E3440;
+                    }
+
+                    // Sub-Controls: Oversampling & Activation Precision
+                    HorizontalLayout {
+                        alignment: space-between;
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        height: 20px;
+
+                        // Oversampling Segmented Switch (Off, 2x, 4x)
+                        HorizontalLayout {
+                            spacing: 3px;
+                            alignment: start;
+                            Text {
+                                text: "OS:";
+                                font-size: 8.5px;
+                                font-weight: 700;
+                                color: #8fa1b3;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                width: 24px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.oversample_mode = 0;
+                                    root.oversample_text = "1x (Off)";
+                                    root.oversample_changed(0);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.oversample_mode == 0 ? #00D4AA : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.oversample_mode == 0 ? #00D4AA : #2E3440;
+                                    Text {
+                                        text: "Off";
+                                        font-size: 8px;
+                                        font-weight: 700;
+                                        color: root.oversample_mode == 0 ? #121315 : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 22px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.oversample_mode = 1;
+                                    root.oversample_text = "2x (HQ)";
+                                    root.oversample_changed(1);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.oversample_mode == 1 ? #00D4AA : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.oversample_mode == 1 ? #00D4AA : #2E3440;
+                                    Text {
+                                        text: "2×";
+                                        font-size: 8px;
+                                        font-weight: 700;
+                                        color: root.oversample_mode == 1 ? #121315 : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 22px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.oversample_mode = 2;
+                                    root.oversample_text = "4x (Ultra)";
+                                    root.oversample_changed(2);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.oversample_mode == 2 ? #00D4AA : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.oversample_mode == 2 ? #00D4AA : #2E3440;
+                                    Text {
+                                        text: "4×";
+                                        font-size: 8px;
+                                        font-weight: 700;
+                                        color: root.oversample_mode == 2 ? #121315 : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Activation Precision Segmented Switch (Standard, Fast)
+                        HorizontalLayout {
+                            spacing: 3px;
+                            alignment: end;
+                            Text {
+                                text: "ACT:";
+                                font-size: 8.5px;
+                                font-weight: 700;
+                                color: #8fa1b3;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                width: 28px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.activation_mode = 0;
+                                    root.activation_changed(0);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.activation_mode == 0 ? #3498db : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.activation_mode == 0 ? #3498db : #2E3440;
+                                    Text {
+                                        text: "Std";
+                                        font-size: 8px;
+                                        font-weight: 700;
+                                        color: root.activation_mode == 0 ? #ffffff : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 28px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.activation_mode = 1;
+                                    root.activation_changed(1);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.activation_mode == 1 ? #3498db : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.activation_mode == 1 ? #3498db : #2E3440;
+                                    Text {
+                                        text: "Fast";
+                                        font-size: 8px;
+                                        font-weight: 700;
+                                        color: root.activation_mode == 1 ? #ffffff : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Zone 3: High-Res Peak & VU Meters (96 px width) ─────────────
+            Rectangle {
+                width: 96px;
+                background: #232830;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: #2E3440;
+                opacity: root.bypass_active ? 0.45 : 1.0;
+                animate opacity { duration: 120ms; }
+
+                VerticalLayout {
+                    padding: 4px;
+                    alignment: center;
+
+                    VuMeter {
+                        stereo: root.is_stereo;
+                        level-l: root.peak_l;
+                        level-r: root.peak_r;
+                        peak-hold-l: root.peak_hold_l;
+                        peak-hold-r: root.peak_hold_r;
+                        clipped <=> root.clip_active;
+                        reset-clip => { root.reset_clip_clicked(); }
+                    }
+                }
+            }
+
+            // ── Zone 4: Master Bypass Control (74 px width) ──────────────────
+            Rectangle {
+                width: 74px;
+                background: #232830;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: #2E3440;
+
+                VerticalLayout {
+                    padding: 8px;
+                    alignment: space-around;
+
+                    Text {
+                        text: "MASTER";
+                        font-size: 9px;
+                        font-weight: 700;
+                        color: #8fa1b3;
+                        horizontal-alignment: center;
+                    }
+
+                    // Master Status LED Indicator
+                    HorizontalLayout {
+                        alignment: center;
+                        LedIndicator {
+                            active: !root.bypass_active;
+                            color-on: #43E97B;
+                            color-off: #F74E4E;
+                            size: 10px;
+                        }
+                    }
+
+                    // Hardware Toggle Switch
+                    HorizontalLayout {
+                        alignment: center;
+                        ToggleSwitch {
+                            checked: !root.bypass_active;
+                            active-color: #43E97B;
+                            inactive-color: #4A4F5A;
+                            toggled(active) => {
+                                root.bypass_active = !active;
+                                root.toggle_bypass();
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.bypass_active ? "BYPASS" : "DSP ACTIVE";
+                        font-size: 8px;
+                        color: root.bypass_active ? #F74E4E : #43E97B;
+                        horizontal-alignment: center;
+                        font-weight: 700;
+                        animate color { duration: 100ms; }
+                    }
+                }
+            }
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // Zone 5: Status Bar / Footer (26 px exact height)
+        // ═════════════════════════════════════════════════════════════════════
+        Rectangle {
+            height: 26px;
+            background: #141518;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #2E3440;
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                alignment: space-between;
+
+                // Left telemetry group
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Text {
+                        text: "SR: " + root.sample_rate_text;
+                        font-size: 9px;
+                        color: #8fa1b3;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "LAT: " + root.latency_text;
+                        font-size: 9px;
+                        color: #8fa1b3;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cycle_oversample(); }
+                        Text {
+                            text: "OS: " + root.oversample_text;
+                            font-size: 9px;
+                            color: parent.has-hover ? #00D4AA : #F5A623;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            animate color { duration: 100ms; }
+                        }
+                    }
+
+                    Text {
+                        text: "CAB: " + (root.has_ir ? "Active" : "Bypass");
+                        font-size: 9px;
+                        color: root.has_ir ? #43E97B : #636e7b;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Right diagnostic group
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+
+                    Text {
+                        text: root.dsp_load_text;
+                        font-size: 9px;
+                        font-weight: 700;
+                        color: #43E97B;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: root.backend_text;
+                        font-size: 9px;
+                        color: #636e7b;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

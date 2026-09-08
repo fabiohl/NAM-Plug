@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+import { SelectorButton } from "SelectorButton.slint";
+
+export component IrCard inherits Rectangle {
+    in property <string> ir-name: "No IR loaded";
+    in property <string> ir-status: "Bypassed";
+    in property <bool> has-ir: false;
+    in property <bool> is-loading: false;
+    in property <bool> is-error: false;
+    in property <string> error-message: "";
+    in property <color> accent-color: #3498db;
+
+    callback load-clicked();
+    callback clear-clicked();
+
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 3px;
+        alignment: space-between;
+
+        // Header Title
+        HorizontalLayout {
+            alignment: space-between;
+            height: 12px;
+            Text {
+                text: "CABINET IR";
+                font-size: 8.5px;
+                font-weight: 700;
+                color: #8fa1b3;
+                vertical-alignment: center;
+            }
+            if root.has-ir : Rectangle {
+                background: #1c3628;
+                border-radius: 2px;
+                border-width: 0.5px;
+                border-color: #43E97B;
+                height: 12px;
+                HorizontalLayout {
+                    padding-left: 3px;
+                    padding-right: 3px;
+                    Text {
+                        text: "CAB ON";
+                        font-size: 7.5px;
+                        font-weight: 800;
+                        color: #43E97B;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Active IR Display Surface
+        Rectangle {
+            height: 36px;
+            background: #141518;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: root.is-error ? #F74E4E : #2E3440;
+            clip: true;
+
+            VerticalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                alignment: center;
+                spacing: 1px;
+
+                if root.is-loading : Text {
+                    text: "Loading impulse...";
+                    font-size: 9px;
+                    font-weight: 600;
+                    color: #F5A623;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                if root.is-error : Text {
+                    text: root.error-message != "" ? root.error-message : "IR load failed";
+                    font-size: 9px;
+                    font-weight: 600;
+                    color: #F74E4E;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                if !root.is-loading && !root.is-error : Text {
+                    text: root.ir-name;
+                    font-size: 9.5px;
+                    font-weight: 600;
+                    color: root.has-ir ? #E5E9F0 : #8fa1b3;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                if !root.is-error : Text {
+                    text: root.has-ir ? ("Active • " + root.ir-status) : "CabSim Bypass (Linear)";
+                    font-size: 8px;
+                    color: root.has-ir ? #43E97B : #636e7b;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // Action Trigger Row (Load IR + Contextual Clear)
+        HorizontalLayout {
+            spacing: 3px;
+            height: 24px;
+
+            SelectorButton {
+                text: "LOAD IR";
+                badge: "WAV";
+                accent-color: root.accent-color;
+                clicked => {
+                    root.load-clicked();
+                }
+            }
+
+            if root.has-ir : touch_clear := TouchArea {
+                width: 24px;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.clear-clicked();
+                }
+
+                Rectangle {
+                    border-radius: 4px;
+                    border-width: 1px;
+                    background: touch_clear.pressed ? #171012 : (touch_clear.has-hover ? #2e1a1d : #201517);
+                    border-color: touch_clear.has-hover ? #F74E4E : #3a2226;
+                    animate background { duration: 100ms; }
+                    animate border-color { duration: 100ms; }
+
+                    Text {
+                        text: "✕";
+                        font-size: 11px;
+                        font-weight: 800;
+                        color: touch_clear.has-hover ? #ffffff : #F74E4E;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        animate color { duration: 100ms; }
+                    }
+                }
+            }
+        }
+    }
+}

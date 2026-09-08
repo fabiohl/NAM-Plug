@@ -81,10 +81,10 @@ impl DefaultPluginFactory for NamClapPlugin {
         let (slimmable_tx, slimmable_rx) = RingBuffer::new(4);
 
         let dialog_state = Some(Arc::new(
-            crate::clap::gui::ui::zones::dialog_state::DialogSharedState::new(),
+            crate::clap::gui::dialog_state::DialogSharedState::new(),
         ));
         let ir_dialog_state = Some(Arc::new(
-            crate::clap::gui::ui::zones::dialog_state::IrDialogSharedState::new(),
+            crate::clap::gui::dialog_state::IrDialogSharedState::new(),
         ));
 
         let gui = Arc::new(GuiSharedState {
@@ -92,6 +92,8 @@ impl DefaultPluginFactory for NamClapPlugin {
                 ui_peak_l: AtomicU32::new(0.0f32.to_bits()),
                 ui_peak_r: AtomicU32::new(0.0f32.to_bits()),
                 ui_clipped: std::sync::atomic::AtomicBool::new(false),
+                ui_clip_indicator: std::sync::atomic::AtomicBool::new(false),
+                ui_gate_active: std::sync::atomic::AtomicBool::new(false),
                 current_latency: AtomicU32::new(0),
                 cabsim_tail_samples: AtomicU32::new(0),
                 active_channel_count: AtomicU32::new(1),
@@ -335,7 +337,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             last_reported_latency: 0,
             last_reported_cabsim_tail: 0,
             last_seen_slimmable_stale: 0,
-            window_handle: None,
+            slint_window: None,
             floating_thread_handle: None,
             floating_close_signal: None,
             dialog_handle: None,

@@ -164,8 +164,8 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 
 - [ ] **3.4.1 GUI Idle CPU Reduction:** Stop audio and leave GUI window open & untouched for 30s.
   *Expected:* CPU usage of DAW process drops noticeably. Moving mouse or playing audio instantly resumes smooth GUI rendering.
-- [ ] **3.4.2 OpenGL Resource Leak Audit:** Open and close GUI editor 30+ times in <60s while monitoring stderr / DAW log.
-  *Expected:* No `egui_glow` warnings (`"Resources will be leaked!"`). Graphic textures, knob arcs, and text render perfectly on reopening.
+- [ ] **3.4.2 OpenGL / FemtoVG Resource Leak Audit:** Open and close GUI editor 30+ times in <60s while monitoring stderr / DAW log.
+  *Expected:* No OpenGL or FemtoVG resource leak warnings. Graphic textures, knob arcs, and text render perfectly on reopening.
 - [ ] **3.4.3 HiDPI & Scale Factor Correctness:** Open plugin on HiDPI display (scale factor 1.5× or 2.0×) and 1.0× 1080p display.
   *Expected:* First-frame renders at crisp native resolution without late resizing jumps or blurriness.
 

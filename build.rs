@@ -35,4 +35,8 @@ fn main() {
         "cargo:rustc-link-arg=-Wl,--version-script={manifest_dir}/.cargo/hide-libm-shadow.map"
     );
     println!("cargo:rerun-if-changed=.cargo/hide-libm-shadow.map");
+
+    slint_build::compile("src/clap/gui/slint/main.slint").expect("slint compilation failed");
+    println!("cargo:rerun-if-changed=src/clap/gui/slint/main.slint");
+    println!("cargo:rerun-if-changed=src/clap/gui/slint");
 }
