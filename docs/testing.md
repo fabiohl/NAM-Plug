@@ -21,7 +21,6 @@ This document details the automated test suite, integration harness, property-ba
 | **`testing`**    | Enables engine test utilities, generators, and fixture resolution. | Mandatory feature flag when running `NAM-Plug` integration tests and benches.                         |
 | **`heap-audit`** | Intercepts memory allocations via `CountingAllocator`.             | Used by RT-safety tests to ensure zero heap allocations occur on the audio thread during `process()`. |
 | **`stereo`**     | Enables dual-channel L/R processing.                               | Default feature enabled across standard builds and test runs.                                         |
-| **`avx512`**     | Opt-in AVX-512 engine kernels (forwarded to `NeuralAmpModeler-rs/avx512`). | Off by default: default/release builds stay contractually on the `x86-64-v3` (AVX2/FMA) baseline, with no AVX-512 code compiled in. |
 
 ---
 
@@ -153,7 +152,7 @@ Top-level workflow entrypoints reside in `utils/`, while shared libraries and mo
 - **Static RT Allocation Guard:** Invokes `utils/lib/verify_no_rt_alloc.sh` (backed by `utils/lib/rt_alloc_scan.awk`) to statically verify zero heap allocations in `src/clap/processor/`.
 - **AppStream Metadata Sync:** Verifies the AppStream metainfo release version stays synchronized with `Cargo.toml`.
 
-The AVX-512 engine segregation is contractual, not enforced by post-link binary scanning: the opt-in `avx512` Cargo feature (default off) forwards the engine's compile-time `cfg(feature = "avx512")` gate, so default and release builds contain no EVEX machine code by construction and the feature matrix above proves both configurations compile cleanly.
+The x86-64-v3 (AVX2/FMA) engine baseline is contractual: `NAM-Plug` links against `NeuralAmpModeler-rs` without enabling opt-in EVEX features, so default and release builds contain no EVEX machine code by construction and the feature matrix above proves all configurations compile cleanly.
 
 `utils/tests-quick.sh` runs three phases, each persisting its output to `target/logs/quick-phaseN.log`, and closes with a typed receipt (`target/logs/quick-receipt.txt`). The artifact under test is selected by `ensure_clap_artifact` — honoring the authoritative `CLAP_PLUGIN_UNDER_TEST` (or `CLAP_PLUGIN_PATH`) override first — and the chosen path is exported as `CLAP_PLUGIN_UNDER_TEST` so every `dlopen`-based integration test and the release gates run against the exact same `.so` whose SHA256 is logged:
 
