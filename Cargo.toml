@@ -86,11 +86,6 @@ path = "src/bin/pgo_profiling_workload.rs"
 required-features = ["testing"]
 
 [[bin]]
-name = "nam_bin_guard"
-path = "src/bin/nam_bin_guard.rs"
-required-features = ["testing"]
-
-[[bin]]
 name = "nam_perf_guard"
 path = "src/bin/nam_perf_guard.rs"
 required-features = ["testing"]
@@ -99,6 +94,7 @@ required-features = ["testing"]
 default = ["stereo"]
 testing = ["NeuralAmpModeler-rs/testing"]
 stereo = ["NeuralAmpModeler-rs/stereo"]
+avx512 = ["NeuralAmpModeler-rs/avx512"]
 heap-audit = []
 
 [lib]
