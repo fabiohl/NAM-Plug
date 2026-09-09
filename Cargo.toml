@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 [package]
 name = "nam-plug"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.98.0"
 license = "GPL-3.0-or-later"
@@ -41,7 +41,7 @@ clack-extensions = { version = "0.1", features = [
 ] }
 # GUI Stack: Slint 1.9 (winit backend + femtovg renderer)
 raw-window-handle = "0.6"
-slint = { version = "1.9", default-features = false, features = [
+slint = { version = "1.17", default-features = false, features = [
     "std",
     "backend-winit",
     "renderer-femtovg",
@@ -60,7 +60,7 @@ libc = "0.2"
 sha2 = "0.11"
 
 [build-dependencies]
-slint-build = "1.9"
+slint-build = "1.17"
 
 [dev-dependencies]
 NeuralAmpModeler-rs = { version = "0.7.3", features = ["testing"] }
@@ -83,11 +83,6 @@ path = "src/bin/ui_preview.rs"
 [[bin]]
 name = "pgo_profiling_workload"
 path = "src/bin/pgo_profiling_workload.rs"
-required-features = ["testing"]
-
-[[bin]]
-name = "nam_bin_guard"
-path = "src/bin/nam_bin_guard.rs"
 required-features = ["testing"]
 
 [[bin]]

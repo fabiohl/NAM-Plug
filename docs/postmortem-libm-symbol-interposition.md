@@ -58,7 +58,7 @@ class of bug.
 
 **Verification:** confirmed by reading the *actual runtime value* written
 into the GOT slot from a live, attached process (not just the relocation
-*type*, which is not sufficient — see §3). Confirmed clean across `NAM-Plug` output targets: the harness unit/integration tests (`--test clap`), the workload/guard binaries (`src/bin/pgo_profiling_workload.rs`, `src/bin/nam_perf_guard.rs`, `src/bin/nam_bin_guard.rs`), and the CLAP plugin shared library (`cdylib` target `libnam_plug.so`).
+*type*, which is not sufficient — see §3). Confirmed clean across `NAM-Plug` output targets: the harness unit/integration tests (`--test clap`), the workload/performance-certification binaries (`src/bin/pgo_profiling_workload.rs`, `src/bin/nam_perf_guard.rs`), and the CLAP plugin shared library (`cdylib` target `libnam_plug.so`).
 
 ## 2. Why this was hard to find
 

@@ -38,7 +38,7 @@ Designed for seamless integration into modern Linux digital audio workstations (
 * **Half-Band Anti-Aliasing Oversampling:** Optional `2x` and `4x` polyphase oversampling centered around the neural inference stage to eliminate high-frequency aliasing foldover in high-gain amp models.
 * **Selectable Activation Precision:** Supports both `Standard` (exact-grade, default) and `Fast` (Padé polynomial minimax approximations) math modes to balance precision against CPU consumption on demanding setups.
 * **Real-Time DSP Telemetry & Diagnostics:** Live footer display reporting sample rate (`SR`), buffer latency (`Lat`), DSP CPU load percentage (`DSP %`), CPU cycles per block, block size (`Last N`), real-time thread priority (`RT Prio`), overload xrun count, and diagnostic status flags (`Flags`).
-* **5-Phase Advanced Optimization Pipeline (PGO + LLVM-BOLT):** Automated compilation suite (`build-release.sh`) leveraging synthetic neural DSP profiling, Profile-Guided Optimization (PGO), LLVM-BOLT machine code layout optimization, and 6 strict verification gates (SONAME/symbols, clap-validator, AVX-512 absence, NAMCore float parity, CabSim IR, and `nam_perf_guard` performance certification).
+* **5-Phase Advanced Optimization Pipeline (PGO + LLVM-BOLT):** Automated compilation suite (`build-release.sh`) leveraging synthetic neural DSP profiling, Profile-Guided Optimization (PGO), LLVM-BOLT machine code layout optimization, and 5 strict verification gates (SONAME/symbols, clap-validator, NAMCore float parity, CabSim IR, and `nam_perf_guard` performance certification).
 * **Linker-Level Symbol Isolation:** Scoped version script (`hide-libm-shadow.map`) ensuring libm symbols resolve dynamically to `glibc` without dangerous PLT/GOT self-referential loops in release builds.
 
 ---
@@ -135,13 +135,12 @@ For maximum performance in live and studio DAW environments, `NAM-Plug` includes
 3. **Phase 3 — PGO-Optimized Compilation:** Recompiles `libnam_plug.so` using `-Cprofile-use=merged.profdata` and relocation symbols (`-Clink-arg=-Wl,-q`), allowing LLVM to optimize hot loops, inline activation functions, and unroll vector SIMD loops.
 4. **Phase 4 — LLVM BOLT Machine Code Reordering:** Reorders machine code instructions via `llvm-bolt` to minimize Instruction Cache (I-Cache) misses and TLB pressure during real-time processing.
 5. **Phase 4.5 — Assembly Hotspot Disassembly Report:** Outputs an AI-ready demangled disassembly report at `target/dsp_hotpath.asm`.
-6. **Phase 5 — Automated Deployment & Strict Certification:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap`, executing 6 release certification gates:
+6. **Phase 5 — Automated Deployment & Strict Certification:** Strips and installs the finalized, hyper-optimized plugin directly to `~/.clap/nam_plug.clap`, executing 5 release certification gates:
    * **Gate 1:** Exported symbols and SONAME validation (`clap_entry`, SONAME presence).
    * **Gate 2:** External `clap-validator` test suite compliance.
-   * **Gate 3:** Fail-closed AVX-512 absence scan (`nam_bin_guard` EVEX bytecode decoder).
-   * **Gate 4:** NAMCore C++ float parity oracle (`test_clap_parity_multi_rate`).
-   * **Gate 5:** CabSim IR artifact test against distributed `.so` (`test_cabsim_ir_changes_audio_release_artifact`).
-   * **Gate 6:** Distributed artifact performance certification gate (`nam_perf_guard` latency distributions and real-time deadline margins).
+   * **Gate 3:** NAMCore C++ float parity oracle (`test_clap_parity_multi_rate`).
+   * **Gate 4:** CabSim IR artifact test against distributed `.so` (`test_cabsim_ir_changes_audio_release_artifact`).
+   * **Gate 5:** Distributed artifact performance certification gate (`nam_perf_guard` latency distributions and real-time deadline margins).
 7. **Phase 6 — Release Packaging (.tar.zst):** Generates a release distribution archive at `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst` containing the plugin, documentation, license, and a 1-click installation script.
 8. **Phase 7 — Release Packaging (.flatpak):** Builds and exports the standalone Flatpak plugin extension bundle (`~/nam-plug-vx.y.z-linux-x86_64-v3.flatpak`) with AppStream metadata for sandboxed DAWs (Bitwig, REAPER).
 
@@ -169,7 +168,7 @@ This format enables sandboxed Flatpak DAWs (including Bitwig Studio `com.bitwig.
 Install the `.flatpak` bundle directly into your local user Flatpak repository:
 
 ```bash
-flatpak install --user --reinstall ~/nam-plug-v0.7.0-linux-x86_64-v3.flatpak
+flatpak install --user --reinstall ~/nam-plug-v0.8.0-linux-x86_64-v3.flatpak
 ```
 
 #### How DAW Discovery Works in Flatpak

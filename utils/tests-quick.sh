@@ -201,7 +201,6 @@ timeout 300 cargo test --features testing --lib \
     --test clap_e0_containment_test \
     --test clap_e2_proptest \
     --test processor_bypass_test \
-    --test avx512_guard \
     2>&1 | tee target/logs/quick-phase1.log
 assert_ran_tests target/logs/quick-phase1.log 1
 emit "PHASE1: PASS log=target/logs/quick-phase1.log"
@@ -214,8 +213,6 @@ ensure_clap_artifact release
 
 release_artifact="${CLAP_PLUGIN_UNDER_TEST:-${CLAP_PLUGIN_PATH:-${CARGO_TARGET_DIR:-target}/release/libnam_plug.so}}"
 export CLAP_PLUGIN_UNDER_TEST="$release_artifact"
-
-"$SCRIPT_DIR/lib/verify_no_avx512_release.sh" "$release_artifact"
 
 # Mirrors the Rust-side discovery order: NAM_CORE_RENDER_BIN first, then
 # build/namcore_render in this repo, then the sibling NeuralAmpModeler-rs

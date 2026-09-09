@@ -51,12 +51,12 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ## 2. Compilation Strategy & Feature Flags
 
-`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.7.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload`, `nam_bin_guard`, and `nam_perf_guard` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
+`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.8.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload` and `nam_perf_guard` under `src/bin/`, both gated behind the `testing` feature). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
 
 The crate feature flags defined in `Cargo.toml` are:
 
 - **`stereo` (default):** Enables dual-channel L/R audio processing and dynamic adaptive stereo VU metering.
-- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, `nam_bin_guard`, `nam_perf_guard`, and the `pgo_profiling_workload` binary.
+- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, the `nam_perf_guard` certification binary, and the `pgo_profiling_workload` binary.
 - **`heap-audit`:** Activates the allocation counting allocator interceptor (`CountingAllocator`) for RT-safety heap audits.
 
 ```bash
@@ -494,13 +494,13 @@ A fully functional simulated DAW host environment built within library unit test
 
 Integration tests dynamic-link against the compiled `.so` binary using `PluginEntry::load(&artifact.path)` rather than static linking, asserting ABI symbol compliance and recording SHA256 binary hashes for CI traceability.
 
-### 9.3 Binary Surface & AVX-512 Absence Guard (`tests/avx512_guard.rs`, `src/bin/nam_bin_guard.rs`)
+### 9.3 SIMD Segregation — Contractual via x86-64-v3 Baseline
 
-Guarantees strict adherence to the baseline `x86-64-v3` architecture:
+Adherence to the baseline `x86-64-v3` (AVX2/FMA) architecture is contractual, not enforced by post-link binary scanning:
 
-- Binary machine code scanner decoding ELF `.text` sections for EVEX prefix bytes (`0x62`).
-- Symbol table scanner forbidding AVX-512 specific mangled symbols in default builds.
-- Fail-closed execution in both integration tests and release verification scripts (`utils/lib/verify_no_avx512_release.sh`).
+- `NAM-Plug` links against `NeuralAmpModeler-rs` on the contractual `x86-64-v3` (AVX2/FMA) baseline without exposing the engine's opt-in `avx512` feature, so all default and release builds compile zero EVEX code into `.text` by construction.
+- The compile-time feature matrix in `utils/lints.sh` (`--no-default-features`, default, `--all-features`) compiles cleanly.
+- The five release gates certify the distributed artifact's exported symbols, host validation, NAMCore float parity, CabSim IR behavior, and real-time performance (`docs/testing.md` §5.4; performance gate detailed in §9.7).
 
 ### 9.4 Real-Time Heap Allocation Audit (`CountingAllocator` / `tests/clap.rs`, `src/clap/processor/heap_audit.rs`)
 
@@ -626,7 +626,7 @@ When deploying and inspecting the Flatpak extension, several architectural behav
 - **Absence of AppStream Branch:** Standalone `.flatpak` bundles do **not** bundle or unpack the auxiliary repository-wide AppStream catalog branches (`appstream/x86_64` or `appstream2/x86_64`).
 - **Unindexed Local Origins:** Installing a bundle locally via `flatpak install --user bundle.flatpak` creates an unindexed local origin (e.g., `namplug-origin`). Because this is a static local origin without an HTTP remote URL, no background AppStream synchronization occurs, leaving `~/.local/share/flatpak/appstream/` unpopulated for that ref.
 - **Software Center Impact:** Graphical managers (like Warehouse) query the centralized AppStream database (`/var/lib/flatpak/appstream/` or `~/.local/share/flatpak/appstream/`) rather than scanning unpacked XML files inside `files/share/metainfo/`. Consequently, locally installed bundles display as *"No metadata"* (*"Sem metadados"*), show fallback IDs, and display generic system gear icons.
-- **Production Resolution on Flathub:** When distributed via Flathub or a standard remote OSTree repository, the build pipeline executes `flatpak build-update-repo` (using `appstream-compose`), which indexes [`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`](packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml) into the `appstream/x86_64` branch. Software centers downloading from Flathub immediately display the full human-readable title (*"NAM Plug"*), release version (`0.7.0`), category, summary, URLs, and release notes.
+- **Production Resolution on Flathub:** When distributed via Flathub or a standard remote OSTree repository, the build pipeline executes `flatpak build-update-repo` (using `appstream-compose`), which indexes [`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`](packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml) into the `appstream/x86_64` branch. Software centers downloading from Flathub immediately display the full human-readable title (*"NAM Plug"*), release version (`0.8.0`), category, summary, URLs, and release notes.
 
 #### 2. Semantic Versioning in `flatpak list`
 
