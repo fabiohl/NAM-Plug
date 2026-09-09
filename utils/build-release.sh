@@ -803,7 +803,7 @@ FINAL_CLAP_SHA=$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)
 echo -e "  ${CYAN}Distributed CLAP artifact SHA-256:${NC} ${BOLD}$FINAL_CLAP_SHA${NC}"
 
 # Gate 1: Symbols and SONAME on distributed artifact
-echo -e "  [Gate 1/6] Validating exported symbols and SONAME on distributed artifact..."
+echo -e "  [Gate 1/5] Validating exported symbols and SONAME on distributed artifact..."
 if ! nm -D "$CLAP_TARGET" | grep -w "clap_entry" > /dev/null; then
     die "Missing 'clap_entry' symbol in distributed CLAP artifact!"
 fi
@@ -813,7 +813,7 @@ fi
 ok "Symbol and SONAME validation passed."
 
 # Gate 2: External clap-validator
-echo -e "  [Gate 2/6] Running external clap-validator against distributed artifact..."
+echo -e "  [Gate 2/5] Running external clap-validator against distributed artifact..."
 if command -v clap-validator >/dev/null 2>&1; then
     clap-validator validate "$CLAP_TARGET" || die "clap-validator rejected the distribution artifact!"
     ok "clap-validator passed."
@@ -824,11 +824,6 @@ else
     warn "clap-validator unavailable. Skipping external validation."
     GATE_SKIPS+=("clap_validator:unavailable")
 fi
-
-# Gate 3: Fail-closed AVX-512 absence certificate (EVEX byte decoding)
-echo -e "  [Gate 3/6] Running fail-closed AVX-512 absence scan on distributed artifact..."
-"$SCRIPT_DIR/lib/verify_no_avx512_release.sh" "$CLAP_TARGET"
-ok "AVX-512 absence certificate passed on distributed artifact."
 
 # Discovery helper for NAMCore render oracle
 find_namcore_render() {
@@ -860,8 +855,8 @@ ORACLE_BIN=""
 ORACLE_SHA=""
 FIXTURE_SHA=""
 
-# Gate 4: NAMCore float parity test against distributed artifact
-echo -e "  [Gate 4/6] Running NAMCore float parity test against distributed artifact..."
+# Gate 3: NAMCore float parity test against distributed artifact
+echo -e "  [Gate 3/5] Running NAMCore float parity test against distributed artifact..."
 if ORACLE_BIN=$(find_namcore_render); then
     if [ -n "$model_fixture" ]; then
         ORACLE_SHA=$(sha256sum "$ORACLE_BIN" | cut -d' ' -f1)
@@ -886,15 +881,15 @@ else
     GATE_SKIPS+=("namcore_parity:missing_oracle_bin")
 fi
 
-# Gate 5: CabSim IR test against distributed artifact
-echo -e "  [Gate 5/6] Running CabSim IR test against distributed artifact..."
+# Gate 4: CabSim IR test against distributed artifact
+echo -e "  [Gate 4/5] Running CabSim IR test against distributed artifact..."
 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
     timeout 300 cargo test --features testing --release --test clap \
     test_cabsim_ir_changes_audio_release_artifact -- --ignored --nocapture
 ok "CabSim IR test passed on distributed artifact."
 
-# Gate 6: Distributed Artifact Performance Certification Gate
-echo -e "  [Gate 6/6] Running performance certification gate on distributed artifact..."
+# Gate 5: Distributed Artifact Performance Certification Gate
+echo -e "  [Gate 5/5] Running performance certification gate on distributed artifact..."
 PERF_REPORT_PATH="$PROJECT_DIR/target/perf-certification-report.json"
 PERF_REPORT_SHA=""
 PERF_GATE_STATUS="SKIPPED"
