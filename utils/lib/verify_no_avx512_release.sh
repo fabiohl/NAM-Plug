@@ -61,5 +61,15 @@ if ! "$GUARD_BIN" scan "$TARGET"; then
     die "Binary certification FAILED for $TARGET (sha256=$HASH)"
 fi
 
+# In addition to the linked binary (.so/.clap), verify crate archive (.rlib) if present
+CRATE_RLIB="$TARGET_DIR/release/libnam_plug.rlib"
+if [ -f "$CRATE_RLIB" ] && [ "$TARGET" != "$CRATE_RLIB" ]; then
+    echo -e "  ${CYAN}Scanning crate static archive:${NC} $CRATE_RLIB"
+    if ! "$GUARD_BIN" scan "$CRATE_RLIB"; then
+        die "Binary certification FAILED for crate archive $CRATE_RLIB"
+    fi
+fi
+
 ok "Binary scan passed: clean x86-64-v3 baseline without AVX-512 leaks (sha256=$HASH)."
 exit 0
+

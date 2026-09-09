@@ -498,7 +498,7 @@ Integration tests dynamic-link against the compiled `.so` binary using `PluginEn
 
 Guarantees strict adherence to the baseline `x86-64-v3` architecture:
 
-- Binary machine code scanner decoding ELF `.text` sections for EVEX prefix bytes (`0x62`).
+- Binary machine code scanner decoding ELF `.text` sections for EVEX prefix bytes (`0x62`), forbidding hand-written engine AVX-512 code while permitting runtime-detected supply-chain polynomial operations (e.g. `crc32fast` 1.5+ VPCLMULQDQ) in linked dynamic libraries.
 - Symbol table scanner forbidding AVX-512 specific mangled symbols in default builds.
 - Fail-closed execution in both integration tests and release verification scripts (`utils/lib/verify_no_avx512_release.sh`).
 
