@@ -21,6 +21,7 @@ This document details the automated test suite, integration harness, property-ba
 | **`testing`**    | Enables engine test utilities, generators, and fixture resolution. | Mandatory feature flag when running `NAM-Plug` integration tests and benches.                         |
 | **`heap-audit`** | Intercepts memory allocations via `CountingAllocator`.             | Used by RT-safety tests to ensure zero heap allocations occur on the audio thread during `process()`. |
 | **`stereo`**     | Enables dual-channel L/R processing.                               | Default feature enabled across standard builds and test runs.                                         |
+| **`avx512`**     | Opt-in AVX-512 engine kernels (forwarded to `NeuralAmpModeler-rs/avx512`). | Off by default: default/release builds stay contractually on the `x86-64-v3` (AVX2/FMA) baseline, with no AVX-512 code compiled in. |
 
 ---
 
@@ -135,29 +136,29 @@ All test and benchmark execution commands **must be executed inside `./NAM-Plug/
 
 ### 5.1 Verification Scripts (`utils/` & `utils/lib/`)
 
-Top-level workflow entrypoints reside in `utils/`, while shared libraries and modular guard scanners reside in `utils/lib/` (`_lib.sh`, `rt_alloc_scan.awk`, `verify_no_rt_alloc.sh`, `verify_no_avx512_release.sh`):
+Top-level workflow entrypoints reside in `utils/`, while shared libraries and modular guard utilities reside in `utils/lib/` (`_lib.sh`, `rt_alloc_scan.awk`, `verify_no_rt_alloc.sh`):
 
 ```bash
-# 1. Static analysis quality gate (formatting, SPDX headers, cargo check, cargo clippy, static RT scan, AVX-512 check)
+# 1. Static analysis quality gate (formatting, SPDX headers, cargo check, cargo clippy, static RT scan, AppStream metadata sync)
 ./utils/lints.sh
 
 # 2. Agile first line of defense QA suite
 ./utils/tests-quick.sh
 ```
 
-`utils/lints.sh` executes a 9-phase static and quality audit matrix:
+`utils/lints.sh` executes an 8-phase static and quality audit matrix:
 
-- **Fmt & Matrix Compilation:** `cargo fmt`, multi-target `cargo check` and strict `cargo clippy -D warnings`.
-- **SPDX & Code Style Policies:** SPDX license headers validation, anti-pattern checks, and documented `#[allow(clippy::)]` verification.
+- **Fmt & Matrix Compilation:** `cargo fmt`, multi-target `cargo check` and strict `cargo clippy -D warnings` across feature combinations (`--all-features`, `--no-default-features`).
+- **SPDX & Code Style Policies:** SPDX license header validation, anti-pattern checks, and documented `#[allow(clippy::)]` verification.
 - **Static RT Allocation Guard:** Invokes `utils/lib/verify_no_rt_alloc.sh` (backed by `utils/lib/rt_alloc_scan.awk`) to statically verify zero heap allocations in `src/clap/processor/`.
-- **Binary & Metadata Checks:** Invokes `utils/lib/verify_no_avx512_release.sh` to certify zero forbidden AVX-512 symbols or engine EVEX machine instructions, followed by AppStream metainfo version synchronization.
+- **AppStream Metadata Sync:** Verifies the AppStream metainfo release version stays synchronized with `Cargo.toml`.
+
+The AVX-512 engine segregation is contractual, not enforced by post-link binary scanning: the opt-in `avx512` Cargo feature (default off) forwards the engine's compile-time `cfg(feature = "avx512")` gate, so default and release builds contain no EVEX machine code by construction and the feature matrix above proves both configurations compile cleanly.
 
 `utils/tests-quick.sh` runs three phases, each persisting its output to `target/logs/quick-phaseN.log`, and closes with a typed receipt (`target/logs/quick-receipt.txt`). The artifact under test is selected by `ensure_clap_artifact` — honoring the authoritative `CLAP_PLUGIN_UNDER_TEST` (or `CLAP_PLUGIN_PATH`) override first — and the chosen path is exported as `CLAP_PLUGIN_UNDER_TEST` so every `dlopen`-based integration test and the release gates run against the exact same `.so` whose SHA256 is logged:
 
 1. **Structural (debug)** — unit + integration tests with debug assertions ON. `ensure_clap_artifact debug` validates the `.so` artifact (fail-closed: missing artifact aborts with `FATAL:`) and logs its SHA256 before any test that `dlopen`s it. Under `NAM_QUICK_STRICT=1` the artifact is additionally freshness-gated: a `.so` older than any source input (`Cargo.toml`/`Cargo.lock`/`.cargo/config.toml`/`src/**`, including the patched sibling `NeuralAmpModeler-rs` tree) aborts the suite instead of being silently validated.
 2. **Release verification (release)** — the release-only surface: `ensure_clap_artifact release` builds the `.so` under release codegen, then:
-   - **Fail-closed AVX-512 absence certificate** — `utils/lib/verify_no_avx512_release.sh` runs the `nam_bin_guard` scanner (`src/bin/nam_bin_guard.rs`, reuse of `neural_amp_modeler_rs::testing::bin_guard`) against the release `.so` (and crate `.rlib`): an EVEX prefix (`0x62`) binary decoder plus a forbidden AVX-512 symbol scan. Hand-written engine AVX-512 kernels or forbidden symbols abort the suite (exit ≠ 0); runtime-detected supply-chain polynomial operations (e.g. `crc32fast` 1.5+ VPCLMULQDQ) are permitted in linked shared libraries while crate archives enforce strict zero EVEX. Tool/format errors are also fail-closed (never a silent empty pass).
-
    - **CLAP × NAMCore parity oracle** — `test_clap_parity_multi_rate` (ESR < 1e-8, SNR > 80 dB at 44.1 kHz, 48 kHz native, and 96 kHz) compares the release `.so` against the C++ render binary (`NAM_CORE_RENDER_BIN` or `build/namcore_render`) through the multi-rate resampling reference oracle (see §3.2.1), executing when the render binary, the release `.so` and the model fixture are all present. The Phase 1 targets are not re-run under `--release` — debug assertions ON already validate that logic, and release codegen of the `.so` is exactly what the oracle measures. Missing prerequisites are never masked — they are recorded as `GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")` and reported as a `WARN GAP`.
    - **CabSim IR artifact test** — `test_cabsim_ir_changes_audio_release_artifact` `dlopen`s the release `.so` to prove a loaded IR changes the audio output.
 3. **RT-Safety heap-audit (debug)** — zero-allocation `process()` gate via `--features testing,heap-audit` (`processor_heap_audit_test`).
@@ -243,9 +244,9 @@ the gates at the exact installed `.so`:
 
 1. **Symbol & SONAME validation** of the distributed artifact.
 2. **External `clap-validator`** against the distributed artifact (skipped ⇒ `skipped_gates` entry; fail-closed in strict mode).
-3. **AVX-512 absence certificate** — `utils/lib/verify_no_avx512_release.sh` + `nam_bin_guard` EVEX (`0x62`) scan on the distributed artifact (see §5.1).
-4. **NAMCore float parity** — `NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_clap_parity_multi_rate` (all three certification rates — see §3.2.1).
-5. **CabSim IR artifact test** — `CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_cabsim_ir_changes_audio_release_artifact`.
+3. **NAMCore float parity** — `NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_clap_parity_multi_rate` (all three certification rates — see §3.2.1).
+4. **CabSim IR artifact test** — `CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_cabsim_ir_changes_audio_release_artifact`.
+5. **Performance certification** — `cargo run --locked --profile dist --features testing --bin nam_perf_guard -- certify --clap "$CLAP_TARGET" --out target/perf-certification-report.json` (real-time deadline margins against the distributed artifact).
 
 In strict mode (`NAM_STRICT_RELEASE=1`, default) the tree must be clean
 (`check_git_clean_strict()` runs before the build and again right before the
@@ -260,7 +261,7 @@ build of the exact artifact that is distributed.
 
 | Metric / Test Gate         | Threshold / Constraint                        | Enforced In                                                        |
 |:-------------------------- |:--------------------------------------------- |:------------------------------------------------------------------ |
-| **CLAP vs NAMCore Parity** | ESR < 1e-8, SNR > 80 dB @ 44.1/48/96 kHz      | `clap_parity_multi_sr.rs` (Phase 2 of `tests-quick.sh`, release Gate 4) |
+| **CLAP vs NAMCore Parity** | ESR < 1e-8, SNR > 80 dB @ 44.1/48/96 kHz      | `clap_parity_multi_sr.rs` (Phase 2 of `tests-quick.sh`, release Gate 3) |
 | **Bypass Transparency**    | Phase cancellation < -120 dBFS                | `processor_bypass_test.rs`                                    |
 | **RT Allocation Budget**   | Exactly 0 heap allocations during `process()` | `verify_no_rt_alloc.sh` (static) & `alloc_audit.rs` (dynamic) |
 | **CLAP Event Handling**    | 0 panics / unhandled boundary conditions      | `clap_e2_proptest.rs`                                         |

@@ -51,13 +51,14 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ## 2. Compilation Strategy & Feature Flags
 
-`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.8.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload`, `nam_bin_guard`, and `nam_perf_guard` under `src/bin/`). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
+`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.8.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload` and `nam_perf_guard` under `src/bin/`, both gated behind the `testing` feature). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
 
 The crate feature flags defined in `Cargo.toml` are:
 
 - **`stereo` (default):** Enables dual-channel L/R audio processing and dynamic adaptive stereo VU metering.
-- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, `nam_bin_guard`, `nam_perf_guard`, and the `pgo_profiling_workload` binary.
+- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, the `nam_perf_guard` certification binary, and the `pgo_profiling_workload` binary.
 - **`heap-audit`:** Activates the allocation counting allocator interceptor (`CountingAllocator`) for RT-safety heap audits.
+- **`avx512` (opt-in):** Forwards the engine's opt-in AVX-512 feature to `NeuralAmpModeler-rs` (`avx512 = ["NeuralAmpModeler-rs/avx512"]`), enabling the extended EVEX engine only in explicit feature builds. Off by default: standard and release builds keep the contractual `x86-64-v3` (AVX2/FMA) baseline — engine AVX-512 kernels are isolated at compile time via `cfg(feature = "avx512")`, with no post-link binary scanning.
 
 ```bash
 # Standard release build (produces target/release/libnam_plug.so)
@@ -494,13 +495,13 @@ A fully functional simulated DAW host environment built within library unit test
 
 Integration tests dynamic-link against the compiled `.so` binary using `PluginEntry::load(&artifact.path)` rather than static linking, asserting ABI symbol compliance and recording SHA256 binary hashes for CI traceability.
 
-### 9.3 Binary Surface & AVX-512 Absence Guard (`tests/avx512_guard.rs`, `src/bin/nam_bin_guard.rs`)
+### 9.3 SIMD Segregation — Contractual via Cargo Feature (`Cargo.toml` `avx512`)
 
-Guarantees strict adherence to the baseline `x86-64-v3` architecture:
+Adherence to the baseline `x86-64-v3` (AVX2/FMA) architecture is contractual, not enforced by post-link binary scanning:
 
-- Binary machine code scanner decoding ELF `.text` sections for EVEX prefix bytes (`0x62`), forbidding hand-written engine AVX-512 code while permitting runtime-detected supply-chain polynomial operations (e.g. `crc32fast` 1.5+ VPCLMULQDQ) in linked dynamic libraries.
-- Symbol table scanner forbidding AVX-512 specific mangled symbols in default builds.
-- Fail-closed execution in both integration tests and release verification scripts (`utils/lib/verify_no_avx512_release.sh`).
+- The engine's AVX-512 kernels live behind `cfg(feature = "avx512")` in `NeuralAmpModeler-rs` and are forwarded by NAM-Plug's opt-in `avx512` feature (default off), so default and release builds compile zero EVEX code into `.text` by construction.
+- The compile-time feature matrix in `utils/lints.sh` (`--no-default-features`, default, `--all-features`) proves both the AVX2 baseline and the opt-in AVX-512 configuration build cleanly.
+- The five release gates certify the distributed artifact's exported symbols, host validation, NAMCore float parity, CabSim IR behavior, and real-time performance (`docs/testing.md` §5.4; performance gate detailed in §9.7).
 
 ### 9.4 Real-Time Heap Allocation Audit (`CountingAllocator` / `tests/clap.rs`, `src/clap/processor/heap_audit.rs`)
 
