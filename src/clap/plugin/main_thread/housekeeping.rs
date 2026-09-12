@@ -20,6 +20,10 @@ impl<'a> NamClapMainThread<'a> {
             self.shared.cold.instance_id,
         );
 
+        // Backend GUI feedback: apply the "user closed the window" signal raised
+        // by the Slint close callback on the GUI thread.
+        self.reconcile_pending_gui_close();
+
         // Drain in-flight parameter snapshot queued by
         // PluginMainThreadParams::flush() when the SPSC was full.
         self.flush_in_flight_params();
@@ -443,6 +447,16 @@ impl<'a> NamClapMainThread<'a> {
                             .store(0, Ordering::Relaxed);
                     }
                     log::info!("NAM-Plug: cab-sim IR cleared via GUI (staged for host restart)");
+                }
+            }
+
+            if self.shared.cold.ui_clear_model.load(Ordering::Relaxed) {
+                self.shared
+                    .cold
+                    .ui_clear_model
+                    .store(false, Ordering::Relaxed);
+                if let Err(e) = self.clear_model() {
+                    log::error!("Failed to clear model from GUI: {e:?}");
                 }
             }
         }

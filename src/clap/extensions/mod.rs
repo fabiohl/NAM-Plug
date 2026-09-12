@@ -9,7 +9,7 @@
 //! ## Implemented Extensions
 //!
 //! - **[`audio_ports`] / [`audio_ports_activation`]**: Audio I/O bus configuration (Main Input / Main Output).
-//! - **[`gui`]**: Main thread GUI lifecycle binding with egui windows.
+//! - **[`gui`]**: Main thread GUI lifecycle binding with Slint 1.17 windows.
 //! - **[`latency`]**: Dynamic latency reporting to the host when oversampling or resampling is active.
 //! - **[`param_indication`]**: Visual parameter automation status mapping.
 //! - **[`params`]**: CLAP parameter metadata, value formatting, and event dispatch.

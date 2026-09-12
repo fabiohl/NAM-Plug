@@ -11,7 +11,6 @@ export component VuMeter inherits Rectangle {
 
     callback reset-clip();
 
-    width: 130px;
     height: 216px;
     background: transparent;
 
@@ -25,8 +24,8 @@ export component VuMeter inherits Rectangle {
             height: 16px;
 
             Text {
-                text: "PEAK / VU METER";
-                font-size: 9px;
+                text: "VU METER";
+                font-size: 8.5px;
                 font-weight: 700;
                 color: #8fa1b3;
                 vertical-alignment: center;
@@ -34,7 +33,7 @@ export component VuMeter inherits Rectangle {
 
             // Clip LED with manual reset on click
             TouchArea {
-                width: 24px;
+                width: 22px;
                 height: 14px;
                 clicked => {
                     root.clipped = false;
@@ -42,7 +41,7 @@ export component VuMeter inherits Rectangle {
                 }
 
                 Rectangle {
-                    width: 22px;
+                    width: 20px;
                     height: 12px;
                     border-radius: 2px;
                     background: root.clipped ? #F74E4E : (parent.has-hover ? #3d2224 : #281819);
@@ -52,7 +51,7 @@ export component VuMeter inherits Rectangle {
 
                     Text {
                         text: "CLIP";
-                        font-size: 7px;
+                        font-size: 6.5px;
                         font-weight: 800;
                         color: root.clipped ? #ffffff : #5c3538;
                         horizontal-alignment: center;
@@ -65,12 +64,12 @@ export component VuMeter inherits Rectangle {
         // Main Metering Canvas: Scale + Bars
         HorizontalLayout {
             alignment: center;
-            spacing: 8px;
+            spacing: 5px;
             height: 168px;
 
             // dB Graduation Scale
             VerticalLayout {
-                width: 24px;
+                width: 18px;
                 alignment: space-between;
                 padding-top: 2px;
                 padding-bottom: 2px;
@@ -87,11 +86,11 @@ export component VuMeter inherits Rectangle {
 
             // Left Channel (L)
             VerticalLayout {
-                width: 18px;
+                width: 16px;
                 spacing: 4px;
 
                 Rectangle {
-                    width: 18px;
+                    width: 16px;
                     height: 150px;
                     background: #111215;
                     border-radius: 2px;
@@ -130,11 +129,11 @@ export component VuMeter inherits Rectangle {
 
             // Right Channel (R) — Shown when stereo is enabled
             if root.stereo : VerticalLayout {
-                width: 18px;
+                width: 16px;
                 spacing: 4px;
 
                 Rectangle {
-                    width: 18px;
+                    width: 16px;
                     height: 150px;
                     background: #111215;
                     border-radius: 2px;

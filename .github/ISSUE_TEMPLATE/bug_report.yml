@@ -18,7 +18,7 @@ body:
       description: Select which component of the plugin is misbehaving.
       options:
         - "Audio Processing / Real-Time DSP Callback"
-        - "GUI / Window Rendering (egui / OpenGL)"
+        - "GUI / Window Rendering (Slint / FemtoVG-OpenGL)"
         - "Host Automation & Parameter Sync"
         - "State Save / Restore (DAW Project Reload)"
         - "Model & CabSim IR Loading"

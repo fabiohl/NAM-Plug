@@ -18,10 +18,10 @@ use std::sync::atomic::Ordering;
 
 use nam_plug::clap::gui::slint_view_model::amp_to_meter_frac;
 use nam_plug::clap::gui::{MainWindow, SlintViewModel};
-use nam_plug::clap::plugin::GuiSharedState;
 use nam_plug::clap::plugin::shared::{
     GESTURE_BEGIN_SHIFT, GESTURE_BITS_PER_PARAM, GESTURE_CHANGED_SHIFT, GESTURE_END_SHIFT,
 };
+use nam_plug::clap::plugin::{GuiSharedState, NamModelMetadata};
 use slint::ComponentHandle;
 
 #[test]
@@ -46,7 +46,7 @@ fn test_slint_view_model_full_lifecycle() {
     shared.ui_to_rt.param_activation.store(1, Ordering::Relaxed); // Standard
 
     let window = MainWindow::new().expect("Failed to create MainWindow");
-    let mut vm = SlintViewModel::new(window.clone_strong(), Arc::clone(&shared), None);
+    let mut vm = SlintViewModel::new(window.clone_strong(), Arc::clone(&shared), None, "Floating");
 
     assert_eq!(window.get_input_gain_db(), -4.5);
     assert_eq!(window.get_input_gain_text(), "-4.5 dB");
@@ -58,6 +58,22 @@ fn test_slint_view_model_full_lifecycle() {
     assert_eq!(window.get_oversample_mode(), 2);
     assert_eq!(window.get_oversample_text(), "4x (Ultra)");
     assert_eq!(window.get_activation_mode(), 1);
+
+    // Static-for-the-window badges (Finding F6): set once at construction,
+    // never left at the design-time placeholder values.
+    assert_eq!(window.get_backend_text(), "Floating");
+    assert!(
+        !window.get_simd_badge().is_empty(),
+        "simd_badge must reflect the runtime-detected instruction set"
+    );
+    assert_eq!(
+        window.get_model_arch(),
+        "No model loaded",
+        "model_arch must not show the design-time placeholder before any model loads"
+    );
+    assert_eq!(window.get_buffer_size_text(), "— spl");
+    assert_eq!(window.get_channels_text(), "Mono");
+    assert_eq!(window.get_sample_rate_text(), "44.1 kHz");
 
     // ── Phase 2: UI-to-RT Parameter Changes & Gestures ───────────────────
     let initial_gen = shared.ui_to_rt.gui_param_generation.load(Ordering::Acquire);
@@ -236,7 +252,28 @@ fn test_slint_view_model_full_lifecycle() {
         "ui_clip_indicator atomic must be cleared"
     );
 
+    // Active channel count update (Mono -> Stereo transition)
+    shared
+        .rt_to_ui
+        .active_channel_count
+        .store(2, Ordering::Relaxed);
+    vm.tick_telemetry();
+    assert_eq!(window.get_channels_text(), "Stereo");
+
     // ── Phase 5: File Dialog Actions & Portal Interfacing ────────────────
+    window.set_has_model(true);
+    window.set_model_name("Test Model.nam".into());
+    assert!(window.get_has_model());
+
+    window.invoke_clear_model_clicked();
+
+    assert!(
+        shared.cold.ui_clear_model.load(Ordering::Relaxed),
+        "ui_clear_model must be set to true"
+    );
+    assert!(!window.get_has_model(), "has_model on window must be false");
+    assert_eq!(window.get_model_name(), "No model loaded");
+
     window.set_has_ir(true);
     window.set_ir_name("Test Cab IR.wav".into());
     assert!(window.get_has_ir());
@@ -264,4 +301,24 @@ fn test_slint_view_model_full_lifecycle() {
     // Clean up state
     shared.set_model_dialog_active(false);
     shared.cold.ui_loading.store(false, Ordering::Relaxed);
+
+    // ── Phase 6: Model Architecture Badge Live Update (Finding F6) ───────
+    // Mirrors the `ui_model_name` diff pattern: loading a model must update
+    // `model_arch` on the next tick, and clearing it must revert to the
+    // "No model loaded" placeholder — never a stale architecture string.
+    if let Ok(mut guard) = shared.cold.ui_model_metadata.lock() {
+        *guard = Some(NamModelMetadata {
+            architecture: "WaveNet".to_string(),
+            topology: "1x16".to_string(),
+            ..Default::default()
+        });
+    }
+    vm.tick_telemetry();
+    assert_eq!(window.get_model_arch(), "WaveNet (1x16)");
+
+    if let Ok(mut guard) = shared.cold.ui_model_metadata.lock() {
+        *guard = None;
+    }
+    vm.tick_telemetry();
+    assert_eq!(window.get_model_arch(), "No model loaded");
 }

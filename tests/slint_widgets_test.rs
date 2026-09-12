@@ -26,23 +26,29 @@ fn test_slint_widgets_and_five_zones_lifecycle() {
     assert_eq!(window.get_peak_hold_l(), 0.78);
     assert_eq!(window.get_peak_hold_r(), 0.74);
 
-    assert_eq!(window.get_model_name(), "Clean Tweed Deluxe (Neural)");
-    assert_eq!(window.get_model_arch(), "WaveNet (Standard)");
-    assert_eq!(window.get_model_sample_rate(), "48 kHz");
+    assert_eq!(window.get_model_name(), "No model loaded");
+    assert_eq!(window.get_model_arch(), "No model loaded");
+    assert_eq!(window.get_model_sample_rate(), "—");
+    assert!(!window.get_has_model());
     assert!(!window.get_model_loading());
     assert!(!window.get_model_error());
 
-    assert_eq!(window.get_ir_name(), "1x12 Greenback (CabSim)");
-    assert_eq!(window.get_ir_status(), "48 kHz");
-    assert!(window.get_has_ir());
+    assert_eq!(window.get_ir_name(), "No IR loaded");
+    assert_eq!(window.get_ir_status(), "—");
+    assert!(!window.get_has_ir());
     assert!(!window.get_ir_loading());
     assert!(!window.get_ir_error());
 
     assert_eq!(window.get_oversample_mode(), 0);
-    assert_eq!(window.get_activation_mode(), 0);
+    assert_eq!(window.get_activation_mode(), 1);
     assert_eq!(window.get_sample_rate_text(), "48000 Hz");
+    assert_eq!(window.get_buffer_size_text(), "— spl");
+    assert_eq!(window.get_channels_text(), "Stereo");
     assert_eq!(window.get_latency_text(), "0 spl (0.0 ms)");
-    assert_eq!(window.get_dsp_load_text(), "1.4% DSP");
+    // Finding F6: the design-time default is an honest "no data yet"
+    // placeholder, not a hard-coded fake percentage — `SlintViewModel`
+    // never overwrites this property (no real per-block metric exists yet).
+    assert_eq!(window.get_dsp_load_text(), "—");
     assert_eq!(window.get_simd_badge(), "AVX2+FMA");
     assert_eq!(window.get_backend_text(), "Wayland Native");
 
@@ -150,6 +156,14 @@ fn test_slint_widgets_and_five_zones_lifecycle() {
     });
     window.invoke_load_ir_clicked();
     assert!(ir_load_triggered.load(std::sync::atomic::Ordering::SeqCst));
+
+    let model_clear_triggered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let model_clear_clone = model_clear_triggered.clone();
+    window.on_clear_model_clicked(move || {
+        model_clear_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    window.invoke_clear_model_clicked();
+    assert!(model_clear_triggered.load(std::sync::atomic::Ordering::SeqCst));
 
     let ir_clear_triggered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ir_clear_clone = ir_clear_triggered.clone();

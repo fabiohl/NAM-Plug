@@ -17,7 +17,7 @@ use super::shared::{
     ClapParamPayload, NamClapShared, PendingModel, PendingRestore, SlimmableRebuild, StagedRestore,
     StagedSwap,
 };
-use crate::clap::gui::lifecycle::GuiLifecycle;
+use crate::clap::gui::lifecycle::{GuiEvent, GuiLifecycle};
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
@@ -98,6 +98,48 @@ pub struct NamClapMainThread<'a> {
 }
 
 impl<'a> NamClapMainThread<'a> {
+    /// Applies a pending backend "user closed" signal to the lifecycle FSM.
+    ///
+    /// The Slint close callback cannot mutate the main-thread FSM directly, so
+    /// it publishes `ColdShared::gui_user_closed`; this reconciles that signal
+    /// before a host-driven transition is validated. Best-effort and
+    /// idempotent — an event arriving in a state that no longer permits it is
+    /// logged by the FSM and discarded, never propagated as an error.
+    pub(crate) fn reconcile_pending_gui_close(&mut self) {
+        if self
+            .shared
+            .cold
+            .gui_user_closed
+            .swap(false, Ordering::AcqRel)
+        {
+            let _ = self.gui_lifecycle.transition(GuiEvent::UserClosed);
+        }
+    }
+
+    /// Discards a pending backend "user closed" signal without applying it.
+    ///
+    /// Used by `hide()`: the host's own hide request already drives the FSM to
+    /// `Hidden`, so applying `UserClosed` afterwards would be redundant and
+    /// would be rejected as an illegal transition from `Hidden`.
+    pub(crate) fn discard_pending_gui_close(&self) {
+        self.shared
+            .cold
+            .gui_user_closed
+            .store(false, Ordering::Release);
+    }
+
+    /// Advances `ShowRequested → Active` once the backend window is ready.
+    ///
+    /// Centralizes the single `WindowReady` transition so both backend triggers
+    /// (window creation in `spawn_gui` and the host's `show()` when the window
+    /// already exists) share one owner. No-op when the host has not requested
+    /// visibility.
+    pub(crate) fn promote_window_ready(&mut self) {
+        if self.gui_lifecycle == GuiLifecycle::ShowRequested {
+            let _ = self.gui_lifecycle.transition(GuiEvent::WindowReady);
+        }
+    }
+
     /// Flushes any model deferred by `load_model()` when `buffer_size == 0`
     /// (state-restore-before-activate scenario). Pre-sizes the model on the
     /// main thread and sends it to the audio thread via SPSC.

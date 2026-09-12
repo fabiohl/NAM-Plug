@@ -11,6 +11,7 @@
 use super::{spawn_reaper, try_join_until};
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::test_util::{self, make_test_plugin};
+use clack_extensions::gui::PluginGuiImpl;
 use clack_host::plugin::PluginInstance;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,4 +146,56 @@ fn test_stress_rapid_teardown_cycles() {
             "cycle {cycle}: fence must be lowered after teardown"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch observability
+// ---------------------------------------------------------------------------
+
+/// A visibility dispatch that reaches a dead event loop must be reported,
+/// never silently dropped.
+///
+/// The test installs a window handle whose Slint event loop is unavailable —
+/// the headless test process never starts a Slint platform — and lowers the
+/// alive fence first, mirroring a teardown running concurrently with the
+/// host's `show()`/`hide()`. Both calls must stay best-effort (`Ok`) for the
+/// host while emitting a `warn` record that reaches the registered log sink.
+#[test]
+fn show_after_teardown_logs_warn() {
+    let (_entry, _host_info, mut plugin_instance) = make_test_plugin();
+    let (captured, _sink) = test_util::register_test_sink();
+
+    let shared_ptr = test_util::extract_shared(&mut plugin_instance);
+    // SAFETY: the plugin instance outlives this reference for the whole test.
+    let shared = unsafe { &*shared_ptr };
+    shared.cold.alive_fence.store(false, Ordering::Release);
+
+    let mt = main_thread_mut(&mut plugin_instance);
+    // A handle whose event loop is gone: the dispatch must fail observably.
+    mt.slint_window = Some(slint::Weak::<crate::clap::gui::MainWindow>::default());
+
+    let show = mt.show();
+    assert!(
+        show.is_ok(),
+        "show() must remain best-effort once the event loop is gone, got {show:?}"
+    );
+    let hide = mt.hide();
+    assert!(
+        hide.is_ok(),
+        "hide() must remain best-effort once the event loop is gone, got {hide:?}"
+    );
+
+    let messages = captured.lock().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|(severity, msg)| *severity == "WARN" && msg.contains("show dispatch failed")),
+        "a failed show dispatch must be logged at warn level.\nCaptured: {messages:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|(severity, msg)| *severity == "WARN" && msg.contains("hide dispatch failed")),
+        "a failed hide dispatch must be logged at warn level.\nCaptured: {messages:#?}"
+    );
 }

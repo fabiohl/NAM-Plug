@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use clack_extensions::params::HostParams;
+use neural_amp_modeler_rs::math::common::{InstructionSet, SIMD_MATH};
 use slint::ComponentHandle;
 
 use crate::clap::extensions::params::{
@@ -65,6 +66,33 @@ fn format_gate_text(val: f32) -> String {
     }
 }
 
+/// Formats the loaded model's architecture/topology for the status bar
+/// (Finding F6): reads real `NamModelMetadata`, never a hard-coded placeholder.
+#[inline]
+fn format_model_arch(meta: &crate::clap::plugin::NamModelMetadata) -> String {
+    if meta.topology.is_empty() {
+        meta.architecture.clone()
+    } else {
+        format!("{} ({})", meta.architecture, meta.topology)
+    }
+}
+
+/// Human-readable label for the runtime-detected SIMD backend actually
+/// dispatching the neural inference math (Finding F6). `Avx2` is the sole
+/// production backend unless the crate's opt-in `avx512` feature is enabled.
+#[inline]
+#[expect(
+    deprecated,
+    reason = "Avx512VnniBf16 must stay handled for match exhaustiveness"
+)]
+fn simd_badge_text(isa: InstructionSet) -> &'static str {
+    match isa {
+        InstructionSet::Avx2 => "AVX2+FMA",
+        InstructionSet::Avx512 => "AVX-512",
+        InstructionSet::Avx512VnniBf16 => "AVX-512 VNNI+BF16",
+    }
+}
+
 #[inline]
 fn flush_params(host: Option<&GuiHostBridge>) {
     if let Some(bridge) = host {
@@ -89,6 +117,7 @@ pub(crate) struct SlintViewModelInner {
     last_oversampling: u32,
     last_activation: u32,
     last_model_name: String,
+    last_model_arch: String,
     last_ir_path: Option<String>,
 
     // Ballistics state
@@ -273,14 +302,32 @@ impl SlintViewModelInner {
         }
 
         if let Ok(name_guard) = self.shared.cold.ui_model_name.try_lock() {
-            let current_name = if name_guard.is_empty() {
-                "No model loaded"
-            } else {
+            let has_model = !name_guard.is_empty();
+            let current_name = if has_model {
                 name_guard.as_str()
+            } else {
+                "No model loaded"
             };
+            if self.window.get_has_model() != has_model {
+                self.window.set_has_model(has_model);
+            }
             if self.last_model_name != current_name {
                 self.last_model_name = current_name.to_string();
                 self.window.set_model_name(current_name.into());
+            }
+        }
+
+        // Model architecture/topology badge (Finding F6): mirrors the
+        // `ui_model_name` diff pattern above so the status card never shows a
+        // stale architecture after a model swap or clear.
+        if let Ok(meta_guard) = self.shared.cold.ui_model_metadata.try_lock() {
+            let current_arch = match meta_guard.as_ref() {
+                Some(meta) => format_model_arch(meta),
+                None => "No model loaded".to_string(),
+            };
+            if self.last_model_arch != current_arch {
+                self.last_model_arch = current_arch.clone();
+                self.window.set_model_arch(current_arch.into());
             }
         }
 
@@ -324,10 +371,24 @@ impl SlintViewModelInner {
         // ── 5. Status Bar Telemetry ───────────────────────────────────────────
         let sr = self.shared.cold.sample_rate.load(Ordering::Relaxed);
         if sr > 0 {
-            let sr_text = format!("{sr} Hz");
+            let sr_text = if sr.is_multiple_of(1000) {
+                format!("{} kHz", sr / 1000)
+            } else {
+                format!("{:.1} kHz", sr as f32 / 1000.0)
+            };
             if self.window.get_sample_rate_text() != sr_text.as_str() {
                 self.window.set_sample_rate_text(sr_text.into());
             }
+        }
+
+        let buf = self.shared.cold.buffer_size.load(Ordering::Relaxed);
+        let buf_text = if buf > 0 {
+            format!("{buf} spl")
+        } else {
+            "— spl".to_string()
+        };
+        if self.window.get_buffer_size_text() != buf_text.as_str() {
+            self.window.set_buffer_size_text(buf_text.into());
         }
 
         let stream_lat = self
@@ -350,6 +411,14 @@ impl SlintViewModelInner {
         if self.window.get_latency_text() != lat_text.as_str() {
             self.window.set_latency_text(lat_text.into());
         }
+
+        let ch_text = match channels {
+            1 => "Mono",
+            _ => "Stereo",
+        };
+        if self.window.get_channels_text() != ch_text {
+            self.window.set_channels_text(ch_text.into());
+        }
     }
 }
 
@@ -366,8 +435,94 @@ impl SlintViewModel {
         window: MainWindow,
         shared: Arc<GuiSharedState>,
         host: Option<GuiHostBridge>,
+        backend_text: &str,
     ) -> Self {
         log::info!("SlintViewModel: Initializing Slint UI bindings and telemetry loop");
+
+        // Static-for-the-window-lifetime badges (Finding F6): the negotiated
+        // windowing backend and the runtime-detected SIMD instruction set
+        // never change while this window is alive, so they are set once here
+        // instead of every 60 Hz tick.
+        window.set_backend_text(backend_text.into());
+        window.set_simd_badge(simd_badge_text(SIMD_MATH.instruction_set).into());
+
+        let initial_model_name = shared
+            .cold
+            .ui_model_name
+            .try_lock()
+            .ok()
+            .and_then(|guard| {
+                if guard.is_empty() {
+                    None
+                } else {
+                    Some(guard.clone())
+                }
+            })
+            .unwrap_or_else(|| "No model loaded".to_string());
+        let initial_has_model = initial_model_name != "No model loaded";
+        window.set_has_model(initial_has_model);
+        window.set_model_name(initial_model_name.as_str().into());
+
+        let initial_model_arch = shared
+            .cold
+            .ui_model_metadata
+            .try_lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(format_model_arch))
+            .unwrap_or_else(|| "No model loaded".to_string());
+        window.set_model_arch(initial_model_arch.clone().into());
+
+        let initial_has_ir = shared
+            .cold
+            .ir_path
+            .try_lock()
+            .ok()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        let initial_ir_name = shared
+            .cold
+            .ir_path
+            .try_lock()
+            .ok()
+            .and_then(|guard| {
+                guard.as_ref().map(|path| {
+                    std::path::Path::new(path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(path.as_str())
+                        .to_string()
+                })
+            })
+            .unwrap_or_else(|| "No IR loaded".to_string());
+        window.set_has_ir(initial_has_ir);
+        window.set_ir_name(initial_ir_name.into());
+
+        let initial_sr = shared.cold.sample_rate.load(Ordering::Relaxed);
+        let initial_sr_text = if initial_sr > 0 {
+            if initial_sr.is_multiple_of(1000) {
+                format!("{} kHz", initial_sr / 1000)
+            } else {
+                format!("{:.1} kHz", initial_sr as f32 / 1000.0)
+            }
+        } else {
+            "48 kHz".to_string()
+        };
+        window.set_sample_rate_text(initial_sr_text.into());
+
+        let initial_buf = shared.cold.buffer_size.load(Ordering::Relaxed);
+        let initial_buf_text = if initial_buf > 0 {
+            format!("{initial_buf} spl")
+        } else {
+            "— spl".to_string()
+        };
+        window.set_buffer_size_text(initial_buf_text.into());
+
+        let initial_channels = shared.rt_to_ui.active_channel_count.load(Ordering::Relaxed);
+        let initial_ch_text = match initial_channels {
+            1 => "Mono",
+            _ => "Stereo",
+        };
+        window.set_channels_text(initial_ch_text.into());
 
         let initial_in_gain =
             f32::from_bits(shared.ui_to_rt.param_input_gain.load(Ordering::Relaxed));
@@ -605,6 +760,27 @@ impl SlintViewModel {
             });
         }
 
+        // ── Bind Clear Model Callback ─────────────────────────────────────────
+        {
+            let shared = Arc::clone(&shared);
+            let window_weak = window.as_weak();
+            window.on_clear_model_clicked(move || {
+                log::info!("SlintViewModel: Requesting NAM Amp Model clear");
+                shared.cold.ui_clear_model.store(true, Ordering::Relaxed);
+                if let Some(bridge) = host
+                    && shared.cold.alive_fence.load(Ordering::Acquire)
+                {
+                    let host_static = bridge.as_static();
+                    host_static.request_callback();
+                }
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_has_model(false);
+                    w.set_model_name("No model loaded".into());
+                    w.set_model_arch("No model loaded".into());
+                }
+            });
+        }
+
         // ── Bind IR File Dialog (XDG Portal via rfd) ──────────────────────────
         {
             let shared = Arc::clone(&shared);
@@ -665,7 +841,8 @@ impl SlintViewModel {
             last_bypass: initial_bypass,
             last_oversampling: initial_os,
             last_activation: initial_act,
-            last_model_name: String::new(),
+            last_model_name: initial_model_name,
+            last_model_arch: initial_model_arch,
             last_ir_path: None,
             current_peak_l: 0.0,
             current_peak_r: 0.0,

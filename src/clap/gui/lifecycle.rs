@@ -11,6 +11,34 @@
 //! - Never hides the window before the host calls `hide()`.
 //! - Always notifies the host via `HostGui::closed()` when the user closes the window.
 //! - Prevents invalid transitions (double-show, hide-before-activate, etc.).
+//!
+//! # Synchronous window-hide contract
+//!
+//! Slint's `Window::hide()` is dispatched to the GUI event loop and there is no
+//! asynchronous "the window is now unmapped" notification available today, so
+//! `hide()` drives `HideRequested → Hidden` immediately after the dispatch is
+//! accepted. `GuiEvent::WindowHidden` therefore models the dispatch being
+//! accepted, not a backend round-trip. A future native-embedding backend may
+//! restore a genuinely asynchronous confirmation.
+//!
+//! Hiding is also accepted from `ShowRequested`: a host may call `hide()` before
+//! the backend has confirmed `WindowReady` (or without any backend window at
+//! all), and that request must never leave the window stuck visible.
+//!
+//! # State transition table
+//!
+//! | Current State   | Event           | Next State      | Valid? |
+//! |-----------------|-----------------|-----------------|--------|
+//! | Hidden          | show()          | ShowRequested   | ✅     |
+//! | ShowRequested   | window_ready    | Active          | ✅     |
+//! | ShowRequested   | hide()          | HideRequested   | ✅     |
+//! | Active          | hide()          | HideRequested   | ✅     |
+//! | HideRequested   | window_hidden   | Hidden          | ✅     |
+//! | ShowRequested   | window_failed   | Hidden          | ✅     |
+//! | ShowRequested   | user_closed     | Hidden          | ✅     |
+//! | Active          | user_closed     | Hidden          | ✅     |
+//! | *               | destroy()       | Destroyed       | ✅     |
+//! | Destroyed       | any()           | Destroyed       | ✅ (no-op) |
 
 use clack_plugin::plugin::PluginError;
 
@@ -22,9 +50,11 @@ use clack_plugin::plugin::PluginError;
 /// |-----------------|-----------------|-----------------|--------|
 /// | Hidden          | show()          | ShowRequested   | ✅     |
 /// | ShowRequested   | window_ready    | Active          | ✅     |
+/// | ShowRequested   | hide()          | HideRequested   | ✅     |
 /// | Active          | hide()          | HideRequested   | ✅     |
 /// | HideRequested   | window_hidden   | Hidden          | ✅     |
 /// | ShowRequested   | window_failed   | Hidden          | ✅     |
+/// | ShowRequested   | user_closed     | Hidden          | ✅     |
 /// | Active          | user_closed     | Hidden          | ✅     |
 /// | *               | destroy()       | Destroyed       | ✅     |
 /// | Destroyed       | any()           | Destroyed       | ✅ (no-op) |
@@ -58,6 +88,10 @@ impl GuiLifecycle {
 
             // hide → host requested the window to be hidden
             (GuiLifecycle::Active, GuiEvent::Hide) => GuiLifecycle::HideRequested,
+
+            // hide before the backend confirmed WindowReady: the host must still
+            // be able to take the window down without the FSM rejecting it.
+            (GuiLifecycle::ShowRequested, GuiEvent::Hide) => GuiLifecycle::HideRequested,
 
             // user closed the window externally (WM close button, X button, etc.)
             // Valid from ShowRequested (window appeared then user immediately closed it)
@@ -217,6 +251,29 @@ mod lifecycle_tests {
                 .transition(GuiEvent::WindowHidden)
                 .is_err()
         );
+    }
+
+    /// Regression guard for Finding 1: when the backend never reports
+    /// `WindowReady`, the FSM parks in `ShowRequested`, and a subsequent host
+    /// `hide()` must still be accepted so the window is actually taken down.
+    ///
+    /// The production wiring that delivers `WindowReady`/`UserClosed` is
+    /// exercised by the `gui_lifecycle_integration_test` module.
+    #[test]
+    fn test_show_without_window_ready_then_hide_is_accepted() {
+        let mut state = GuiLifecycle::Hidden;
+        state.transition(GuiEvent::Show).unwrap();
+        assert_eq!(state, GuiLifecycle::ShowRequested);
+
+        state
+            .transition(GuiEvent::Hide)
+            .expect("Hide from ShowRequested must be accepted");
+        assert_eq!(state, GuiLifecycle::HideRequested);
+
+        state
+            .transition(GuiEvent::WindowHidden)
+            .expect("HideRequested must accept the synchronous WindowHidden signal");
+        assert_eq!(state, GuiLifecycle::Hidden);
     }
 
     #[test]

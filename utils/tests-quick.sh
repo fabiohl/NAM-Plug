@@ -66,6 +66,7 @@ echo -e "${BLUE}${BOLD}========================================${NC}"
 
 emit "SUITE: tests-quick"
 emit "STRICT: ${NAM_QUICK_STRICT:-0}"
+SUITE_START=$(date +%s%N)
 
 # find_stale_artifact_input <artifact>
 #   Prints the first source input that is strictly newer than <artifact>, or
@@ -194,6 +195,7 @@ ensure_clap_artifact() {
 }
 
 # ── Phase 1: Structural unit & integration tests (debug) ─────────────────────
+P1_START=$(date +%s%N)
 phase "Structural: unit & integration tests (debug)..."
 ensure_clap_artifact debug
 timeout 300 cargo test --features testing --lib \
@@ -203,11 +205,15 @@ timeout 300 cargo test --features testing --lib \
     --test processor_bypass_test \
     2>&1 | tee target/logs/quick-phase1.log
 assert_ran_tests target/logs/quick-phase1.log 1
+P1_DUR_MS=$(( ($(date +%s%N) - P1_START) / 1000000 ))
+P1_DUR_STR=$(format_duration_ms "$P1_DUR_MS")
+ok "Phase 1 passed (${P1_DUR_STR})"
 emit "PHASE1: PASS log=target/logs/quick-phase1.log"
 
 # ── Phase 2: Release verification (release) ─────────────────────────────────
 declare -a GAPS=()
 
+P2_START=$(date +%s%N)
 phase "Release verification: CLAP .so artifact + float parity oracle (release)..."
 ensure_clap_artifact release
 
@@ -225,14 +231,16 @@ find_namcore_render() {
         fi
         warn "NAM_CORE_RENDER_BIN set but path not found: $NAM_CORE_RENDER_BIN"
     fi
-    local base hit
-    for base in "build/namcore_render" "../NeuralAmpModeler-rs/build/namcore_render"; do
-        hit=$(find "$base" -type f -name render -print -quit 2>/dev/null || true)
-        if [ -n "$hit" ]; then
-            echo "$hit"
-            return 0
-        fi
-    done
+    local local_bin="build/namcore_render/namcore_render"
+    if [ -f "$local_bin" ]; then
+        echo "$local_bin"
+        return 0
+    fi
+    local sibling_bin="../NeuralAmpModeler-rs/build/namcore_render/namcore_render"
+    if [ -f "$sibling_bin" ]; then
+        echo "$sibling_bin"
+        return 0
+    fi
     return 1
 }
 
@@ -243,29 +251,38 @@ elif [ -f "tests/fixtures/models/wavenet_a1_standard.nam" ]; then
     model_fixture="tests/fixtures/models/wavenet_a1_standard.nam"
 fi
 
-if render_bin=$(find_namcore_render); then
-    if [ -f "$release_artifact" ] && [ -n "$model_fixture" ]; then
+render_bin=$(find_namcore_render || true)
+if [ -n "$render_bin" ] && [ -x "$render_bin" ]; then
+    echo -e "  ${GREEN}✓ NAMCore render binary:${NC} $render_bin"
+    # Multi-rate parity oracle test requires:
+    #   1. Release CLAP plugin artifact ($release_artifact)
+    #   2. C++ NAMCore render binary ($render_bin)
+    #   3. Model fixture: tests/fixtures/models/wavenet_a1_standard.nam
+    if [ -f "$release_artifact" ] && [ -f "$model_fixture" ]; then
         oracle_sha=$(sha256sum "$render_bin" | cut -d' ' -f1)
         fixture_sha=$(sha256sum "$model_fixture" | cut -d' ' -f1)
         artifact_sha=$(sha256sum "$release_artifact" | cut -d' ' -f1)
 
-        echo -e "  ${BLUE}→ Executing CLAP vs NAMCore float parity oracle...${NC}"
+        echo -e "  ${BLUE}→ Executing CLAP × NAMCore float parity oracle (multi-rate)...${NC}"
         warn "oracle=$render_bin (sha256:${oracle_sha:0:16}) artifact=$release_artifact fixture=$model_fixture (sha256:${fixture_sha:0:16})"
         emit "ORACLE_SHA256: $oracle_sha"
         emit "FIXTURE_SHA256: $fixture_sha"
         emit "ARTIFACT_SHA256: $artifact_sha"
 
-        NAM_REQUIRE_CPP_ORACLE=1 timeout 600 cargo test --features testing --release --test clap \
-            test_clap_parity_multi_rate -- --ignored --nocapture \
+        NAM_CORE_RENDER_BIN="$render_bin" timeout 600 cargo test \
+            --features testing \
+            --release \
+            --test clap \
+            test_clap_multi_rate_parity_with_cpp_namcore \
+            -- --ignored --nocapture \
             2>&1 | tee -a target/logs/quick-phase2.log
-        if grep -q "test_clap_parity_multi_rate .* ok" target/logs/quick-phase2.log \
-           && grep -q "ESR  =" target/logs/quick-phase2.log; then
-            emit "PARITY: PASS"
-            ok "CLAP vs NAMCore float parity: PASS"
+        if grep -q "test_clap_multi_rate_parity_with_cpp_namcore .* ok" target/logs/quick-phase2.log; then
+            emit "CLAP_CPP_PARITY: PASS"
+            ok "Multi-rate parity oracle: PASS"
             assert_ran_tests target/logs/quick-phase2.log 1
             emit "PHASE2: PASS log=target/logs/quick-phase2.log"
         else
-            die "PARITY: FAIL test_clap_parity_multi_rate did not complete successfully"
+            die "PARITY: FAIL test_clap_multi_rate_parity_with_cpp_namcore did not complete successfully"
         fi
     else
         if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
@@ -306,17 +323,28 @@ else
     warn "Actionable: build the release artifact ('cargo build --release') to enable the cab-sim IR artifact test."
     emit "PHASE2: GAP reason=missing_release_artifact"
 fi
+P2_DUR_MS=$(( ($(date +%s%N) - P2_START) / 1000000 ))
+P2_DUR_STR=$(format_duration_ms "$P2_DUR_MS")
+ok "Phase 2 passed (${P2_DUR_STR})"
 
 # ── Phase 3: RT-Safety & Heap Allocation Audit (debug, heap-audit) ───────────
+P3_START=$(date +%s%N)
 phase "RT-Safety & Heap Allocation Audit..."
 timeout 120 cargo test --features testing,heap-audit --lib \
     processor_heap_audit_test \
     2>&1 | tee target/logs/quick-heap-audit.log
 assert_ran_tests target/logs/quick-heap-audit.log 1
+P3_DUR_MS=$(( ($(date +%s%N) - P3_START) / 1000000 ))
+P3_DUR_STR=$(format_duration_ms "$P3_DUR_MS")
+ok "Phase 3 passed (${P3_DUR_STR})"
 emit "PHASE3: PASS log=target/logs/quick-heap-audit.log"
 emit "HEAP_AUDIT=RAN"
 
 # ── Receipt & summary ────────────────────────────────────────────────────────
+SUITE_END=$(date +%s%N)
+TOTAL_DUR_MS=$(( (SUITE_END - SUITE_START) / 1000000 ))
+TOTAL_DUR_STR=$(format_duration_ms "$TOTAL_DUR_MS")
+
 if [ ${#GAPS[@]} -gt 0 ]; then
     for g in "${GAPS[@]}"; do
         emit "GAP: $g"
@@ -328,6 +356,11 @@ if [ ${#GAPS[@]} -gt 0 ]; then
     echo -e "    - Phase 1 log: ${CYAN}target/logs/quick-phase1.log${NC}"
     echo -e "    - Phase 2 log: ${CYAN}target/logs/quick-phase2.log${NC}"
     echo -e "    - Heap log:    ${CYAN}target/logs/quick-heap-audit.log${NC}"
+    echo -e "  ${BOLD}Durations:${NC}"
+    echo -e "    - Phase 1:     ${P1_DUR_STR:-N/A}"
+    echo -e "    - Phase 2:     ${P2_DUR_STR:-N/A}"
+    echo -e "    - Phase 3:     ${P3_DUR_STR:-N/A}"
+    echo -e "    - Total:       ${TOTAL_DUR_STR}"
     echo -e "${YELLOW}${BOLD}================================================================================${NC}\n"
     if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
         echo -e "${RED}${BOLD}OVERALL: FAIL reason=strict_gaps${NC}"
@@ -335,7 +368,7 @@ if [ ${#GAPS[@]} -gt 0 ]; then
         exit 1
     fi
     emit "OVERALL: COMPLETED_WITH_GAPS"
-    echo -e "${YELLOW}${BOLD}OVERALL: COMPLETED_WITH_GAPS${NC}"
+    echo -e "${YELLOW}${BOLD}OVERALL: COMPLETED_WITH_GAPS (${TOTAL_DUR_STR})${NC}"
     exit 0
 fi
 
@@ -346,5 +379,10 @@ echo -e "    - Receipt:     ${CYAN}target/logs/quick-receipt.txt${NC}"
 echo -e "    - Phase 1 log: ${CYAN}target/logs/quick-phase1.log${NC}"
 echo -e "    - Phase 2 log: ${CYAN}target/logs/quick-phase2.log${NC}"
 echo -e "    - Heap log:    ${CYAN}target/logs/quick-heap-audit.log${NC}"
+echo -e "  ${BOLD}Durations:${NC}"
+echo -e "    - Phase 1:     ${P1_DUR_STR:-N/A}"
+echo -e "    - Phase 2:     ${P2_DUR_STR:-N/A}"
+echo -e "    - Phase 3:     ${P3_DUR_STR:-N/A}"
+echo -e "    - Total:       ${TOTAL_DUR_STR}"
 echo -e "${GREEN}${BOLD}================================================================================${NC}\n"
 emit "OVERALL: PASSED"

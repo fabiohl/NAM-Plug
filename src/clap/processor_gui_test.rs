@@ -16,11 +16,11 @@ mod tests {
     /// Verifies that `is_api_supported` accepts all valid configurations and rejects invalid ones.
     ///
     /// Valid:
-    ///   - X11 embedded (canonical path for X11 DAWs)
-    ///   - X11 floating (fallback path)
+    ///   - X11 floating (the only X11 mode the plugin actually delivers)
     ///   - Wayland floating (only Wayland mode allowed by CLAP spec)
     ///
     /// Invalid:
+    ///   - X11 embedded (native reparenting is not implemented)
     ///   - Wayland embedded (no XEmbed equivalent on Wayland — rejected by spec)
     ///   - WIN32 / COCOA (wrong OS)
     #[test]
@@ -36,14 +36,14 @@ mod tests {
 
         // ── X11 ─────────────────────────────────────────────────────────────
         assert!(
-            gui_ext.is_api_supported(
+            !gui_ext.is_api_supported(
                 &mut handle,
                 GuiConfiguration {
                     api_type: GuiApiType::X11,
                     is_floating: false
                 }
             ),
-            "X11 embedded must be supported"
+            "X11 embedded must NOT be supported (no reparenting backend)"
         );
         assert!(
             gui_ext.is_api_supported(
@@ -102,7 +102,7 @@ mod tests {
     }
 
     /// Verifies that `get_preferred_api` returns Wayland floating when `WAYLAND_DISPLAY` is set,
-    /// and X11 embedded when it is not set.
+    /// and X11 floating when it is not set.
     #[test]
     fn test_gui_get_preferred_api_wayland_session() {
         use clack_extensions::gui::{GuiApiType, PluginGui};
@@ -134,7 +134,7 @@ mod tests {
         }
     }
 
-    /// Verifies that `get_preferred_api` returns X11 embedded when `WAYLAND_DISPLAY` is unset.
+    /// Verifies that `get_preferred_api` returns X11 floating when `WAYLAND_DISPLAY` is unset.
     #[test]
     fn test_gui_get_preferred_api_x11_session() {
         use clack_extensions::gui::{GuiApiType, PluginGui};
@@ -160,14 +160,14 @@ mod tests {
                 "X11 session: preferred API must be X11"
             );
             assert!(
-                !pref.is_floating,
-                "X11 session: preferred mode must be embedded"
+                pref.is_floating,
+                "X11 session: preferred mode must be floating"
             );
         }
     }
 
-    /// Tests the full GUI extension surface (size, resize, create) with the X11 embedded path,
-    /// which is the historical baseline for this plugin.
+    /// Tests the full GUI extension surface (size, resize, create) with the X11 floating path,
+    /// the only X11 mode the plugin supports.
     #[test]
     fn test_gui_extension_x11() {
         use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui};
@@ -206,7 +206,7 @@ mod tests {
         // when the plugin returns an Err. Thus we cannot assert gui_ext.set_size returns Err
         // from the host-side wrapper here.
 
-        // 4. create succeeds with X11 embedded
+        // 4. create rejects X11 embedded — the contract is floating-only
         assert!(
             gui_ext
                 .create(
@@ -216,8 +216,8 @@ mod tests {
                         is_floating: false
                     },
                 )
-                .is_ok(),
-            "create with X11 embedded must succeed"
+                .is_err(),
+            "create with X11 embedded must be rejected"
         );
 
         // 5. create succeeds with X11 floating
@@ -402,12 +402,10 @@ mod tests {
     /// not require a parent window handle from the host — it creates its own
     /// top-level window via Slint's event loop on a background thread.
     ///
-    /// Note: `show()` and `hide()` are NOT called because the floating
-    /// window is immediately visible after `set_transient()`; the GUI
-    /// lifecycle FSM's `WindowReady` transition is not triggered in this
-    /// code path (it's a documented limitation — the FSM awaits a GUI-thread
-    /// callback that does not exist in the current implementation).
-    /// DAWs use `destroy()` for window teardown, which is what we test here.
+    /// Note: `show()` and `hide()` are NOT called here; `set_transient()` already
+    /// maps the window on the GUI thread and `destroy()` exercises the teardown
+    /// path. The FSM `show → hide` transitions are covered separately by the
+    /// headless lifecycle integration tests.
     #[test]
     #[ignore = "requires dedicated X11 display server and mutates process environment"]
     fn test_headless_gui_floating_window_lifecycle() {
@@ -451,8 +449,10 @@ mod tests {
 
         // 2. Open floating window — spawns background "nam-slint-gui" thread with
         //    slint::run_event_loop(), waits for initialization (up to 2 seconds).
-        //    The `_window` parameter is unused in the plugin's set_transient
-        //    implementation, so we pass a dummy X11 window.
+        //    The host window handle is intentionally not dereferenced: X11 is served
+        //    floating-only, so the plugin always creates its own top-level window and
+        //    never reparents into the host (the embedded `set_parent` path is not
+        //    negotiated, see `is_api_supported`). Passing a dummy handle is therefore safe.
         // SAFETY: The dummy window handle is not dereferenced by the plugin.
         let result = unsafe {
             gui_ext.set_transient(

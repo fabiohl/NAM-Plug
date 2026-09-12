@@ -147,6 +147,17 @@ impl<'a> NamClapMainThread<'a> {
 
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
 
+        // Negotiated backend label for the status bar (Finding F6): every GUI
+        // negotiation is floating-only post-honesty-fix (see `is_api_supported`),
+        // so this is fixed for the lifetime of the window, computed once here
+        // instead of every 60 Hz telemetry tick.
+        let backend_text = match window_info.as_ref().map(Window::api_type) {
+            Some(api) if api == GuiApiType::WAYLAND => "Wayland (Floating)".to_string(),
+            Some(api) if api == GuiApiType::X11 => "X11 (Floating)".to_string(),
+            Some(_) => "Floating".to_string(),
+            None => "Floating".to_string(),
+        };
+
         if let Some(ref w) = window_info {
             log::info!("NAM-Plug: spawning Slint GUI (API={:?})", w.api_type().0);
         } else {
@@ -179,9 +190,23 @@ impl<'a> NamClapMainThread<'a> {
                 }
 
                 let host_close_notify = host_static;
+                let shared_close_notify = Arc::clone(&shared_arc);
                 window.window().on_close_requested(move || {
-                    if let Some(gui_host) = host_close_notify.get_extension::<HostGui>() {
-                        gui_host.closed(&host_close_notify, false);
+                    // Publish the backend "user closed" signal for the main
+                    // thread. The host-facing notification is gated by the
+                    // teardown fence: after it drops the plugin instance is being
+                    // (or has been) destroyed, and `request_callback` would
+                    // dispatch into a freed instance.
+                    shared_close_notify
+                        .cold
+                        .gui_user_closed
+                        .store(true, Ordering::Release);
+                    log::debug!("NAM-Plug: GUI user closed");
+                    if shared_close_notify.cold.alive_fence.load(Ordering::Acquire) {
+                        if let Some(gui_host) = host_close_notify.get_extension::<HostGui>() {
+                            gui_host.closed(&host_close_notify, false);
+                        }
+                        host_close_notify.request_callback();
                     }
                     slint::CloseRequestResponse::HideWindow
                 });
@@ -191,6 +216,7 @@ impl<'a> NamClapMainThread<'a> {
                     window.clone_strong(),
                     shared_arc,
                     Some(host_bridge),
+                    &backend_text,
                 );
 
                 if let Err(e) = window.show() {
@@ -214,6 +240,11 @@ impl<'a> NamClapMainThread<'a> {
                 self.slint_window = Some(weak);
                 self.floating_thread_handle = Some(handle);
                 self.floating_close_signal = Some(close_signal);
+                // Backend feedback: the window thread confirmed creation. When
+                // the host already requested visibility (ShowRequested) this
+                // advances the FSM to Active; otherwise the window is ready but
+                // stays hidden until the host's show() promotes it.
+                self.promote_window_ready();
                 Ok(())
             }
             Ok(Err(msg)) => {
@@ -241,16 +272,23 @@ impl<'a> NamClapMainThread<'a> {
 impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// Indicates whether the given graphics API configuration and floating mode is supported.
     ///
+    /// The plugin renders into its own top-level window on the backend thread and never
+    /// reparents into the host-provided handle, so only floating configurations are
+    /// accepted. Advertising embedded while delivering floating would break the host's
+    /// contract, therefore `X11` embedded is rejected instead of silently downgraded.
+    ///
     /// Accepted configurations (per CLAP GUI extension v1.2+):
-    /// - **X11 embedded** (preferred on X11 sessions): the host reparents the plugin window.
-    /// - **X11 floating** (fallback): the plugin manages its own top-level X11 window.
+    /// - **X11 floating**: the plugin manages its own top-level X11 window.
     /// - **Wayland floating**: the only Wayland mode allowed by the CLAP spec, because the
     ///   Wayland protocol has no generic cross-client window-embedding primitive.
-    ///   Wayland embedded is therefore explicitly rejected.
+    ///
+    /// Rejected configurations:
+    /// - **X11 embedded**: native reparenting (XEmbed) is not implemented.
+    /// - **Wayland embedded**: explicitly rejected by the CLAP spec.
     fn is_api_supported(&mut self, configuration: GuiConfiguration) -> bool {
         match configuration.api_type {
-            // X11: both embedded and floating are supported.
-            t if t == GuiApiType::X11 => true,
+            // X11: floating-only until a native reparenting backend exists.
+            t if t == GuiApiType::X11 => configuration.is_floating,
             // Wayland: only floating is supported (no XEmbed equivalent on Wayland).
             t if t == GuiApiType::WAYLAND => configuration.is_floating,
             // All other APIs (WIN32, COCOA, custom) are unsupported on Linux.
@@ -262,7 +300,10 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     ///
     /// Priority:
     /// 1. **Wayland floating** — when `WAYLAND_DISPLAY` is set (native Wayland session).
-    /// 2. **X11 embedded** — default for X11 sessions or XWayland fallback.
+    /// 2. **X11 floating** — default for X11 sessions or XWayland fallback.
+    ///
+    /// Both branches request floating, matching what the backend actually delivers: the
+    /// plugin always creates a top-level window and never reparents into the host.
     ///
     /// The detection reads an environment variable once on the main thread; it is
     /// strictly off-RT and safe to call here.
@@ -276,10 +317,10 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                 is_floating: true, // Wayland embedding is not supported by the CLAP spec.
             });
         }
-        log::debug!("GUI API negotiation: no WAYLAND_DISPLAY, preferring X11 embedded");
+        log::debug!("GUI API negotiation: no WAYLAND_DISPLAY, preferring X11 floating");
         Some(GuiConfiguration {
             api_type: GuiApiType::X11,
-            is_floating: false,
+            is_floating: true,
         })
     }
 
@@ -301,6 +342,9 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
         };
         log::info!("GUI create: api={api} mode={mode}");
         {
+            // A new GUI generation must not inherit a close signal from a
+            // previous window; the flag belongs to the current window only.
+            self.discard_pending_gui_close();
             self.gui_lifecycle = GuiLifecycle::Hidden;
         }
         Ok(())
@@ -315,6 +359,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                 gui_host.closed(&self.host.shared(), true);
             }
             self.teardown_gui_resources();
+            self.discard_pending_gui_close();
             let _ = self.gui_lifecycle.transition(GuiEvent::Destroy);
         }
     }
@@ -369,32 +414,75 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
 
     /// Makes the GUI window visible.
     ///
-    /// Transitions the lifecycle state from `Hidden` to `ShowRequested`.
-    /// The window show is dispatched to the Slint event loop.
+    /// A pending backend "user closed" signal is reconciled first, so a close
+    /// that raced the host's re-open cannot reject it. The lifecycle then moves
+    /// `Hidden → ShowRequested` and dispatches the window show to the Slint
+    /// event loop. When the backend window already exists (created by
+    /// `set_parent`/`set_transient`), the FSM is promoted to `Active` — the
+    /// window was mapped by the backend thread.
+    ///
+    /// A dispatch failure (no Slint platform, or an event loop already torn
+    /// down by a concurrent teardown) leaves the window visibility unchanged,
+    /// yet CLAP offers no error better than `Ok(())` for this case. The failure
+    /// is therefore logged at `warn` level — both the dispatch result and the
+    /// window operation executed on the GUI thread — so the false positive is
+    /// observable through the host log console and the diagnostic bundle.
     fn show(&mut self) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
+        self.reconcile_pending_gui_close();
         self.gui_lifecycle.transition(GuiEvent::Show)?;
         if let Some(weak) = &self.slint_window {
-            let _ = weak.upgrade_in_event_loop(|w| {
-                let _ = w.show();
-            });
+            let lifecycle = self.gui_lifecycle;
+            if let Err(e) = weak.upgrade_in_event_loop(move |w| {
+                if let Err(e) = w.show() {
+                    log::warn!(
+                        "NAM-Plug: Slint window show failed (gui_lifecycle={lifecycle:?}): {e}"
+                    );
+                }
+            }) {
+                log::warn!(
+                    "NAM-Plug: show dispatch failed \
+                     (gui_lifecycle={lifecycle:?}, event loop unavailable): {e:?}"
+                );
+            }
+            self.promote_window_ready();
         }
         Ok(())
     }
 
     /// Hides the GUI window.
     ///
-    /// Transitions the lifecycle state from `Active` to `HideRequested`.
-    /// The window hide is dispatched to the Slint event loop.
-    /// Resources are preserved so `show()` can re-display the window.
+    /// Accepts `Hide` from `Active` and from `ShowRequested` (a host may hide
+    /// before the backend confirms `WindowReady`). The window hide is dispatched
+    /// to the Slint event loop and, because Slint exposes no asynchronous
+    /// "unmapped" signal, the FSM is driven `HideRequested → Hidden`
+    /// immediately after the dispatch. Resources are preserved so `show()` can
+    /// re-display the window. Any pending close signal is consumed here because
+    /// the hide request already realizes the hidden state.
+    ///
+    /// As in `show()`, a dispatch failure is logged at `warn` level rather than
+    /// returned to the host: the FSM still reaches `Hidden` (the host already
+    /// considers the window hidden), but the dropped error stays observable.
     fn hide(&mut self) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
+        self.discard_pending_gui_close();
         self.gui_lifecycle.transition(GuiEvent::Hide)?;
         if let Some(weak) = &self.slint_window {
-            let _ = weak.upgrade_in_event_loop(|w| {
-                let _ = w.hide();
-            });
+            let lifecycle = self.gui_lifecycle;
+            if let Err(e) = weak.upgrade_in_event_loop(move |w| {
+                if let Err(e) = w.hide() {
+                    log::warn!(
+                        "NAM-Plug: Slint window hide failed (gui_lifecycle={lifecycle:?}): {e}"
+                    );
+                }
+            }) {
+                log::warn!(
+                    "NAM-Plug: hide dispatch failed \
+                     (gui_lifecycle={lifecycle:?}, event loop unavailable): {e:?}"
+                );
+            }
         }
+        let _ = self.gui_lifecycle.transition(GuiEvent::WindowHidden);
         Ok(())
     }
 
@@ -410,3 +498,7 @@ pub type NamPluginGui = PluginGui;
 #[cfg(test)]
 #[path = "gui_test.rs"]
 mod gui_test;
+
+#[cfg(test)]
+#[path = "gui_lifecycle_integration_test.rs"]
+mod gui_lifecycle_integration_test;

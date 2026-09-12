@@ -14,7 +14,7 @@ Fixes #
 <!-- Check all that apply -->
 - [ ] **CLAP Protocol & Extensions** (`src/clap/`, parameter automation, state context, latency reporting)
 - [ ] **Real-Time Audio Processing** (`src/audio/`, audio callback, SPSC parameter & model sync)
-- [ ] **GUI & User Interface** (`src/gui/`, egui controls, visual meters, OpenGL rendering)
+- [ ] **GUI & User Interface** (`src/clap/gui/`, Slint 1.17 controls, visual meters, FemtoVG/OpenGL rendering)
 - [ ] **Preset & Model Management** (`src/presets/`, IR loading, state serialization)
 - [ ] **Benchmarks & Quality Gates** (`benches/`, `tests/`)
 - [ ] **Documentation & Assets** (`docs/`, `README.md`)

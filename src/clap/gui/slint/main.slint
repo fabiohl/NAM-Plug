@@ -17,16 +17,17 @@ export component MainWindow inherits Window {
     default-font-family: "sans-serif";
 
     // ── Zone 1 Properties: Model & IR Metadata ───────────────
-    in-out property <string> model_name: "Clean Tweed Deluxe (Neural)";
-    in-out property <string> model_arch: "WaveNet (Standard)";
-    in-out property <string> model_sample_rate: "48 kHz";
+    in-out property <string> model_name: "No model loaded";
+    in-out property <string> model_arch: "No model loaded";
+    in-out property <string> model_sample_rate: "—";
+    in-out property <bool> has_model: false;
     in-out property <bool> model_loading: false;
     in-out property <bool> model_error: false;
     in-out property <string> model_error_msg: "";
 
-    in-out property <string> ir_name: "1x12 Greenback (CabSim)";
-    in-out property <string> ir_status: "48 kHz";
-    in-out property <bool> has_ir: true;
+    in-out property <string> ir_name: "No IR loaded";
+    in-out property <string> ir_status: "—";
+    in-out property <bool> has_ir: false;
     in-out property <bool> ir_loading: false;
     in-out property <bool> ir_error: false;
     in-out property <string> ir_error_msg: "";
@@ -40,7 +41,7 @@ export component MainWindow inherits Window {
     in-out property <string> gate_thresh_text: "-90 dB";
     in-out property <bool> gate_active: false;
     in-out property <int> oversample_mode: 0; // 0: Off, 1: 2x, 2: 4x
-    in-out property <int> activation_mode: 0; // 0: Standard, 1: Fast
+    in-out property <int> activation_mode: 1; // 1: Standard, 0: Fast
 
     // ── Zone 3 Properties: Telemetry & VU Meters ──────────────
     in-out property <float> peak_l: 0.72;
@@ -55,8 +56,14 @@ export component MainWindow inherits Window {
 
     // ── Zone 5 Properties: Status Bar & Host Telemetry ────────
     in-out property <string> sample_rate_text: "48000 Hz";
+    in-out property <string> buffer_size_text: "— spl";
     in-out property <string> latency_text: "0 spl (0.0 ms)";
-    in-out property <string> dsp_load_text: "1.4% DSP";
+    in-out property <string> channels_text: "Stereo";
+    // "—" is the honest placeholder until a real per-block DSP-load metric is
+    // wired (Finding F6 / T3.6.3): the preview binary and the design-time
+    // default previously showed a hard-coded "1.4% DSP" that never reflected
+    // the actually loaded model or host block size.
+    in-out property <string> dsp_load_text: "—";
     in-out property <string> oversample_text: "1x (Off)";
     in-out property <string> simd_badge: "AVX2+FMA";
     in-out property <string> backend_text: "Wayland Native";
@@ -64,6 +71,7 @@ export component MainWindow inherits Window {
     // ── Host Interaction Callbacks ────────────────────────────
     callback toggle_bypass();
     callback load_model_clicked();
+    callback clear_model_clicked();
     callback load_ir_clicked();
     callback clear_ir_clicked();
     callback reset_clip_clicked();
@@ -153,11 +161,13 @@ export component MainWindow inherits Window {
                         model-name: root.model_name;
                         model-arch: root.model_arch;
                         model-sample-rate: root.model_sample_rate;
+                        has-model: root.has_model;
                         is-loading: root.model_loading;
                         is-error: root.model_error;
                         error-message: root.model_error_msg;
                         accent-color: #00D4AA;
                         load-clicked => { root.load_model_clicked(); }
+                        clear-clicked => { root.clear_model_clicked(); }
                     }
 
                     Rectangle {
@@ -299,14 +309,14 @@ export component MainWindow inherits Window {
                             spacing: 3px;
                             alignment: start;
                             Text {
-                                text: "OS:";
+                                text: "Oversample:";
                                 font-size: 8.5px;
                                 font-weight: 700;
                                 color: #8fa1b3;
                                 vertical-alignment: center;
                             }
                             TouchArea {
-                                width: 24px;
+                                width: 22px;
                                 mouse-cursor: pointer;
                                 clicked => {
                                     root.oversample_mode = 0;
@@ -329,7 +339,7 @@ export component MainWindow inherits Window {
                                 }
                             }
                             TouchArea {
-                                width: 22px;
+                                width: 20px;
                                 mouse-cursor: pointer;
                                 clicked => {
                                     root.oversample_mode = 1;
@@ -352,7 +362,7 @@ export component MainWindow inherits Window {
                                 }
                             }
                             TouchArea {
-                                width: 22px;
+                                width: 20px;
                                 mouse-cursor: pointer;
                                 clicked => {
                                     root.oversample_mode = 2;
@@ -381,36 +391,14 @@ export component MainWindow inherits Window {
                             spacing: 3px;
                             alignment: end;
                             Text {
-                                text: "ACT:";
+                                text: "Precision:";
                                 font-size: 8.5px;
                                 font-weight: 700;
                                 color: #8fa1b3;
                                 vertical-alignment: center;
                             }
                             TouchArea {
-                                width: 28px;
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    root.activation_mode = 0;
-                                    root.activation_changed(0);
-                                }
-                                Rectangle {
-                                    border-radius: 2px;
-                                    background: root.activation_mode == 0 ? #3498db : (parent.has-hover ? #2e3440 : #1a1d23);
-                                    border-width: 0.5px;
-                                    border-color: root.activation_mode == 0 ? #3498db : #2E3440;
-                                    Text {
-                                        text: "Std";
-                                        font-size: 8px;
-                                        font-weight: 700;
-                                        color: root.activation_mode == 0 ? #ffffff : #8fa1b3;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                            TouchArea {
-                                width: 28px;
+                                width: 26px;
                                 mouse-cursor: pointer;
                                 clicked => {
                                     root.activation_mode = 1;
@@ -422,10 +410,32 @@ export component MainWindow inherits Window {
                                     border-width: 0.5px;
                                     border-color: root.activation_mode == 1 ? #3498db : #2E3440;
                                     Text {
-                                        text: "Fast";
+                                        text: "Std";
                                         font-size: 8px;
                                         font-weight: 700;
                                         color: root.activation_mode == 1 ? #ffffff : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 26px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.activation_mode = 0;
+                                    root.activation_changed(0);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.activation_mode == 0 ? #3498db : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.activation_mode == 0 ? #3498db : #2E3440;
+                                    Text {
+                                        text: "Fast";
+                                        font-size: 8px;
+                                        font-weight: 700;
+                                        color: root.activation_mode == 0 ? #ffffff : #8fa1b3;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -536,11 +546,18 @@ export component MainWindow inherits Window {
 
                 // Left telemetry group
                 HorizontalLayout {
-                    spacing: 14px;
+                    spacing: 12px;
                     alignment: start;
 
                     Text {
                         text: "SR: " + root.sample_rate_text;
+                        font-size: 9px;
+                        color: #8fa1b3;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "BUF: " + root.buffer_size_text;
                         font-size: 9px;
                         color: #8fa1b3;
                         vertical-alignment: center;
@@ -553,24 +570,10 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                     }
 
-                    TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.cycle_oversample(); }
-                        Text {
-                            text: "OS: " + root.oversample_text;
-                            font-size: 9px;
-                            color: parent.has-hover ? #00D4AA : #F5A623;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                            animate color { duration: 100ms; }
-                        }
-                    }
-
                     Text {
-                        text: "CAB: " + (root.has_ir ? "Active" : "Bypass");
+                        text: "CH: " + root.channels_text;
                         font-size: 9px;
-                        color: root.has_ir ? #43E97B : #636e7b;
-                        font-weight: 600;
+                        color: #8fa1b3;
                         vertical-alignment: center;
                     }
                 }

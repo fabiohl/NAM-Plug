@@ -19,12 +19,14 @@ source "$(dirname "$0")/lib/_lib.sh"
 echo -e "${BLUE}${BOLD}========================================${NC}"
 echo -e "${BLUE}${BOLD}    NAM-Plug Linting & Quality Suite    ${NC}"
 echo -e "${BLUE}${BOLD}========================================${NC}"
+SUITE_START=$(date +%s%N)
 
 # ---------------------------------------------------------------------------
 # [1/8] Code formatting (cargo fmt)
 # ---------------------------------------------------------------------------
 phase "Applying code formatting (cargo fmt)..."
 cargo fmt --all
+ok "Code formatting applied ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
 # [2/8] Compilation checks (cargo check) — broad feature matrix
@@ -39,6 +41,7 @@ cargo check --lib --no-default-features
 
 echo -e "  ${YELLOW}${BOLD}Checking: All Targets (no default features)...${NC}"
 cargo check --all-targets --no-default-features
+ok "Compilation checks passed ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
 # [3/8] Static analysis (cargo clippy) — strict, broad feature matrix
@@ -53,6 +56,7 @@ cargo clippy --lib --no-default-features -- -D warnings
 
 echo -e "  ${YELLOW}${BOLD}Clippy: All Targets (no default features)...${NC}"
 cargo clippy --all-targets --no-default-features -- -D warnings
+ok "Static analysis passed cleanly with zero warnings ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
 # [4/8] SPDX license header validation (deterministic, no external tooling)
@@ -86,7 +90,7 @@ if [ -n "$invalid" ]; then
     echo "$invalid" | sed 's/^/    /'
     exit 1
 fi
-ok "All files have valid SPDX headers (GPL-3.0-or-later, MIT)."
+ok "All files have valid SPDX headers (GPL-3.0-or-later, MIT) ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
 # [5/8] Anti-pattern check: #[test] in tests/common/
@@ -97,7 +101,7 @@ if [ -d "tests/common" ] && grep -rnF "#[test]" tests/common/ > /dev/null 2>&1; 
     grep -rnF "#[test]" tests/common/ | sed 's/^/    /'
     exit 1
 fi
-ok "No '#[test]' in tests/common/."
+ok "No '#[test]' in tests/common/ ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
 # [6/8] RT-path static allocation scan
@@ -109,6 +113,7 @@ ok "No '#[test]' in tests/common/."
 # ---------------------------------------------------------------------------
 phase "Checking RT path for heap allocations (static scan)..."
 "$(dirname "$0")/lib/verify_no_rt_alloc.sh"
+ok "RT-path static allocation scan passed ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
 # [7/8] Undocumented #[allow(clippy::)] check (enforce allow_attributes policy)
@@ -149,7 +154,7 @@ if [ -n "$undocumented_allows" ]; then
     echo "$undocumented_allows" | sed 's/^/    /'
     exit 1
 fi
-ok "All #[allow(clippy::)] suppressions are documented."
+ok "All #[allow(clippy::)] suppressions are documented ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
 # [8/8] AppStream metadata version sync check
@@ -165,9 +170,13 @@ if [ -f "$metainfo_file" ]; then
         echo -e "  ${RED}${BOLD}ERROR: Version mismatch between Cargo.toml ($cargo_ver) and $metainfo_file ($xml_ver)!${NC}"
         exit 1
     fi
-    ok "AppStream metainfo version matches Cargo.toml ($cargo_ver)."
+    ok "AppStream metainfo version matches Cargo.toml ($cargo_ver) ($(phase_elapsed_str))."
 fi
 
+SUITE_END=$(date +%s%N)
+TOTAL_DUR_MS=$(( (SUITE_END - SUITE_START) / 1000000 ))
+TOTAL_DUR_STR=$(format_duration_ms "$TOTAL_DUR_MS")
+
 echo -e "${GREEN}${BOLD}========================================${NC}"
-echo -e "${GREEN}${BOLD} Quality suite completed successfully!  ${NC}"
+echo -e "${GREEN}${BOLD} Quality suite completed successfully in ${TOTAL_DUR_STR}!${NC}"
 echo -e "${GREEN}${BOLD}========================================${NC}"

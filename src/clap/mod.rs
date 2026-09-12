@@ -13,7 +13,7 @@
 //! - **[`factory`]**: Preset discovery factory for querying local `.nam` model collections and presets.
 //! - **[`plugin`]**: Plugin instance context (`NamClapPlugin`), shared thread state, and SPSC command scheduler.
 //! - **[`processor`]**: Real-time DSP audio processor (`NamClapProcessor`), sample rendering loop, and SIMD activation processing.
-//! - **[`gui`]**: Cross-platform `egui`-based GUI lifecycle and window rendering pipeline.
+//! - **[`gui`]**: Cross-platform Slint 1.17-based GUI lifecycle and window rendering pipeline.
 //! - **`host_harness` / `test_util`**: CLAP host mock harness and test utilities for integration testing (active under `testing` feature).
 
 pub mod descriptor;

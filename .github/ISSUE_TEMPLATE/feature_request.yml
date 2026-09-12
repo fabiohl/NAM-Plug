@@ -17,7 +17,7 @@ body:
       label: Feature Category
       description: What area of the plugin does this request target?
       options:
-        - "GUI & User Experience (egui controls, visual meters, themes)"
+        - "GUI & User Experience (Slint controls, visual meters, themes)"
         - "CLAP Extensions (Remote controls, Preset discovery, Tail)"
         - "Parameter & Automation Control"
         - "Preset & Bank Management"

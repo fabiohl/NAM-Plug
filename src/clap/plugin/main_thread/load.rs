@@ -472,4 +472,141 @@ impl<'a> NamClapMainThread<'a> {
 
         Ok(())
     }
+
+    /// Clears the active neural model (unloads model).
+    pub fn clear_model(&mut self) -> Result<(), Box<NamDiagnostic>> {
+        let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
+            self.shared.cold.instance_id,
+        );
+
+        let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
+        let host_rate = if host_rate == 0 { 48000 } else { host_rate };
+        let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
+
+        let generation = self.shared.cold.allocate_model_generation();
+
+        if let Ok(mut storage) = self.shared.cold.full_wavenet_model.lock() {
+            *storage = None;
+        }
+
+        self.params.model_path = None;
+        self.params.model_basename = None;
+        self.params.model_hash = None;
+
+        if let Ok(mut meta_guard) = self.shared.cold.ui_model_metadata.lock() {
+            *meta_guard = None;
+        }
+        if let Ok(mut info_guard) = self.shared.cold.ui_model_info.lock() {
+            *info_guard = None;
+        }
+        if let Ok(mut name_guard) = self.shared.cold.ui_model_name.lock() {
+            name_guard.clear();
+        }
+
+        self.shared
+            .cold
+            .model_sample_rate
+            .store(0, Ordering::Relaxed);
+
+        if buffer_size > 0 {
+            let buf_capacity = buffer_size.max(MAX_RESAMP_BUF);
+            let new_resampler = Box::new(
+                NamResampler::new(host_rate, host_rate, buf_capacity).map_err(|e| {
+                    Box::new(
+                        NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                            .message("Failed to build dummy resampler for clear")
+                            .param("error", e.to_string()),
+                    )
+                })?,
+            );
+
+            let new_stream =
+                crate::clap::plugin::build_stream_adapter(host_rate, host_rate, buffer_size)
+                    .map_err(|e| {
+                        Box::new(
+                            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                                .message("Failed to build dummy streaming buffer for clear")
+                                .param("error", e.to_string()),
+                        )
+                    })?;
+
+            self.staged_restore = None;
+
+            let current_stream_latency = self
+                .shared
+                .cold
+                .current_stream_latency
+                .load(Ordering::Relaxed);
+            let new_stream_latency = new_stream.latency_samples();
+
+            if new_stream_latency == current_stream_latency {
+                if let Some(staged) = self.staged_swap.as_mut() {
+                    staged.clear_model();
+                    if staged.is_empty() {
+                        self.staged_swap = None;
+                    }
+                }
+                match self
+                    .cmd_producer
+                    .try_push_command(ClapParamPayload::LoadModel {
+                        generation,
+                        model_l: None,
+                        new_resampler,
+                        new_stream,
+                        input_mult_adj: 1.0,
+                        output_mult_adj: 1.0,
+                    }) {
+                    Ok(_seq) => {}
+                    Err((PushError::Full, payload)) => {
+                        if let ClapParamPayload::LoadModel {
+                            generation,
+                            model_l,
+                            input_mult_adj,
+                            output_mult_adj,
+                            ..
+                        } = payload
+                            && let Ok(mut pending_guard) = self.shared.cold.pending_model.lock()
+                        {
+                            *pending_guard = Some(PendingModel {
+                                generation,
+                                model: model_l,
+                                model_rate: host_rate,
+                                input_mult_adj,
+                                output_mult_adj,
+                            });
+                        }
+                    }
+                }
+            } else {
+                let staged = self.staged_swap.get_or_insert_with(StagedSwap::default);
+                staged.model = Some(LoadModelPayload {
+                    generation,
+                    model_l: None,
+                    new_resampler,
+                    new_stream,
+                    input_mult_adj: 1.0,
+                    output_mult_adj: 1.0,
+                });
+                self.host.request_restart();
+            }
+        } else {
+            if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock() {
+                *pending_guard = Some(PendingModel {
+                    generation,
+                    model: None,
+                    model_rate: host_rate,
+                    input_mult_adj: 1.0,
+                    output_mult_adj: 1.0,
+                });
+            }
+        }
+
+        self.shared
+            .cold
+            .model_load_counter
+            .fetch_add(1, Ordering::Relaxed);
+
+        log::info!("NAM-Plug: model cleared via GUI");
+        Ok(())
+    }
 }

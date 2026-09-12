@@ -14,7 +14,7 @@ keywords = ["audio", "dsp", "nam", "neural-amp-modeler", "clap", "plugin"]
 categories = ["multimedia::audio", "multimedia"]
 
 [dependencies]
-NeuralAmpModeler-rs = { version = "0.7.3", default-features = false, features = [
+NeuralAmpModeler-rs = { version = "0.7.4", default-features = false, features = [
     "stereo",
 ] }
 clack-common = "0.1"
@@ -39,8 +39,7 @@ clack-extensions = { version = "0.1", features = [
     "state-context",
     "tail",
 ] }
-# GUI Stack: Slint 1.9 (winit backend + femtovg renderer)
-raw-window-handle = "0.6"
+# GUI Stack: Slint 1.17 (winit backend + femtovg renderer)
 slint = { version = "1.17", default-features = false, features = [
     "std",
     "backend-winit",
@@ -63,7 +62,7 @@ sha2 = "0.11"
 slint-build = "1.17"
 
 [dev-dependencies]
-NeuralAmpModeler-rs = { version = "0.7.3", features = ["testing"] }
+NeuralAmpModeler-rs = { version = "0.7.4", features = ["testing"] }
 nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.1", features = ["clack-plugin"] }
 clap-sys = "0.5"

@@ -27,7 +27,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 │        Main Thread          │  │    Audio Thread (RT)    │  │       GUI Thread       │
 │  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - Slint Event Loop    │
 │  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - "nam-slint-gui"     │
-│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.9 FemtoVG  │
+│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.17 FemtoVG│
 │  - Background Model Loading │  │  - Zero Blocking I/O    │  │  - Wayland & X11       │
 │  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - Async rfd FileDialog│
 │                             │  │                         │  │  - 5-Zone UI Layout    │
@@ -45,7 +45,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
   > **Hard Real-Time Contract:** Zero heap allocations, zero mutex locks, zero blocking I/O, zero panics. Operates directly on host audio buffers using host-driven single-callback processing.
 
-- **GUI Thread** — Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.9 (FemtoVG / winit backend). Fully isolated from the audio thread, synchronizing telemetry at 60 Hz via `SlintViewModel`.
+- **GUI Thread** — Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.17 (FemtoVG / winit backend). Fully isolated from the audio thread, synchronizing telemetry at 60 Hz via `SlintViewModel`.
 
 ---
 
@@ -410,7 +410,7 @@ NAM models supply embedded metadata (`input_level_dbu`, `loudness`). The loader 
 
 ## 7. Graphical User Interface (Slint GUI Architecture)
 
-The graphical interface is built using the declarative Slint UI framework (v1.9) under `src/clap/gui/`.
+The graphical interface is built using the declarative Slint UI framework (v1.17) under `src/clap/gui/`.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -424,10 +424,10 @@ The graphical interface is built using the declarative Slint UI framework (v1.9)
 │    Zone 4: Bypass Toggle (ToggleSwitch with active glow & crossfader sync)  │
 │    Zone 5: Status Bar (Sample Rate, Latency, DSP Load, Oversample, XRuns)   │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Rendering Pipeline: Slint v1.9 ──► FemtoVG / OpenGL backend via winit      │
+│  Rendering Pipeline: Slint v1.17 ──► FemtoVG / OpenGL backend via winit     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Windowing: Wayland (CLAP_WINDOW_API_WAYLAND) & X11 (CLAP_WINDOW_API_X11)   │
-│             RawWindowHandle 0.6 / Bounded Teardown Join (nam-gui-reaper)    │
+│  Windowing: X11 & Wayland — floating-only (CLAP_WINDOW_API_X11/WAYLAND)     │
+│             Bounded Teardown Join (nam-gui-reaper)                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Async File Picker: rfd (Background Worker File Dialog, Non-Blocking)       │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -436,6 +436,7 @@ The graphical interface is built using the declarative Slint UI framework (v1.9)
 ### 7.1 Module Organization
 
 - `src/clap/gui/mod.rs` — GUI entry point, window dimensions (`600x275`), `GuiHostBridge`.
+- `src/clap/gui/lifecycle.rs` — `GuiLifecycle` finite state machine for window visibility (`Hidden`/`ShowRequested`/`Active`/`HideRequested`/`Destroyed`).
 - `src/clap/gui/slint/main.slint` — 5-Zone declarative UI layout (`MainWindow`).
 - `src/clap/gui/slint/` — Modular Slint component definitions (`RotaryKnob`, `VuMeter`, `ToggleSwitch`, `LedIndicator`, `SelectorButton`, `ModelCard`, `IrCard`).
 - `src/clap/gui/slint_view_model.rs` — `SlintViewModel`: bridges Slint properties with plugin atomics (`NamClapShared`), drives the 60 Hz telemetry polling timer, applies IEC 60268-10 ballistics, and handles user interaction callbacks (`on_param_changed`, `on_bypass_toggled`, `on_load_model_clicked`, etc.).
@@ -447,12 +448,21 @@ The graphical interface is built using the declarative Slint UI framework (v1.9)
 
 To provide smooth metering without degrading the audio thread:
 - A dedicated 60 Hz Slint `Timer` (`slint::Timer`) runs inside `"nam-slint-gui"`.
-- Polling reads atomic telemetry (`NamClapShared::rt_to_ui`, `sample_rate`, `effective_latency_samples`, `dsp_load_pct`).
+- Polling reads atomic telemetry (`NamClapShared::rt_to_ui`, `sample_rate`, `effective_latency_samples`).
 - Peak levels are processed with standard IEC 60268-10 Type I (DIN) ballistics:
   - **Attack:** Immediate (single block peak capture).
   - **Decay:** 1700 ms fallback to -20 dBFS.
   - **Peak-hold indicator:** 1.5 seconds retention before release.
 - **Dynamic track configuration (`active_channel_count`):** Automatically adapts the meter between centered mono bar and independent stereo L/R bars.
+
+#### 7.2.1 Status-Bar Badges: Live vs. Static-per-Window (Finding F6)
+
+The status bar exposes four informational strings that are **never** hard-coded design-time placeholders in production:
+
+- **`model_arch`** — live: sourced from `ColdShared::ui_model_metadata` (`NamModelMetadata::architecture`/`topology`), diffed every 60 Hz tick with the same echo-guard pattern as `model_name`/`ir_name`. Shows `"No model loaded"` when no model is active, never a stale architecture after a swap or clear.
+- **`simd_badge`** — static-per-window: the runtime-detected SIMD backend (`neural_amp_modeler_rs::math::common::SIMD_MATH.instruction_set`) never changes for the lifetime of a process, so it is read and set once in `SlintViewModel::new()` rather than every tick. Reads `"AVX2+FMA"` in every standard build (the opt-in `avx512` feature is not enabled by `NAM-Plug`).
+- **`backend_text`** — static-per-window: the negotiated windowing backend (`"X11 (Floating)"` / `"Wayland (Floating)"` / `"Floating"`) is computed once in `spawn_gui()` from the CLAP host's `Window::api_type()` and passed into `SlintViewModel::new()`, matching the floating-only contract of §4 (Finding F2 / Opção B).
+- **`dsp_load_text`** — **honest placeholder**: no real per-block DSP-load percentage metric exists yet in the codebase (verified: no such counter is computed anywhere in `src/clap/processor/`). The design-time default was corrected from a hard-coded, misleading `"1.4% DSP"` to `"—"`; `SlintViewModel` intentionally never overwrites it. Wiring a real metric here is a distinct, larger follow-up (would require instrumenting an RT-safe cycle/deadline counter and publishing it through `RtToUi`), tracked as future work rather than bundled into this fix.
 
 ### 7.3 Bounded Teardown & Reaper Pattern (`nam-gui-reaper`)
 
@@ -461,6 +471,29 @@ Window closing and destruction follow a deterministic, leak-free protocol:
 2. The plugin signals `floating_close_signal`, invokes `slint::quit_event_loop()`, and clears the local `slint_window` handle.
 3. The main thread performs a bounded join on the `"nam-slint-gui"` thread handle with a timeout of `TEARDOWN_JOIN_TIMEOUT` (2000 ms).
 4. If the windowing backend takes longer to release resources, the handle is handed off to a detached background thread named `"nam-gui-reaper"` (`spawn_reaper`), guaranteeing that the DAW main thread is never blocked while preventing thread abandonment and use-after-free conditions.
+
+### 7.4 GUI Lifecycle FSM Feedback
+
+`src/clap/gui/lifecycle.rs` models window visibility as `Hidden → ShowRequested →
+Active → HideRequested → Hidden` (plus the terminal `Destroyed`). The FSM is fed
+from two directions:
+
+- **Host-driven:** `create()`, `show()`, and `hide()` call `transition()` on the
+  main thread.
+- **Backend-driven:** the `"nam-slint-gui"` thread cannot mutate the main-thread
+  FSM directly, so it publishes signals that are drained off-RT:
+  - window creation confirmed in `spawn_gui()` promotes `ShowRequested → Active`
+    (`WindowReady`); `show()` applies the same promotion when the window already
+    exists (the common `set_parent`/`set_transient` before `show()` order);
+  - `on_close_requested` sets `ColdShared::gui_user_closed` (Release) and calls
+    `request_callback()`, so `housekeeping()` drains it (Acquire) and drives
+    `UserClosed → Hidden`.
+
+Because Slint exposes no asynchronous "unmapped" notification, `hide()` treats
+the dispatched `Window::hide()` as the completion of the request and drives
+`HideRequested → Hidden` synchronously. `Hide` is accepted from `ShowRequested`
+as well, so a host that hides before `WindowReady` never leaves a window stuck
+visible.
 
 ---
 

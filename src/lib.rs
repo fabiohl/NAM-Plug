@@ -10,7 +10,7 @@
 //!
 //! - **[`clap`]**: Core plugin entry point, descriptor, extensions (Params, State, GUI, Latency, Preset Discovery), factory wrappers, host harness, and DSP processor implementations.
 //! - **Real-Time Safety (RT-Safety)**: Processing loops in [`clap::processor`] isolate all heap allocations and dynamic drops from the audio thread, communicating with the DAW host and GUI thread via SPSC lock-free channels and atomic status bitmasks.
-//! - **GUI Infrastructure**: Integrated `egui`-based control panel with direct atomic telemetry and non-blocking model/IR loading.
+//! - **GUI Infrastructure**: Integrated Slint 1.17-based control panel with direct atomic telemetry and non-blocking model/IR loading.
 
 pub mod clap;
 

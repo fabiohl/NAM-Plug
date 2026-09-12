@@ -549,8 +549,17 @@ pub struct ColdShared {
     pub ui_load_error_msg: Mutex<String>,
     /// Dynamic model info for diagnostics.
     pub ui_model_info: Mutex<Option<neural_amp_modeler_rs::common::diagnostics::ModelInfo>>,
+    /// Flag signaling that the model should be cleared (unload model).
+    pub ui_clear_model: AtomicBool,
     /// Lifetime fence: true while the plugin exists. Checked by the File Picker thread.
     pub alive_fence: Arc<AtomicBool>,
+    /// Backend signal: the user closed the GUI window (WM close button, Alt-F4).
+    ///
+    /// Set by the Slint window's `on_close_requested` callback on the GUI
+    /// thread (Release) and consumed by `housekeeping()` on the main thread
+    /// (Acquire) to drive `GuiEvent::UserClosed` into the lifecycle FSM — the
+    /// GUI thread cannot mutate `NamClapMainThread::gui_lifecycle` directly.
+    pub gui_user_closed: AtomicBool,
     /// Render mode as set by the host via `clap.render`: 0 = Realtime, 1 = Offline.
     /// Written by the Main Thread, read by the RT thread at low frequency (transitions only).
     pub render_mode: AtomicU32,
@@ -938,6 +947,7 @@ impl GuiSharedState {
                 ui_load_error_msg: Mutex::new(String::new()),
                 ui_model_info: Mutex::new(None),
                 alive_fence: Arc::new(AtomicBool::new(true)),
+                gui_user_closed: AtomicBool::new(false),
                 render_mode: AtomicU32::new(RENDER_MODE_REALTIME),
                 gui_scale_factor: AtomicU32::new(0),
                 ir_path: Mutex::new(None),
@@ -947,6 +957,7 @@ impl GuiSharedState {
                 ui_ir_load_error: AtomicBool::new(false),
                 ui_ir_load_error_msg: Mutex::new(String::new()),
                 ui_clear_ir: AtomicBool::new(false),
+                ui_clear_model: AtomicBool::new(false),
                 ir_raw_samples: Mutex::new(None),
                 ir_raw_sample_rate: AtomicU32::new(0),
                 slimmable_tx: Mutex::new(Some(slimmable_tx)),

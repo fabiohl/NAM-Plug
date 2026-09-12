@@ -277,19 +277,21 @@ else
         fi
     fi
     set -e
+    PHASE1_END=$(date +%s%N)
+    PHASE1_DUR_MS=$(( (PHASE1_END - PHASE1_START) / 1000000 ))
+    if [ "$DRY_RUN" = "1" ]; then
+        PHASE1_DUR_MS=0
+        PHASE1_STATUS="PASSED"
+    fi
+    local dur1_str
+    dur1_str=$(format_duration_ms "$PHASE1_DUR_MS")
     if [ "$PHASE1_STATUS" = "FAILED" ]; then
-        echo -e "  ${RED}${BOLD}Phase 1 FAILED${NC}"
+        echo -e "  ${RED}${BOLD}Phase 1 FAILED (${dur1_str})${NC}"
     else
-        echo -e "  ${GREEN}${BOLD}Phase 1 PASSED${NC}"
+        echo -e "  ${GREEN}${BOLD}Phase 1 PASSED (${dur1_str})${NC}"
     fi
 fi
 
-PHASE1_END=$(date +%s%N)
-PHASE1_DUR_MS=$(( (PHASE1_END - PHASE1_START) / 1000000 ))
-if [ "$DRY_RUN" = "1" ]; then
-    PHASE1_DUR_MS=0
-    PHASE1_STATUS="PASSED"
-fi
 emit_receipt "phase1" "GC Stress — 1000 swaps + drain-on-destroy" "$PHASE1_STATUS" "$PHASE1_DUR_MS" "$PHASE1_LOG"
 PHASE_STATUS+=("$PHASE1_STATUS")
 PHASE_DURATIONS+=("$PHASE1_DUR_MS")
@@ -314,26 +316,28 @@ else
     fi
     RC=$?
     set -e
+    PHASE2_END=$(date +%s%N)
+    PHASE2_DUR_MS=$(( (PHASE2_END - PHASE2_START) / 1000000 ))
+    if [ "$DRY_RUN" = "1" ]; then
+        PHASE2_DUR_MS=0
+    fi
+    local dur2_str
+    dur2_str=$(format_duration_ms "$PHASE2_DUR_MS")
     if [ $RC -ne 0 ]; then
         PHASE2_STATUS="FAILED"
         OVERALL_FAILED=1
-        echo -e "  ${RED}${BOLD}Phase 2 FAILED (rc=$RC)${NC}"
+        echo -e "  ${RED}${BOLD}Phase 2 FAILED (rc=$RC, ${dur2_str})${NC}"
     else
         if ! grep -q "test result: ok" "$PHASE2_LOG" 2>/dev/null; then
-            echo -e "  ${YELLOW}⚠ Phase 2: no test result summary found — treating as failure${NC}"
+            echo -e "  ${YELLOW}⚠ Phase 2: no test result summary found — treating as failure (${dur2_str})${NC}"
             PHASE2_STATUS="FAILED"
             OVERALL_FAILED=1
         else
-            echo -e "  ${GREEN}${BOLD}Phase 2 PASSED${NC}"
+            echo -e "  ${GREEN}${BOLD}Phase 2 PASSED (${dur2_str})${NC}"
         fi
     fi
 fi
 
-PHASE2_END=$(date +%s%N)
-PHASE2_DUR_MS=$(( (PHASE2_END - PHASE2_START) / 1000000 ))
-if [ "$DRY_RUN" = "1" ]; then
-    PHASE2_DUR_MS=0
-fi
 emit_receipt "phase2" "Teardown — RT parking lot drain off-RT" "$PHASE2_STATUS" "$PHASE2_DUR_MS" "$PHASE2_LOG"
 PHASE_STATUS+=("$PHASE2_STATUS")
 PHASE_DURATIONS+=("$PHASE2_DUR_MS")
@@ -362,22 +366,23 @@ else
     fi
     RC=$?
     set -e
+    PHASE3_END=$(date +%s%N)
+    PHASE3_DUR_MS=$(( (PHASE3_END - PHASE3_START) / 1000000 ))
+    if [ "$DRY_RUN" = "1" ]; then
+        PHASE3_DUR_MS=0
+    fi
+    local dur3_str
+    dur3_str=$(format_duration_ms "$PHASE3_DUR_MS")
     if [ $RC -ne 0 ]; then
         PHASE3_STATUS="FAILED"
         OVERALL_FAILED=1
-        echo -e "  ${RED}${BOLD}Phase 3 FAILED (rc=$RC)${NC}"
+        echo -e "  ${RED}${BOLD}Phase 3 FAILED (rc=$RC, ${dur3_str})${NC}"
     else
         if ! grep -q "test result: ok" "$PHASE3_LOG" 2>/dev/null; then
-            echo -e "  ${YELLOW}⚠ Phase 3: no test result summary — treating as failure${NC}"
+            echo -e "  ${YELLOW}⚠ Phase 3: no test result summary — treating as failure (${dur3_str})${NC}"
             PHASE3_STATUS="FAILED"
             OVERALL_FAILED=1
         else
-            echo -e "  ${GREEN}${BOLD}Phase 3 PASSED${NC}"
-        fi
-    fi
-fi
-
-PHASE3_END=$(date +%s%N)
 PHASE3_DUR_MS=$(( (PHASE3_END - PHASE3_START) / 1000000 ))
 if [ "$DRY_RUN" = "1" ]; then
     PHASE3_DUR_MS=0

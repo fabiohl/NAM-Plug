@@ -42,7 +42,7 @@ export component IrCard inherits Rectangle {
                     padding-left: 3px;
                     padding-right: 3px;
                     Text {
-                        text: "CAB ON";
+                        text: "IR ON";
                         font-size: 7.5px;
                         font-weight: 800;
                         color: #43E97B;
@@ -97,7 +97,7 @@ export component IrCard inherits Rectangle {
                 }
 
                 if !root.is-error : Text {
-                    text: root.has-ir ? ("Active • " + root.ir-status) : "CabSim Bypass (Linear)";
+                    text: root.has-ir ? ("Active • " + root.ir-status) : "Select .wav impulse";
                     font-size: 8px;
                     color: root.has-ir ? #43E97B : #636e7b;
                     horizontal-alignment: center;
