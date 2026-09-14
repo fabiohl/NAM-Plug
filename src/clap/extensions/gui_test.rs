@@ -9,30 +9,27 @@
 //! dereferencing `NamClapShared` after the plugin instance is destroyed.
 
 use super::{spawn_reaper, try_join_until};
+use crate::clap::gui::worker::{GuiWorker, GuiWorkerJob};
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::test_util::{self, make_test_plugin};
 use clack_extensions::gui::PluginGuiImpl;
 use clack_host::plugin::PluginInstance;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// Spawns a thread that mimics the floating window event loop: it polls the
-/// close signal every ~1 ms and exits when the window is closed, reporting
-/// its exit through the returned receiver.
-fn fake_floating_window_thread(
-    close_signal: &Arc<AtomicBool>,
-) -> (std::thread::JoinHandle<()>, mpsc::Receiver<()>) {
-    let (tx, rx) = mpsc::channel();
-    let cs = Arc::clone(close_signal);
+/// Spawns a thread that mimics the persistent GUI worker: it blocks until its
+/// job channel is closed (the `GuiWorker::shutdown` contract) and reports its
+/// exit through `exited_tx`.
+fn fake_gui_worker_thread(
+    exited_tx: mpsc::Sender<()>,
+) -> (mpsc::Sender<GuiWorkerJob>, std::thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel::<GuiWorkerJob>();
     let handle = std::thread::spawn(move || {
-        while !cs.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let _ = tx.send(());
+        let _ = rx.recv(); // exits when the worker's sender is dropped
+        let _ = exited_tx.send(());
     });
-    (handle, rx)
+    (tx, handle)
 }
 
 /// Returns a mutable reference to the main thread struct of a test plugin.
@@ -88,40 +85,42 @@ fn test_try_join_until_times_out_and_returns_handle_for_reaper() {
 // ---------------------------------------------------------------------------
 
 /// Destroying the plugin without ever calling `gui.destroy()` must lower the
-/// alive fence and synchronously close + join any floating window thread —
-/// before `NamClapShared` is dropped.
+/// alive fence and synchronously close + join the persistent GUI worker
+/// thread — before `NamClapShared` is dropped.
 #[test]
-fn test_drop_teardown_lowers_fence_and_joins_floating_thread() {
+fn test_drop_teardown_lowers_fence_and_joins_worker() {
     let (_entry, _host_info, mut plugin_instance) = make_test_plugin();
 
     let shared_ptr = test_util::extract_shared(&mut plugin_instance);
     // SAFETY: the plugin instance outlives this reference (dropped below).
     let shared = unsafe { &*shared_ptr };
-    let fence = Arc::clone(&shared.cold.alive_fence);
-    assert!(fence.load(Ordering::Relaxed), "fence must start raised");
+    let fence = std::sync::Arc::clone(&shared.cold.alive_fence);
+    assert!(
+        fence.load(std::sync::atomic::Ordering::Relaxed),
+        "fence must start raised"
+    );
 
-    let close_signal = Arc::new(AtomicBool::new(false));
-    let (handle, exited) = fake_floating_window_thread(&close_signal);
+    let (exited_tx, exited) = mpsc::channel();
+    let (tx, handle) = fake_gui_worker_thread(exited_tx);
 
     let mt = main_thread_mut(&mut plugin_instance);
-    mt.floating_thread_handle = Some(handle);
-    mt.floating_close_signal = Some(close_signal);
+    mt.gui_worker = Some(GuiWorker::from_parts_for_test(tx, handle));
 
     // Host destroys the plugin without gui.destroy().
     drop(plugin_instance);
 
     assert!(
-        !fence.load(Ordering::Relaxed),
+        !fence.load(std::sync::atomic::Ordering::Relaxed),
         "fence must be lowered before shared state is released"
     );
     exited
         .recv_timeout(Duration::from_secs(1))
-        .expect("floating thread must have been closed and joined during drop");
+        .expect("GUI worker must have been closed and joined during drop");
 }
 
-/// Repeatedly opening and destroying the plugin with an active floating
-/// window must never panic, hang, or leave the fence raised (acceptance:
-/// stress with rapid floating window open/close).
+/// Repeatedly opening and destroying the plugin with an active GUI worker
+/// must never panic, hang, or leave the fence raised (acceptance: stress with
+/// rapid GUI open/close).
 #[test]
 fn test_stress_rapid_teardown_cycles() {
     for cycle in 0..20 {
@@ -130,19 +129,18 @@ fn test_stress_rapid_teardown_cycles() {
         let shared_ptr = test_util::extract_shared(&mut plugin_instance);
         // SAFETY: the plugin instance outlives this reference (dropped below).
         let shared = unsafe { &*shared_ptr };
-        let fence = Arc::clone(&shared.cold.alive_fence);
+        let fence = std::sync::Arc::clone(&shared.cold.alive_fence);
 
-        let close_signal = Arc::new(AtomicBool::new(false));
-        let (handle, _exited) = fake_floating_window_thread(&close_signal);
+        let (exited_tx, _exited) = mpsc::channel();
+        let (tx, handle) = fake_gui_worker_thread(exited_tx);
 
         let mt = main_thread_mut(&mut plugin_instance);
-        mt.floating_thread_handle = Some(handle);
-        mt.floating_close_signal = Some(close_signal);
+        mt.gui_worker = Some(GuiWorker::from_parts_for_test(tx, handle));
 
         drop(plugin_instance);
 
         assert!(
-            !fence.load(Ordering::Relaxed),
+            !fence.load(std::sync::atomic::Ordering::Relaxed),
             "cycle {cycle}: fence must be lowered after teardown"
         );
     }

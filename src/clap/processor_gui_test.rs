@@ -16,11 +16,12 @@ mod tests {
     /// Verifies that `is_api_supported` accepts all valid configurations and rejects invalid ones.
     ///
     /// Valid:
-    ///   - X11 floating (the only X11 mode the plugin actually delivers)
+    ///   - X11 floating (plugin-managed top-level window)
+    ///   - X11 embedded (native XEmbed — E4/Sprint 8; the definitive guarantee
+    ///     is enforced in `set_parent`, which errors instead of downgrading)
     ///   - Wayland floating (only Wayland mode allowed by CLAP spec)
     ///
     /// Invalid:
-    ///   - X11 embedded (native reparenting is not implemented)
     ///   - Wayland embedded (no XEmbed equivalent on Wayland — rejected by spec)
     ///   - WIN32 / COCOA (wrong OS)
     #[test]
@@ -36,14 +37,14 @@ mod tests {
 
         // ── X11 ─────────────────────────────────────────────────────────────
         assert!(
-            !gui_ext.is_api_supported(
+            gui_ext.is_api_supported(
                 &mut handle,
                 GuiConfiguration {
                     api_type: GuiApiType::X11,
                     is_floating: false
                 }
             ),
-            "X11 embedded must NOT be supported (no reparenting backend)"
+            "X11 embedded must be supported (E4/Sprint 8 — embed-at-creation)"
         );
         assert!(
             gui_ext.is_api_supported(
@@ -134,7 +135,7 @@ mod tests {
         }
     }
 
-    /// Verifies that `get_preferred_api` returns X11 floating when `WAYLAND_DISPLAY` is unset.
+    /// Verifies that `get_preferred_api` returns X11 embedded when `WAYLAND_DISPLAY` is unset.
     #[test]
     fn test_gui_get_preferred_api_x11_session() {
         use clack_extensions::gui::{GuiApiType, PluginGui};
@@ -160,8 +161,8 @@ mod tests {
                 "X11 session: preferred API must be X11"
             );
             assert!(
-                pref.is_floating,
-                "X11 session: preferred mode must be floating"
+                !pref.is_floating,
+                "X11 session: preferred mode must be embedded (E4/Sprint 8 native XEmbed)"
             );
         }
     }
@@ -206,19 +207,26 @@ mod tests {
         // when the plugin returns an Err. Thus we cannot assert gui_ext.set_size returns Err
         // from the host-side wrapper here.
 
-        // 4. create rejects X11 embedded — the contract is floating-only
-        assert!(
-            gui_ext
-                .create(
-                    &mut handle,
-                    GuiConfiguration {
-                        api_type: GuiApiType::X11,
-                        is_floating: false
-                    },
-                )
-                .is_err(),
-            "create with X11 embedded must be rejected"
-        );
+        // 4. create accepts X11 embedded when a display is reachable, and
+        //    rejects it (honestly, at create-time — the only error the host can
+        //    see, since clack 0.1.1 swallows set_parent errors) when DISPLAY is
+        //    unset (e.g. headless CI).
+        {
+            let has_display = std::env::var_os("DISPLAY").is_some();
+            let created = gui_ext.create(
+                &mut handle,
+                GuiConfiguration {
+                    api_type: GuiApiType::X11,
+                    is_floating: false,
+                },
+            );
+            assert_eq!(
+                created.is_ok(),
+                has_display,
+                "create(X11 embedded) must succeed with a display and fail without one \
+                 (E4/Sprint 8 create-time viability gate), got {created:?}"
+            );
+        }
 
         // 5. create succeeds with X11 floating
         assert!(
@@ -449,10 +457,11 @@ mod tests {
 
         // 2. Open floating window — spawns background "nam-slint-gui" thread with
         //    slint::run_event_loop(), waits for initialization (up to 2 seconds).
-        //    The host window handle is intentionally not dereferenced: X11 is served
-        //    floating-only, so the plugin always creates its own top-level window and
-        //    never reparents into the host (the embedded `set_parent` path is not
-        //    negotiated, see `is_api_supported`). Passing a dummy handle is therefore safe.
+        //    The host window handle is intentionally not dereferenced by the
+        //    floating path: `set_transient` creates a plugin-owned top-level
+        //    window and never reparents into the host (embedded X11 is a
+        //    separate `set_parent` negotiation — E4/Sprint 8). Passing a dummy
+        //    handle is therefore safe.
         // SAFETY: The dummy window handle is not dereferenced by the plugin.
         let result = unsafe {
             gui_ext.set_transient(

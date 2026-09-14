@@ -27,7 +27,7 @@ use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::NamModel;
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 /// Main thread exclusive state (model loading, state save/load).
 pub struct NamClapMainThread<'a> {
@@ -53,10 +53,11 @@ pub struct NamClapMainThread<'a> {
     pub last_seen_slimmable_stale: u32,
     /// Slint window handle for GUI lifecycle control.
     pub slint_window: Option<slint::Weak<crate::clap::gui::MainWindow>>,
-    /// Thread handle for the floating window event loop.
-    pub floating_thread_handle: Option<std::thread::JoinHandle<()>>,
-    /// Close signal for the floating window.
-    pub floating_close_signal: Option<Arc<AtomicBool>>,
+    /// Persistent per-instance GUI worker thread (owns the Slint platform and
+    /// event loop for the instance lifetime; survives `gui.destroy()` so
+    /// repeated create/destroy cycles keep working — Slint 1.17 pins the
+    /// platform to the thread that first initialized it).
+    pub(crate) gui_worker: Option<crate::clap::gui::worker::GuiWorker>,
     /// Handle for the model file-dialog background thread (if active). Joined during teardown.
     #[expect(dead_code, reason = "held for join on teardown, never read directly")]
     pub(crate) dialog_handle: Option<std::thread::JoinHandle<()>>,

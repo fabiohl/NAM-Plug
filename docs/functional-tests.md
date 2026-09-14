@@ -103,6 +103,12 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
   *Expected:* Plugin locates model via search paths / basename and restores full state.
 - [ ] **2C.7 Floating GUI Fallback Window:** Test plugin on a host requesting floating GUI mode → open and close the window 10+ times.
   *Expected:* GUI opens as a standalone top-level window. All 10+ cycles complete without crashes, zombie windows, or RSS growth (>5 MB would indicate a leak).
+- [ ] **2C.7a X11 Embedded GUI (`[X11]`):** On an X11 session (or XWayland), leave the host in its **default** GUI negotiation (embedded — `is_floating=false`) → open and close the plugin GUI 10+ times.
+  *Expected:* the GUI renders **inside** the host's plugin panel (a native X11 child of the host `Window` — XEmbed), not as a separate top-level window; keyboard input works when the host panel has focus; all cycles complete without crashes, zombie/orphan windows, or RSS growth. *(Automated equivalent: `DISPLAY=:99 cargo test --features testing -- --ignored gui_embedded` under Xvfb/Xephyr.)*
+- [ ] **2C.7b Embedded→Floating Honest Fallback (`[X11]`):** Force the host to request an unsupported embedded configuration (e.g. run without an X11 display server reachable, or check the host's "floating editor" option if available) → the plugin must **not** show a silently-floating window for an embedded contract: `create()` is rejected and the host reports the GUI failure / falls back.
+  *Expected:* no second top-level window, no invisible GUI, no FSM anomaly; the status bar shows the negotiated backend (`"X11 (Embedded)"`, `"X11 (Floating)"`, or `"Wayland (Floating)"`).
+- [ ] **2C.7c GUI Reopen After destroy (`[X11]`):** With an X11 embedded GUI open, close the host's plugin editor window (host calls `destroy()`) and re-open it — repeat 5+ times on the same plugin instance.
+  *Expected:* the window re-embeds into the host panel every time (persistent per-instance GUI worker); no "The Slint platform was initialized in another thread" failures in the log.
 - [ ] **2C.8 Bitwig Device Panel Pages (`[Bitwig]`):** Open Bitwig Device Panel → navigate between pages.
   *Expected:* 2 pages present: **"Main"** (INPUT, OUTPUT, BYPASS) and **"Gate"** (GATE). Moving a slider in the Device Panel updates the corresponding knob in the GUI, and vice versa.
 - [ ] **2C.9 Category & Search Indexing:** Search host plugin browser for `"distortion"`, `"gate"`, or `"mono"`.

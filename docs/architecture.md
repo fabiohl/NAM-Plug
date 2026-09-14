@@ -145,9 +145,26 @@ Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-exten
 | `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                            |
 | `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision. |
 | `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining cab-sim IR ring-out frames.                            |
-| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint declarative GUI with dual Wayland and X11 support (`CLAP_WINDOW_API_WAYLAND` and `CLAP_WINDOW_API_X11`). |
+| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint declarative GUI with **native X11 XEmbed embedding** and X11/Wayland floating support (E4/Sprint 8, Opção A). |
 
 > **Host Compatibility Note:** Native Wayland and X11 window negotiation (`CLAP_WINDOW_API_WAYLAND` and `CLAP_WINDOW_API_X11`) is verified across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. PreSonus Studio One / Fender Studio Pro for Linux is supported via floating window mode with bounded join teardown (`nam-gui-reaper`).
+
+#### 4.10 Windowing Support Matrix (E4/Sprint 8)
+
+| Negotiation (`is_floating`)                  | Wayland session (`WAYLAND_DISPLAY`)                      | X11 session / XWayland                                          |
+|:---------------------------------------------|:-------------------------------------------------------- |:--------------------------------------------------------------- |
+| `CLAP_WINDOW_API_X11`, **embedded**          | `create` rejected unless `DISPLAY` reachable (XWayland); X11 event loop forced → **native XEmbed child** (embed-at-creation) | **Native XEmbed child** of the host `Window` (preferred API)     |
+| `CLAP_WINDOW_API_X11`, floating              | X11-floating window via XWayland (first window forces X11 loop) | Plugin-owned top-level X11 window                                |
+| `CLAP_WINDOW_API_WAYLAND`, floating          | Native Wayland top-level window (preferred API)          | Wayland window only if a Wayland compositor is present; else rejected by negotiation |
+| `CLAP_WINDOW_API_WAYLAND`, embedded          | **Rejected** (no XEmbed equivalent on Wayland; CLAP spec) | **Rejected**                                                     |
+
+Guarantees: an embedded request is honored **only** when embedding actually
+happens (create-time viability gate + strict `set_parent` error path); the
+plugin never silently delivers a floating window for an embedded contract and
+never creates two windows. Repeated `create`/`destroy` cycles reuse the
+persistent per-instance GUI worker (Slint 1.17 pins the platform to the
+initializing thread); a *second plugin instance's* GUI in the same process is
+limited to one platform per process (documented Slint constraint).
 
 A separate **Preset Discovery Factory** (`src/clap/factory/preset_discovery.rs`) indexes local models in `~/.nam/models` with extracted metadata so hosts can list them natively.
 
@@ -426,8 +443,8 @@ The graphical interface is built using the declarative Slint UI framework (v1.17
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Rendering Pipeline: Slint v1.17 ──► FemtoVG / OpenGL backend via winit     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Windowing: X11 & Wayland — floating-only (CLAP_WINDOW_API_X11/WAYLAND)     │
-│             Bounded Teardown Join (nam-gui-reaper)                          │
+│  Windowing: X11 embedded (native XEmbed) + X11/Wayland floating fallback   │
+│             Persistent per-instance GUI worker + bounded teardown reaper   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Async File Picker: rfd (Background Worker File Dialog, Non-Blocking)       │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -436,6 +453,8 @@ The graphical interface is built using the declarative Slint UI framework (v1.17
 ### 7.1 Module Organization
 
 - `src/clap/gui/mod.rs` — GUI entry point, window dimensions (`600x275`), `GuiHostBridge`.
+- `src/clap/gui/worker.rs` — persistent per-instance GUI worker thread (`GuiWorker`): owns the Slint platform + event loop for the instance lifetime, so repeated `create`/`destroy` cycles (and the X11 embed hook) keep working (E4/Sprint 8).
+- `src/clap/gui/x11_embed.rs` — process-global X11 XEmbed embed-at-creation engine: dynamic `with_winit_window_attributes_hook`, backend pin bookkeeping, embed target by value (E4/Sprint 8).
 - `src/clap/gui/lifecycle.rs` — `GuiLifecycle` finite state machine for window visibility (`Hidden`/`ShowRequested`/`Active`/`HideRequested`/`Destroyed`).
 - `src/clap/gui/slint/main.slint` — 5-Zone declarative UI layout (`MainWindow`).
 - `src/clap/gui/slint/` — Modular Slint component definitions (`RotaryKnob`, `VuMeter`, `ToggleSwitch`, `LedIndicator`, `SelectorButton`, `ModelCard`, `IrCard`).
@@ -461,16 +480,46 @@ The status bar exposes four informational strings that are **never** hard-coded 
 
 - **`model_arch`** — live: sourced from `ColdShared::ui_model_metadata` (`NamModelMetadata::architecture`/`topology`), diffed every 60 Hz tick with the same echo-guard pattern as `model_name`/`ir_name`. Shows `"No model loaded"` when no model is active, never a stale architecture after a swap or clear.
 - **`simd_badge`** — static-per-window: the runtime-detected SIMD backend (`neural_amp_modeler_rs::math::common::SIMD_MATH.instruction_set`) never changes for the lifetime of a process, so it is read and set once in `SlintViewModel::new()` rather than every tick. Reads `"AVX2+FMA"` in every standard build (the opt-in `avx512` feature is not enabled by `NAM-Plug`).
-- **`backend_text`** — static-per-window: the negotiated windowing backend (`"X11 (Floating)"` / `"Wayland (Floating)"` / `"Floating"`) is computed once in `spawn_gui()` from the CLAP host's `Window::api_type()` and passed into `SlintViewModel::new()`, matching the floating-only contract of §4 (Finding F2 / Opção B).
+- **`backend_text`** — static-per-window: the negotiated windowing backend (`"X11 (Embedded)"` / `"X11 (Floating)"` / `"Wayland (Floating)"` / `"Floating"`) is computed once in `spawn_gui()` from the CLAP host's `Window::api_type()` and the negotiated mode, and passed into `SlintViewModel::new()` (Finding F2 / Opção A + F6).
 - **`dsp_load_text`** — **honest placeholder**: no real per-block DSP-load percentage metric exists yet in the codebase (verified: no such counter is computed anywhere in `src/clap/processor/`). The design-time default was corrected from a hard-coded, misleading `"1.4% DSP"` to `"—"`; `SlintViewModel` intentionally never overwrites it. Wiring a real metric here is a distinct, larger follow-up (would require instrumenting an RT-safe cycle/deadline counter and publishing it through `RtToUi`), tracked as future work rather than bundled into this fix.
 
-### 7.3 Bounded Teardown & Reaper Pattern (`nam-gui-reaper`)
+### 7.3 Persistent GUI Worker & Bounded Teardown (`nam-gui-reaper`)
+
+**Why a persistent worker (E4/Sprint 8):** Slint 1.17 pins the platform — and
+with it the winit event loop and the X11 XEmbed hook — to the **thread that
+first initializes it**. A per-generation "one thread per window" model breaks
+the first `destroy()` + re-open cycle (the new thread gets
+`SetPlatformError("The Slint platform was initialized in another thread")`).
+`src/clap/gui/worker.rs` therefore hosts **one** `"nam-slint-gui"` thread per
+plugin instance that outlives `gui.destroy()`: the platform is initialized on
+it exactly once, every window generation reuses the same event loop, and the
+dynamic embed hook applies the negotiated parent id per generation.
 
 Window closing and destruction follow a deterministic, leak-free protocol:
-1. The DAW host invokes `gui.destroy()` or the user closes the floating window (`on_close_requested`).
-2. The plugin signals `floating_close_signal`, invokes `slint::quit_event_loop()`, and clears the local `slint_window` handle.
-3. The main thread performs a bounded join on the `"nam-slint-gui"` thread handle with a timeout of `TEARDOWN_JOIN_TIMEOUT` (2000 ms).
-4. If the windowing backend takes longer to release resources, the handle is handed off to a detached background thread named `"nam-gui-reaper"` (`spawn_reaper`), guaranteeing that the DAW main thread is never blocked while preventing thread abandonment and use-after-free conditions.
+1. The DAW host invokes `gui.destroy()` or the user closes the window
+   (`on_close_requested`).
+2. The plugin closes the window (`close_current_window`: `slint::quit_event_loop()`
+   guarded by owning a worker, and clears `slint_window`). The worker keeps
+   running, ready for the next `create`.
+3. After the event loop exits, the worker releases the window in order —
+   `SlintViewModel` (strong clone), `Window::hide()` (drops the additional
+   strong component reference that `show()` maintains), and the `MainWindow`
+   handle — then runs **one drained loop iteration** so winit's queued
+   `XDestroyWindow` reaches the X server (winit only queues the destroy on
+   window drop, and the persistent connection never flushes otherwise — this
+   is what guarantees zero orphan children across cycles).
+4. Only at **instance destruction** the worker is shut down (job channel
+   closed) and joined with a bounded timeout `TEARDOWN_JOIN_TIMEOUT` (2000 ms).
+5. If the windowing backend takes longer to release resources, the handle is
+   handed off to a detached background thread named `"nam-gui-reaper"`
+   (`spawn_reaper`), guaranteeing that the DAW main thread is never blocked
+   while preventing thread abandonment and use-after-free conditions.
+
+**Multi-instance constraint (Slint 1.17):** one platform per process means a
+second plugin instance cannot open a GUI while a first instance's worker is
+alive (its window creation fails cleanly and the host sees the honest
+`create()` rejection). This is a documented Slint constraint, tracked
+separately from this delivery.
 
 ### 7.4 GUI Lifecycle FSM Feedback
 
@@ -494,6 +543,96 @@ the dispatched `Window::hide()` as the completion of the request and drives
 `HideRequested → Hidden` synchronously. `Hide` is accepted from `ShowRequested`
 as well, so a host that hides before `WindowReady` never leaves a window stuck
 visible.
+
+### 7.5 X11 Embedding — Spike, Design & Delivery (Finding F2 / Opção A)
+
+> **Status:** delivered (E4 / Sprint 8). Production code in `src/clap/gui/x11_embed.rs`
+> (process-global embed engine) + `src/clap/gui/worker.rs` (persistent GUI
+> worker). The spike POC lives on the `spike/x11-embed` branch
+> (`examples/x11_embed_poc.rs`); Sprint 8 supersedes it with the delivery
+> below. Verified by headless gates plus the display-only Xvfb/X11 test
+> `gui_embedded_x11_open_close_cycles_no_leak` (10 open/close cycles, zero
+> orphan children).
+
+**Go/no-go verdict: GO.** Slint 1.17 can create a window as a native X11 child
+(XEmbed) **without forking Slint**, using the officially exposed
+`unstable-winit-030` feature. This unblocks E4 / Sprint 8 (Opção A).
+
+**Spike evidence (read-only, Slint 1.17.1 / winit 0.30.13 / clack-extensions 0.1.1):**
+
+| Question                                                                                     | Finding                                                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| (a) Can a custom `slint::platform::WindowAdapter`/`Platform` inject an existing X11 `Window`? | Not required. Slint 1.17 exposes `slint::BackendSelector::with_winit_window_attributes_hook(Fn(WindowAttributes) -> WindowAttributes)` (feature `unstable-winit-030`), invoked in `i-slint-backend-winit::Backend::create_window_adapter` on **every** window creation. A custom `WindowAdapter` is therefore unnecessary for embedding.                                      |
+| (b) How to extract the host X11 `Window` id from CLAP?                                        | `clack_extensions::gui::Window::as_x11_handle() -> Option<c_ulong>` returns the host `Window` directly (the `raw-window-handle_06` feature is **not** needed). Fallbacks: `Window::from_generic_ptr` or the rwh-0.6 `HasRawWindowHandle` impl (`XlibWindowHandle`).                                                                                                         |
+| (c) Does `winit` expose the X11 window id for `XReparentWindow`/`xcb_reparent_window`?       | Yes, and better: `winit::platform::x11::WindowAttributesExtX11::with_embed_parent_window(XWindow)` sets `platform_specific.x11.embed_window`; the X11 backend then creates the window as a child (`create_window(..., parent=embed_window, ...)`, `platform_impl/linux/x11/window.rs:305`) and sets the `_XEMBED` property `[0,1]` (version 0, mapped) via `embed_window()` (`window.rs:368`). |
+| (d) Is `build.rs` affected?                                                                   | No. `slint_build::compile("src/clap/gui/slint/main.slint")` stays untouched; the feature flag and backend selection are runtime-only.                                                                                                                                                                                                                                    |
+
+**Selected design (decision): embed-at-creation (option i).**
+
+- **(i) Embed-at-creation** — enable `slint` feature `unstable-winit-030`, then,
+  before the first Slint component is created, select the backend with
+  `BackendSelector::new().backend_name("winit").with_winit_window_attributes_hook(|attrs| attrs.with_embed_parent_window(parent_id)).select()`.
+  The host `parent_id` is obtained from `Window::as_x11_handle()` cast to
+  `winit::platform::x11::XWindow` (`u32`). winit creates the window already
+  parented and sets `_XEMBED` — no reparent race, no WM interference, no extra
+  X11 connection of our own.
+- **(ii) Reparent-after-creation** (rejected) — `WinitWindowAccessor::with_winit_window(|w| ...)`
+  yields the winit window only **after** the event loop has mapped it as a
+  top-level; a subsequent `xcb_reparent_window`/`XReparentWindow` would fight the
+  WM (which may already frame/focus the window) and requires a direct
+  `x11rb`/`xcb` dependency plus our own X11 connection.
+- **(iii) Custom `WindowAdapter`/`Platform`** (rejected) — heavyweight, re-implements
+  the window lifecycle Slint already provides, when (i) is a first-class hook.
+
+**Implications for `GuiHostBridge` / `alive_fence` (child must not outlive the host `Window`):**
+
+- The embed hook captures the host `Window` id by value (`XWindow` is a `u32`),
+  so no raw pointer escapes to the GUI thread — the existing `GuiHostBridge`
+  fence protocol is unchanged and remains the sole owner of host lifetime.
+- The child window is created *inside* the host's window tree; if the host
+  closes its panel without `destroy()`, the child is destroyed by X11
+  automatically (it is a descendant), so no orphan top-level remains. The
+  plugin still drives `on_close_requested`/`gui_user_closed` (Sprint 2) unchanged.
+
+**Order of `set_parent` vs `show` (design constraint):**
+
+- The embed hook runs at `create_window_adapter`, i.e. when `MainWindow::new()`
+  is called on the GUI worker thread. The host `Window` is only known from
+  `set_parent` (`spawn_gui(Some(window))`), so the main thread resolves the
+  embed target *before* the worker creates the window: it extracts the parent
+  id (by value) into the process-global `EMBED_TARGET` atomic, and the worker's
+  select-once backend (`ensure_backend_on_gui_thread`) installs the **dynamic**
+  hook that reads that atomic on every window creation. `show()` then maps the
+  already-child window; the existing FSM (`WindowReady` promotion) is unaffected.
+- The backend selection happens **on the worker thread** (Slint pins the
+  platform to the initializing thread), exactly once per process
+  (`BACKEND_ONCE`). The first GUI window of the process decides the winit
+  event-loop kind: X11 (forced via `with_x11()`) or native Wayland.
+- `set_transient` (floating fallback) clears the embed target — the dynamic
+  hook becomes a no-op and the window is a regular top-level.
+
+**Honesty: fallback floating (never "two windows"):**
+
+- clack 0.1.1's FFI wrapper maps the plugin's `set_parent`/`set_transient`
+  result through `is_some()`, so a plugin-side `Err` is **invisible to the
+  host**. The honest fallback therefore happens at **`create()`**: the
+  *embedded viability gate* rejects an X11-embedded configuration when the
+  process can no longer embed (non-X11 loop pinned) or when no X11 display is
+  reachable (`DISPLAY` unset — pure Wayland without XWayland). `create()` *does*
+  propagate, so a conforming host falls back to a floating negotiation.
+- `is_api_supported(X11, embedded) == true` is restored (E4/Sprint 8) behind
+  that gate. Defense-in-depth: `set_parent` still returns `Err` (logged loudly,
+  `gui_host.closed()` notified) without creating a window on any embedding
+  failure — never a silently-floating embedded contract, never two windows.
+- `raw-window-handle = "0.6"` is reintroduced in `Cargo.toml` and used by the
+  rwh-0.6 fallback extraction path in `spawn_gui` (clack's `HasRawWindowHandle`
+  impl behind the `raw-window-handle_06` feature); the primary path remains
+  `Window::as_x11_handle()`.
+
+**Stability caveat:** `unstable-winit-030` is a normal Cargo feature on the stable
+toolchain (not nightly); the "unstable" prefix flags that its API may change in
+future minor Slint releases as winit majors evolve. E4/Sprint 8 must pin the
+winit minor and re-validate the hook signature on any Slint upgrade.
 
 ---
 

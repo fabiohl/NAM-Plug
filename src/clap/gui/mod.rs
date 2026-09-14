@@ -13,6 +13,10 @@ pub(crate) mod file_dialogs;
 pub mod lifecycle;
 /// Slint view-model and telemetry/event bridge.
 pub mod slint_view_model;
+/// Persistent per-instance GUI worker thread (E4/Sprint 8).
+pub(crate) mod worker;
+/// Process-global X11 XEmbed embed-at-creation engine (E4/Sprint 8).
+pub(crate) mod x11_embed;
 pub use slint_view_model::{MainWindow, SlintViewModel};
 
 /// Default width of the plugin window.
@@ -41,6 +45,15 @@ pub const GUI_HEIGHT: u32 = 275;
 /// Unlike the previous `extend_host_lifetime()` unsafe transmute, this
 /// struct encapsulates the pointer with explicit safety documentation at
 /// the creation site — no transmute necessary.
+///
+/// # Embedded X11 windows (E4/Sprint 8)
+///
+/// An embedded child window is created *inside* the host's window tree via
+/// the XEmbed hook (`x11_embed`): the hook captures the host X11 parent id by
+/// value (`u32` XID), so no additional raw pointer crosses to the GUI thread.
+/// If the host destroys its panel without calling `gui.destroy()`, X11
+/// destroys the descendant window automatically — the child never outlives
+/// the host `Window`, and the fence protocol below is unchanged.
 #[derive(Clone, Copy)]
 pub struct GuiHostBridge {
     raw: std::ptr::NonNull<()>,
