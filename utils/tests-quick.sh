@@ -234,16 +234,31 @@ find_namcore_render() {
         fi
         warn "NAM_CORE_RENDER_BIN set but path not found: $NAM_CORE_RENDER_BIN"
     fi
-    local local_bin="build/namcore_render/namcore_render"
-    if [ -f "$local_bin" ]; then
-        echo "$local_bin"
-        return 0
-    fi
-    local sibling_bin="../NeuralAmpModeler-rs/build/namcore_render/namcore_render"
-    if [ -f "$sibling_bin" ]; then
-        echo "$sibling_bin"
-        return 0
-    fi
+    local cand
+    for cand in \
+        "build/namcore_render/tools/render" \
+        "build/namcore_render/Release/render" \
+        "build/namcore_render/Debug/render" \
+        "build/namcore_render/render" \
+        "build/namcore_render/namcore_render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/tools/render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/Release/render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/Debug/render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/namcore_render"; do
+        if [ -x "$cand" ]; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    local base hit
+    for base in "build/namcore_render" "../NeuralAmpModeler-rs/build/namcore_render"; do
+        hit=$(find "$base" -type f \( -name render -o -name namcore_render \) -executable -print -quit 2>/dev/null || true)
+        if [ -n "$hit" ]; then
+            echo "$hit"
+            return 0
+        fi
+    done
     return 1
 }
 

@@ -426,6 +426,48 @@ echo -e "\n${BLUE}${BOLD}[Phase 1.5/7] Executing strict Quick QA & RT Heap Alloc
 QUICK_RECEIPT="$PROJECT_DIR/target/logs/quick-receipt.txt"
 HEAP_LOG="$PROJECT_DIR/target/logs/quick-heap-audit.log"
 
+# Discovery helper for NAMCore render oracle
+find_namcore_render() {
+    if [ -n "${NAM_CORE_RENDER_BIN:-}" ]; then
+        if [ -f "$NAM_CORE_RENDER_BIN" ]; then
+            echo "$NAM_CORE_RENDER_BIN"
+            return 0
+        fi
+    fi
+    local cand
+    for cand in \
+        "build/namcore_render/tools/render" \
+        "build/namcore_render/Release/render" \
+        "build/namcore_render/Debug/render" \
+        "build/namcore_render/render" \
+        "build/namcore_render/namcore_render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/tools/render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/Release/render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/Debug/render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/render" \
+        "../NeuralAmpModeler-rs/build/namcore_render/namcore_render"; do
+        if [ -x "$cand" ]; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    local base hit
+    for base in "build/namcore_render" "../NeuralAmpModeler-rs/build/namcore_render"; do
+        hit=$(find "$base" -type f \( -name render -o -name namcore_render \) -executable -print -quit 2>/dev/null || true)
+        if [ -n "$hit" ]; then
+            echo "$hit"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -z "${NAM_CORE_RENDER_BIN:-}" ]; then
+    if _candidate_oracle=$(find_namcore_render 2>/dev/null); then
+        export NAM_CORE_RENDER_BIN="$_candidate_oracle"
+    fi
+fi
+
 if [ "${NAM_SKIP_QUICK_QA:-0}" != "1" ]; then
     local_quick_strict=0
     if [ "$RELEASE_CEREMONY" = "true" ]; then
@@ -830,26 +872,7 @@ else
     GATE_SKIPS+=("clap_validator:unavailable")
 fi
 
-# Discovery helper for NAMCore render oracle
-find_namcore_render() {
-    if [ -n "${NAM_CORE_RENDER_BIN:-}" ]; then
-        if [ -f "$NAM_CORE_RENDER_BIN" ]; then
-            echo "$NAM_CORE_RENDER_BIN"
-            return 0
-        fi
-    fi
-    local base hit
-    for base in "build/namcore_render" "../NeuralAmpModeler-rs/build/namcore_render"; do
-        hit=$(find "$base" -type f -name render -print -quit 2>/dev/null || true)
-        if [ -n "$hit" ]; then
-            echo "$hit"
-            return 0
-        fi
-    done
-    return 1
-}
-
-model_fixture=""
+# Gate 3: NAMCore float parity test against distributed artifact
 if [ -n "${NAM_FIXTURES_DIR:-}" ] && [ -f "$NAM_FIXTURES_DIR/wavenet_a1_standard.nam" ]; then
     model_fixture="$NAM_FIXTURES_DIR/wavenet_a1_standard.nam"
 elif [ -f "tests/fixtures/models/wavenet_a1_standard.nam" ]; then
