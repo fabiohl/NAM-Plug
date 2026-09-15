@@ -15,7 +15,7 @@
 
 use clack_common::events::Pckn;
 use clack_common::events::event_types::ParamValueEvent;
-use clack_common::utils::{ClapId, Cookie};
+use clack_common::utils::ClapId;
 use clack_extensions::render::{PluginRender, RenderMode};
 use clack_host::prelude::*;
 use nam_plug::clap::extensions::params::{
@@ -233,7 +233,7 @@ fn main() {
     let receipt = WorkloadReceipt {
         manifest_version: MANIFEST_VERSION.to_string(),
         status: "SUCCESS".to_string(),
-        timestamp_utc: format!("{:?}", std::time::SystemTime::now()),
+        timestamp_utc: iso8601_now(),
         total_scenarios: scenario_results.len(),
         total_callbacks,
         total_samples_processed,
@@ -261,6 +261,30 @@ fn main() {
 
     log::info!("📄 Generated receipt at: {}", receipt_path.display());
     log::info!("✓ Real-world PGO profiling workload completed successfully.");
+}
+
+/// Generates a standardized ISO-8601 UTC string (RFC-3339) using POSIX libc time functions.
+fn iso8601_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::gmtime_r(&secs, &mut tm) };
+    let mut buf = [0u8; 32];
+    let len = unsafe {
+        libc::strftime(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            c"%Y-%m-%dT%H:%M:%SZ".as_ptr(),
+            &tm,
+        )
+    };
+    if len > 0 {
+        String::from_utf8_lossy(&buf[..len]).into_owned()
+    } else {
+        format!("{secs}")
+    }
 }
 
 /// Resolves mandatory fixtures and returns their metadata. Aborts immediately if missing.
@@ -525,8 +549,8 @@ fn run_clap_scenario(
             .plugin_handle()
             .get_extension::<PluginRender>();
         if let Some(render_ext) = ext {
-            let mut handle = plugin_instance.plugin_handle();
-            render_ext.set(&mut handle, RenderMode::Offline)?;
+            let handle = plugin_instance.plugin_handle();
+            render_ext.set(&handle, RenderMode::Offline)?;
         }
     }
 
@@ -582,21 +606,18 @@ fn run_clap_scenario(
                     ClapId::new(PARAM_INPUT_GAIN),
                     Pckn::match_all(),
                     mod_gain,
-                    Cookie::empty(),
                 ));
                 input_events_buffer.push(&ParamValueEvent::new(
                     (chunk_len / 4) as u32,
                     ClapId::new(PARAM_GATE_THRESH),
                     Pckn::match_all(),
                     -60.0 + (block_idx % 30) as f64,
-                    Cookie::empty(),
                 ));
                 input_events_buffer.push(&ParamValueEvent::new(
                     (chunk_len / 2) as u32,
                     ClapId::new(PARAM_OUTPUT_GAIN),
                     Pckn::match_all(),
                     -mod_gain,
-                    Cookie::empty(),
                 ));
                 if block_idx.is_multiple_of(16) {
                     input_events_buffer.push(&ParamValueEvent::new(
@@ -604,7 +625,6 @@ fn run_clap_scenario(
                         ClapId::new(PARAM_BYPASS),
                         Pckn::match_all(),
                         0.0,
-                        Cookie::empty(),
                     ));
                 }
             }

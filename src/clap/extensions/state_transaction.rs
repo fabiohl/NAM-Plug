@@ -84,7 +84,7 @@ pub(crate) enum RestoreMode {
 /// Entry-point for the 3-phase transactional state restore.
 pub(crate) fn restore_state_transactional(
     buffer: &[u8],
-    main_thread: &mut NamClapMainThread,
+    main_thread: &NamClapMainThread,
     mode: RestoreMode,
 ) -> Result<(), PluginError> {
     debug_assert_main_thread(&main_thread.host);
@@ -744,7 +744,7 @@ fn next_restore_generation() -> u64 {
 ///   retained in `pending_model` for `activate()`.
 fn commit(
     validated: ValidatedRestore,
-    main_thread: &mut NamClapMainThread,
+    main_thread: &NamClapMainThread,
     mode: &RestoreMode,
 ) -> Result<(), PluginError> {
     let buffer_size = main_thread.shared.cold.buffer_size.load(Ordering::Relaxed);
@@ -759,7 +759,7 @@ fn commit(
 /// host restart cycle (different physical latency, Política A / TR.1).
 fn atomic_commit(
     validated: ValidatedRestore,
-    main_thread: &mut NamClapMainThread,
+    main_thread: &NamClapMainThread,
     mode: &RestoreMode,
 ) -> Result<(), PluginError> {
     let host_rate = {
@@ -769,7 +769,7 @@ fn atomic_commit(
     let buffer_size = main_thread.shared.cold.buffer_size.load(Ordering::Relaxed);
     let (publish, txn) = build_restore_package(
         validated,
-        &main_thread.params,
+        &main_thread.params.borrow(),
         host_rate,
         buffer_size,
         mode,
@@ -822,11 +822,10 @@ fn atomic_commit(
     if !latency_differs {
         // Same latency ⇒ continuous atomic restore through SPSC (ack-gated).
         // Clear any superseded staged items on the main thread (TR.1 #5).
-        main_thread.staged_restore = None;
-        if let Some(staged) = main_thread.staged_swap.as_mut() {
+        *main_thread.staged_restore.borrow_mut() = None;
+        if let Some(mut staged) = main_thread.staged_swap.borrow_mut().take() {
             staged.clear_model();
             staged.clear_ir();
-            main_thread.staged_swap = None;
         }
 
         let pending = PendingRestore {
@@ -846,8 +845,8 @@ fn atomic_commit(
                 Ordering::Release,
             );
         }
-        main_thread.staged_swap = None;
-        main_thread.staged_restore = Some(StagedRestore { txn, publish });
+        *main_thread.staged_swap.borrow_mut() = None;
+        *main_thread.staged_restore.borrow_mut() = Some(StagedRestore { txn, publish });
         main_thread.host.request_restart();
     }
 
@@ -1011,12 +1010,16 @@ fn build_restore_package(
 
 /// Attempts the first `try_push_command` of the transaction. On `Full` the whole
 /// package (txn + publish payload) is retained in `pending_restore` for retry.
-fn deliver_pending_restore(main_thread: &mut NamClapMainThread, mut pending: PendingRestore) {
+///
+/// Runs under `&NamClapMainThread`: the `pending_restore` and `cmd_producer`
+/// borrows are scoped and released before the host `request_callback()`.
+fn deliver_pending_restore(main_thread: &NamClapMainThread, mut pending: PendingRestore) {
     if let Some(txn) = pending.txn.take() {
-        match main_thread
+        let push_result = main_thread
             .cmd_producer
-            .try_push_command(ClapParamPayload::RestoreTxn(txn))
-        {
+            .borrow_mut()
+            .try_push_command(ClapParamPayload::RestoreTxn(txn));
+        match push_result {
             Ok(seq) => {
                 pending.txn = None;
                 pending.seq = seq;
@@ -1026,14 +1029,14 @@ fn deliver_pending_restore(main_thread: &mut NamClapMainThread, mut pending: Pen
                 if let ClapParamPayload::RestoreTxn(txn) = payload {
                     pending.txn = Some(txn);
                 }
-                main_thread.pending_restore = Some(pending);
+                *main_thread.pending_restore.borrow_mut() = Some(pending);
                 main_thread.host.request_callback();
                 return;
             }
         }
     }
     // Pushed (or already pushed earlier): retain until the audio thread acks.
-    main_thread.pending_restore = Some(pending);
+    *main_thread.pending_restore.borrow_mut() = Some(pending);
     main_thread.host.request_callback();
 }
 
@@ -1041,7 +1044,7 @@ fn deliver_pending_restore(main_thread: &mut NamClapMainThread, mut pending: Pen
 /// delivered to the audio thread. Kept at delivery (push) time
 /// so synchronous callers observe the counter advance without
 /// waiting for the ack; UI/path/hash publication still waits for the ack.
-fn note_model_delivered(main_thread: &mut NamClapMainThread, publish: &RestorePublish) {
+fn note_model_delivered(main_thread: &NamClapMainThread, publish: &RestorePublish) {
     if publish.model.is_some() {
         main_thread
             .shared
@@ -1053,7 +1056,10 @@ fn note_model_delivered(main_thread: &mut NamClapMainThread, publish: &RestorePu
 
 /// Publishes UI/paths/hashes for a restore transaction once the audio thread has
 /// applied it (ack phase), or immediately in a pre-activate local commit.
-pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &mut NamClapMainThread) {
+///
+/// Runs under `&NamClapMainThread`; every `RefCell` borrow is scoped and never
+/// held across a host call (`mark_dirty` / `rescan`).
+pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMainThread) {
     let RestorePublish {
         mode_full,
         params,
@@ -1119,7 +1125,7 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &mut NamClap
             .store(48000, Ordering::Relaxed);
     }
 
-    if let Some(mut state_ext) = main_thread
+    if let Some(state_ext) = main_thread
         .host
         .get_extension::<clack_extensions::state::HostState>()
     {
@@ -1142,8 +1148,11 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &mut NamClap
             .cold
             .ir_raw_sample_rate
             .store(ir_raw_sample_rate, Ordering::Relaxed);
-        main_thread.params.ir_path = Some(PathBuf::from(ir_path_str.clone()));
-        main_thread.params.ir_hash = ir_hash;
+        {
+            let mut params = main_thread.params.borrow_mut();
+            params.ir_path = Some(PathBuf::from(ir_path_str.clone()));
+            params.ir_hash = ir_hash;
+        }
     } else if mode_full {
         if let Ok(mut ir_guard) = main_thread.shared.cold.ir_path.lock() {
             *ir_guard = None;
@@ -1159,73 +1168,87 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &mut NamClap
             .cold
             .ir_raw_sample_rate
             .store(0, Ordering::Relaxed);
-        main_thread.params.ir_path = None;
-        main_thread.params.ir_hash = None;
+        {
+            let mut params = main_thread.params.borrow_mut();
+            params.ir_path = None;
+            params.ir_hash = None;
+        }
     }
 
     // ── Params publication ──
-    match mode {
-        RestoreMode::Full => {
-            main_thread.params = params;
+    // Single scoped borrow: no host call happens while it is held.
+    {
+        let mut mt_params = main_thread.params.borrow_mut();
+        match mode {
+            RestoreMode::Full => {
+                *mt_params = params;
+            }
+            RestoreMode::ForPreset => {
+                mt_params.input_gain_db = params.input_gain_db;
+                mt_params.output_gain_db = params.output_gain_db;
+                mt_params.gate_threshold_db = params.gate_threshold_db;
+                mt_params.bypass = params.bypass;
+                mt_params.adaptive_compute = params.adaptive_compute;
+                mt_params.slim_override = params.slim_override;
+                mt_params.oversample = params.oversample;
+                mt_params.activation_precision = params.activation_precision;
+            }
         }
-        RestoreMode::ForPreset => {
-            main_thread.params.input_gain_db = params.input_gain_db;
-            main_thread.params.output_gain_db = params.output_gain_db;
-            main_thread.params.gate_threshold_db = params.gate_threshold_db;
-            main_thread.params.bypass = params.bypass;
-            main_thread.params.adaptive_compute = params.adaptive_compute;
-            main_thread.params.slim_override = params.slim_override;
-            main_thread.params.oversample = params.oversample;
-            main_thread.params.activation_precision = params.activation_precision;
-        }
-    }
 
-    if mode_full {
-        main_thread.params.model_path = model_path_on_disk;
-        main_thread.params.model_basename = model_basename;
-        main_thread.params.model_hash = model_hash;
-        if let Some(search_path) = model_search_path_to_add
-            && !main_thread.params.model_search_paths.contains(&search_path)
-        {
-            main_thread.params.model_search_paths.push(search_path);
+        if mode_full {
+            mt_params.model_path = model_path_on_disk;
+            mt_params.model_basename = model_basename;
+            mt_params.model_hash = model_hash;
+            if let Some(search_path) = model_search_path_to_add
+                && !mt_params.model_search_paths.contains(&search_path)
+            {
+                mt_params.model_search_paths.push(search_path);
+            }
         }
-    }
 
-    // ── Publish params to RT atomics ──
-    use crate::clap::extensions::params::bypass_bool_to_u32;
-    main_thread.shared.ui_to_rt.param_input_gain.store(
-        main_thread.params.input_gain_db.to_bits(),
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_output_gain.store(
-        main_thread.params.output_gain_db.to_bits(),
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_gate_thresh.store(
-        main_thread.params.gate_threshold_db.to_bits(),
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_bypass.store(
-        bypass_bool_to_u32(main_thread.params.bypass),
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_adaptive_compute.store(
-        main_thread.params.adaptive_compute as u32,
-        Ordering::Relaxed,
-    );
-    main_thread
-        .shared
-        .ui_to_rt
-        .param_slim_override
-        .store(main_thread.params.slim_override as u32, Ordering::Relaxed);
-    main_thread.shared.ui_to_rt.param_oversample.store(
-        main_thread.params.oversample.to_f32() as u32,
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_activation.store(
-        main_thread.params.activation_precision as u32,
-        Ordering::Relaxed,
-    );
+        // ── Publish params to RT atomics ──
+        use crate::clap::extensions::params::bypass_bool_to_u32;
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_input_gain
+            .store(mt_params.input_gain_db.to_bits(), Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_output_gain
+            .store(mt_params.output_gain_db.to_bits(), Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_gate_thresh
+            .store(mt_params.gate_threshold_db.to_bits(), Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_bypass
+            .store(bypass_bool_to_u32(mt_params.bypass), Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_adaptive_compute
+            .store(mt_params.adaptive_compute as u32, Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_slim_override
+            .store(mt_params.slim_override as u32, Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_oversample
+            .store(mt_params.oversample.to_f32() as u32, Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_activation
+            .store(mt_params.activation_precision as u32, Ordering::Relaxed);
+    }
     main_thread.shared.bump_generation();
 
     if let Some(params_ext) = main_thread
@@ -1233,7 +1256,7 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &mut NamClap
         .get_extension::<clack_extensions::params::HostParams>()
     {
         params_ext.rescan(
-            &mut main_thread.host,
+            &main_thread.host,
             clack_extensions::params::ParamRescanFlags::VALUES,
         );
     }
@@ -1244,7 +1267,7 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &mut NamClap
 /// retained in `pending_model` for `flush_pending_model()` on `activate()`.
 fn local_commit(
     validated: ValidatedRestore,
-    main_thread: &mut NamClapMainThread,
+    main_thread: &NamClapMainThread,
     mode: &RestoreMode,
 ) -> Result<(), PluginError> {
     let ValidatedRestore {
@@ -1327,7 +1350,7 @@ fn local_commit(
             );
         }
 
-        if let Some(mut state_ext) = main_thread
+        if let Some(state_ext) = main_thread
             .host
             .get_extension::<clack_extensions::state::HostState>()
         {
@@ -1384,10 +1407,13 @@ fn local_commit(
             .cold
             .ir_raw_sample_rate
             .store(ir.sample_rate, Ordering::Relaxed);
-        if let Some(ref ir_path_str) = ir_path_on_disk {
-            main_thread.params.ir_path = Some(PathBuf::from(ir_path_str.clone()));
+        {
+            let mut params = main_thread.params.borrow_mut();
+            if let Some(ref ir_path_str) = ir_path_on_disk {
+                params.ir_path = Some(PathBuf::from(ir_path_str.clone()));
+            }
+            params.ir_hash = ir_hash;
         }
-        main_thread.params.ir_hash = ir_hash;
     } else if let RestoreMode::Full = mode {
         if let Ok(mut ir_guard) = main_thread.shared.cold.ir_path.lock() {
             *ir_guard = None;
@@ -1403,74 +1429,90 @@ fn local_commit(
             .cold
             .ir_raw_sample_rate
             .store(0, Ordering::Relaxed);
-        main_thread.params.ir_path = None;
-        main_thread.params.ir_hash = None;
+        {
+            let mut params = main_thread.params.borrow_mut();
+            params.ir_path = None;
+            params.ir_hash = None;
+        }
     }
 
     // ── Commit params (local) ──
-    match mode {
-        RestoreMode::Full => {
-            main_thread.params = validated_params;
+    // Single scoped `RefCell` borrow of the params slot: released before the
+    // host `rescan` call below, so a reentrant plugin-param read cannot
+    // collide with it.
+    {
+        let mut params = main_thread.params.borrow_mut();
+        match mode {
+            RestoreMode::Full => {
+                *params = validated_params;
+            }
+            RestoreMode::ForPreset => {
+                params.input_gain_db = validated_params.input_gain_db;
+                params.output_gain_db = validated_params.output_gain_db;
+                params.gate_threshold_db = validated_params.gate_threshold_db;
+                params.bypass = validated_params.bypass;
+                params.adaptive_compute = validated_params.adaptive_compute;
+                params.slim_override = validated_params.slim_override;
+                // Oversample and activation_precision are part of the preset identity
+                params.oversample = validated_params.oversample;
+                params.activation_precision = validated_params.activation_precision;
+            }
         }
-        RestoreMode::ForPreset => {
-            main_thread.params.input_gain_db = validated_params.input_gain_db;
-            main_thread.params.output_gain_db = validated_params.output_gain_db;
-            main_thread.params.gate_threshold_db = validated_params.gate_threshold_db;
-            main_thread.params.bypass = validated_params.bypass;
-            main_thread.params.adaptive_compute = validated_params.adaptive_compute;
-            main_thread.params.slim_override = validated_params.slim_override;
-            // Oversample and activation_precision are part of the preset identity
-            main_thread.params.oversample = validated_params.oversample;
-            main_thread.params.activation_precision = validated_params.activation_precision;
-        }
-    }
 
-    if let RestoreMode::Full = mode {
-        main_thread.params.model_path = model_path_on_disk;
-        main_thread.params.model_basename = model_basename;
-        main_thread.params.model_hash = model_hash;
-        if let Some(search_path) = model_search_path_to_add
-            && !main_thread.params.model_search_paths.contains(&search_path)
-        {
-            main_thread.params.model_search_paths.push(search_path);
+        if let RestoreMode::Full = mode {
+            params.model_path = model_path_on_disk;
+            params.model_basename = model_basename;
+            params.model_hash = model_hash;
+            if let Some(search_path) = model_search_path_to_add
+                && !params.model_search_paths.contains(&search_path)
+            {
+                params.model_search_paths.push(search_path);
+            }
         }
-    }
 
-    // ── Publish params to RT atomics (no SPSC push: no audio thread yet) ──
-    use crate::clap::extensions::params::bypass_bool_to_u32;
-    main_thread.shared.ui_to_rt.param_input_gain.store(
-        main_thread.params.input_gain_db.to_bits(),
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_output_gain.store(
-        main_thread.params.output_gain_db.to_bits(),
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_gate_thresh.store(
-        main_thread.params.gate_threshold_db.to_bits(),
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_bypass.store(
-        bypass_bool_to_u32(main_thread.params.bypass),
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_adaptive_compute.store(
-        main_thread.params.adaptive_compute as u32,
-        Ordering::Relaxed,
-    );
-    main_thread
-        .shared
-        .ui_to_rt
-        .param_slim_override
-        .store(main_thread.params.slim_override as u32, Ordering::Relaxed);
-    main_thread.shared.ui_to_rt.param_oversample.store(
-        main_thread.params.oversample.to_f32() as u32,
-        Ordering::Relaxed,
-    );
-    main_thread.shared.ui_to_rt.param_activation.store(
-        main_thread.params.activation_precision as u32,
-        Ordering::Relaxed,
-    );
+        // ── Publish params to RT atomics (no SPSC push: no audio thread yet) ──
+        use crate::clap::extensions::params::bypass_bool_to_u32;
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_input_gain
+            .store(params.input_gain_db.to_bits(), Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_output_gain
+            .store(params.output_gain_db.to_bits(), Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_gate_thresh
+            .store(params.gate_threshold_db.to_bits(), Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_bypass
+            .store(bypass_bool_to_u32(params.bypass), Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_adaptive_compute
+            .store(params.adaptive_compute as u32, Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_slim_override
+            .store(params.slim_override as u32, Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_oversample
+            .store(params.oversample.to_f32() as u32, Ordering::Relaxed);
+        main_thread
+            .shared
+            .ui_to_rt
+            .param_activation
+            .store(params.activation_precision as u32, Ordering::Relaxed);
+    }
     main_thread.shared.bump_generation();
 
     if let Some(params_ext) = main_thread
@@ -1478,7 +1520,7 @@ fn local_commit(
         .get_extension::<clack_extensions::params::HostParams>()
     {
         params_ext.rescan(
-            &mut main_thread.host,
+            &main_thread.host,
             clack_extensions::params::ParamRescanFlags::VALUES,
         );
     }
@@ -1494,16 +1536,20 @@ impl<'a> NamClapMainThread<'a> {
     /// older still-pending one; the older transaction already in the ring still
     /// applies atomically (a complete package), but its UI publication is
     /// superseded.
-    pub(crate) fn flush_pending_restore(&mut self) {
-        let Some(mut pending) = self.pending_restore.take() else {
+    ///
+    /// Runs under `&self`; every `RefCell` borrow is released before the host
+    /// `request_callback()` calls.
+    pub(crate) fn flush_pending_restore(&self) {
+        let Some(mut pending) = self.pending_restore.borrow_mut().take() else {
             return;
         };
 
         if let Some(txn) = pending.txn.take() {
-            match self
+            let push_result = self
                 .cmd_producer
-                .try_push_command(ClapParamPayload::RestoreTxn(txn))
-            {
+                .borrow_mut()
+                .try_push_command(ClapParamPayload::RestoreTxn(txn));
+            match push_result {
                 Ok(seq) => {
                     pending.txn = None;
                     pending.seq = seq;
@@ -1513,17 +1559,17 @@ impl<'a> NamClapMainThread<'a> {
                     if let ClapParamPayload::RestoreTxn(txn) = payload {
                         pending.txn = Some(txn);
                     }
-                    self.pending_restore = Some(pending);
+                    *self.pending_restore.borrow_mut() = Some(pending);
                     self.host.request_callback();
                     return;
                 }
             }
         }
 
-        if pending.seq > 0 && self.cmd_producer.is_acked(pending.seq) {
+        if pending.seq > 0 && self.cmd_producer.borrow().is_acked(pending.seq) {
             publish_restore(pending.publish, self);
         } else {
-            self.pending_restore = Some(pending);
+            *self.pending_restore.borrow_mut() = Some(pending);
             self.host.request_callback();
         }
     }

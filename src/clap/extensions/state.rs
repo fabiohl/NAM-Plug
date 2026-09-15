@@ -154,12 +154,12 @@ fn migrate(version: u32, params: ProcessingParams) -> ProcessingParams {
 }
 
 impl<'a> PluginStateImpl for NamClapMainThread<'a> {
-    fn save(&mut self, output: &mut OutputStream) -> Result<(), PluginError> {
+    fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
         self.snapshot_params();
-        ensure_asset_hashes(&self.params, false)?;
+        ensure_asset_hashes(&self.params.borrow(), false)?;
 
-        let serialized = serialize_envelope(&self.params)?;
+        let serialized = serialize_envelope(&self.params.borrow())?;
         let blob_len = serialized.len();
 
         output
@@ -171,7 +171,7 @@ impl<'a> PluginStateImpl for NamClapMainThread<'a> {
         Ok(())
     }
 
-    fn load(&mut self, input: &mut InputStream) -> Result<(), PluginError> {
+    fn load(&self, input: &mut InputStream) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
         let mut buffer = Vec::new();
         input

@@ -94,7 +94,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     /// `activate` is the ONLY allocation site — kept out of `process`.
     fn activate(
         host: HostAudioProcessorHandle<'a>,
-        main_thread: &mut NamClapMainThread<'a>,
+        main_thread: &NamClapMainThread<'a>,
         shared: &'a NamClapShared,
         audio_config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
@@ -366,7 +366,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // by the main thread; they take precedence over preserved
             // (`DeactivatedDspState`) ones, and superseded preserved resources
             // drop here on the main thread.
-            let staged_restore = main_thread.staged_restore.take();
+            let staged_restore = main_thread.staged_restore.borrow_mut().take();
             let staged_restore_valid = staged_restore.as_ref().is_some_and(|r| {
                 if let Some(ref m) = r.txn.model {
                     m.new_stream.host_rate() == host_rate
@@ -382,7 +382,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 );
             }
 
-            let staged_swap = main_thread.staged_swap.take();
+            let staged_swap = main_thread.staged_swap.borrow_mut().take();
             let staged_model_ok = staged_swap
                 .as_ref()
                 .and_then(|s| s.model.as_ref())
@@ -846,7 +846,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         }
     }
 
-    fn deactivate(mut self, _main_thread: &mut NamClapMainThread<'a>) {
+    fn deactivate(mut self, _main_thread: &NamClapMainThread<'a>) {
         // Isolate panics during cleanup.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // A structural command deferred by the final callback is resolved

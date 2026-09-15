@@ -203,6 +203,9 @@ timeout 300 cargo test --features testing --lib \
     --test clap_e0_containment_test \
     --test clap_e2_proptest \
     --test processor_bypass_test \
+    --test heap_audit \
+    --test slint_view_model_test \
+    --test slint_widgets_test \
     2>&1 | tee target/logs/quick-phase1.log
 assert_ran_tests target/logs/quick-phase1.log 1
 P1_DUR_MS=$(( ($(date +%s%N) - P1_START) / 1000000 ))
@@ -273,16 +276,16 @@ if [ -n "$render_bin" ] && [ -x "$render_bin" ]; then
             --features testing \
             --release \
             --test clap \
-            test_clap_multi_rate_parity_with_cpp_namcore \
+            test_clap_parity_multi_rate \
             -- --ignored --nocapture \
             2>&1 | tee -a target/logs/quick-phase2.log
-        if grep -q "test_clap_multi_rate_parity_with_cpp_namcore .* ok" target/logs/quick-phase2.log; then
+        if grep -q "test_clap_parity_multi_rate .* ok" target/logs/quick-phase2.log; then
             emit "CLAP_CPP_PARITY: PASS"
             ok "Multi-rate parity oracle: PASS"
             assert_ran_tests target/logs/quick-phase2.log 1
             emit "PHASE2: PASS log=target/logs/quick-phase2.log"
         else
-            die "PARITY: FAIL test_clap_multi_rate_parity_with_cpp_namcore did not complete successfully"
+            die "PARITY: FAIL test_clap_parity_multi_rate did not complete successfully"
         fi
     else
         if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then

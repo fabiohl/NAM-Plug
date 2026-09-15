@@ -31,7 +31,7 @@ mod tests {
     use crate::clap::test_util::{assert_zero_alloc, model_path, tmp_path};
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
-    use clack_common::utils::{ClapId, Cookie};
+    use clack_common::utils::ClapId;
     use clack_host::prelude::*;
     use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
     use std::f32::consts::PI;
@@ -129,7 +129,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
         let ir = write_decay_ir("t44_batch_reset");
@@ -188,7 +188,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
         let ir = write_pre_delay_ir(256, "t44_xfade_ir");
@@ -210,23 +210,11 @@ mod tests {
             let mut event_buf = EventBuffer::new();
             if b == 5 {
                 // Toggle Bypass ON at block 5
-                let ev = ParamValueEvent::new(
-                    0,
-                    ClapId::new(PARAM_BYPASS),
-                    Pckn::match_all(),
-                    1.0,
-                    Cookie::empty(),
-                );
+                let ev = ParamValueEvent::new(0, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 1.0);
                 event_buf.push(&ev);
             } else if b == 12 {
                 // Toggle Bypass OFF at block 12
-                let ev = ParamValueEvent::new(
-                    0,
-                    ClapId::new(PARAM_BYPASS),
-                    Pckn::match_all(),
-                    0.0,
-                    Cookie::empty(),
-                );
+                let ev = ParamValueEvent::new(0, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 0.0);
                 event_buf.push(&ev);
             }
 
@@ -278,7 +266,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t44_gate_handoff");
         mt.load_cabsim(&ir).expect("load decay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
@@ -343,7 +331,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t44_combined_ir");
         mt.load_cabsim(&ir).expect("load pre-delay IR");
 
@@ -418,7 +406,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
         let ir = write_decay_ir("t44_zero_alloc");
@@ -439,7 +427,6 @@ mod tests {
                         ClapId::new(PARAM_BYPASS),
                         Pckn::match_all(),
                         if (i / 3) % 2 == 0 { 1.0 } else { 0.0 },
-                        Cookie::empty(),
                     );
                     event_buf.push(&ev);
                 }

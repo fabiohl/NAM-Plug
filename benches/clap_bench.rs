@@ -22,7 +22,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use clack_common::events::Pckn;
 use clack_common::events::event_types::ParamValueEvent;
-use clack_common::utils::{ClapId, Cookie};
+use clack_common::utils::ClapId;
 use clack_extensions::render::{PluginRender, RenderMode};
 use clack_extensions::state::PluginState;
 use clack_host::prelude::*;
@@ -86,9 +86,9 @@ fn create_and_activate_bench_plugin(
         .get_extension::<PluginState>()
         .expect("State extension not found");
     let state_bytes = serde_json::to_vec(params).expect("Failed to serialize ProcessingParams");
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     state_ext
-        .load(&mut handle, &mut state_bytes.as_slice())
+        .load(&handle, &mut state_bytes.as_slice())
         .expect("Failed to load plugin state");
 
     // Configure render mode if requested
@@ -97,9 +97,9 @@ fn create_and_activate_bench_plugin(
             .plugin_handle()
             .get_extension::<PluginRender>();
         if let Some(render_ext) = ext {
-            let mut handle = plugin_instance.plugin_handle();
+            let handle = plugin_instance.plugin_handle();
             render_ext
-                .set(&mut handle, mode)
+                .set(&handle, mode)
                 .expect("Failed to set render mode");
         }
     }
@@ -208,19 +208,13 @@ fn bench_clap_infrastructure(c: &mut Criterion) {
         let mut output_events_buffer = EventBuffer::with_capacity(10);
 
         let mut input_events_buffer = EventBuffer::new();
-        let event_in = ParamValueEvent::new(
-            0,
-            ClapId::new(PARAM_INPUT_GAIN),
-            Pckn::match_all(),
-            1.5,
-            Cookie::empty(),
-        );
+        let event_in =
+            ParamValueEvent::new(0, ClapId::new(PARAM_INPUT_GAIN), Pckn::match_all(), 1.5);
         let event_out = ParamValueEvent::new(
             (block_size / 2) as u32,
             ClapId::new(PARAM_OUTPUT_GAIN),
             Pckn::match_all(),
             -1.5,
-            Cookie::empty(),
         );
         input_events_buffer.push(&event_in);
         input_events_buffer.push(&event_out);

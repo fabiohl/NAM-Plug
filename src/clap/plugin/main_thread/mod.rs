@@ -26,66 +26,87 @@ use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::NamModel;
 use rtrb::{Consumer, Producer};
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 /// Main thread exclusive state (model loading, state save/load).
+///
+/// # Interior mutability model ("Embrace Reentrancy")
+///
+/// Every mutable field is exposed through granular `Cell`/`RefCell` interior
+/// mutability, so the whole type can be reached through `&self`. The granular
+/// domains guarantee that a reentrant host callback (e.g. `PluginParams::get_value`
+/// or `PluginLatencyImpl::get` while a model is being loaded) never collides
+/// with the mutation of the SPSC producers or the GUI window/worker slots.
+///
+/// Borrow discipline: `RefCell` borrows are strictly scoped and always dropped
+/// **before** any external host call (`request_callback`, `request_restart`,
+/// extension calls). No borrow is ever held across a host call, which rules out
+/// reentrant `BorrowMutError` panics by construction.
+///
+/// None of these fields are ever touched from the audio thread; the RT-safety
+/// and `#[repr(align(128))]` cache isolation of `NamClapShared` are unaffected.
 pub struct NamClapMainThread<'a> {
     pub(crate) shared: &'a NamClapShared,
     /// Current parameters known by the main thread (mirror of the audio thread params).
-    pub params: ProcessingParams,
+    pub params: RefCell<ProcessingParams>,
     /// Host handle for notifications (latency_changed, state, etc.).
+    ///
+    /// `HostMainThreadHandle` is `Copy` in clack 0.2.0; plugin-to-host calls
+    /// take `&self.host` directly (or a local copy when the callee still
+    /// wants `&mut`, e.g. `HostTrackInfo::get`).
     pub host: HostMainThreadHandle<'a>,
     /// System snapshot for emitting diagnostics.
     pub sys: SystemSnapshot,
     /// Producer to send updates to the audio thread with coalescing and ack.
-    pub cmd_producer: CommandProducer<'a>,
+    pub cmd_producer: RefCell<CommandProducer<'a>>,
     /// Consumer to collect garbage (obsolete models) from the audio thread.
-    pub gc_rx: Consumer<GcItem>,
+    pub gc_rx: RefCell<Consumer<GcItem>>,
     /// Producer to send slimmable-rebuilt models to the audio thread.
-    pub slimmable_tx: Producer<SlimmableRebuild>,
+    pub slimmable_tx: RefCell<Producer<SlimmableRebuild>>,
     /// Cached last latency reported to the host to avoid redundant notifications.
-    pub last_reported_latency: u32,
+    pub last_reported_latency: Cell<u32>,
     /// Cached last CabSim tail length reported to the host to avoid redundant notifications.
-    pub last_reported_cabsim_tail: u32,
+    pub last_reported_cabsim_tail: Cell<u32>,
     /// Last-seen value of `ColdShared::slimmable_stale_discarded_total`, used to
     /// log stale-slimmable-rebuild discards exactly once.
-    pub last_seen_slimmable_stale: u32,
+    pub last_seen_slimmable_stale: Cell<u32>,
     /// Slint window handle for GUI lifecycle control.
-    pub slint_window: Option<slint::Weak<crate::clap::gui::MainWindow>>,
+    pub slint_window: RefCell<Option<slint::Weak<crate::clap::gui::MainWindow>>>,
     /// Persistent per-instance GUI worker thread (owns the Slint platform and
     /// event loop for the instance lifetime; survives `gui.destroy()` so
     /// repeated create/destroy cycles keep working — Slint 1.17 pins the
     /// platform to the thread that first initialized it).
-    pub(crate) gui_worker: Option<crate::clap::gui::worker::GuiWorker>,
+    pub(crate) gui_worker: RefCell<Option<crate::clap::gui::worker::GuiWorker>>,
     /// Handle for the model file-dialog background thread (if active). Joined during teardown.
     #[expect(dead_code, reason = "held for join on teardown, never read directly")]
-    pub(crate) dialog_handle: Option<std::thread::JoinHandle<()>>,
+    pub(crate) dialog_handle: RefCell<Option<std::thread::JoinHandle<()>>>,
     /// Shared state synchronized with the model file-dialog background thread.
     #[expect(dead_code, reason = "held for Arc lifecycle, never read directly")]
     pub(crate) dialog_state: Option<Arc<crate::clap::gui::dialog_state::DialogSharedState>>,
     /// Handle for the IR file-dialog background thread (if active). Joined during teardown.
     #[expect(dead_code, reason = "held for join on teardown, never read directly")]
-    pub(crate) ir_dialog_handle: Option<std::thread::JoinHandle<()>>,
+    pub(crate) ir_dialog_handle: RefCell<Option<std::thread::JoinHandle<()>>>,
     /// Shared state synchronized with the IR file-dialog background thread.
     #[expect(dead_code, reason = "held for Arc lifecycle, never read directly")]
     pub(crate) ir_dialog_state: Option<Arc<crate::clap::gui::dialog_state::IrDialogSharedState>>,
     /// Finite state machine tracking the GUI window lifecycle
     /// (Hidden → ShowRequested → Active → HideRequested → Destroyed).
-    pub(crate) gui_lifecycle: GuiLifecycle,
+    pub(crate) gui_lifecycle: Cell<GuiLifecycle>,
     /// Flag indicating whether hugepage status has been synced for this instance.
-    pub(crate) hugepage_synced: bool,
+    pub(crate) hugepage_synced: Cell<bool>,
     /// A validated restore staged on the main thread awaiting atomic delivery
     /// to the audio thread and ack-gated publication. Private slot —
     /// never shared with the audio thread or GUI.
-    pub(crate) pending_restore: Option<PendingRestore>,
+    pub(crate) pending_restore: RefCell<Option<PendingRestore>>,
     /// Latency-affecting full state restore staged to land only on the next
     /// host restart cycle (Strict Restart Policy / TR.1).
     ///
     /// Set by `atomic_commit()` when the restore package changes physical
     /// stream latency, physical cabsim latency, or oversampling factor.
     /// Parked here until `activate()` installs the entire package atomically.
-    pub(crate) staged_restore: Option<StagedRestore>,
+    pub(crate) staged_restore: RefCell<Option<StagedRestore>>,
     /// Latency-affecting model/IR swap staged to land only on the next host
     /// restart cycle (Strict Restart Policy / TR.1).
     ///
@@ -95,7 +116,7 @@ pub struct NamClapMainThread<'a> {
     /// during the restart cycle — the DSP keeps the old, still-reported
     /// latency until then. Same-latency swaps bypass this slot and apply
     /// continuously through the SPSC. Latest-wins coalescing per component.
-    pub(crate) staged_swap: Option<StagedSwap>,
+    pub(crate) staged_swap: RefCell<Option<StagedSwap>>,
 }
 
 impl<'a> NamClapMainThread<'a> {
@@ -106,14 +127,16 @@ impl<'a> NamClapMainThread<'a> {
     /// before a host-driven transition is validated. Best-effort and
     /// idempotent — an event arriving in a state that no longer permits it is
     /// logged by the FSM and discarded, never propagated as an error.
-    pub(crate) fn reconcile_pending_gui_close(&mut self) {
+    pub(crate) fn reconcile_pending_gui_close(&self) {
         if self
             .shared
             .cold
             .gui_user_closed
             .swap(false, Ordering::AcqRel)
         {
-            let _ = self.gui_lifecycle.transition(GuiEvent::UserClosed);
+            let mut lifecycle = self.gui_lifecycle.get();
+            let _ = lifecycle.transition(GuiEvent::UserClosed);
+            self.gui_lifecycle.set(lifecycle);
         }
     }
 
@@ -135,9 +158,11 @@ impl<'a> NamClapMainThread<'a> {
     /// (window creation in `spawn_gui` and the host's `show()` when the window
     /// already exists) share one owner. No-op when the host has not requested
     /// visibility.
-    pub(crate) fn promote_window_ready(&mut self) {
-        if self.gui_lifecycle == GuiLifecycle::ShowRequested {
-            let _ = self.gui_lifecycle.transition(GuiEvent::WindowReady);
+    pub(crate) fn promote_window_ready(&self) {
+        let mut lifecycle = self.gui_lifecycle.get();
+        if lifecycle == GuiLifecycle::ShowRequested {
+            let _ = lifecycle.transition(GuiEvent::WindowReady);
+            self.gui_lifecycle.set(lifecycle);
         }
     }
 
@@ -147,7 +172,7 @@ impl<'a> NamClapMainThread<'a> {
     ///
     /// F3 fix: this ensures heap alloc + mmap/munmap/memfd_create + drop
     /// never happen on the audio thread.
-    pub fn flush_pending_model(&mut self) -> Result<(), PluginError> {
+    pub fn flush_pending_model(&self) -> Result<(), PluginError> {
         let pending = if let Ok(mut guard) = self.shared.cold.pending_model.lock() {
             guard.take()
         } else {
@@ -212,16 +237,18 @@ impl<'a> NamClapMainThread<'a> {
             )));
         }
 
-        match self
-            .cmd_producer
-            .try_push_command(ClapParamPayload::LoadModel {
-                generation,
-                model_l,
-                new_resampler,
-                new_stream,
-                input_mult_adj,
-                output_mult_adj,
-            }) {
+        let push_result =
+            self.cmd_producer
+                .borrow_mut()
+                .try_push_command(ClapParamPayload::LoadModel {
+                    generation,
+                    model_l,
+                    new_resampler,
+                    new_stream,
+                    input_mult_adj,
+                    output_mult_adj,
+                });
+        match push_result {
             Ok(seq) => {
                 log::trace!("Deferred model sent to audio thread (seq={seq})");
                 Ok(())
@@ -257,51 +284,52 @@ impl<'a> NamClapMainThread<'a> {
     }
     /// Synchronises atomic values from the audio thread and cold state into `self.params`
     /// before serialisation. Shared by `state.rs` and `state_context.rs`.
-    pub(crate) fn snapshot_params(&mut self) {
-        self.params.input_gain_db = f32::from_bits(
+    pub(crate) fn snapshot_params(&self) {
+        let mut params = self.params.borrow_mut();
+        params.input_gain_db = f32::from_bits(
             self.shared
                 .ui_to_rt
                 .param_input_gain
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
-        self.params.output_gain_db = f32::from_bits(
+        params.output_gain_db = f32::from_bits(
             self.shared
                 .ui_to_rt
                 .param_output_gain
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
-        self.params.gate_threshold_db = f32::from_bits(
+        params.gate_threshold_db = f32::from_bits(
             self.shared
                 .ui_to_rt
                 .param_gate_thresh
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
-        self.params.bypass = super::super::extensions::params::bypass_u32_to_bool(
+        params.bypass = super::super::extensions::params::bypass_u32_to_bool(
             self.shared
                 .ui_to_rt
                 .param_bypass
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
-        self.params.adaptive_compute =
+        params.adaptive_compute =
             neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(
                 self.shared
                     .ui_to_rt
                     .param_adaptive_compute
                     .load(std::sync::atomic::Ordering::Relaxed) as f32,
             );
-        self.params.slim_override = neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(
+        params.slim_override = neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(
             self.shared
                 .ui_to_rt
                 .param_slim_override
                 .load(std::sync::atomic::Ordering::Relaxed) as f32,
         );
-        self.params.oversample = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(
+        params.oversample = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(
             self.shared
                 .ui_to_rt
                 .param_oversample
                 .load(std::sync::atomic::Ordering::Relaxed) as f32,
         );
-        self.params.activation_precision =
+        params.activation_precision =
             neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(
                 self.shared
                     .ui_to_rt
@@ -309,16 +337,16 @@ impl<'a> NamClapMainThread<'a> {
                     .load(std::sync::atomic::Ordering::Relaxed) as f32,
             );
         if let Ok(ir_guard) = self.shared.cold.ir_path.lock() {
-            self.params.ir_path = ir_guard.as_ref().map(std::path::PathBuf::from);
+            params.ir_path = ir_guard.as_ref().map(std::path::PathBuf::from);
         }
         // Mandatory asset identity: keep the IR digest in lockstep with the path — no persisted IR
         // reference without its SHA-256 digest, and no stale digest when the
         // IR was cleared.
         if let Ok(hash_guard) = self.shared.cold.ir_hash.lock() {
-            self.params.ir_hash = hash_guard.clone();
+            params.ir_hash = hash_guard.clone();
         }
-        if self.params.ir_path.is_none() {
-            self.params.ir_hash = None;
+        if params.ir_path.is_none() {
+            params.ir_hash = None;
         }
     }
 
@@ -332,15 +360,18 @@ impl<'a> NamClapMainThread<'a> {
     /// `deactivate()` the processor hands over `&mut self.parking_lot` here,
     /// after the audio thread has stopped and prior to `Drop` of RT state.
     /// A single call drops SPSC + overflow + the 16 off-RT slots.
-    pub(crate) fn drain_gc_final(&mut self, parking_lot: &mut [Option<GcItem>; 16]) {
+    pub(crate) fn drain_gc_final(&self, parking_lot: &mut [Option<GcItem>; 16]) {
         use neural_amp_modeler_rs::common::spsc::drain_gc_channels;
         // Drain primary SPSC channel, overflow buffer, and RT parking lot
-        let drained = drain_gc_channels(
-            &mut self.gc_rx,
-            &self.shared.cold.gc_overflow,
-            parking_lot,
-            &self.shared.cold.rt_status,
-        );
+        let drained = {
+            let mut gc_rx = self.gc_rx.borrow_mut();
+            drain_gc_channels(
+                &mut gc_rx,
+                &self.shared.cold.gc_overflow,
+                parking_lot,
+                &self.shared.cold.rt_status,
+            )
+        };
         self.shared
             .cold
             .rt_status
@@ -354,12 +385,15 @@ impl<'a> NamClapMainThread<'a> {
         }
         // Second pass: overflow may have been filled by RT between the first
         // drain and now (benign race — the second pass closes the window)
-        let second = drain_gc_channels(
-            &mut self.gc_rx,
-            &self.shared.cold.gc_overflow,
-            parking_lot,
-            &self.shared.cold.rt_status,
-        );
+        let second = {
+            let mut gc_rx = self.gc_rx.borrow_mut();
+            drain_gc_channels(
+                &mut gc_rx,
+                &self.shared.cold.gc_overflow,
+                parking_lot,
+                &self.shared.cold.rt_status,
+            )
+        };
         self.shared
             .cold
             .rt_status
@@ -391,7 +425,7 @@ impl<'a> Drop for NamClapMainThread<'a> {
 impl<'a> PluginMainThread<'a, NamClapShared> for NamClapMainThread<'a> {
     /// Called periodically or in response to host events.
     /// Delegates to concern-specific sub-module methods.
-    fn on_main_thread(&mut self) {
+    fn on_main_thread(&self) {
         if !self.shared.cold.alive_fence.load(Ordering::Relaxed) {
             // Fence down implies RT processor has already stopped (deactivate) and
             // the lot arrived drained during handoff; final drain covers SPSC + overflow.

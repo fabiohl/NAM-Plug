@@ -7,7 +7,7 @@ use crate::clap::plugin::PendingRestartOs;
 use crate::clap::test_util::{model_path, write_model_with_rate};
 use clack_common::events::Pckn;
 use clack_common::events::event_types::ParamValueEvent;
-use clack_common::utils::{ClapId, Cookie};
+use clack_common::utils::ClapId;
 use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use std::sync::atomic::Ordering;
 
@@ -68,13 +68,7 @@ fn test_oversample_change_triggers_restart_protocol() {
         .expect("activate failed");
     let mut started = stopped.start_processing().expect("start_processing failed");
 
-    let event = ParamValueEvent::new(
-        0u32,
-        ClapId::new(PARAM_OVERSAMPLE),
-        Pckn::match_all(),
-        1.0,
-        Cookie::empty(),
-    );
+    let event = ParamValueEvent::new(0u32, ClapId::new(PARAM_OVERSAMPLE), Pckn::match_all(), 1.0);
     let mut event_buffer = EventBuffer::new();
     event_buffer.push(&event);
     let input_events = InputEvents::from_buffer(&event_buffer);
@@ -136,11 +130,11 @@ const OS_LATENCY_4X: u32 = 24;
 
 /// Reads the latency the host would receive via `PluginLatency::get()`.
 fn plugin_latency_get(instance: &mut PluginInstance<CompleteHost>) -> u32 {
-    let mut handle = instance.plugin_handle();
+    let handle = instance.plugin_handle();
     let ext = handle
         .get_extension::<clack_extensions::latency::PluginLatency>()
         .expect("PluginLatency extension must be registered");
-    ext.get(&mut handle)
+    ext.get(&handle)
 }
 
 /// Sends an oversampling parameter event through one audio block (host-event
@@ -154,7 +148,6 @@ fn send_oversample_request(
         ClapId::new(PARAM_OVERSAMPLE),
         Pckn::match_all(),
         factor.to_f32() as f64,
-        Cookie::empty(),
     );
     let mut event_buffer = EventBuffer::new();
     event_buffer.push(&event);
@@ -315,7 +308,7 @@ fn test_latency_changed_notification() {
     );
 
     // ── Same-latency model swap (48k over 48k): continuous, silent ─────────
-    let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+    let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
     let base = model_path("lstm.nam");
     assert!(base.exists(), "lstm.nam fixture missing");
     mt.load_model(&base).expect("load same-rate model");
@@ -324,7 +317,7 @@ fn test_latency_changed_notification() {
         "same-latency model swap must not request a restart"
     );
     assert!(
-        mt.staged_swap.is_none(),
+        mt.staged_swap.borrow().is_none(),
         "same-latency swap must not be staged"
     );
     process_block_silent(&mut started);
@@ -371,6 +364,7 @@ fn test_latency_changed_notification() {
     );
     assert!(
         mt.staged_swap
+            .borrow()
             .as_ref()
             .and_then(|s| s.model.as_ref())
             .is_some(),
@@ -480,7 +474,6 @@ fn test_command_queue_no_overflow_under_automation_burst() {
             ClapId::new(param_id),
             Pckn::match_all(),
             value,
-            Cookie::empty(),
         ));
     }
     let input_events = InputEvents::from_buffer(&event_buffer);
@@ -589,4 +582,51 @@ fn test_dual_instance_harness() {
 
     assert!(!state_a.snapshot().is_empty());
     assert!(!state_b.snapshot().is_empty());
+}
+
+/// The harness event log must stay lossless and deterministic when host
+/// callbacks record events concurrently (host main thread vs. audio thread).
+/// Each writer owns a disjoint `param_id` range, so a sorted snapshot must
+/// reproduce the exact `0..N` sequence with zero dropped or torn records.
+#[test]
+fn test_event_log_atomicity_under_concurrent_recording() {
+    let state = CompleteHostState::new();
+
+    const WRITERS: usize = 4;
+    const EVENTS_PER_WRITER: usize = 250;
+
+    std::thread::scope(|scope| {
+        let state = &state;
+        for writer in 0..WRITERS {
+            scope.spawn(move || {
+                for i in 0..EVENTS_PER_WRITER {
+                    state.record(HostEvent::ParamsClear {
+                        param_id: (writer * EVENTS_PER_WRITER + i) as u32,
+                    });
+                }
+            });
+        }
+    });
+
+    let snapshot = state.snapshot();
+    assert_eq!(
+        snapshot.len(),
+        WRITERS * EVENTS_PER_WRITER,
+        "no recorded event may be lost"
+    );
+
+    let mut param_ids: Vec<u32> = snapshot
+        .iter()
+        .map(|event| match event {
+            HostEvent::ParamsClear { param_id } => *param_id,
+            other => panic!("unexpected event recorded: {other:?}"),
+        })
+        .collect();
+    param_ids.sort_unstable();
+    for (index, param_id) in param_ids.iter().enumerate() {
+        assert_eq!(
+            *param_id, index as u32,
+            "every event must be unique and intact"
+        );
+    }
 }

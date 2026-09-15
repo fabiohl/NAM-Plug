@@ -128,15 +128,15 @@ fn test_state_save_emits_confirmation_log() {
     };
     let state_bytes = serde_json::to_vec(&params).unwrap();
     let state_ext = test_util::get_state_ext(&mut plugin_instance);
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     state_ext
-        .load(&mut handle, &mut state_bytes.as_slice())
+        .load(&handle, &mut state_bytes.as_slice())
         .expect("Failed to load state");
 
     let mut output = Vec::new();
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     state_ext
-        .save(&mut handle, &mut output)
+        .save(&handle, &mut output)
         .expect("save should succeed");
 
     assert!(!output.is_empty(), "save output should not be empty");

@@ -117,9 +117,9 @@ fn load_state(instance: &mut PluginInstance<TestHost>, params: &ProcessingParams
         .get_extension::<PluginState>()
         .expect("PluginState extension not found");
     let state_bytes = serde_json::to_vec(params).unwrap();
-    let mut handle = instance.plugin_handle();
+    let handle = instance.plugin_handle();
     state_ext
-        .load(&mut handle, &mut state_bytes.as_slice())
+        .load(&handle, &mut state_bytes.as_slice())
         .expect("state load should succeed");
 }
 

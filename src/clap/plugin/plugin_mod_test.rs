@@ -200,44 +200,44 @@ fn test_per_instance_hugepage_synced() {
     let main_thread1_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr1,
-            |w| Ok(w.main_thread().as_ptr()),
+            |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
         )
         .unwrap()
     };
     let main_thread2_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr2,
-            |w| Ok(w.main_thread().as_ptr()),
+            |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
         )
         .unwrap()
     };
 
-    let mt1 = unsafe { &mut *main_thread1_ptr };
-    let mt2 = unsafe { &mut *main_thread2_ptr };
+    let mt1 = unsafe { &*main_thread1_ptr };
+    let mt2 = unsafe { &*main_thread2_ptr };
 
     assert!(
-        !mt1.hugepage_synced,
+        !mt1.hugepage_synced.get(),
         "Instance 1 hugepage_synced should start false"
     );
     assert!(
-        !mt2.hugepage_synced,
+        !mt2.hugepage_synced.get(),
         "Instance 2 hugepage_synced should start false"
     );
 
     mt1.housekeeping();
 
     assert!(
-        mt1.hugepage_synced,
+        mt1.hugepage_synced.get(),
         "Instance 1 hugepage_synced should be true after housekeeping"
     );
     assert!(
-        !mt2.hugepage_synced,
+        !mt2.hugepage_synced.get(),
         "Instance 2 must remain unsynced until its own housekeeping call"
     );
 
     mt2.housekeeping();
     assert!(
-        mt2.hugepage_synced,
+        mt2.hugepage_synced.get(),
         "Instance 2 hugepage_synced should be true after housekeeping"
     );
 }

@@ -16,7 +16,7 @@ mod tests {
     use crate::clap::test_util::{self, StereoTestBuffers, TestHost};
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
-    use clack_common::utils::{ClapId, Cookie};
+    use clack_common::utils::ClapId;
     use clack_host::prelude::*;
     use std::sync::atomic::Ordering;
 
@@ -59,9 +59,9 @@ mod tests {
         let state_ext = test_util::get_state_ext(instance);
         let params = test_util::make_default_params(Some(test_util::model_path("a2_example.nam")));
         let state_bytes = serde_json::to_vec(&params).unwrap();
-        let mut handle = instance.plugin_handle();
+        let handle = instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut state_bytes.as_slice())
+            .load(&handle, &mut state_bytes.as_slice())
             .expect("Failed to load model state");
 
         // Drain the SPSC (model + stream swap) and warm the gate/smoothers.
@@ -324,21 +324,18 @@ mod tests {
             ClapId::new(PARAM_GATE_THRESH),
             Pckn::match_all(),
             -90.0,
-            Cookie::empty(),
         ));
         input_events_buffer.push(&ParamValueEvent::new(
             64,
             ClapId::new(PARAM_INPUT_GAIN),
             Pckn::match_all(),
             0.0,
-            Cookie::empty(),
         ));
         input_events_buffer.push(&ParamValueEvent::new(
             128,
             ClapId::new(PARAM_INPUT_GAIN),
             Pckn::match_all(),
             -12.0,
-            Cookie::empty(),
         ));
 
         out_l.fill(SENTINEL);

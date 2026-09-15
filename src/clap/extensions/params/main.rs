@@ -19,11 +19,11 @@ use neural_amp_modeler_rs::math::constants::{GAIN_MAX_DB, GAIN_MIN_DB};
 use std::ffi::CStr;
 
 impl PluginMainThreadParams for NamClapMainThread<'_> {
-    fn count(&mut self) -> u32 {
+    fn count(&self) -> u32 {
         9
     }
 
-    fn get_info(&mut self, param_index: u32, info: &mut ParamInfoWriter) {
+    fn get_info(&self, param_index: u32, info: &mut ParamInfoWriter) {
         match param_index {
             PARAM_INPUT_GAIN => {
                 info.set(&ParamInfo {
@@ -144,7 +144,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
         }
     }
 
-    fn get_value(&mut self, id: ClapId) -> Option<f64> {
+    fn get_value(&self, id: ClapId) -> Option<f64> {
         match id.get() {
             PARAM_INPUT_GAIN => Some(f32::from_bits(
                 self.shared
@@ -205,7 +205,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
     }
 
     fn value_to_text(
-        &mut self,
+        &self,
         id: ClapId,
         value: f64,
         writer: &mut ParamDisplayWriter,
@@ -258,7 +258,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
         }
     }
 
-    fn text_to_value(&mut self, id: ClapId, text: &CStr) -> Option<f64> {
+    fn text_to_value(&self, id: ClapId, text: &CStr) -> Option<f64> {
         let text_str = text.to_str().ok()?;
         let id_val = id.get();
         let parsed = match id_val {
@@ -345,7 +345,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
         parsed.map(|v| sanitize_param_value_f64(id_val, v))
     }
 
-    fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
+    fn flush(&self, input: &InputEvents, output: &mut OutputEvents) {
         self.shared.write_gui_events(output);
 
         let mut param_changed = false;
@@ -363,37 +363,38 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
 
             match id {
                 PARAM_INPUT_GAIN => {
-                    self.params.input_gain_db = val;
+                    self.params.borrow_mut().input_gain_db = val;
                     self.shared
                         .ui_to_rt
                         .param_input_gain
                         .store(val.to_bits(), std::sync::atomic::Ordering::Relaxed);
                 }
                 PARAM_OUTPUT_GAIN => {
-                    self.params.output_gain_db = val;
+                    self.params.borrow_mut().output_gain_db = val;
                     self.shared
                         .ui_to_rt
                         .param_output_gain
                         .store(val.to_bits(), std::sync::atomic::Ordering::Relaxed);
                 }
                 PARAM_GATE_THRESH => {
-                    self.params.gate_threshold_db = val;
+                    self.params.borrow_mut().gate_threshold_db = val;
                     self.shared
                         .ui_to_rt
                         .param_gate_thresh
                         .store(val.to_bits(), std::sync::atomic::Ordering::Relaxed);
                 }
                 PARAM_BYPASS => {
-                    self.params.bypass = bypass_f32_to_bool(val);
+                    let bypass = bypass_f32_to_bool(val);
+                    self.params.borrow_mut().bypass = bypass;
                     self.shared.ui_to_rt.param_bypass.store(
-                        bypass_bool_to_u32(self.params.bypass),
+                        bypass_bool_to_u32(bypass),
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
                 PARAM_ADAPTIVE_COMPUTE => {
                     let mode =
                         neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(val);
-                    self.params.adaptive_compute = mode;
+                    self.params.borrow_mut().adaptive_compute = mode;
                     self.shared
                         .ui_to_rt
                         .param_adaptive_compute
@@ -401,7 +402,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 }
                 PARAM_SLIM_OVERRIDE => {
                     let ov = neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(val);
-                    self.params.slim_override = ov;
+                    self.params.borrow_mut().slim_override = ov;
                     self.shared
                         .ui_to_rt
                         .param_slim_override
@@ -410,7 +411,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 PARAM_OVERSAMPLE => {
                     let factor =
                         neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(val);
-                    self.params.oversample = factor;
+                    self.params.borrow_mut().oversample = factor;
                     self.shared
                         .ui_to_rt
                         .param_oversample
@@ -419,7 +420,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 PARAM_ACTIVATION => {
                     let mode =
                         neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(val);
-                    self.params.activation_precision = mode;
+                    self.params.borrow_mut().activation_precision = mode;
                     self.shared
                         .ui_to_rt
                         .param_activation
@@ -431,9 +432,16 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
         }
 
         if param_changed {
-            let snapshot = RtProcessingParams::from_processing_params(&self.params);
-            self.cmd_producer.push_params(snapshot);
-            if self.cmd_producer.force_flush().is_err() {
+            // Scoped params borrow: released before the SPSC producer borrow
+            // below, and both are released before the host
+            // `request_callback()` in the error path.
+            let snapshot = RtProcessingParams::from_processing_params(&self.params.borrow());
+            let flush_result = {
+                let mut producer = self.cmd_producer.borrow_mut();
+                producer.push_params(snapshot);
+                producer.force_flush()
+            };
+            if flush_result.is_err() {
                 let mut guard = self
                     .shared
                     .cold

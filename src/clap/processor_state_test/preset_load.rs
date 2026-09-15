@@ -24,9 +24,9 @@ fn test_preset_load_integration() {
     let counter_before = shared.cold.model_load_counter.load(Ordering::Relaxed);
     assert_eq!(counter_before, 0, "model_load_counter should start at 0");
 
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     preset_load_ext
-        .load_from_location(&mut handle, Location::File { path: &path_cstr }, None)
+        .load_from_location(&handle, Location::File { path: &path_cstr }, None)
         .expect("load_from_location should succeed");
 
     plugin_instance.call_on_main_thread_callback();

@@ -7,7 +7,7 @@ mod tests {
     use crate::clap::test_util::{self, StereoTestBuffers};
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
-    use clack_common::utils::{ClapId, Cookie};
+    use clack_common::utils::ClapId;
     use clack_host::prelude::*;
 
     struct ProcessedStereo {
@@ -48,13 +48,7 @@ mod tests {
 
         let mut input_events_buffer = EventBuffer::new();
         if bypass {
-            let event = ParamValueEvent::new(
-                0,
-                ClapId::new(PARAM_BYPASS),
-                Pckn::match_all(),
-                1.0,
-                Cookie::empty(),
-            );
+            let event = ParamValueEvent::new(0, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 1.0);
             input_events_buffer.push(&event);
         }
         let input_events = InputEvents::from_buffer(&input_events_buffer);
@@ -344,7 +338,7 @@ mod tests {
         use crate::clap::extensions::params::PARAM_INPUT_GAIN;
         use clack_common::events::Pckn;
         use clack_common::events::event_types::ParamValueEvent;
-        use clack_common::utils::{ClapId, Cookie};
+        use clack_common::utils::ClapId;
         use clack_extensions::params::PluginAudioProcessorParams;
         use std::sync::atomic::Ordering;
 
@@ -384,7 +378,6 @@ mod tests {
                 ClapId::new(PARAM_INPUT_GAIN),
                 Pckn::match_all(),
                 (10.0 + i as f64) % 20.0,
-                Cookie::empty(),
             );
             input_events_buffer.push(&event);
             let input_events = InputEvents::from_buffer(&input_events_buffer);
@@ -459,7 +452,7 @@ mod tests {
         use crate::clap::extensions::params::PARAM_INPUT_GAIN;
         use clack_common::events::Pckn;
         use clack_common::events::event_types::ParamValueEvent;
-        use clack_common::utils::{ClapId, Cookie};
+        use clack_common::utils::ClapId;
         use clack_extensions::params::PluginAudioProcessorParams;
         use std::sync::atomic::Ordering;
 
@@ -493,7 +486,6 @@ mod tests {
                 ClapId::new(PARAM_INPUT_GAIN),
                 Pckn::match_all(),
                 -12.0f64,
-                Cookie::empty(),
             );
             input_events_buffer.push(&event);
             let input_events = InputEvents::from_buffer(&input_events_buffer);

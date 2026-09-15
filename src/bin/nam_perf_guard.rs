@@ -160,9 +160,9 @@ fn measure_scenario(
         .plugin_handle()
         .get_extension::<PluginState>()
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut state_bytes.as_slice())
+            .load(&handle, &mut state_bytes.as_slice())
             .map_err(|e| format!("Failed to load state: {e:?}"))?;
     }
 

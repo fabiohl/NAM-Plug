@@ -13,7 +13,7 @@ impl PluginAudioPortsImpl for NamClapMainThread<'_> {
     /// Returns the number of audio ports (input or output).
     ///
     /// NAM-Plug is a native mono plugin by definition with exactly 1 input and 1 output port.
-    fn count(&mut self, _is_input: bool) -> u32 {
+    fn count(&self, _is_input: bool) -> u32 {
         1
     }
 
@@ -26,7 +26,7 @@ impl PluginAudioPortsImpl for NamClapMainThread<'_> {
     /// To respect traditional DAW workflows, the plugin works strictly as mono.
     /// The DAW decides how to connect the plugin (e.g., managing stereo channel routing externally),
     /// while stereo support is provided exclusively as a convenience in standalone mode.
-    fn get(&mut self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
+    fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
         if index == 0 {
             writer.set(&AudioPortInfo {
                 id: ClapId::new(0),

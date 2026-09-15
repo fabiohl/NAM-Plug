@@ -244,8 +244,9 @@ mod tests {
 
         // Step 1 — Load IR 1: the drained `LoadCabIr` swap must be zero-alloc.
         {
-            let mt = unsafe { &mut *main_thread_ptr };
+            let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
+                .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr {
                     adapter: Some(Box::new(adapter_a)),
                 })
@@ -277,8 +278,9 @@ mod tests {
         // Step 2 — Swap IR 2 (A → B): zero-alloc, and the tail must change
         // (proving a real adapter swap, not a no-op).
         {
-            let mt = unsafe { &mut *main_thread_ptr };
+            let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
+                .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr {
                     adapter: Some(Box::new(adapter_b)),
                 })
@@ -309,8 +311,9 @@ mod tests {
 
         // Step 3 — Clear IR (B → None): zero-alloc, tail must drop to zero.
         {
-            let mt = unsafe { &mut *main_thread_ptr };
+            let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
+                .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr { adapter: None })
                 .expect("Clear IR push must succeed");
         }
@@ -340,7 +343,7 @@ mod tests {
         // Drain the GC channel off-RT: the replaced adapters must be dropped
         // on the main thread, never leaked.
         {
-            let mt = unsafe { &mut *main_thread_ptr };
+            let mt = unsafe { &*main_thread_ptr };
             mt.housekeeping();
         }
 
@@ -543,9 +546,10 @@ mod tests {
             // Burst 1 — same-kind IR coalescing burst (3 → 2 callbacks; the
             // deferred IR B is superseded by C on the second callback).
             {
-                let mt = unsafe { &mut *main_thread_ptr };
+                let mt = unsafe { &*main_thread_ptr };
                 for len in [512usize, 1024, 2048] {
                     mt.cmd_producer
+                        .borrow_mut()
                         .push_command(ClapParamPayload::LoadCabIr {
                             adapter: Some(build_ir(len)),
                         })
@@ -568,7 +572,7 @@ mod tests {
             // Burst 2 — same-kind model coalescing burst (3 → 2 callbacks; the
             // deferred middle model is superseded by the last one).
             {
-                let mt = unsafe { &mut *main_thread_ptr };
+                let mt = unsafe { &*main_thread_ptr };
                 for name in [
                     if round % 2 == 0 {
                         "wavenet_a1_standard.nam"
@@ -589,6 +593,7 @@ mod tests {
                     let (model_l, new_resampler, new_stream, input_mult_adj, output_mult_adj) =
                         build_model(name);
                     mt.cmd_producer
+                        .borrow_mut()
                         .push_command(ClapParamPayload::LoadModel {
                             generation: 0,
                             model_l,
@@ -618,8 +623,9 @@ mod tests {
             // 2 → 2 callbacks (the restore is deferred one callback).
             next_gen += 1;
             {
-                let mt = unsafe { &mut *main_thread_ptr };
+                let mt = unsafe { &*main_thread_ptr };
                 mt.cmd_producer
+                    .borrow_mut()
                     .push_command(build_os(if round % 2 == 0 {
                         OversampleFactor::X4
                     } else {
@@ -633,6 +639,7 @@ mod tests {
                         "wavenet_a1_standard.nam"
                     });
                 mt.cmd_producer
+                    .borrow_mut()
                     .push_command(ClapParamPayload::RestoreTxn(RestoreTxn {
                         generation: next_gen,
                         model: Some(LoadModelPayload {
@@ -668,10 +675,11 @@ mod tests {
             // RestoreTxn is ack-gated and never superseded, so each callback
             // applies exactly one generation in FIFO order).
             {
-                let mt = unsafe { &mut *main_thread_ptr };
+                let mt = unsafe { &*main_thread_ptr };
                 for _ in 0..3 {
                     next_gen += 1;
                     mt.cmd_producer
+                        .borrow_mut()
                         .push_command(ClapParamPayload::RestoreTxn(RestoreTxn {
                             generation: next_gen,
                             model: None,
@@ -699,7 +707,7 @@ mod tests {
             // the audit lane because the tracking guard is not active outside
             // the audio callback.
             {
-                let mt = unsafe { &mut *main_thread_ptr };
+                let mt = unsafe { &*main_thread_ptr };
                 mt.housekeeping();
             }
         }
@@ -766,12 +774,12 @@ mod tests {
     #[cfg(feature = "heap-audit")]
     fn main_thread_ptr(
         instance: &mut PluginInstance<TestHost>,
-    ) -> *mut crate::clap::plugin::NamClapMainThread<'static> {
+    ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
         let raw_ptr = instance.plugin_handle().as_raw_ptr();
         unsafe {
             clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
                 raw_ptr,
-                |w| Ok(w.main_thread().as_ptr()),
+                |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
             )
             .unwrap()
         }
@@ -863,8 +871,8 @@ mod tests {
         let params = test_util::make_default_params(Some(invalid_path));
         let state_bytes = serde_json::to_vec(&params).unwrap();
         let state_ext = test_util::get_state_ext(&mut plugin_instance);
-        let mut handle = plugin_instance.plugin_handle();
-        let _ = state_ext.load(&mut handle, &mut state_bytes.as_slice());
+        let handle = plugin_instance.plugin_handle();
+        let _ = state_ext.load(&handle, &mut state_bytes.as_slice());
 
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 

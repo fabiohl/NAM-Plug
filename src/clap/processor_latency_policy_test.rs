@@ -68,7 +68,7 @@ fn test_model_swap_same_rate_is_continuous_no_restart() {
     let mut started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
 
     let model = crate::clap::test_util::model_path("lstm.nam");
     assert!(model.exists(), "lstm.nam fixture missing");
@@ -79,7 +79,7 @@ fn test_model_swap_same_rate_is_continuous_no_restart() {
         "same-latency model swap must not request a host restart"
     );
     assert!(
-        mt.staged_swap.is_none(),
+        mt.staged_swap.borrow().is_none(),
         "same-latency model swap must not be staged"
     );
     assert_eq!(
@@ -119,7 +119,7 @@ fn test_model_swap_diff_rate_triggers_restart_and_stages() {
     let mut started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
     let model_44k = write_model_with_rate(&base, 44100);
@@ -131,6 +131,7 @@ fn test_model_swap_diff_rate_triggers_restart_and_stages() {
     );
     assert!(
         mt.staged_swap
+            .borrow()
             .as_ref()
             .and_then(|s| s.model.as_ref())
             .is_some(),
@@ -175,7 +176,7 @@ fn test_restart_cycle_applies_staged_model_and_latency() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
     let model_44k = write_model_with_rate(&base, 44100);
@@ -202,7 +203,7 @@ fn test_restart_cycle_applies_staged_model_and_latency() {
         "reported latency must match the active filter chain after the restart"
     );
     assert!(
-        mt.staged_swap.is_none(),
+        mt.staged_swap.borrow().is_none(),
         "staged swap must be consumed by activate()"
     );
 
@@ -238,7 +239,7 @@ fn test_ir_load_and_swap_policy() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
 
     let ir1 = write_ir(512, "ir1");
     let ir2 = write_ir(1024, "ir2");
@@ -251,6 +252,7 @@ fn test_ir_load_and_swap_policy() {
     );
     assert!(
         mt.staged_swap
+            .borrow()
             .as_ref()
             .and_then(|s| s.ir.as_ref())
             .is_some(),
@@ -283,7 +285,7 @@ fn test_ir_load_and_swap_policy() {
         "same-partition IR swap must not request a host restart"
     );
     assert!(
-        mt.staged_swap.is_none(),
+        mt.staged_swap.borrow().is_none(),
         "same-partition IR swap must not be staged"
     );
     assert_eq!(
@@ -324,7 +326,7 @@ fn test_ir_clear_triggers_restart() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
 
     let ir = write_ir(512, "clear");
     mt.load_cabsim(&ir).expect("load IR");
@@ -348,6 +350,7 @@ fn test_ir_clear_triggers_restart() {
     );
     assert!(
         mt.staged_swap
+            .borrow()
             .as_ref()
             .and_then(|s| s.ir.as_ref())
             .is_some_and(|ir| ir.is_none()),
@@ -393,7 +396,7 @@ fn test_same_latency_swap_supersedes_staged() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
     let model_44k = write_model_with_rate(&base, 44100);
@@ -404,6 +407,7 @@ fn test_same_latency_swap_supersedes_staged() {
     assert!(state.restart_requested.load(Ordering::SeqCst));
     assert!(
         mt.staged_swap
+            .borrow()
             .as_ref()
             .and_then(|s| s.model.as_ref())
             .is_some()
@@ -413,7 +417,7 @@ fn test_same_latency_swap_supersedes_staged() {
     // applies continuously.
     mt.load_model(&model_48k).expect("load 48k model");
     assert!(
-        mt.staged_swap.is_none(),
+        mt.staged_swap.borrow().is_none(),
         "a same-latency load must supersede the staged latency-changing load"
     );
     assert_eq!(
@@ -464,7 +468,7 @@ fn test_latency_notification_ordering() {
     instance.call_on_main_thread_callback();
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
     let model_44k = write_model_with_rate(&base, 44100);
@@ -526,9 +530,9 @@ fn load_state(
         .get_extension::<clack_extensions::state::PluginState>()
         .expect("PluginState extension not found");
     let state_bytes = serde_json::to_vec(params).unwrap();
-    let mut handle = instance.plugin_handle();
+    let handle = instance.plugin_handle();
     state_ext
-        .load(&mut handle, &mut state_bytes.as_slice())
+        .load(&handle, &mut state_bytes.as_slice())
         .expect("PluginState::load failed");
 }
 
@@ -566,9 +570,9 @@ fn test_restore_same_latency_is_continuous_no_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
     assert!(
-        mt.staged_restore.is_none(),
+        mt.staged_restore.borrow().is_none(),
         "same-latency restore must not be staged"
     );
 
@@ -624,9 +628,9 @@ fn test_restore_diff_rate_stages_and_requests_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
     assert!(
-        mt.staged_restore.is_some(),
+        mt.staged_restore.borrow().is_some(),
         "diff-rate restore must be staged"
     );
     assert_eq!(
@@ -705,9 +709,9 @@ fn test_restore_ir_stages_and_requests_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
     assert!(
-        mt.staged_restore.is_some(),
+        mt.staged_restore.borrow().is_some(),
         "first IR restore must be staged"
     );
 
@@ -779,8 +783,8 @@ fn test_restore_coalescing_latest_wins() {
     assert!(state.restart_requested.load(Ordering::SeqCst));
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
-    assert!(mt.staged_restore.is_some());
+    let mt = unsafe { &*mt_ptr };
+    assert!(mt.staged_restore.borrow().is_some());
 
     // 2. Second restore before restart: 48k (same rate as baseline)
     let params_48k = neural_amp_modeler_rs::common::params::ProcessingParams {
@@ -793,7 +797,7 @@ fn test_restore_coalescing_latest_wins() {
     load_state(&mut instance, &params_48k);
 
     assert!(
-        mt.staged_restore.is_none(),
+        mt.staged_restore.borrow().is_none(),
         "second same-rate restore must supersede the staged restore"
     );
 
@@ -855,8 +859,8 @@ fn test_restore_combined_model_and_oversample_single_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
-    assert!(mt.staged_restore.is_some());
+    let mt = unsafe { &*mt_ptr };
+    assert!(mt.staged_restore.borrow().is_some());
     assert_eq!(
         PendingRestartOs::load(&shared.cold.pending_restart_os_factor, Ordering::Relaxed),
         PendingRestartOs::Pending(OversampleFactor::X2)
@@ -912,9 +916,9 @@ fn test_restore_pre_activate_remains_local_commit() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
     assert!(
-        mt.staged_restore.is_none(),
+        mt.staged_restore.borrow().is_none(),
         "pre-activate restore must not be staged"
     );
 
@@ -951,7 +955,7 @@ fn test_restore_for_preset_without_model_preserves_active_model() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
-    let mt = unsafe { &mut *mt_ptr };
+    let mt = unsafe { &*mt_ptr };
 
     // Initial 48k model load
     let model = crate::clap::test_util::model_path("lstm.nam");
@@ -983,10 +987,10 @@ fn test_restore_for_preset_without_model_preserves_active_model() {
         .get_extension::<clack_extensions::state_context::PluginStateContext>()
         .expect("PluginStateContext extension");
     let state_bytes = serde_json::to_vec(&params).unwrap();
-    let mut handle = instance.plugin_handle();
+    let handle = instance.plugin_handle();
     state_ctx_ext
         .load(
-            &mut handle,
+            &handle,
             &mut state_bytes.as_slice(),
             clack_extensions::state_context::StateContextType::ForPreset,
         )

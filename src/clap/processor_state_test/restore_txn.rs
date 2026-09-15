@@ -61,12 +61,12 @@ fn process_block(
 
 fn main_thread_ptr(
     instance: &mut PluginInstance<TestHost>,
-) -> *mut crate::clap::plugin::NamClapMainThread<'static> {
+) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
-            |w| Ok(w.main_thread().as_ptr()),
+            |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
         )
         .unwrap()
     }
@@ -75,9 +75,9 @@ fn main_thread_ptr(
 fn load_state(instance: &mut PluginInstance<TestHost>, params: &ProcessingParams) {
     let state_ext = test_util::get_state_ext(instance);
     let state_bytes = serde_json::to_vec(params).unwrap();
-    let mut handle = instance.plugin_handle();
+    let handle = instance.plugin_handle();
     state_ext
-        .load(&mut handle, &mut state_bytes.as_slice())
+        .load(&handle, &mut state_bytes.as_slice())
         .expect("state.load must succeed");
 }
 
@@ -87,19 +87,19 @@ fn try_load_state(
 ) -> Result<(), clack_extensions::state::StateError> {
     let state_ext = test_util::get_state_ext(instance);
     let state_bytes = serde_json::to_vec(params).unwrap();
-    let mut handle = instance.plugin_handle();
-    state_ext.load(&mut handle, &mut state_bytes.as_slice())
+    let handle = instance.plugin_handle();
+    state_ext.load(&handle, &mut state_bytes.as_slice())
 }
 
 /// Processes one block (applies any queued transaction) and runs one
 /// housekeeping cycle (retries pushes and publishes acked restores).
 fn settle(
     started: &mut StartedPluginAudioProcessor<TestHost>,
-    main_thread_ptr: *mut crate::clap::plugin::NamClapMainThread<'static>,
+    main_thread_ptr: *const crate::clap::plugin::NamClapMainThread<'static>,
     bufs: &mut StereoTestBuffers,
 ) {
     process_block(started, bufs);
-    let mt = unsafe { &mut *main_thread_ptr };
+    let mt = unsafe { &*main_thread_ptr };
     mt.housekeeping();
 }
 
@@ -117,9 +117,10 @@ fn test_restore_ui_not_published_until_ack() {
     // Saturate the SPSC command ring (capacity 256) so the restore txn cannot
     // be pushed immediately.
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         for _ in 0..256 {
             mt.cmd_producer
+                .borrow_mut()
                 .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { adapter: None })
                 .expect("expected the first 256 pushes to succeed");
         }
@@ -139,9 +140,9 @@ fn test_restore_ui_not_published_until_ack() {
 
     // Stage phase: the whole transaction is retained; NOTHING is published yet.
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         assert!(
-            mt.pending_restore.is_some(),
+            mt.pending_restore.borrow().is_some(),
             "restore txn must be retained whole on SPSC full"
         );
     }
@@ -173,7 +174,7 @@ fn test_restore_ui_not_published_until_ack() {
         process_block(&mut started, &mut bufs);
     }
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         mt.housekeeping();
     }
 
@@ -190,11 +191,14 @@ fn test_restore_ui_not_published_until_ack() {
 
     // Ack phase: housekeeping publishes the UI now that the ack landed.
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         mt.housekeeping();
     }
     assert!(
-        unsafe { &*main_thread_ptr }.pending_restore.is_none(),
+        unsafe { &*main_thread_ptr }
+            .pending_restore
+            .borrow()
+            .is_none(),
         "pending restore must be consumed after ack"
     );
 

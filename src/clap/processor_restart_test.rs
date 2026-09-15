@@ -8,7 +8,7 @@ mod tests {
     use crate::clap::test_util::{self, TestHost};
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
-    use clack_common::utils::{ClapId, Cookie};
+    use clack_common::utils::ClapId;
     use clack_host::prelude::*;
     use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_OS_REBUILD;
     use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
@@ -26,7 +26,6 @@ mod tests {
             ClapId::new(PARAM_OVERSAMPLE),
             Pckn::match_all(),
             value as f64,
-            Cookie::empty(),
         )
     }
 

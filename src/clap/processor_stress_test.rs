@@ -120,10 +120,10 @@ mod tests {
 
                 let params = test_util::make_default_params(Some(path));
                 let state_bytes = serde_json::to_vec(&params).unwrap();
-                let mut handle = plugin_instance.plugin_handle();
+                let handle = plugin_instance.plugin_handle();
                 let prev_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
                 state_ext
-                    .load(&mut handle, &mut state_bytes.as_slice())
+                    .load(&handle, &mut state_bytes.as_slice())
                     .expect("Failed to load state");
 
                 let current_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
@@ -222,7 +222,7 @@ mod tests {
         use crate::clap::extensions::params::PARAM_INPUT_GAIN;
         use clack_common::events::Pckn;
         use clack_common::events::event_types::ParamValueEvent;
-        use clack_common::utils::{ClapId, Cookie};
+        use clack_common::utils::ClapId;
 
         let mut input_events_buffer = EventBuffer::new();
         for i in 0..n {
@@ -232,7 +232,6 @@ mod tests {
                 ClapId::new(PARAM_INPUT_GAIN),
                 Pckn::match_all(),
                 val as f64,
-                Cookie::empty(),
             );
             input_events_buffer.push(&event);
         }
@@ -304,27 +303,17 @@ mod tests {
         use crate::clap::extensions::params::{PARAM_GATE_THRESH, PARAM_INPUT_GAIN};
         use clack_common::events::Pckn;
         use clack_common::events::event_types::{ParamModEvent, ParamValueEvent};
-        use clack_common::utils::{ClapId, Cookie};
+        use clack_common::utils::ClapId;
 
         // 1. Base case: No modulation, base gain = 0dB.
         {
             let mut input_events_buffer = EventBuffer::new();
-            let val_event = ParamValueEvent::new(
-                0,
-                ClapId::new(PARAM_INPUT_GAIN),
-                Pckn::match_all(),
-                0.0,
-                Cookie::empty(),
-            );
+            let val_event =
+                ParamValueEvent::new(0, ClapId::new(PARAM_INPUT_GAIN), Pckn::match_all(), 0.0);
             input_events_buffer.push(&val_event);
 
-            let gate_event = ParamValueEvent::new(
-                0,
-                ClapId::new(PARAM_GATE_THRESH),
-                Pckn::match_all(),
-                -90.0,
-                Cookie::empty(),
-            );
+            let gate_event =
+                ParamValueEvent::new(0, ClapId::new(PARAM_GATE_THRESH), Pckn::match_all(), -90.0);
             input_events_buffer.push(&gate_event);
 
             let input_events = InputEvents::from_buffer(&input_events_buffer);
@@ -369,13 +358,8 @@ mod tests {
         // 2. Modulation
         {
             let mut input_events_buffer = EventBuffer::new();
-            let mod_event = ParamModEvent::new(
-                0,
-                ClapId::new(PARAM_INPUT_GAIN),
-                Pckn::match_all(),
-                6.0,
-                Cookie::empty(),
-            );
+            let mod_event =
+                ParamModEvent::new(0, ClapId::new(PARAM_INPUT_GAIN), Pckn::match_all(), 6.0);
             input_events_buffer.push(&mod_event);
 
             let input_events = InputEvents::from_buffer(&input_events_buffer);
@@ -420,13 +404,8 @@ mod tests {
         {
             let mut input_events_buffer = EventBuffer::new();
             // Modulates gate threshold by +120dB (bringing effective threshold to +30dB)
-            let mod_event = ParamModEvent::new(
-                0,
-                ClapId::new(PARAM_GATE_THRESH),
-                Pckn::match_all(),
-                120.0,
-                Cookie::empty(),
-            );
+            let mod_event =
+                ParamModEvent::new(0, ClapId::new(PARAM_GATE_THRESH), Pckn::match_all(), 120.0);
             input_events_buffer.push(&mod_event);
 
             let input_events = InputEvents::from_buffer(&input_events_buffer);

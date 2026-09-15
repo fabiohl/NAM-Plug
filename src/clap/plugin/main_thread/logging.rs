@@ -12,7 +12,7 @@ impl<'a> NamClapMainThread<'a> {
     ///
     /// RT-Safe: all `CString::new(…).unwrap_or_default()` calls use static
     /// ASCII literals with no internal null bytes — guaranteed non-panicking.
-    pub(crate) fn emit_pending_logs(&mut self) {
+    pub(crate) fn emit_pending_logs(&self) {
         let log_ext = self.host.get_extension::<HostLog>();
         let shared = self.host.shared();
 

@@ -177,9 +177,9 @@ run_cargo_test() {
     cmd_prefix="$(maybe_taskset)"
     local full_cmd
     if [ -n "$cmd_prefix" ]; then
-        full_cmd="$cmd_prefix cargo test --features testing $*"
+        full_cmd="$cmd_prefix cargo test --features testing --release $*"
     else
-        full_cmd="cargo test --features testing $*"
+        full_cmd="cargo test --features testing --release $*"
     fi
     if [ "$DRY_RUN" = "1" ]; then
         echo -e "  ${YELLOW}[dry-run]${NC} $full_cmd 2>&1 | tee $log_file"
@@ -188,9 +188,9 @@ run_cargo_test() {
     echo -e "  ${BLUE}→${NC} $full_cmd"
     # shellcheck disable=SC2086
     if [ -n "$cmd_prefix" ]; then
-        eval $cmd_prefix cargo test --features testing "$@" 2>&1 | tee "$log_file"
+        eval $cmd_prefix cargo test --features testing --release "$@" 2>&1 | tee "$log_file"
     else
-        cargo test --features testing "$@" 2>&1 | tee "$log_file"
+        cargo test --features testing --release "$@" 2>&1 | tee "$log_file"
     fi
 }
 
@@ -221,16 +221,19 @@ PHASE_DURATIONS=()
 OVERALL_FAILED=0
 
 # ── Phase 1: GC Stress ────────────────────────────────────────────────────────
-phase "GC Stress — SPSC cascade & drain-on-destroy (Phase 1/3)"
+phase "GC Stress — SPSC cascade, drain-on-destroy & property soak (Phase 1/3)"
 PHASE1_START=$(date +%s%N)
 PHASE1_STATUS="PASSED"
 PHASE1_LOG="target/logs/long-phase1.log"
 : > "$PHASE1_LOG" 2>/dev/null || true
 
 if [ "$DRY_RUN" = "1" ]; then
+    PHASE1_DUR_MS=0
+    PHASE1_STATUS="PASSED"
     echo -e "  ${YELLOW}[dry-run] Phase 1 would execute:${NC}"
-    echo -e "    cargo test --features testing --lib test_gc_stress_1000_swaps -- --ignored $NOCAPTURE_FLAG"
-    echo -e "    cargo test --features testing --lib test_gc_drain_on_destroy_no_leak -- --ignored $NOCAPTURE_FLAG"
+    echo -e "    cargo test --features testing --release --lib test_gc_stress_1000_swaps -- --ignored $NOCAPTURE_FLAG"
+    echo -e "    cargo test --features testing --release --lib test_gc_drain_on_destroy_no_leak -- --ignored $NOCAPTURE_FLAG"
+    echo -e "    cargo test --features testing --release --test heap_audit prop_gc_swap_idempotence -- --ignored $NOCAPTURE_FLAG"
 else
     set +e
     echo -e "  ${BLUE}→ Running test_gc_stress_1000_swaps...${NC}"
@@ -269,21 +272,34 @@ else
         OVERALL_FAILED=1
         echo -e "  ${RED}✗ test_gc_drain_on_destroy_no_leak failed (rc=$RC2)${NC}"
     else
-        if ! grep -q "test result: ok" "$PHASE1_LOG" 2>/dev/null; then
-            :
-        fi
         if grep -q "test_gc_drain_on_destroy_no_leak.*ok" "$PHASE1_LOG" 2>/dev/null || [ $RC2 -eq 0 ]; then
             echo -e "  ${GREEN}✓ test_gc_drain_on_destroy_no_leak passed${NC}"
         fi
     fi
+
+    echo -e "  ${BLUE}→ Running prop_gc_swap_idempotence (property soak)...${NC}"
+    TMP_LOG="target/logs/long-phase1c.log"
+    if [ -n "$NOCAPTURE_FLAG" ]; then
+        run_cargo_test "$TMP_LOG" --test heap_audit prop_gc_swap_idempotence -- --ignored --nocapture
+    else
+        run_cargo_test "$TMP_LOG" --test heap_audit prop_gc_swap_idempotence -- --ignored
+    fi
+    RC3=$?
+    cat "$TMP_LOG" >> "$PHASE1_LOG" 2>/dev/null || true
+    rm -f "$TMP_LOG"
+    if [ $RC3 -ne 0 ]; then
+        PHASE1_STATUS="FAILED"
+        OVERALL_FAILED=1
+        echo -e "  ${RED}✗ prop_gc_swap_idempotence failed (rc=$RC3)${NC}"
+    else
+        if grep -q "prop_gc_swap_idempotence.*ok" "$PHASE1_LOG" 2>/dev/null || [ $RC3 -eq 0 ]; then
+            echo -e "  ${GREEN}✓ prop_gc_swap_idempotence passed${NC}"
+        fi
+    fi
+
     set -e
     PHASE1_END=$(date +%s%N)
     PHASE1_DUR_MS=$(( (PHASE1_END - PHASE1_START) / 1000000 ))
-    if [ "$DRY_RUN" = "1" ]; then
-        PHASE1_DUR_MS=0
-        PHASE1_STATUS="PASSED"
-    fi
-    local dur1_str
     dur1_str=$(format_duration_ms "$PHASE1_DUR_MS")
     if [ "$PHASE1_STATUS" = "FAILED" ]; then
         echo -e "  ${RED}${BOLD}Phase 1 FAILED (${dur1_str})${NC}"
@@ -292,7 +308,7 @@ else
     fi
 fi
 
-emit_receipt "phase1" "GC Stress — 1000 swaps + drain-on-destroy" "$PHASE1_STATUS" "$PHASE1_DUR_MS" "$PHASE1_LOG"
+emit_receipt "phase1" "GC Stress — 1000 swaps, drain-on-destroy & property soak" "$PHASE1_STATUS" "$PHASE1_DUR_MS" "$PHASE1_LOG"
 PHASE_STATUS+=("$PHASE1_STATUS")
 PHASE_DURATIONS+=("$PHASE1_DUR_MS")
 
@@ -304,8 +320,10 @@ PHASE2_LOG="target/logs/long-phase2.log"
 : > "$PHASE2_LOG" 2>/dev/null || true
 
 if [ "$DRY_RUN" = "1" ]; then
+    PHASE2_DUR_MS=0
+    PHASE2_STATUS="PASSED"
     echo -e "  ${YELLOW}[dry-run] Phase 2 would execute:${NC}"
-    echo -e "    cargo test --features testing --lib test_teardown_drains_rt_parking_lot_off_rt -- --ignored $NOCAPTURE_FLAG"
+    echo -e "    cargo test --features testing --release --lib test_teardown_drains_rt_parking_lot_off_rt -- --ignored $NOCAPTURE_FLAG"
 else
     set +e
     echo -e "  ${BLUE}→ Running test_teardown_drains_rt_parking_lot_off_rt...${NC}"
@@ -318,10 +336,6 @@ else
     set -e
     PHASE2_END=$(date +%s%N)
     PHASE2_DUR_MS=$(( (PHASE2_END - PHASE2_START) / 1000000 ))
-    if [ "$DRY_RUN" = "1" ]; then
-        PHASE2_DUR_MS=0
-    fi
-    local dur2_str
     dur2_str=$(format_duration_ms "$PHASE2_DUR_MS")
     if [ $RC -ne 0 ]; then
         PHASE2_STATUS="FAILED"
@@ -350,11 +364,13 @@ PHASE3_LOG="target/logs/long-phase3.log"
 : > "$PHASE3_LOG" 2>/dev/null || true
 
 if [ "$DRY_RUN" = "1" ]; then
+    PHASE3_DUR_MS=0
+    PHASE3_STATUS="PASSED"
     echo -e "  ${YELLOW}[dry-run] Phase 3 would execute:${NC}"
     if [ "$HAS_TASKSET" = "1" ]; then
-        echo -e "    taskset -c $BENCH_CORE cargo test --features testing --test clap test_multi_instance_rt_priority -- --ignored $NOCAPTURE_FLAG"
+        echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --test clap test_multi_instance_rt_priority -- --ignored $NOCAPTURE_FLAG"
     else
-        echo -e "    cargo test --features testing --test clap test_multi_instance_rt_priority -- --ignored $NOCAPTURE_FLAG"
+        echo -e "    cargo test --features testing --release --test clap test_multi_instance_rt_priority -- --ignored $NOCAPTURE_FLAG"
     fi
 else
     set +e
@@ -368,10 +384,6 @@ else
     set -e
     PHASE3_END=$(date +%s%N)
     PHASE3_DUR_MS=$(( (PHASE3_END - PHASE3_START) / 1000000 ))
-    if [ "$DRY_RUN" = "1" ]; then
-        PHASE3_DUR_MS=0
-    fi
-    local dur3_str
     dur3_str=$(format_duration_ms "$PHASE3_DUR_MS")
     if [ $RC -ne 0 ]; then
         PHASE3_STATUS="FAILED"
@@ -383,10 +395,11 @@ else
             PHASE3_STATUS="FAILED"
             OVERALL_FAILED=1
         else
-PHASE3_DUR_MS=$(( (PHASE3_END - PHASE3_START) / 1000000 ))
-if [ "$DRY_RUN" = "1" ]; then
-    PHASE3_DUR_MS=0
+            echo -e "  ${GREEN}${BOLD}Phase 3 PASSED (${dur3_str})${NC}"
+        fi
+    fi
 fi
+
 emit_receipt "phase3" "Multi-Instance — RT priority under CPU affinity" "$PHASE3_STATUS" "$PHASE3_DUR_MS" "$PHASE3_LOG"
 PHASE_STATUS+=("$PHASE3_STATUS")
 PHASE_DURATIONS+=("$PHASE3_DUR_MS")

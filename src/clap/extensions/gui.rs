@@ -76,27 +76,21 @@ fn spawn_reaper(name: &'static str, handle: std::thread::JoinHandle<()>) {
 /// Extracts the host X11 `Window` id (`u32` XID) from a CLAP window handle.
 ///
 /// Primary path: `Window::as_x11_handle()` (the `x11` member of the CLAP
-/// window union). Fallback: the rwh-0.6 `HasRawWindowHandle` impl behind
+/// window union). Fallback: the rwh-0.6 `HasWindowHandle` impl behind
 /// clack's `raw-window-handle_06` feature, used when the host reports a
 /// custom API whose payload is still an X11 id.
-fn extract_parent_x11_id(window: &Window<'_>) -> Option<u32> {
+fn extract_parent_x11_id(window: &Window<'_, '_>) -> Option<u32> {
     if let Some(handle) = window.as_x11_handle() {
         return u32::try_from(handle).ok();
     }
     if window.to_standard_api_type().is_some() {
-        // clack-extensions 0.1.1 implements the rwh-0.6 `HasRawWindowHandle`
-        // trait (deprecated upstream in favour of `HasWindowHandle`, but it is
-        // the only rwh impl provided by the CLAP crate version we pin).
-        #[expect(
-            deprecated,
-            reason = "clack 0.1.1 only provides the deprecated rwh-0.6 trait"
-        )]
+        // clack-extensions implements the rwh-0.6 `HasWindowHandle` trait.
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = window.window_handle()
+            && let RawWindowHandle::Xlib(xlib) = handle.as_raw()
         {
-            use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
-            if let Ok(RawWindowHandle::Xlib(xlib)) = window.raw_window_handle() {
-                // rwh 0.6 `XlibWindowHandle.window` is a `c_ulong`; XIDs are u32.
-                return u32::try_from(xlib.window).ok();
-            }
+            // rwh 0.6 `XlibWindowHandle.window` is a `c_ulong`; XIDs are u32.
+            return u32::try_from(xlib.window).ok();
         }
     }
     None
@@ -114,12 +108,12 @@ impl<'a> NamClapMainThread<'a> {
     /// single process-wide event-loop proxy, so an unconditional quit from an
     /// instance that never owned a loop would tear down a *different*
     /// instance's running loop (observable in parallel tests).
-    pub(crate) fn close_current_window(&mut self) {
+    pub(crate) fn close_current_window(&self) {
         // 1. Quit the Slint event loop and clear the window reference.
-        if self.gui_worker.is_some() {
+        if self.gui_worker.borrow().is_some() {
             let _ = slint::quit_event_loop();
         }
-        self.slint_window = None;
+        self.slint_window.replace(None);
 
         // 2. Clear dialog active flags so the UI doesn't show stale Loading
         //    state after the window is closed.
@@ -145,7 +139,7 @@ impl<'a> NamClapMainThread<'a> {
     /// the host handle (its event loops become no-ops). The reaper thread is
     /// used only as a last resort — after the fence is down it merely reclaims
     /// the OS thread resources.
-    pub(crate) fn teardown_gui_resources(&mut self) {
+    pub(crate) fn teardown_gui_resources(&self) {
         self.close_current_window();
 
         // 1. Shut down the persistent GUI worker (channel close → worker
@@ -153,7 +147,7 @@ impl<'a> NamClapMainThread<'a> {
         //    timeout the handle goes to a reaper — with the fence down the
         //    worker's event loops are no-ops from this point on, so no UAF
         //    window exists.
-        if let Some(worker) = self.gui_worker.take()
+        if let Some(worker) = self.gui_worker.borrow_mut().take()
             && let Some(handle) = worker.shutdown()
             && let Some(still_running) =
                 try_join_until(handle, std::time::Instant::now() + TEARDOWN_JOIN_TIMEOUT)
@@ -217,8 +211,8 @@ impl<'a> NamClapMainThread<'a> {
     /// platform is pinned to the initializing thread) and by the XEmbed hook,
     /// which is installed once on that thread and applied to every generation.
     fn spawn_gui(
-        &mut self,
-        window_info: Option<Window<'_>>,
+        &self,
+        window_info: Option<&Window<'_, '_>>,
         mode: GuiWindowMode,
     ) -> Result<(), PluginError> {
         // Resolve the windowing mode *before* touching the worker: embedded
@@ -245,10 +239,8 @@ impl<'a> NamClapMainThread<'a> {
                             log::warn!(
                                 "NAM-Plug: X11 embedding unavailable, failing set_parent: {reason}"
                             );
-                            // clack 0.1.1 hides this error from the host (the
-                            // FFI maps set_parent through is_some()), so notify
-                            // the host that no GUI exists instead of leaving an
-                            // invisible window behind.
+                            // Notify the host that no GUI exists instead of
+                            // leaving an invisible window behind.
                             if let Some(gui_host) = self.host.get_extension::<HostGui>() {
                                 gui_host.closed(&self.host.shared(), true);
                             }
@@ -297,22 +289,30 @@ impl<'a> NamClapMainThread<'a> {
         self.close_current_window();
 
         // Ensure the persistent per-instance GUI worker exists.
-        if self.gui_worker.is_none() {
+        if self.gui_worker.borrow().is_none() {
             let (host_static, shared_arc) = self.host_static_and_shared();
-            self.gui_worker = Some(crate::clap::gui::worker::GuiWorker::spawn(
+            *self.gui_worker.borrow_mut() = Some(crate::clap::gui::worker::GuiWorker::spawn(
                 shared_arc,
                 host_static,
             ));
         }
 
         // Open the window on the worker (bounded wait for creation feedback).
-        let worker = self.gui_worker.as_ref().expect("worker just ensured");
-        match worker.open_window(crate::clap::gui::worker::GuiWindowJob {
-            force_x11,
-            backend_text,
-        }) {
+        // The shared `RefCell` borrow is scoped to the `open_window` call: the
+        // worker job only waits on its own channel, so no reentrant main-thread
+        // access can collide with it.
+        let open_result = {
+            let worker = self.gui_worker.borrow();
+            worker.as_ref().expect("worker just ensured").open_window(
+                crate::clap::gui::worker::GuiWindowJob {
+                    force_x11,
+                    backend_text,
+                },
+            )
+        };
+        match open_result {
             Ok(weak) => {
-                self.slint_window = Some(weak);
+                self.slint_window.replace(Some(weak));
                 // Backend feedback: the worker confirmed creation. When the
                 // host already requested visibility (ShowRequested) this
                 // advances the FSM to Active; otherwise the window is ready
@@ -341,7 +341,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     ///
     /// Rejected configurations:
     /// - **Wayland embedded**: explicitly rejected by the CLAP spec.
-    fn is_api_supported(&mut self, configuration: GuiConfiguration) -> bool {
+    fn is_api_supported(&self, configuration: GuiConfiguration) -> bool {
         match configuration.api_type {
             // X11: floating always; embedded when the embed-at-creation engine
             // is not already pinned to a non-X11 process event loop.
@@ -367,7 +367,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     ///
     /// The detection reads an environment variable once on the main thread; it is
     /// strictly off-RT and safe to call here.
-    fn get_preferred_api(&mut self) -> Option<GuiConfiguration<'_>> {
+    fn get_preferred_api(&self) -> Option<GuiConfiguration<'_>> {
         // Detect Wayland session: WAYLAND_DISPLAY being set is the canonical indicator.
         // This is off-RT (main thread only) so std::env::var is acceptable.
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -386,13 +386,11 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
 
     /// Creates and allocates resources for the graphical interface.
     ///
-    /// Embedded X11 negotiations are validated **here**, because clack 0.1.1's
-    /// FFI wrapper never propagates a `set_parent` error to the host (it maps
-    /// the plugin result through `is_some()`). Rejecting an unviable embedded
-    /// configuration at `create` — which *does* propagate — is therefore the
-    /// only honest way to make a conforming host fall back to a floating
-    /// negotiation instead of ending up with a silently missing window.
-    fn create(&mut self, configuration: GuiConfiguration) -> Result<(), PluginError> {
+    /// Embedded X11 negotiations are validated **here**, because clack's
+    /// FFI wrapper propagates a `set_parent` error to the host, and rejecting
+    /// an unviable embedded configuration at `create` keeps the negotiation
+    /// honest for hosts that probe `create` before `set_parent`.
+    fn create(&self, configuration: GuiConfiguration) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
         if !self.is_api_supported(configuration) {
             return Err(PluginError::Message("GUI configuration not supported"));
@@ -429,7 +427,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             // A new GUI generation must not inherit a close signal from a
             // previous window; the flag belongs to the current window only.
             self.discard_pending_gui_close();
-            self.gui_lifecycle = GuiLifecycle::Hidden;
+            self.gui_lifecycle.set(GuiLifecycle::Hidden);
         }
         Ok(())
     }
@@ -440,7 +438,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// the host may call `create`/`set_parent` again (Slint 1.17 requires the
     /// platform to live on the thread that initialized it, so re-creation
     /// must reuse this instance's worker).
-    fn destroy(&mut self) {
+    fn destroy(&self) {
         debug_assert_main_thread(&self.host);
         {
             // Notify host that the GUI was destroyed by the plugin
@@ -449,7 +447,9 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             }
             self.close_current_window();
             self.discard_pending_gui_close();
-            let _ = self.gui_lifecycle.transition(GuiEvent::Destroy);
+            let mut lifecycle = self.gui_lifecycle.get();
+            let _ = lifecycle.transition(GuiEvent::Destroy);
+            self.gui_lifecycle.set(lifecycle);
         }
     }
 
@@ -467,7 +467,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// GUI thread via `Relaxed` ordering — writing it here uses `Relaxed` too
     /// because the GUI thread only ever *reads* it (plain non-atomic is not
     /// shared; the atomic matches `ColdShared` conventions).
-    fn set_scale(&mut self, scale: f64) -> Result<(), PluginError> {
+    fn set_scale(&self, scale: f64) -> Result<(), PluginError> {
         if scale <= 0.0 || !scale.is_finite() {
             log::warn!("NAM-Plug: set_scale rejected non-positive/non-finite scale {scale}");
             return Err(PluginError::Message(
@@ -489,7 +489,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// geomeography via `can_resize() == false`. Host-side panel resizes reach
     /// the child through X11 `ConfigureNotify`, so the viewport scales without
     /// breaking the CLAP size contract.
-    fn get_size(&mut self) -> Option<GuiSize> {
+    fn get_size(&self) -> Option<GuiSize> {
         Some(GuiSize {
             width: GUI_WIDTH,
             height: GUI_HEIGHT,
@@ -497,7 +497,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     }
 
     /// Sets the GUI size. Only the fixed size is accepted.
-    fn set_size(&mut self, size: GuiSize) -> Result<(), PluginError> {
+    fn set_size(&self, size: GuiSize) -> Result<(), PluginError> {
         if size.width == GUI_WIDTH && size.height == GUI_HEIGHT {
             Ok(())
         } else {
@@ -513,17 +513,11 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// the Slint window as a native child of the host `Window` (XEmbed,
     /// embed-at-creation, see `x11_embed`).
     ///
-    /// # Error propagation caveat
-    ///
-    /// clack 0.1.1's FFI wrapper maps the plugin's `set_parent` result through
-    /// `is_some()`, so a `Err` here is **not** visible to the host. The honest
-    /// fallback therefore happens at `create()` (the *embedded viability
-    /// gate*), which *does* propagate. The error path in this method remains
-    /// as defense-in-depth: it never creates a window, logs the reason loudly,
-    /// and notifies the host through `gui_host.closed()`. Wayland is rejected
+    /// The error path never creates a window, logs the reason loudly, and
+    /// notifies the host through `gui_host.closed()`. Wayland is rejected
     /// outright — the protocol has no generic cross-client embedding and
     /// `is_api_supported` already refuses it.
-    fn set_parent(&mut self, window: Window) -> Result<(), PluginError> {
+    fn set_parent(&self, window: Window) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
         log::info!(
             "NAM-Plug: set_parent requested with API {:?}",
@@ -538,17 +532,17 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             }
             return Err(PluginError::Message(msg));
         }
-        self.spawn_gui(Some(window), GuiWindowMode::EmbeddedX11)
+        self.spawn_gui(Some(&window), GuiWindowMode::EmbeddedX11)
     }
 
     /// Configures the window to float above the host window (floating mode).
-    fn set_transient(&mut self, window: Window) -> Result<(), PluginError> {
+    fn set_transient(&self, window: Window) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
         log::info!(
             "NAM-Plug: set_transient requested with API {:?}",
             window.api_type().0
         );
-        self.spawn_gui(Some(window), GuiWindowMode::Floating)
+        self.spawn_gui(Some(&window), GuiWindowMode::Floating)
     }
 
     /// Makes the GUI window visible.
@@ -566,12 +560,14 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// is therefore logged at `warn` level — both the dispatch result and the
     /// window operation executed on the GUI thread — so the false positive is
     /// observable through the host log console and the diagnostic bundle.
-    fn show(&mut self) -> Result<(), PluginError> {
+    fn show(&self) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
         self.reconcile_pending_gui_close();
-        self.gui_lifecycle.transition(GuiEvent::Show)?;
-        if let Some(weak) = &self.slint_window {
-            let lifecycle = self.gui_lifecycle;
+        let mut lifecycle = self.gui_lifecycle.get();
+        lifecycle.transition(GuiEvent::Show)?;
+        self.gui_lifecycle.set(lifecycle);
+        if let Some(weak) = self.slint_window.borrow().as_ref().cloned() {
+            let lifecycle = self.gui_lifecycle.get();
             if let Err(e) = weak.upgrade_in_event_loop(move |w| {
                 if let Err(e) = w.show() {
                     log::warn!(
@@ -602,12 +598,14 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// As in `show()`, a dispatch failure is logged at `warn` level rather than
     /// returned to the host: the FSM still reaches `Hidden` (the host already
     /// considers the window hidden), but the dropped error stays observable.
-    fn hide(&mut self) -> Result<(), PluginError> {
+    fn hide(&self) -> Result<(), PluginError> {
         debug_assert_main_thread(&self.host);
         self.discard_pending_gui_close();
-        self.gui_lifecycle.transition(GuiEvent::Hide)?;
-        if let Some(weak) = &self.slint_window {
-            let lifecycle = self.gui_lifecycle;
+        let mut lifecycle = self.gui_lifecycle.get();
+        lifecycle.transition(GuiEvent::Hide)?;
+        self.gui_lifecycle.set(lifecycle);
+        if let Some(weak) = self.slint_window.borrow().as_ref().cloned() {
+            let lifecycle = self.gui_lifecycle.get();
             if let Err(e) = weak.upgrade_in_event_loop(move |w| {
                 if let Err(e) = w.hide() {
                     log::warn!(
@@ -621,12 +619,14 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                 );
             }
         }
-        let _ = self.gui_lifecycle.transition(GuiEvent::WindowHidden);
+        let mut lifecycle = self.gui_lifecycle.get();
+        let _ = lifecycle.transition(GuiEvent::WindowHidden);
+        self.gui_lifecycle.set(lifecycle);
         Ok(())
     }
 
     /// Reports whether the window size can be changed (fixed size).
-    fn can_resize(&mut self) -> bool {
+    fn can_resize(&self) -> bool {
         false
     }
 }

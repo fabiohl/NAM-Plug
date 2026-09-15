@@ -22,14 +22,14 @@ pub type NamPluginAudioPortsActivation = PluginAudioPortsActivation;
 // ---------------------------------------------------------------------------
 
 impl PluginAudioPortsActivationImpl for NamClapMainThread<'_> {
-    fn can_activate_while_processing(&mut self) -> bool {
+    fn can_activate_while_processing(&self) -> bool {
         true
     }
 }
 
 impl PluginAudioPortsActivationSetImpl for NamClapMainThread<'_> {
     fn set_active(
-        &mut self,
+        &self,
         is_input: bool,
         port_index: u32,
         is_active: bool,
@@ -54,7 +54,7 @@ impl PluginAudioPortsActivationSetImpl for NamClapMainThread<'_> {
 
 impl PluginAudioPortsActivationSetImpl for NamClapProcessor<'_> {
     fn set_active(
-        &mut self,
+        &self,
         is_input: bool,
         port_index: u32,
         is_active: bool,

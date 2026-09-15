@@ -137,7 +137,7 @@ mod tests {
             use crate::clap::extensions::params::PARAM_INPUT_GAIN;
             use clack_common::events::Pckn;
             use clack_common::events::event_types::ParamValueEvent;
-            use clack_common::utils::{ClapId, Cookie};
+            use clack_common::utils::ClapId;
 
             let mut input_events_buffer = EventBuffer::new();
             let val_event = ParamValueEvent::new(
@@ -145,7 +145,6 @@ mod tests {
                 ClapId::new(PARAM_INPUT_GAIN),
                 Pckn::match_all(),
                 12.0, // +12 dB
-                Cookie::empty(),
             );
             input_events_buffer.push(&val_event);
             let input_events = InputEvents::from_buffer(&input_events_buffer);

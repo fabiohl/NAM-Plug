@@ -1069,7 +1069,6 @@ impl GuiSharedState {
                     ClapId::new(*param_id),
                     clack_plugin::events::Pckn::new(0u8, 0u8, 0u8, 0u8),
                     val,
-                    clack_plugin::utils::Cookie::empty(),
                 );
                 if output.try_push(ev).is_err() {
                     self.set_gesture(pi, Self::GESTURE_CHANGED_SHIFT);

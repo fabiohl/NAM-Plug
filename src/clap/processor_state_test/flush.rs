@@ -10,7 +10,7 @@ fn test_audio_processor_flush() {
     use crate::clap::extensions::params::PARAM_INPUT_GAIN;
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
-    use clack_common::utils::{ClapId, Cookie};
+    use clack_common::utils::ClapId;
     use clack_extensions::params::PluginAudioProcessorParams;
 
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
@@ -46,13 +46,7 @@ fn test_audio_processor_flush() {
 
     // Prepare parameter events for flush: set input gain to 10.5 dB
     let mut input_events_buffer = EventBuffer::new();
-    let event = ParamValueEvent::new(
-        0,
-        ClapId::new(PARAM_INPUT_GAIN),
-        Pckn::match_all(),
-        10.5f64,
-        Cookie::empty(),
-    );
+    let event = ParamValueEvent::new(0, ClapId::new(PARAM_INPUT_GAIN), Pckn::match_all(), 10.5f64);
     input_events_buffer.push(&event);
     let input_events = InputEvents::from_buffer(&input_events_buffer);
 

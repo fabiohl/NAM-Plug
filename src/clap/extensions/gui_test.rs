@@ -32,25 +32,26 @@ fn fake_gui_worker_thread(
     (tx, handle)
 }
 
-/// Returns a mutable reference to the main thread struct of a test plugin.
+/// Returns a shared reference to the main thread struct of a test plugin.
 ///
 /// The reference is only valid while `instance` is alive; callers must not
 /// use it after the instance is dropped.
-fn main_thread_mut(
-    instance: &mut PluginInstance<test_util::TestHost>,
-) -> &mut NamClapMainThread<'_> {
+///
+/// Shared (not mutable): clack 0.2.0 exposes the main thread through `&self`
+/// ("Embrace Reentrancy"); interior mutability (`Cell`/`RefCell`) keeps the
+/// staged slots reachable without `&mut`.
+fn main_thread_mut(instance: &mut PluginInstance<test_util::TestHost>) -> &NamClapMainThread<'_> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
-    let mut nn = unsafe {
+    let ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::plugin::NamClapPlugin>::handle(
             raw_ptr,
-            |wrapper| Ok(wrapper.main_thread()),
+            |wrapper| Ok(wrapper.main_thread() as *const NamClapMainThread<'_>),
         )
     }
     .expect("Failed to get plugin wrapper");
-    // SAFETY: the plugin instance is uniquely borrowed for the duration of
-    // the caller's use; the wrapper guarantees main-thread exclusivity and
-    // nothing else aliases this struct while the caller holds the reference.
-    unsafe { nn.as_mut() }
+    // SAFETY: the plugin instance outlives the returned reference, and the
+    // wrapper guarantees main-thread exclusivity while it is alive.
+    unsafe { &*ptr }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +105,8 @@ fn test_drop_teardown_lowers_fence_and_joins_worker() {
     let (tx, handle) = fake_gui_worker_thread(exited_tx);
 
     let mt = main_thread_mut(&mut plugin_instance);
-    mt.gui_worker = Some(GuiWorker::from_parts_for_test(tx, handle));
+    mt.gui_worker
+        .replace(Some(GuiWorker::from_parts_for_test(tx, handle)));
 
     // Host destroys the plugin without gui.destroy().
     drop(plugin_instance);
@@ -135,7 +137,8 @@ fn test_stress_rapid_teardown_cycles() {
         let (tx, handle) = fake_gui_worker_thread(exited_tx);
 
         let mt = main_thread_mut(&mut plugin_instance);
-        mt.gui_worker = Some(GuiWorker::from_parts_for_test(tx, handle));
+        mt.gui_worker
+            .replace(Some(GuiWorker::from_parts_for_test(tx, handle)));
 
         drop(plugin_instance);
 
@@ -170,7 +173,8 @@ fn show_after_teardown_logs_warn() {
 
     let mt = main_thread_mut(&mut plugin_instance);
     // A handle whose event loop is gone: the dispatch must fail observably.
-    mt.slint_window = Some(slint::Weak::<crate::clap::gui::MainWindow>::default());
+    mt.slint_window
+        .replace(Some(slint::Weak::<crate::clap::gui::MainWindow>::default()));
 
     let show = mt.show();
     assert!(

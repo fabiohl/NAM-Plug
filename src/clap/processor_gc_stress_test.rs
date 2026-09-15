@@ -44,10 +44,10 @@ mod tests {
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
-            let mut handle = plugin_instance.plugin_handle();
+            let handle = plugin_instance.plugin_handle();
             let prev_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
             state_ext
-                .load(&mut handle, &mut state_bytes.as_slice())
+                .load(&handle, &mut state_bytes.as_slice())
                 .expect("Failed to load state");
 
             let current_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
@@ -105,10 +105,10 @@ mod tests {
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
-            let mut handle = plugin_instance.plugin_handle();
+            let handle = plugin_instance.plugin_handle();
             let prev_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
             state_ext
-                .load(&mut handle, &mut state_bytes.as_slice())
+                .load(&handle, &mut state_bytes.as_slice())
                 .expect("Failed to load state");
 
             let current_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
@@ -197,10 +197,10 @@ mod tests {
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
-            let mut handle = plugin_instance.plugin_handle();
+            let handle = plugin_instance.plugin_handle();
             let prev_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
             state_ext
-                .load(&mut handle, &mut state_bytes.as_slice())
+                .load(&handle, &mut state_bytes.as_slice())
                 .expect("Failed to load state");
 
             let current_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
@@ -313,10 +313,10 @@ mod tests {
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
-            let mut handle = plugin_instance.plugin_handle();
+            let handle = plugin_instance.plugin_handle();
 
             state_ext
-                .load(&mut handle, &mut state_bytes.as_slice())
+                .load(&handle, &mut state_bytes.as_slice())
                 .expect("Failed to load state");
 
             let mut input_channels = [bufs.in_l.as_mut_slice(), bufs.in_r.as_mut_slice()];
@@ -400,9 +400,9 @@ mod tests {
 
             let params = test_util::make_default_params(Some(path));
             let state_bytes = serde_json::to_vec(&params).unwrap();
-            let mut handle = plugin_instance.plugin_handle();
+            let handle = plugin_instance.plugin_handle();
             state_ext
-                .load(&mut handle, &mut state_bytes.as_slice())
+                .load(&handle, &mut state_bytes.as_slice())
                 .expect("Failed to load state");
 
             let mut input_channels = [bufs.in_l.as_mut_slice(), bufs.in_r.as_mut_slice()];

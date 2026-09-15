@@ -29,6 +29,7 @@ use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{GcOverflowBuffer, RtStatusFlags};
 use rtrb::RingBuffer;
+use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -203,7 +204,10 @@ impl DefaultPluginFactory for NamClapPlugin {
         mut host: HostMainThreadHandle<'a>,
         shared: &'a Self::Shared<'a>,
     ) -> Result<Self::MainThread<'a>, PluginError> {
-        // Initial track color query from the host
+        // Initial track color query from the host.
+        // `HostTrackInfo::get` still takes `&mut` in clack 0.2.0 (only the
+        // plugin-side traits flipped to `&self`); `new_main_thread` owns the
+        // handle mutably here, so no interior-mutability workaround is needed.
         if let Some(track_info_ext) =
             host.get_extension::<clack_extensions::track_info::HostTrackInfo>()
         {
@@ -327,29 +331,29 @@ impl DefaultPluginFactory for NamClapPlugin {
             // is overridden here to the range minimum (-90.0 dB), the most permissive
             // setting, so the gate practically never closes unless the user/host
             // explicitly tightens the threshold.
-            params: ProcessingParams {
+            params: RefCell::new(ProcessingParams {
                 gate_threshold_db: -90.0,
                 ..ProcessingParams::default()
-            },
+            }),
             host,
             sys: SystemSnapshot::capture(),
-            cmd_producer,
-            gc_rx,
-            slimmable_tx,
-            last_reported_latency: 0,
-            last_reported_cabsim_tail: 0,
-            last_seen_slimmable_stale: 0,
-            slint_window: None,
-            gui_worker: None,
-            dialog_handle: None,
+            cmd_producer: RefCell::new(cmd_producer),
+            gc_rx: RefCell::new(gc_rx),
+            slimmable_tx: RefCell::new(slimmable_tx),
+            last_reported_latency: Cell::new(0),
+            last_reported_cabsim_tail: Cell::new(0),
+            last_seen_slimmable_stale: Cell::new(0),
+            slint_window: RefCell::new(None),
+            gui_worker: RefCell::new(None),
+            dialog_handle: RefCell::new(None),
             dialog_state: shared.cold.dialog_state.clone(),
-            ir_dialog_handle: None,
+            ir_dialog_handle: RefCell::new(None),
             ir_dialog_state: shared.cold.ir_dialog_state.clone(),
-            gui_lifecycle: crate::clap::gui::lifecycle::GuiLifecycle::Hidden,
-            hugepage_synced: false,
-            pending_restore: None,
-            staged_restore: None,
-            staged_swap: None,
+            gui_lifecycle: Cell::new(crate::clap::gui::lifecycle::GuiLifecycle::Hidden),
+            hugepage_synced: Cell::new(false),
+            pending_restore: RefCell::new(None),
+            staged_restore: RefCell::new(None),
+            staged_swap: RefCell::new(None),
         };
 
         let host_name = main_thread

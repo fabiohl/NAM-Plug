@@ -26,7 +26,11 @@ impl<'a> NamClapMainThread<'a> {
     /// This method performs I/O and memory allocations, being safe to execute
     /// only on the main thread. The loaded model is sent to the RT thread
     /// via a lock-free channel.
-    pub fn load_model(&mut self, path: &Path) -> Result<(), Box<NamDiagnostic>> {
+    ///
+    /// Runs under `&self`: mutations go through the granular interior
+    /// mutability, with every `RefCell` borrow scoped so it is released
+    /// before any host call.
+    pub fn load_model(&self, path: &Path) -> Result<(), Box<NamDiagnostic>> {
         let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
             self.shared.cold.instance_id,
         );
@@ -70,15 +74,18 @@ impl<'a> NamClapMainThread<'a> {
                 )
             })?);
 
-        self.params.model_path = Some(path.to_path_buf());
-        self.params.model_basename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
-        if let Some(parent) = path.parent() {
-            let parent_buf = parent.to_path_buf();
-            if !self.params.model_search_paths.contains(&parent_buf) {
-                self.params.model_search_paths.push(parent_buf);
+        {
+            let mut params = self.params.borrow_mut();
+            params.model_path = Some(path.to_path_buf());
+            params.model_basename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
+            if let Some(parent) = path.parent() {
+                let parent_buf = parent.to_path_buf();
+                if !params.model_search_paths.contains(&parent_buf) {
+                    params.model_search_paths.push(parent_buf);
+                }
             }
         }
 
@@ -94,7 +101,7 @@ impl<'a> NamClapMainThread<'a> {
                         .hint("Assets are adopted only with a verified SHA-256 digest."),
                 )
             })?;
-        self.params.model_hash = Some(model_hash);
+        self.params.borrow_mut().model_hash = Some(model_hash);
 
         let metadata = model_pair.metadata.clone();
         let architecture = model_pair.architecture.clone();
@@ -197,7 +204,7 @@ impl<'a> NamClapMainThread<'a> {
                     })?;
 
             // Explicit user load supersedes any pending staged restore (TR.1 #5).
-            self.staged_restore = None;
+            *self.staged_restore.borrow_mut() = None;
 
             // Strict Restart Policy: a model swap only changes the
             // physical latency when the streaming adapter's latency changes
@@ -215,22 +222,27 @@ impl<'a> NamClapMainThread<'a> {
                 // Same exact latency ⇒ continuous hot swap:
                 // deliver through the SPSC and supersede any
                 // previously staged model (latest user intent already landed).
-                if let Some(staged) = self.staged_swap.as_mut() {
-                    staged.clear_model();
-                    if staged.is_empty() {
-                        self.staged_swap = None;
+                {
+                    let mut staged_swap = self.staged_swap.borrow_mut();
+                    if let Some(staged) = staged_swap.as_mut() {
+                        staged.clear_model();
+                        if staged.is_empty() {
+                            *staged_swap = None;
+                        }
                     }
                 }
-                match self
-                    .cmd_producer
-                    .try_push_command(ClapParamPayload::LoadModel {
-                        generation,
-                        model_l,
-                        new_resampler,
-                        new_stream,
-                        input_mult_adj,
-                        output_mult_adj,
-                    }) {
+                let push_result =
+                    self.cmd_producer
+                        .borrow_mut()
+                        .try_push_command(ClapParamPayload::LoadModel {
+                            generation,
+                            model_l,
+                            new_resampler,
+                            new_stream,
+                            input_mult_adj,
+                            output_mult_adj,
+                        });
+                match push_result {
                     Ok(_seq) => {}
                     Err((PushError::Full, payload)) => {
                         // Fail-closed — retain the model for retry instead of
@@ -268,15 +280,18 @@ impl<'a> NamClapMainThread<'a> {
                 // (`activate()` consumes `staged_swap`). The DSP keeps the
                 // old, still-reported latency until then — no sample ever
                 // diverges from `PluginLatency::get()`.
-                let staged = self.staged_swap.get_or_insert_with(StagedSwap::default);
-                staged.model = Some(LoadModelPayload {
-                    generation,
-                    model_l,
-                    new_resampler,
-                    new_stream,
-                    input_mult_adj,
-                    output_mult_adj,
-                });
+                {
+                    let mut staged_swap = self.staged_swap.borrow_mut();
+                    let staged = staged_swap.get_or_insert_with(StagedSwap::default);
+                    staged.model = Some(LoadModelPayload {
+                        generation,
+                        model_l,
+                        new_resampler,
+                        new_stream,
+                        input_mult_adj,
+                        output_mult_adj,
+                    });
+                }
                 self.host.request_restart();
             }
         } else {
@@ -314,14 +329,14 @@ impl<'a> NamClapMainThread<'a> {
             .get_extension::<clack_extensions::params::HostParams>()
         {
             params_ext.rescan(
-                &mut self.host,
+                &self.host,
                 clack_extensions::params::ParamRescanFlags::VALUES,
             );
         }
 
         log::info!("Model loaded: {path:?}");
 
-        if let Some(mut state_ext) = self
+        if let Some(state_ext) = self
             .host
             .get_extension::<clack_extensions::state::HostState>()
         {
@@ -337,7 +352,7 @@ impl<'a> NamClapMainThread<'a> {
     /// FFT plan construction), being safe to execute only on the main thread.
     /// The constructed `ConvEngine` is sent to the RT thread via a lock-free
     /// SPSC channel following the same pattern as `load_model`.
-    pub fn load_cabsim(&mut self, path: &Path) -> Result<(), Box<NamDiagnostic>> {
+    pub fn load_cabsim(&self, path: &Path) -> Result<(), Box<NamDiagnostic>> {
         let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
             self.shared.cold.instance_id,
         );
@@ -389,7 +404,7 @@ impl<'a> NamClapMainThread<'a> {
         // exact same latency and applies continuously through the SPSC.
         let delivered = if buffer_size > 0 {
             // Explicit user IR load supersedes any pending staged restore (TR.1 #5).
-            self.staged_restore = None;
+            *self.staged_restore.borrow_mut() = None;
 
             // Box here on the main thread so the SPSC payload
             // carries `Box<CabSimAdapter>` and the audio-thread swap moves the
@@ -414,10 +429,13 @@ impl<'a> NamClapMainThread<'a> {
                 // Same exact latency ⇒ continuous IR swap (no restart needed).
                 // Supersedes any previously staged IR (latest user intent
                 // already landed).
-                if let Some(staged) = self.staged_swap.as_mut() {
-                    staged.clear_ir();
-                    if staged.is_empty() {
-                        self.staged_swap = None;
+                {
+                    let mut staged_swap = self.staged_swap.borrow_mut();
+                    if let Some(staged) = staged_swap.as_mut() {
+                        staged.clear_ir();
+                        if staged.is_empty() {
+                            *staged_swap = None;
+                        }
                     }
                 }
                 // Fail-closed — if the SPSC is full, put the path back in
@@ -427,6 +445,7 @@ impl<'a> NamClapMainThread<'a> {
                 // while DSP stays dry).
                 match self
                     .cmd_producer
+                    .borrow_mut()
                     .try_push_command(ClapParamPayload::LoadCabIr { adapter })
                 {
                     Ok(_) => true,
@@ -443,8 +462,11 @@ impl<'a> NamClapMainThread<'a> {
                 // the adapter and request a host restart. The DSP keeps running
                 // without the IR (and reporting the old latency) until the
                 // restart cycle installs the staged IR in `activate()`.
-                let staged = self.staged_swap.get_or_insert_with(StagedSwap::default);
-                staged.ir = Some(adapter);
+                {
+                    let mut staged_swap = self.staged_swap.borrow_mut();
+                    let staged = staged_swap.get_or_insert_with(StagedSwap::default);
+                    staged.ir = Some(adapter);
+                }
                 self.host.request_restart();
                 true
             }
@@ -466,15 +488,18 @@ impl<'a> NamClapMainThread<'a> {
                 .cold
                 .ir_raw_sample_rate
                 .store(cabsim.sample_rate, Ordering::Relaxed);
-            self.params.ir_path = Some(path.to_path_buf());
-            self.params.ir_hash = Some(ir_hash);
+            {
+                let mut params = self.params.borrow_mut();
+                params.ir_path = Some(path.to_path_buf());
+                params.ir_hash = Some(ir_hash);
+            }
         }
 
         Ok(())
     }
 
     /// Clears the active neural model (unloads model).
-    pub fn clear_model(&mut self) -> Result<(), Box<NamDiagnostic>> {
+    pub fn clear_model(&self) -> Result<(), Box<NamDiagnostic>> {
         let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
             self.shared.cold.instance_id,
         );
@@ -489,9 +514,12 @@ impl<'a> NamClapMainThread<'a> {
             *storage = None;
         }
 
-        self.params.model_path = None;
-        self.params.model_basename = None;
-        self.params.model_hash = None;
+        {
+            let mut params = self.params.borrow_mut();
+            params.model_path = None;
+            params.model_basename = None;
+            params.model_hash = None;
+        }
 
         if let Ok(mut meta_guard) = self.shared.cold.ui_model_metadata.lock() {
             *meta_guard = None;
@@ -530,7 +558,7 @@ impl<'a> NamClapMainThread<'a> {
                         )
                     })?;
 
-            self.staged_restore = None;
+            *self.staged_restore.borrow_mut() = None;
 
             let current_stream_latency = self
                 .shared
@@ -540,22 +568,27 @@ impl<'a> NamClapMainThread<'a> {
             let new_stream_latency = new_stream.latency_samples();
 
             if new_stream_latency == current_stream_latency {
-                if let Some(staged) = self.staged_swap.as_mut() {
-                    staged.clear_model();
-                    if staged.is_empty() {
-                        self.staged_swap = None;
+                {
+                    let mut staged_swap = self.staged_swap.borrow_mut();
+                    if let Some(staged) = staged_swap.as_mut() {
+                        staged.clear_model();
+                        if staged.is_empty() {
+                            *staged_swap = None;
+                        }
                     }
                 }
-                match self
-                    .cmd_producer
-                    .try_push_command(ClapParamPayload::LoadModel {
-                        generation,
-                        model_l: None,
-                        new_resampler,
-                        new_stream,
-                        input_mult_adj: 1.0,
-                        output_mult_adj: 1.0,
-                    }) {
+                let push_result =
+                    self.cmd_producer
+                        .borrow_mut()
+                        .try_push_command(ClapParamPayload::LoadModel {
+                            generation,
+                            model_l: None,
+                            new_resampler,
+                            new_stream,
+                            input_mult_adj: 1.0,
+                            output_mult_adj: 1.0,
+                        });
+                match push_result {
                     Ok(_seq) => {}
                     Err((PushError::Full, payload)) => {
                         if let ClapParamPayload::LoadModel {
@@ -578,15 +611,18 @@ impl<'a> NamClapMainThread<'a> {
                     }
                 }
             } else {
-                let staged = self.staged_swap.get_or_insert_with(StagedSwap::default);
-                staged.model = Some(LoadModelPayload {
-                    generation,
-                    model_l: None,
-                    new_resampler,
-                    new_stream,
-                    input_mult_adj: 1.0,
-                    output_mult_adj: 1.0,
-                });
+                {
+                    let mut staged_swap = self.staged_swap.borrow_mut();
+                    let staged = staged_swap.get_or_insert_with(StagedSwap::default);
+                    staged.model = Some(LoadModelPayload {
+                        generation,
+                        model_l: None,
+                        new_resampler,
+                        new_stream,
+                        input_mult_adj: 1.0,
+                        output_mult_adj: 1.0,
+                    });
+                }
                 self.host.request_restart();
             }
         } else {

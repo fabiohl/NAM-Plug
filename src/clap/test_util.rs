@@ -210,9 +210,9 @@ pub fn get_state_ext(
 pub fn load_plugin_state(instance: &mut PluginInstance<TestHost>, params: &ProcessingParams) {
     let state_ext = get_state_ext(instance);
     let state_bytes = serde_json::to_vec(params).unwrap();
-    let mut handle = instance.plugin_handle();
+    let handle = instance.plugin_handle();
     state_ext
-        .load(&mut handle, &mut state_bytes.as_slice())
+        .load(&handle, &mut state_bytes.as_slice())
         .expect("Failed to load state");
 }
 

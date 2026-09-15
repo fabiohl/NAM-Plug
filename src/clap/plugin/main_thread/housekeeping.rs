@@ -15,7 +15,13 @@ use std::sync::atomic::Ordering;
 
 impl<'a> NamClapMainThread<'a> {
     /// GC drain, status flag mirroring, hugepage sync, pending model load, latency notification.
-    pub(crate) fn housekeeping(&mut self) {
+    ///
+    /// Runs under `&self`: every mutation goes through the granular
+    /// `Cell`/`RefCell` interior mutability, and every `RefCell` borrow is
+    /// scoped to end **before** any external host call (`request_callback`,
+    /// `request_restart`, extension methods) — no borrow survives a host call,
+    /// so a reentrant host callback can never hit a `BorrowMutError`.
+    pub(crate) fn housekeeping(&self) {
         let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
             self.shared.cold.instance_id,
         );
@@ -45,12 +51,15 @@ impl<'a> NamClapMainThread<'a> {
         // `drain_gc_final(&mut processor.parking_lot)`) covers the 16 slots
         // after the audio thread stops.
         let mut rt_parking_lot: [Option<GcItem>; 16] = Default::default();
-        let drained = drain_gc_channels(
-            &mut self.gc_rx,
-            &self.shared.cold.gc_overflow,
-            &mut rt_parking_lot,
-            &self.shared.cold.rt_status,
-        );
+        let drained = {
+            let mut gc_rx = self.gc_rx.borrow_mut();
+            drain_gc_channels(
+                &mut gc_rx,
+                &self.shared.cold.gc_overflow,
+                &mut rt_parking_lot,
+                &self.shared.cold.rt_status,
+            )
+        };
         self.shared
             .cold
             .rt_status
@@ -70,11 +79,11 @@ impl<'a> NamClapMainThread<'a> {
             .fetch_or(current_bits, Ordering::Relaxed);
 
         // Sync huge page status from mirror buffer (one-shot per instance).
-        if !self.hugepage_synced {
+        if !self.hugepage_synced.get() {
             neural_amp_modeler_rs::dsp::mirror_buf::sync_huge_page_flag(
                 &self.shared.cold.rt_status,
             );
-            self.hugepage_synced = true;
+            self.hugepage_synced.set(true);
         }
 
         // Slimmable reset failure: RT thread sets flag, main thread emits log.
@@ -141,8 +150,11 @@ impl<'a> NamClapMainThread<'a> {
                 };
 
                 if let Some(model) = new_model {
+                    // The producer borrow ends before `request_callback()` below
+                    // (Err arm), so no borrow is held across the host call.
                     match self
                         .slimmable_tx
+                        .borrow_mut()
                         .push(SlimmableRebuild { generation, model })
                     {
                         Ok(()) => {
@@ -197,7 +209,9 @@ impl<'a> NamClapMainThread<'a> {
                 OversampleEngine::new(factor, MAX_RESAMP_BUF),
                 OversampleEngine::new(factor, MAX_RESAMP_BUF),
             ) {
-                match self.cmd_producer.try_push_command(
+                // Producer borrow ends with the match scrutinee, before the
+                // host calls in the arms (clear_flag / request_callback).
+                match self.cmd_producer.borrow_mut().try_push_command(
                     crate::clap::plugin::ClapParamPayload::SetOversample {
                         os_l: Box::new(l),
                         os_r: Box::new(r),
@@ -293,7 +307,7 @@ impl<'a> NamClapMainThread<'a> {
                 match res {
                     Ok(_) => {
                         if let Some(pending) = pending_load {
-                            notify_preset_loaded(&mut self.host, pending);
+                            notify_preset_loaded(&self.host, pending);
                         }
                     }
                     Err(e) => {
@@ -315,7 +329,7 @@ impl<'a> NamClapMainThread<'a> {
 
                         if let Some(pending) = pending_load {
                             notify_preset_error(
-                                &mut self.host,
+                                &self.host,
                                 pending,
                                 e.error_code() as i32,
                                 err_msg,
@@ -416,8 +430,13 @@ impl<'a> NamClapMainThread<'a> {
                 if current_cabsim_latency == 0 {
                     self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
                 } else {
-                    let staged = self.staged_swap.get_or_insert_with(StagedSwap::default);
-                    staged.ir = Some(None);
+                    // Scoped borrow: `staged_swap` is released before the host
+                    // `request_restart()` call below.
+                    {
+                        let mut staged_swap = self.staged_swap.borrow_mut();
+                        let staged = staged_swap.get_or_insert_with(StagedSwap::default);
+                        staged.ir = Some(None);
+                    }
                     self.host.request_restart();
                     self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
                     {
@@ -469,8 +488,8 @@ impl<'a> NamClapMainThread<'a> {
         // from `RtToUi`) have been replaced by this single unified atomic read.
         let current_latency = self.shared.rt_to_ui.current_latency.load(Ordering::Relaxed);
 
-        if current_latency != self.last_reported_latency {
-            self.last_reported_latency = current_latency;
+        if current_latency != self.last_reported_latency.get() {
+            self.last_reported_latency.set(current_latency);
             log::info!(
                 "[Housekeeping] Latency changed: {} samples reported to host.",
                 current_latency
@@ -479,7 +498,7 @@ impl<'a> NamClapMainThread<'a> {
                 .host
                 .get_extension::<clack_extensions::latency::HostLatency>()
             {
-                latency_ext.changed(&mut self.host);
+                latency_ext.changed(&self.host);
             }
         }
 
@@ -489,8 +508,8 @@ impl<'a> NamClapMainThread<'a> {
             .rt_to_ui
             .cabsim_tail_samples
             .load(Ordering::Relaxed);
-        if _cabsim_tail != self.last_reported_cabsim_tail {
-            self.last_reported_cabsim_tail = _cabsim_tail;
+        if _cabsim_tail != self.last_reported_cabsim_tail.get() {
+            self.last_reported_cabsim_tail.set(_cabsim_tail);
         }
 
         // Observability: surface stale slimmable-rebuild
@@ -502,8 +521,8 @@ impl<'a> NamClapMainThread<'a> {
             .cold
             .slimmable_stale_discarded_total
             .load(Ordering::Relaxed);
-        if stale_discarded != self.last_seen_slimmable_stale {
-            self.last_seen_slimmable_stale = stale_discarded;
+        if stale_discarded != self.last_seen_slimmable_stale.get() {
+            self.last_seen_slimmable_stale.set(stale_discarded);
             log::warn!(
                 "NAM-Plug: {} stale slimmable rebuild(s) discarded",
                 stale_discarded
@@ -514,7 +533,7 @@ impl<'a> NamClapMainThread<'a> {
     /// Retries delivery of parameter snapshots queued by
     /// `PluginMainThreadParams::flush()` when the SPSC channel was full.
     /// Called from `housekeeping()` (triggered by `host.request_callback()`).
-    fn flush_in_flight_params(&mut self) {
+    fn flush_in_flight_params(&self) {
         let snapshot = self
             .shared
             .cold
@@ -523,8 +542,15 @@ impl<'a> NamClapMainThread<'a> {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(params) = snapshot {
-            self.cmd_producer.push_params(params);
-            match self.cmd_producer.force_flush() {
+            // Scoped producer borrow: released before the poisoned-lock
+            // recovery below (no host call happens here, but keeping the
+            // borrow window minimal is the house rule).
+            let flush_result = {
+                let mut producer = self.cmd_producer.borrow_mut();
+                producer.push_params(params);
+                producer.force_flush()
+            };
+            match flush_result {
                 Ok(_) => {
                     log::trace!("In-flight params delivered on retry");
                 }
@@ -549,7 +575,7 @@ impl<'a> NamClapMainThread<'a> {
 /// Notify the host that a preset was loaded successfully.
 /// Reconstructs the `Location` from the stored `PendingPresetLoad` and
 /// calls `HostPresetLoad::loaded()`.
-fn notify_preset_loaded(host: &mut HostMainThreadHandle, pending: PendingPresetLoad) {
+fn notify_preset_loaded(host: &HostMainThreadHandle, pending: PendingPresetLoad) {
     let path_cstr = pending.location_path;
     let load_key_cstr = pending.load_key;
     if let Some(preset_load) = host.get_extension::<HostPresetLoad>() {
@@ -562,7 +588,7 @@ fn notify_preset_loaded(host: &mut HostMainThreadHandle, pending: PendingPresetL
 
 /// Notify the host that a preset load failed.
 fn notify_preset_error(
-    host: &mut HostMainThreadHandle,
+    host: &HostMainThreadHandle,
     pending: PendingPresetLoad,
     os_error: i32,
     message: &str,

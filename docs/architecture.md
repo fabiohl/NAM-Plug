@@ -558,12 +558,12 @@ visible.
 (XEmbed) **without forking Slint**, using the officially exposed
 `unstable-winit-030` feature. This unblocks E4 / Sprint 8 (Opção A).
 
-**Spike evidence (read-only, Slint 1.17.1 / winit 0.30.13 / clack-extensions 0.1.1):**
+**Spike evidence (read-only, Slint 1.17.1 / winit 0.30.13 / clack-extensions 0.2.0):**
 
 | Question                                                                                     | Finding                                                                                                                                                                                                                                                                                                                                                                  |
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | (a) Can a custom `slint::platform::WindowAdapter`/`Platform` inject an existing X11 `Window`? | Not required. Slint 1.17 exposes `slint::BackendSelector::with_winit_window_attributes_hook(Fn(WindowAttributes) -> WindowAttributes)` (feature `unstable-winit-030`), invoked in `i-slint-backend-winit::Backend::create_window_adapter` on **every** window creation. A custom `WindowAdapter` is therefore unnecessary for embedding.                                      |
-| (b) How to extract the host X11 `Window` id from CLAP?                                        | `clack_extensions::gui::Window::as_x11_handle() -> Option<c_ulong>` returns the host `Window` directly (the `raw-window-handle_06` feature is **not** needed). Fallbacks: `Window::from_generic_ptr` or the rwh-0.6 `HasRawWindowHandle` impl (`XlibWindowHandle`).                                                                                                         |
+| (b) How to extract the host X11 `Window` id from CLAP?                                        | `clack_extensions::gui::Window::as_x11_handle() -> Option<XlibHandle>` returns the host `Window` directly (the `raw-window-handle_06` feature is **not** needed). Fallbacks: `Window::to_standard_api_type()` + the rwh-0.6 `HasWindowHandle` impl (`XlibWindowHandle`).                                                                                                              |
 | (c) Does `winit` expose the X11 window id for `XReparentWindow`/`xcb_reparent_window`?       | Yes, and better: `winit::platform::x11::WindowAttributesExtX11::with_embed_parent_window(XWindow)` sets `platform_specific.x11.embed_window`; the X11 backend then creates the window as a child (`create_window(..., parent=embed_window, ...)`, `platform_impl/linux/x11/window.rs:305`) and sets the `_XEMBED` property `[0,1]` (version 0, mapped) via `embed_window()` (`window.rs:368`). |
 | (d) Is `build.rs` affected?                                                                   | No. `slint_build::compile("src/clap/gui/slint/main.slint")` stays untouched; the feature flag and backend selection are runtime-only.                                                                                                                                                                                                                                    |
 
@@ -613,10 +613,9 @@ visible.
 
 **Honesty: fallback floating (never "two windows"):**
 
-- clack 0.1.1's FFI wrapper maps the plugin's `set_parent`/`set_transient`
-  result through `is_some()`, so a plugin-side `Err` is **invisible to the
-  host**. The honest fallback therefore happens at **`create()`**: the
-  *embedded viability gate* rejects an X11-embedded configuration when the
+- clack 0.2.0's FFI wrapper propagates the plugin's `set_parent`/`set_transient`
+  result to the host, and the honest fallback also happens at **`create()`**:
+  the *embedded viability gate* rejects an X11-embedded configuration when the
   process can no longer embed (non-X11 loop pinned) or when no X11 display is
   reachable (`DISPLAY` unset — pure Wayland without XWayland). `create()` *does*
   propagate, so a conforming host falls back to a floating negotiation.
@@ -625,7 +624,7 @@ visible.
   `gui_host.closed()` notified) without creating a window on any embedding
   failure — never a silently-floating embedded contract, never two windows.
 - `raw-window-handle = "0.6"` is reintroduced in `Cargo.toml` and used by the
-  rwh-0.6 fallback extraction path in `spawn_gui` (clack's `HasRawWindowHandle`
+  rwh-0.6 fallback extraction path in `spawn_gui` (clack's `HasWindowHandle`
   impl behind the `raw-window-handle_06` feature); the primary path remains
   `Window::as_x11_handle()`.
 

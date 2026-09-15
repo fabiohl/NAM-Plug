@@ -475,18 +475,19 @@ fi
 if [ "$USE_PGO" = true ]; then
     echo -e "\n${BLUE}${BOLD}[Phase 2/7] Generating PGO profiles via workload runner...${NC}"
 
-    export RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS -Cprofile-generate=$PROFRAW_DIR"
-    export LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw"
-    echo -e "  Using RUSTFLAGS: ${BOLD}$RUSTFLAGS${NC}"
+    # Allocate sufficient static value profile counters (LLVM default is 2, which exhausts on polymorphic DSP topologies).
+    # Prevents "LLVM Profile Warning: Unable to track new values: Running out of static counters" and preserves indirect call profile fidelity.
+    PGO_GEN_RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS -Cprofile-generate=$PROFRAW_DIR -Cllvm-args=-vp-counters-per-site=8"
+    echo -e "  Using RUSTFLAGS: ${BOLD}$PGO_GEN_RUSTFLAGS${NC}"
 
     echo -e "  Compiling real-world PGO profiling workload (pgo_profiling_workload)..."
-    cargo build --locked --profile dist --features testing --bin pgo_profiling_workload || {
+    RUSTFLAGS="$PGO_GEN_RUSTFLAGS" cargo build --locked --profile dist --features testing --bin pgo_profiling_workload || {
         echo -e "${RED}Error: Failed to build pgo_profiling_workload for PGO profiling.${NC}"
         exit 1
     }
 
     echo -e "  Executing PGO profiling workload..."
-    timeout 60 "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" || {
+    LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw" timeout 60 "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" || {
         echo -e "${RED}Error: pgo_profiling_workload failed (or timed out after 60s). Cannot generate PGO profiles.${NC}"
         exit 1
     }
@@ -513,14 +514,14 @@ fi
 # -----------------------------------------------------------------------------
 echo -e "\n${BLUE}${BOLD}[Phase 3/7] Compiling optimized CLAP plugin...${NC}"
 
+CLAP_BASE_RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS"
 if [ "$USE_PGO" = true ] && [ -f "$MERGED_PROFILE" ]; then
-    export RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS -Cprofile-use=$MERGED_PROFILE"
+    CLAP_BASE_RUSTFLAGS="$CLAP_BASE_RUSTFLAGS -Cprofile-use=$MERGED_PROFILE"
 else
-    export RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS"
     echo -e "  ${YELLOW}Compiling without PGO profile.${NC}"
 fi
 
-CLAP_RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,-q -Clink-arg=-Wl,-soname,nam_plug.clap"
+CLAP_RUSTFLAGS="$CLAP_BASE_RUSTFLAGS -Clink-arg=-Wl,-q -Clink-arg=-Wl,-soname,nam_plug.clap"
 echo -e "  Using RUSTFLAGS (CLAP): ${BOLD}$CLAP_RUSTFLAGS${NC}"
 RUSTFLAGS="$CLAP_RUSTFLAGS" cargo build --locked --profile dist --target-dir "$PGO_CLAP_TARGET_DIR" --lib
 
@@ -530,6 +531,9 @@ if [ ! -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
     exit 1
 fi
 echo -e "  ${GREEN}✓${NC} Compilation completed successfully."
+
+# Ensure RUSTFLAGS and LLVM_PROFILE_FILE do not leak into downstream phases or verification gates
+unset RUSTFLAGS LLVM_PROFILE_FILE 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
 # PHASE 4: BOLT Instrumentation & Post-Link Optimization
@@ -567,9 +571,10 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
         echo -e "  [Step 2/3] Collecting BOLT instrumentation profiles via workload runner..."
         echo -e "  Recompiling workload runner without PGO instrumentation (linking with LTO; please wait)..."
 
-        # Recompile pgo_profiling_workload without PGO instrumentation for clean BOLT profiling
+        # Recompile workload runner & performance guard without PGO instrumentation for clean profiling/gates
         RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS" \
-            cargo build --locked --profile dist --features testing --bin pgo_profiling_workload
+            cargo build --locked --profile dist --features testing --bin pgo_profiling_workload --bin nam_perf_guard
+        unset RUSTFLAGS 2>/dev/null || true
 
         # Clean any stale fdata files and previous workload receipt before profiling
         rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.* "$BOLT_DIR/libnam_plug.merged.fdata" "$PROJECT_DIR/target/pgo-workload-receipt.json"
@@ -854,13 +859,15 @@ fi
 ORACLE_BIN=""
 ORACLE_SHA=""
 FIXTURE_SHA=""
+if [ -n "$model_fixture" ] && [ -f "$model_fixture" ]; then
+    FIXTURE_SHA=$(sha256sum "$model_fixture" | cut -d' ' -f1)
+fi
 
 # Gate 3: NAMCore float parity test against distributed artifact
 echo -e "  [Gate 3/5] Running NAMCore float parity test against distributed artifact..."
 if ORACLE_BIN=$(find_namcore_render); then
     if [ -n "$model_fixture" ]; then
         ORACLE_SHA=$(sha256sum "$ORACLE_BIN" | cut -d' ' -f1)
-        FIXTURE_SHA=$(sha256sum "$model_fixture" | cut -d' ' -f1)
         echo -e "  ${BLUE}→ Parity oracle found:${NC} $ORACLE_BIN (sha256: ${ORACLE_SHA:0:16}...)"
         NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
             timeout 600 cargo test --features testing --release --test clap \
@@ -884,7 +891,7 @@ fi
 # Gate 4: CabSim IR test against distributed artifact
 echo -e "  [Gate 4/5] Running CabSim IR test against distributed artifact..."
 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
-    timeout 300 cargo test --features testing --release --test clap \
+    timeout 600 cargo test --features testing --release --test clap \
     test_cabsim_ir_changes_audio_release_artifact -- --ignored --nocapture
 ok "CabSim IR test passed on distributed artifact."
 

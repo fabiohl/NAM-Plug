@@ -24,7 +24,7 @@ impl<'a> PluginParamIndicationImpl for NamClapMainThread<'a> {
     /// Updates the `INDICATION_MAPPED` bit and stores the packed ARGB color
     /// in shared atomics for reading by the GUI thread.
     fn set_mapping(
-        &mut self,
+        &self,
         param_id: ClapId,
         has_mapping: bool,
         color: Option<Color>,
@@ -57,7 +57,7 @@ impl<'a> PluginParamIndicationImpl for NamClapMainThread<'a> {
     /// ensuring mutual exclusion between both states. The color provided by the host
     /// is stored for use by the GUI when rendering automation halos.
     fn set_automation(
-        &mut self,
+        &self,
         param_id: ClapId,
         automation_state: ParamIndicationAutomation,
         color: Option<Color>,

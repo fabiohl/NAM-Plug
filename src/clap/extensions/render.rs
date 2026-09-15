@@ -22,7 +22,7 @@ impl<'a> PluginRenderImpl for NamClapMainThread<'a> {
         false
     }
 
-    fn set(&mut self, mode: RenderMode) -> Result<(), PluginError> {
+    fn set(&self, mode: RenderMode) -> Result<(), PluginError> {
         let old_val = self.shared.cold.render_mode.load(Ordering::Acquire);
         let val = match mode {
             RenderMode::Realtime => RENDER_MODE_REALTIME,

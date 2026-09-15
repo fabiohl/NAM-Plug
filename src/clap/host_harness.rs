@@ -214,7 +214,7 @@ impl CompleteHostMainThread {
 impl<'a> MainThreadHandler<'a> for CompleteHostMainThread {}
 
 impl HostLatencyImpl for CompleteHostMainThread {
-    fn changed(&mut self) {
+    fn changed(&self) {
         self.state
             .latency_changed_count
             .fetch_add(1, Ordering::SeqCst);
@@ -224,7 +224,7 @@ impl HostLatencyImpl for CompleteHostMainThread {
 
 impl HostPresetLoadImpl for CompleteHostMainThread {
     fn on_error(
-        &mut self,
+        &self,
         _location: Location,
         _load_key: Option<&std::ffi::CStr>,
         os_error: i32,
@@ -238,7 +238,7 @@ impl HostPresetLoadImpl for CompleteHostMainThread {
                 .unwrap_or_default(),
         });
     }
-    fn loaded(&mut self, _location: Location, _load_key: Option<&std::ffi::CStr>) {
+    fn loaded(&self, _location: Location, _load_key: Option<&std::ffi::CStr>) {
         self.state
             .preset_loaded_count
             .fetch_add(1, Ordering::SeqCst);
@@ -247,10 +247,10 @@ impl HostPresetLoadImpl for CompleteHostMainThread {
 }
 
 impl HostParamsImplMainThread for CompleteHostMainThread {
-    fn rescan(&mut self, _flags: ParamRescanFlags) {
+    fn rescan(&self, _flags: ParamRescanFlags) {
         self.state.record(HostEvent::ParamsRescan);
     }
-    fn clear(&mut self, param_id: clack_common::utils::ClapId, _flags: ParamClearFlags) {
+    fn clear(&self, param_id: clack_common::utils::ClapId, _flags: ParamClearFlags) {
         self.state.record(HostEvent::ParamsClear {
             param_id: param_id.get(),
         });
@@ -424,23 +424,25 @@ pub fn extract_plugin_shared(
     .expect("Failed to get plugin wrapper")
 }
 
-/// Extracts a raw `*mut` to the plugin's main thread (`NamClapMainThread`).
+/// Extracts a raw `*const` to the plugin's main thread (`NamClapMainThread`).
 ///
-/// The caller should dereference this with `unsafe { &mut *ptr }` and ensure
+/// The caller should dereference this with `unsafe { &*ptr }` and ensure
 /// the `PluginInstance` outlives the dereferenced reference. Used by tests that
 /// drive `load_model()`/`load_cabsim()` and inspect the staged-swap slot.
+///
+/// `*const` (not `*mut`): clack 0.2.0 exposes the main thread through `&self`
+/// ("Embrace Reentrancy"), so tests reach it through a shared reference —
+/// exactly like the host does. Interior mutability (`Cell`/`RefCell`) keeps
+/// the staged slots reachable without `&mut`.
 pub fn extract_plugin_main_thread(
     instance: &mut PluginInstance<CompleteHost>,
-) -> *mut crate::clap::plugin::NamClapMainThread<'static> {
+) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
             raw_ptr,
             |wrapper| {
-                Ok(wrapper
-                    .main_thread()
-                    .as_ptr()
-                    .cast::<crate::clap::plugin::NamClapMainThread<'static>>())
+                Ok(wrapper.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>)
             },
         )
     }

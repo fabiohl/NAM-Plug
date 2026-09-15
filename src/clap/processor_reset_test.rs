@@ -146,7 +146,7 @@ mod tests {
         let started = stopped.start_processing().expect("start_processing");
 
         // First IR load (0 → partition latency) is staged + host restart.
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t43_reset_tail");
         mt.load_cabsim(&ir).expect("load decay IR");
         assert!(
@@ -228,7 +228,7 @@ mod tests {
 
         let model = model_path("lstm.nam");
         assert!(model.exists(), "lstm.nam fixture missing");
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&model).expect("load lstm model");
 
         let silence = [0.0f32; BLOCK];
@@ -296,7 +296,7 @@ mod tests {
         // Model + IR installed (IR load is staged + restart).
         let model = model_path("lstm.nam");
         assert!(model.exists(), "lstm.nam fixture missing");
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&model).expect("load lstm model");
         let ir = write_decay_ir("t43_reset_zalloc");
         mt.load_cabsim(&ir).expect("load decay IR");
@@ -340,7 +340,7 @@ mod tests {
             .param_bypass
             .store(bypass_bool_to_u32(false), Ordering::Relaxed);
         shared.bump_generation();
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t43_reset_cfg");
         mt.load_cabsim(&ir).expect("load decay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());

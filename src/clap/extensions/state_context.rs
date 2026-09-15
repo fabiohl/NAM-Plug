@@ -24,7 +24,7 @@ pub type NamPluginStateContext = PluginStateContext;
 
 impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
     fn save(
-        &mut self,
+        &self,
         output: &mut OutputStream,
         context_type: StateContextType,
     ) -> Result<(), PluginError> {
@@ -32,7 +32,7 @@ impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
         self.snapshot_params();
 
         let save_params = if context_type == StateContextType::ForPreset {
-            let mut preset_params = self.params.clone();
+            let mut preset_params = self.params.borrow().clone();
             // Strip absolute file paths, keep portable identifiers + search hints
             preset_params.model_path = None;
             preset_params.ir_path = None;
@@ -41,7 +41,7 @@ impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
             // and are preserved for cross-machine canonical search fallback
             preset_params
         } else {
-            self.params.clone()
+            self.params.borrow().clone()
         };
 
         super::state::ensure_asset_hashes(
@@ -59,7 +59,7 @@ impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
     }
 
     fn load(
-        &mut self,
+        &self,
         input: &mut InputStream,
         context_type: StateContextType,
     ) -> Result<(), PluginError> {

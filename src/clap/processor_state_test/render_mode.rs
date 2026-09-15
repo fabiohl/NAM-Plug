@@ -20,7 +20,7 @@ fn test_render_mode_transitions() {
         .expect("PluginRender extension not found");
 
     assert!(
-        !render_ext.has_realtime_requirement(&mut plugin_instance.plugin_handle()),
+        !render_ext.has_realtime_requirement(&plugin_instance.plugin_handle()),
         "NAM should not have hard realtime requirement"
     );
 
@@ -40,9 +40,9 @@ fn test_render_mode_transitions() {
         "should start in realtime mode"
     );
 
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     render_ext
-        .set(&mut handle, RenderMode::Offline)
+        .set(&handle, RenderMode::Offline)
         .expect("set RenderMode::Offline should succeed");
 
     let render_mode = shared.cold.render_mode.load(Ordering::Acquire);
@@ -98,9 +98,9 @@ fn test_render_mode_transitions() {
         "DEGRADE_MINIMAL should be clear in offline mode"
     );
 
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     render_ext
-        .set(&mut handle, RenderMode::Realtime)
+        .set(&handle, RenderMode::Realtime)
         .expect("set RenderMode::Realtime should succeed");
 
     let render_mode = shared.cold.render_mode.load(Ordering::Acquire);
@@ -217,9 +217,9 @@ fn test_offline_mode_forces_adaptive_off() {
     );
 
     // 3. Set RenderMode::Offline
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     render_ext
-        .set(&mut handle, RenderMode::Offline)
+        .set(&handle, RenderMode::Offline)
         .expect("set RenderMode::Offline should succeed");
 
     // 4. Process a block in Offline mode

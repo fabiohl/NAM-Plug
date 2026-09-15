@@ -144,7 +144,7 @@ mod tests {
         let started = stopped.start_processing().expect("start_processing");
 
         // First IR load (0 → partition latency) is staged + host restart.
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t42_rearm");
         mt.load_cabsim(&ir).expect("load decay IR");
         assert!(
@@ -214,7 +214,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("rearm_zalloc");
         mt.load_cabsim(&ir).expect("load decay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());

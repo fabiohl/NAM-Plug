@@ -33,12 +33,12 @@ mod tests {
             .plugin_handle()
             .get_extension::<PluginGui>()
             .expect("PluginGui extension not found");
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
 
         // ── X11 ─────────────────────────────────────────────────────────────
         assert!(
             gui_ext.is_api_supported(
-                &mut handle,
+                &handle,
                 GuiConfiguration {
                     api_type: GuiApiType::X11,
                     is_floating: false
@@ -48,7 +48,7 @@ mod tests {
         );
         assert!(
             gui_ext.is_api_supported(
-                &mut handle,
+                &handle,
                 GuiConfiguration {
                     api_type: GuiApiType::X11,
                     is_floating: true
@@ -60,7 +60,7 @@ mod tests {
         // ── Wayland ──────────────────────────────────────────────────────────
         assert!(
             gui_ext.is_api_supported(
-                &mut handle,
+                &handle,
                 GuiConfiguration {
                     api_type: GuiApiType::WAYLAND,
                     is_floating: true
@@ -70,7 +70,7 @@ mod tests {
         );
         assert!(
             !gui_ext.is_api_supported(
-                &mut handle,
+                &handle,
                 GuiConfiguration {
                     api_type: GuiApiType::WAYLAND,
                     is_floating: false
@@ -82,7 +82,7 @@ mod tests {
         // ── Other platforms ──────────────────────────────────────────────────
         assert!(
             !gui_ext.is_api_supported(
-                &mut handle,
+                &handle,
                 GuiConfiguration {
                     api_type: GuiApiType::WIN32,
                     is_floating: false
@@ -92,7 +92,7 @@ mod tests {
         );
         assert!(
             !gui_ext.is_api_supported(
-                &mut handle,
+                &handle,
                 GuiConfiguration {
                     api_type: GuiApiType::COCOA,
                     is_floating: false
@@ -118,10 +118,10 @@ mod tests {
                 .plugin_handle()
                 .get_extension::<PluginGui>()
                 .expect("PluginGui extension not found");
-            let mut handle = plugin_instance.plugin_handle();
+            let handle = plugin_instance.plugin_handle();
 
             let pref = gui_ext
-                .get_preferred_api(&mut handle)
+                .get_preferred_api(&handle)
                 .expect("Preferred API must be Some in Wayland session");
             assert_eq!(
                 pref.api_type,
@@ -150,10 +150,10 @@ mod tests {
                 .plugin_handle()
                 .get_extension::<PluginGui>()
                 .expect("PluginGui extension not found");
-            let mut handle = plugin_instance.plugin_handle();
+            let handle = plugin_instance.plugin_handle();
 
             let pref = gui_ext
-                .get_preferred_api(&mut handle)
+                .get_preferred_api(&handle)
                 .expect("Preferred API must be Some in X11 session");
             assert_eq!(
                 pref.api_type,
@@ -180,21 +180,21 @@ mod tests {
             .get_extension::<PluginGui>()
             .expect("PluginGui extension not found");
 
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
 
         // 1. get_size
-        let size = gui_ext.get_size(&mut handle).expect("Failed to get size");
+        let size = gui_ext.get_size(&handle).expect("Failed to get size");
         assert_eq!(size.width, 600);
         assert_eq!(size.height, 275);
 
         // 2. can_resize
-        assert!(!gui_ext.can_resize(&mut handle));
+        assert!(!gui_ext.can_resize(&handle));
 
         // 3. set_size — accepted when dimensions match
         assert!(
             gui_ext
                 .set_size(
-                    &mut handle,
+                    &handle,
                     GuiSize {
                         width: 600,
                         height: 275
@@ -202,19 +202,13 @@ mod tests {
                 )
                 .is_ok()
         );
-        // Note: clack-extensions 0.1.0's FFI wrapper for set_size contains a bug where it calls
-        // .is_some() on the Option<Result<(), PluginError>>, returning true (Ok) to the host even
-        // when the plugin returns an Err. Thus we cannot assert gui_ext.set_size returns Err
-        // from the host-side wrapper here.
-
         // 4. create accepts X11 embedded when a display is reachable, and
-        //    rejects it (honestly, at create-time — the only error the host can
-        //    see, since clack 0.1.1 swallows set_parent errors) when DISPLAY is
+        //    rejects it (honestly, at create-time) when DISPLAY is
         //    unset (e.g. headless CI).
         {
             let has_display = std::env::var_os("DISPLAY").is_some();
             let created = gui_ext.create(
-                &mut handle,
+                &handle,
                 GuiConfiguration {
                     api_type: GuiApiType::X11,
                     is_floating: false,
@@ -232,7 +226,7 @@ mod tests {
         assert!(
             gui_ext
                 .create(
-                    &mut handle,
+                    &handle,
                     GuiConfiguration {
                         api_type: GuiApiType::X11,
                         is_floating: true
@@ -246,7 +240,7 @@ mod tests {
         assert!(
             gui_ext
                 .create(
-                    &mut handle,
+                    &handle,
                     GuiConfiguration {
                         api_type: GuiApiType::WAYLAND,
                         is_floating: true
@@ -438,20 +432,20 @@ mod tests {
             .get_extension::<PluginGui>()
             .expect("PluginGui extension not found");
 
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
 
         let float_config = GuiConfiguration {
             api_type: GuiApiType::X11,
             is_floating: true,
         };
         assert!(
-            gui_ext.is_api_supported(&mut handle, float_config),
+            gui_ext.is_api_supported(&handle, float_config),
             "X11 floating must be supported"
         );
 
         // 1. Create GUI resources
         assert!(
-            gui_ext.create(&mut handle, float_config).is_ok(),
+            gui_ext.create(&handle, float_config).is_ok(),
             "GUI create() must succeed"
         );
 
@@ -465,7 +459,7 @@ mod tests {
         // SAFETY: The dummy window handle is not dereferenced by the plugin.
         let result = unsafe {
             gui_ext.set_transient(
-                &mut handle,
+                &handle,
                 Window::from_generic_ptr(GuiApiType::X11, std::ptr::null_mut()),
             )
         };
@@ -479,7 +473,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         // Destroy — tears down resources, joins window thread via reaper
-        gui_ext.destroy(&mut handle);
+        gui_ext.destroy(&handle);
 
         eprintln!("  ✓ GUI floating window lifecycle: create → set_transient → destroy");
     }

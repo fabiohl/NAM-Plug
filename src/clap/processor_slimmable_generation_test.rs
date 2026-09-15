@@ -31,12 +31,12 @@ mod tests {
 
     fn main_thread_ptr(
         instance: &mut PluginInstance<TestHost>,
-    ) -> *mut crate::clap::plugin::NamClapMainThread<'static> {
+    ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
         let raw_ptr = instance.plugin_handle().as_raw_ptr();
         unsafe {
             clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
                 raw_ptr,
-                |w| Ok(w.main_thread().as_ptr()),
+                |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
             )
             .unwrap()
         }
@@ -47,7 +47,7 @@ mod tests {
     ) -> (
         StartedPluginAudioProcessor<TestHost>,
         *const crate::clap::plugin::NamClapShared,
-        *mut crate::clap::plugin::NamClapMainThread<'static>,
+        *const crate::clap::plugin::NamClapMainThread<'static>,
     ) {
         let stopped = plugin_instance.activate(|_, _| (), audio_config()).unwrap();
         let started = stopped.start_processing().unwrap();
@@ -135,8 +135,9 @@ mod tests {
         // ── Phase 1: stale delivery (older generation) must be discarded ──
         let stale_gen = active_gen.wrapping_sub(1); // guaranteed != active_gen
         {
-            let mt = unsafe { &mut *main_thread_ptr };
+            let mt = unsafe { &*main_thread_ptr };
             mt.slimmable_tx
+                .borrow_mut()
                 .push(SlimmableRebuild {
                     generation: stale_gen,
                     model: make_linear_model(0.5),
@@ -157,10 +158,10 @@ mod tests {
         // the stale Linear would have replaced the active WaveNet and the
         // WaveNet would be the one retired to GC instead.
         {
-            let mt = unsafe { &mut *main_thread_ptr };
+            let mt = unsafe { &*main_thread_ptr };
             let mut saw_linear = false;
             let mut saw_other = false;
-            while let Ok(item) = mt.gc_rx.pop() {
+            while let Ok(item) = mt.gc_rx.borrow_mut().pop() {
                 if let GcItem::Model(m) = item {
                     match m.as_ref() {
                         StaticModel::Linear(_) => saw_linear = true,
@@ -176,8 +177,9 @@ mod tests {
 
         // ── Phase 2: matching delivery must install and retire the old model ──
         {
-            let mt = unsafe { &mut *main_thread_ptr };
+            let mt = unsafe { &*main_thread_ptr };
             mt.slimmable_tx
+                .borrow_mut()
                 .push(SlimmableRebuild {
                     generation: active_gen,
                     model: make_linear_model(0.9),
@@ -197,10 +199,10 @@ mod tests {
         // The retired model (the previously-active WaveNet) reaches the GC, and
         // nothing is discarded — proving the valid path still installs.
         {
-            let mt = unsafe { &mut *main_thread_ptr };
+            let mt = unsafe { &*main_thread_ptr };
             let mut saw_linear = false;
             let mut saw_other = false;
-            while let Ok(item) = mt.gc_rx.pop() {
+            while let Ok(item) = mt.gc_rx.borrow_mut().pop() {
                 if let GcItem::Model(m) = item {
                     match m.as_ref() {
                         StaticModel::Linear(_) => saw_linear = true,

@@ -30,15 +30,16 @@ fn test_model_retained_on_spsc_full_no_ui_desync() {
     let main_thread_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
-            |w| Ok(w.main_thread().as_ptr()),
+            |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
         )
         .unwrap()
     };
-    let mt = unsafe { &mut *main_thread_ptr };
+    let mt = unsafe { &*main_thread_ptr };
 
     // Saturate the SPSC command ring (capacity 256).
     for _ in 0..256 {
         mt.cmd_producer
+            .borrow_mut()
             .push_command(ClapParamPayload::LoadCabIr { adapter: None })
             .expect("expected the first 256 pushes to succeed");
     }
@@ -88,11 +89,11 @@ fn test_cabsim_retained_on_spsc_full_no_ui_desync() {
     let main_thread_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
-            |w| Ok(w.main_thread().as_ptr()),
+            |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
         )
         .unwrap()
     };
-    let mt = unsafe { &mut *main_thread_ptr };
+    let mt = unsafe { &*main_thread_ptr };
 
     // Under strict host restart policy: the *first* IR load (0 → partition latency)
     // is staged and requests a host restart — it never touches the SPSC. The
@@ -105,6 +106,7 @@ fn test_cabsim_retained_on_spsc_full_no_ui_desync() {
 
     for _ in 0..256 {
         mt.cmd_producer
+            .borrow_mut()
             .push_command(ClapParamPayload::LoadCabIr { adapter: None })
             .expect("expected the first 256 pushes to succeed");
     }

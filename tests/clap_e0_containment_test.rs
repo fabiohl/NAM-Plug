@@ -203,9 +203,9 @@ fn test_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     {
         let state_ext = test_util::get_state_ext(&mut plugin_instance);
         let state_a = serde_json::to_vec(&params_a).unwrap();
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut state_a.as_slice())
+            .load(&handle, &mut state_a.as_slice())
             .expect("failed to load model A via state");
     }
 
@@ -260,9 +260,9 @@ fn test_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     {
         let state_ext = test_util::get_state_ext(&mut plugin_instance);
         let state_b = serde_json::to_vec(&params_b).unwrap();
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         // Load returns Err when model is not found — no DSP change
-        let result = state_ext.load(&mut handle, &mut state_b.as_slice());
+        let result = state_ext.load(&handle, &mut state_b.as_slice());
         assert!(
             result.is_err(),
             "state load with missing model must return Err (transactional pipeline)"
@@ -364,9 +364,9 @@ fn test_offline_realtime_restores_activation_precision() {
 
     // ── Step 2: Enter Offline mode ──
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         render_ext
-            .set(&mut handle, RenderMode::Offline)
+            .set(&handle, RenderMode::Offline)
             .expect("set Offline should succeed");
     }
 
@@ -389,9 +389,9 @@ fn test_offline_realtime_restores_activation_precision() {
 
     // ── Step 3: Return to Realtime mode ──
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         render_ext
-            .set(&mut handle, RenderMode::Realtime)
+            .set(&handle, RenderMode::Realtime)
             .expect("set Realtime should succeed");
     }
 
@@ -433,7 +433,7 @@ fn test_offline_realtime_restores_activation_precision() {
 fn test_bypass_responds_to_host_events() {
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
-    use clack_common::utils::{ClapId, Cookie};
+    use clack_common::utils::ClapId;
     use nam_plug::clap::extensions::params::{PARAM_BYPASS, bypass_bool_to_u32};
 
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
@@ -475,13 +475,8 @@ fn test_bypass_responds_to_host_events() {
 
     // ── Send a bypass OFF event at offset 0 in the same block ──
     let mut input_events_buffer = EventBuffer::new();
-    let bypass_off_event = ParamValueEvent::new(
-        0u32,
-        ClapId::new(PARAM_BYPASS),
-        Pckn::match_all(),
-        0.0f64,
-        Cookie::empty(),
-    );
+    let bypass_off_event =
+        ParamValueEvent::new(0u32, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 0.0f64);
     input_events_buffer.push(&bypass_off_event);
 
     let input_events = InputEvents::from_buffer(&input_events_buffer);
@@ -604,9 +599,9 @@ fn test_offline_log_does_not_claim_max_quality_without_4x() {
 
     // Enter Offline mode
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         render_ext
-            .set(&mut handle, RenderMode::Offline)
+            .set(&handle, RenderMode::Offline)
             .expect("set Offline should succeed");
     }
 

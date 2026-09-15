@@ -716,16 +716,16 @@ fn corrupted_state_blobs() -> Vec<Vec<u8>> {
 
 /// Raw pointer to the plugin's main thread object. The pointer stays valid for
 /// as long as `instance` is alive; callers must dereference it as
-/// `&mut NamClapMainThread<'static>`.
+/// `&NamClapMainThread<'static>`.
 #[cfg(feature = "heap-audit")]
 fn main_thread_ptr(
     instance: &mut clack_host::plugin::PluginInstance<crate::clap::test_util::TestHost>,
-) -> *mut crate::clap::plugin::NamClapMainThread<'static> {
+) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
-            |w| Ok(w.main_thread().as_ptr()),
+            |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
         )
         .expect("failed to get main-thread pointer")
     }
@@ -736,7 +736,7 @@ fn main_thread_ptr(
 /// the load was rejected.
 #[cfg(feature = "heap-audit")]
 fn plugin_state_load_fails(
-    main_thread: &mut crate::clap::plugin::NamClapMainThread,
+    main_thread: &crate::clap::plugin::NamClapMainThread,
     blob: &[u8],
 ) -> bool {
     use clack_common::stream::InputStream;
@@ -754,7 +754,7 @@ fn test_corrupted_states_10000_heap_stable() {
 
     let (_entry, _host_info, mut plugin_instance) = crate::clap::test_util::make_test_plugin();
     let blobs = corrupted_state_blobs();
-    let main_thread = unsafe { &mut *main_thread_ptr(&mut plugin_instance) };
+    let main_thread = unsafe { &*main_thread_ptr(&mut plugin_instance) };
 
     let _guard = TrackingGuard::new();
     // Exact live allocations: realloc is counted as +1 alloc with no matching

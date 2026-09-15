@@ -16,11 +16,12 @@ impl<'a> PluginTrackInfoImpl for NamClapMainThread<'a> {
             .get_extension::<clack_extensions::track_info::HostTrackInfo>()
         {
             let mut buffer = clack_extensions::track_info::TrackInfoBuffer::new();
-            // SAFETY: The CLAP main thread executes this callback synchronously.
-            // with_arbitrary_lifetime extends the handle's lifetime without bypassing
-            // thread-safety checks — the caller guarantees we are on the main thread.
-            let mut host_mut = unsafe { self.host.with_arbitrary_lifetime() };
-            if let Some(info) = track_info_ext.get(&mut host_mut, &mut buffer) {
+            // `HostTrackInfo::get` still takes `&mut HostMainThreadHandle` in
+            // clack 0.2.0 (only the plugin-side traits flipped to `&self`).
+            // The handle is `Copy` (a `NonNull` wrapper), so copy it to a
+            // local instead of borrowing `self.host` mutably.
+            let mut host = self.host;
+            if let Some(info) = track_info_ext.get(&mut host, &mut buffer) {
                 if let Some(color) = info.color() {
                     let packed = pack_argb(color.alpha, color.red, color.green, color.blue);
                     self.shared

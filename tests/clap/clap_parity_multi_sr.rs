@@ -277,9 +277,9 @@ fn process_through_clap(model_path: &Path, input: &[f32], sample_rate: f64) -> V
             .get_extension::<PluginState>()
             .expect("PluginState extension not found");
         let state_bytes = serde_json::to_vec(&params).expect("Failed to serialize params");
-        let mut handle = instance.plugin_handle();
+        let handle = instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut state_bytes.as_slice())
+            .load(&handle, &mut state_bytes.as_slice())
             .expect("Failed to load model state");
     }
 

@@ -69,9 +69,9 @@ fn test_integration_v0_legacy_load() {
     let v0_json = r#"{"input_gain_db": 3.0,"output_gain_db": -6.0,"gate_threshold_db": -50.0,"model_path": null,"bypass": true}"#;
 
     {
-        let mut handle = instance.plugin_handle();
+        let handle = instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut v0_json.as_bytes())
+            .load(&handle, &mut v0_json.as_bytes())
             .expect("Failed to load v0 state");
     }
 
@@ -161,9 +161,9 @@ fn test_integration_v1_round_trip() {
     // 2. Save state
     let mut output_buf = Vec::new();
     {
-        let mut handle = instance.plugin_handle();
+        let handle = instance.plugin_handle();
         state_ext
-            .save(&mut handle, &mut output_buf)
+            .save(&handle, &mut output_buf)
             .expect("Failed to save state");
     }
 
@@ -187,9 +187,9 @@ fn test_integration_v1_round_trip() {
 
     // 4. Load saved state
     {
-        let mut handle = instance.plugin_handle();
+        let handle = instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut output_buf.as_slice())
+            .load(&handle, &mut output_buf.as_slice())
             .expect("Failed to load saved state");
     }
 
@@ -255,9 +255,9 @@ fn test_integration_forward_v1_to_v2() {
 
     // Should load successfully applying the migration (or ignoring unknown fields) without panics
     {
-        let mut handle = instance.plugin_handle();
+        let handle = instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut v2_json.as_bytes())
+            .load(&handle, &mut v2_json.as_bytes())
             .expect("Failed to process future v2 envelope");
     }
 

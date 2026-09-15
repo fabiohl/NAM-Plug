@@ -22,25 +22,26 @@ use clack_host::plugin::PluginInstance;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as _;
 
-/// Returns a mutable reference to the main thread struct of a test plugin.
+/// Returns a shared reference to the main thread struct of a test plugin.
 ///
 /// The reference is only valid while `instance` is alive; callers must not use
 /// it after the instance is dropped.
-fn main_thread_mut(
-    instance: &mut PluginInstance<test_util::TestHost>,
-) -> &mut NamClapMainThread<'_> {
+///
+/// Shared (not mutable): clack 0.2.0 exposes the main thread through `&self`
+/// ("Embrace Reentrancy"); interior mutability (`Cell`/`RefCell`) keeps the
+/// staged slots reachable without `&mut`.
+fn main_thread_mut(instance: &mut PluginInstance<test_util::TestHost>) -> &NamClapMainThread<'_> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
-    let mut nn = unsafe {
+    let ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::plugin::NamClapPlugin>::handle(
             raw_ptr,
-            |wrapper| Ok(wrapper.main_thread()),
+            |wrapper| Ok(wrapper.main_thread() as *const NamClapMainThread<'_>),
         )
     }
     .expect("Failed to get plugin wrapper");
-    // SAFETY: the plugin instance is uniquely borrowed for the duration of the
-    // caller's use; the wrapper guarantees main-thread exclusivity and nothing
-    // else aliases this struct while the caller holds the reference.
-    unsafe { nn.as_mut() }
+    // SAFETY: the plugin instance outlives the returned reference, and the
+    // wrapper guarantees main-thread exclusivity while it is alive.
+    unsafe { &*ptr }
 }
 
 /// Fixed X11 floating configuration used as the canonical host request.
@@ -155,32 +156,32 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
 
     // Negotiation: embedded X11 is advertised (E4/Sprint 8).
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         assert!(
-            gui_ext.is_api_supported(&mut handle, x11_embedded()),
+            gui_ext.is_api_supported(&handle, x11_embedded()),
             "X11 embedded must be supported by negotiation"
         );
     }
 
     let display_available = std::env::var_os("DISPLAY").is_some();
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     if display_available {
         // Real display: create + full embedded window cycle against the fake host.
         let (conn, parent) = create_host_parent_window()
             .expect("a display is available, so a host window must be creatable");
         gui_ext
-            .create(&mut handle, x11_embedded())
+            .create(&handle, x11_embedded())
             .expect("create(X11 embedded) with a display must succeed");
         // SAFETY: the x11rb host window outlives the plugin instance.
         unsafe {
             gui_ext
                 .set_parent(
-                    &mut handle,
+                    &handle,
                     Window::from_x11_handle(parent as std::os::raw::c_ulong),
                 )
                 .expect("set_parent(real X11 host window) must embed");
         }
-        gui_ext.show(&mut handle).expect("show() must succeed");
+        gui_ext.show(&handle).expect("show() must succeed");
 
         let child = wait_for_embedded_child(&conn, parent, std::time::Duration::from_secs(4))
             .expect("the host window must acquire the embedded child within the timeout");
@@ -206,7 +207,7 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
 
         // T4.8.2: fixed size/scale contract holds on the child.
         assert_eq!(
-            gui_ext.get_size(&mut handle),
+            gui_ext.get_size(&handle),
             Some(GuiSize {
                 width: 600,
                 height: 275
@@ -214,13 +215,13 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
             "embedded GUI keeps the fixed 600x275 logical size"
         );
         assert!(
-            !gui_ext.can_resize(&mut handle),
+            !gui_ext.can_resize(&handle),
             "embedded GUI is not resizable"
         );
         assert!(
             gui_ext
                 .set_size(
-                    &mut handle,
+                    &handle,
                     GuiSize {
                         width: 600,
                         height: 275
@@ -230,13 +231,13 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
             "set_size(600x275) must be accepted"
         );
         assert!(
-            gui_ext.set_scale(&mut handle, 1.5).is_ok(),
+            gui_ext.set_scale(&handle, 1.5).is_ok(),
             "set_scale(positive) must be accepted"
         );
 
-        gui_ext.hide(&mut handle).expect("hide() must succeed");
-        gui_ext.show(&mut handle).expect("re-show() must succeed");
-        gui_ext.destroy(&mut handle);
+        gui_ext.hide(&handle).expect("hide() must succeed");
+        gui_ext.show(&handle).expect("re-show() must succeed");
+        gui_ext.destroy(&handle);
         assert!(
             wait_until_child_destroyed(&conn, child, std::time::Duration::from_secs(4)),
             "teardown must destroy the embedded X11 child (no orphan windows)"
@@ -245,23 +246,23 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
         // Headless: the embedded negotiation must fail at create() — visible to
         // the host (create propagates; set_parent does not) — with the FSM
         // untouched and no window ever created.
-        let result = gui_ext.create(&mut handle, x11_embedded());
+        let result = gui_ext.create(&handle, x11_embedded());
         assert!(
             result.is_err(),
             "create(X11 embedded) without a display must return an error, got {result:?}"
         );
         let mt = main_thread_mut(&mut plugin_instance);
         assert_eq!(
-            mt.gui_lifecycle,
+            mt.gui_lifecycle.get(),
             GuiLifecycle::Hidden,
             "a failed embedded create() must leave the lifecycle FSM untouched"
         );
         assert!(
-            mt.slint_window.is_none(),
+            mt.slint_window.borrow().is_none(),
             "a failed embedded create() must never create a window"
         );
-        let mut handle = plugin_instance.plugin_handle();
-        gui_ext.destroy(&mut handle);
+        let handle = plugin_instance.plugin_handle();
+        gui_ext.destroy(&handle);
     }
 }
 
@@ -276,18 +277,18 @@ fn gui_lifecycle_hide_after_show_returns_ok() {
         .expect("PluginGui extension not found");
 
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         gui_ext
-            .create(&mut handle, x11_floating())
+            .create(&handle, x11_floating())
             .expect("create(X11 floating) must succeed");
         gui_ext
-            .show(&mut handle)
+            .show(&handle)
             .expect("show() from Hidden must succeed");
     }
 
     {
-        let mut handle = plugin_instance.plugin_handle();
-        let hide = gui_ext.hide(&mut handle);
+        let handle = plugin_instance.plugin_handle();
+        let hide = gui_ext.hide(&handle);
         assert!(
             hide.is_ok(),
             "F1 defect: hide() after show() must return Ok so the window is hidden, got {hide:?}"
@@ -296,7 +297,7 @@ fn gui_lifecycle_hide_after_show_returns_ok() {
 
     let mt = main_thread_mut(&mut plugin_instance);
     assert_eq!(
-        mt.gui_lifecycle,
+        mt.gui_lifecycle.get(),
         GuiLifecycle::Hidden,
         "hide() must leave the FSM in Hidden once the dispatch is accepted"
     );
@@ -313,12 +314,12 @@ fn gui_lifecycle_user_closed_flag_drained_by_housekeeping() {
         .expect("PluginGui extension not found");
 
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         gui_ext
-            .create(&mut handle, x11_floating())
+            .create(&handle, x11_floating())
             .expect("create(X11 floating) must succeed");
         gui_ext
-            .show(&mut handle)
+            .show(&handle)
             .expect("show() from Hidden must succeed");
     }
 
@@ -336,7 +337,7 @@ fn gui_lifecycle_user_closed_flag_drained_by_housekeeping() {
         let mt = main_thread_mut(&mut plugin_instance);
         mt.housekeeping();
         assert_eq!(
-            mt.gui_lifecycle,
+            mt.gui_lifecycle.get(),
             GuiLifecycle::Hidden,
             "draining gui_user_closed must drive UserClosed into the FSM"
         );
@@ -349,9 +350,9 @@ fn gui_lifecycle_user_closed_flag_drained_by_housekeeping() {
         "the drained flag must be cleared so each close fires exactly once"
     );
 
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     gui_ext
-        .show(&mut handle)
+        .show(&handle)
         .expect("show() after a user close must succeed from the post-close Hidden state");
 }
 
@@ -366,12 +367,12 @@ fn gui_lifecycle_pending_close_reconciled_before_show() {
         .expect("PluginGui extension not found");
 
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         gui_ext
-            .create(&mut handle, x11_floating())
+            .create(&handle, x11_floating())
             .expect("create(X11 floating) must succeed");
         gui_ext
-            .show(&mut handle)
+            .show(&handle)
             .expect("show() from Hidden must succeed");
     }
 
@@ -384,14 +385,14 @@ fn gui_lifecycle_pending_close_reconciled_before_show() {
         .store(true, std::sync::atomic::Ordering::Release);
 
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         gui_ext
-            .show(&mut handle)
+            .show(&handle)
             .expect("show() must reconcile a pending close instead of rejecting the re-open");
     }
 
     let mt = main_thread_mut(&mut plugin_instance);
-    assert_eq!(mt.gui_lifecycle, GuiLifecycle::ShowRequested);
+    assert_eq!(mt.gui_lifecycle.get(), GuiLifecycle::ShowRequested);
     assert!(
         !shared
             .cold
@@ -412,12 +413,12 @@ fn gui_lifecycle_destroy_clears_stale_close() {
         .expect("PluginGui extension not found");
 
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         gui_ext
-            .create(&mut handle, x11_floating())
+            .create(&handle, x11_floating())
             .expect("create(X11 floating) must succeed");
         gui_ext
-            .show(&mut handle)
+            .show(&handle)
             .expect("show() from Hidden must succeed");
     }
 
@@ -430,8 +431,8 @@ fn gui_lifecycle_destroy_clears_stale_close() {
         .store(true, std::sync::atomic::Ordering::Release);
 
     {
-        let mut handle = plugin_instance.plugin_handle();
-        gui_ext.destroy(&mut handle);
+        let handle = plugin_instance.plugin_handle();
+        gui_ext.destroy(&handle);
     }
     assert!(
         !shared
@@ -456,25 +457,27 @@ fn gui_lifecycle_reopen_after_user_closed_returns_ok() {
         .expect("PluginGui extension not found");
 
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         gui_ext
-            .create(&mut handle, x11_floating())
+            .create(&handle, x11_floating())
             .expect("create(X11 floating) must succeed");
         gui_ext
-            .show(&mut handle)
+            .show(&handle)
             .expect("show() from Hidden must succeed");
     }
 
     {
         let mt = main_thread_mut(&mut plugin_instance);
-        mt.gui_lifecycle
+        let mut lifecycle = mt.gui_lifecycle.get();
+        lifecycle
             .transition(GuiEvent::UserClosed)
             .expect("UserClosed from ShowRequested must be a valid transition");
-        assert_eq!(mt.gui_lifecycle, GuiLifecycle::Hidden);
+        mt.gui_lifecycle.set(lifecycle);
+        assert_eq!(mt.gui_lifecycle.get(), GuiLifecycle::Hidden);
     }
 
-    let mut handle = plugin_instance.plugin_handle();
-    let reopen = gui_ext.show(&mut handle);
+    let handle = plugin_instance.plugin_handle();
+    let reopen = gui_ext.show(&handle);
     assert!(
         reopen.is_ok(),
         "show() after a user close must succeed, got {reopen:?}"
@@ -503,21 +506,21 @@ fn gui_lifecycle_hide_after_show_with_real_window() {
         .plugin_handle()
         .get_extension::<PluginGui>()
         .expect("PluginGui extension not found");
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
 
     let float_config = GuiConfiguration {
         api_type: GuiApiType::X11,
         is_floating: true,
     };
     gui_ext
-        .create(&mut handle, float_config)
+        .create(&handle, float_config)
         .expect("create(X11 floating) must succeed");
     // SAFETY: the dummy window handle is never dereferenced by the plugin's
     // floating path, which creates its own top-level window.
     unsafe {
         gui_ext
             .set_transient(
-                &mut handle,
+                &handle,
                 clack_extensions::gui::Window::from_generic_ptr(
                     GuiApiType::X11,
                     std::ptr::null_mut(),
@@ -525,13 +528,13 @@ fn gui_lifecycle_hide_after_show_with_real_window() {
             )
             .expect("set_transient() must succeed");
     }
-    gui_ext.show(&mut handle).expect("show() must succeed");
-    let hide = gui_ext.hide(&mut handle);
+    gui_ext.show(&handle).expect("show() must succeed");
+    let hide = gui_ext.hide(&handle);
     assert!(
         hide.is_ok(),
         "F1 defect with a real window: hide() after show() must return Ok, got {hide:?}"
     );
-    gui_ext.destroy(&mut handle);
+    gui_ext.destroy(&handle);
 }
 
 /// Xvfb/X11 display test: 10 full open/close embedded cycles against the same
@@ -575,25 +578,25 @@ fn gui_embedded_x11_open_close_cycles_no_leak() {
             .plugin_handle()
             .get_extension::<PluginGui>()
             .expect("PluginGui extension not found");
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
 
         assert!(
-            gui_ext.is_api_supported(&mut handle, x11_embedded()),
+            gui_ext.is_api_supported(&handle, x11_embedded()),
             "X11 embedded must be supported"
         );
         gui_ext
-            .create(&mut handle, x11_embedded())
+            .create(&handle, x11_embedded())
             .expect("create(X11 embedded) must succeed");
         // SAFETY: the x11rb host window outlives the plugin instance.
         unsafe {
             gui_ext
                 .set_parent(
-                    &mut handle,
+                    &handle,
                     Window::from_x11_handle(parent as std::os::raw::c_ulong),
                 )
                 .expect("set_parent(real X11 host window) must embed");
         }
-        gui_ext.show(&mut handle).expect("show() must succeed");
+        gui_ext.show(&handle).expect("show() must succeed");
 
         let child = wait_for_embedded_child(&conn, parent, std::time::Duration::from_secs(4))
             .unwrap_or_else(|| {
@@ -612,7 +615,7 @@ fn gui_embedded_x11_open_close_cycles_no_leak() {
         if round == 0 {
             // T4.8.2 contract, asserted once (fixed per generation).
             assert_eq!(
-                gui_ext.get_size(&mut handle),
+                gui_ext.get_size(&handle),
                 Some(GuiSize {
                     width: 600,
                     height: 275
@@ -620,13 +623,13 @@ fn gui_embedded_x11_open_close_cycles_no_leak() {
                 "embedded GUI keeps the fixed 600x275 logical size"
             );
             assert!(
-                !gui_ext.can_resize(&mut handle),
+                !gui_ext.can_resize(&handle),
                 "embedded GUI is not resizable"
             );
             assert!(
                 gui_ext
                     .set_size(
-                        &mut handle,
+                        &handle,
                         GuiSize {
                             width: 600,
                             height: 275
@@ -634,12 +637,12 @@ fn gui_embedded_x11_open_close_cycles_no_leak() {
                     )
                     .is_ok()
             );
-            assert!(gui_ext.set_scale(&mut handle, 2.0).is_ok());
+            assert!(gui_ext.set_scale(&handle, 2.0).is_ok());
         }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
-        gui_ext.hide(&mut handle).expect("hide() must succeed");
-        gui_ext.destroy(&mut handle);
+        gui_ext.hide(&handle).expect("hide() must succeed");
+        gui_ext.destroy(&handle);
         assert!(
             wait_until_child_destroyed(&conn, child, std::time::Duration::from_secs(4)),
             "round {round}: teardown must destroy the embedded child"

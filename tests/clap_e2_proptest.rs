@@ -152,7 +152,7 @@ proptest! {
     ) {
         use clack_common::events::Pckn;
         use clack_common::events::event_types::ParamValueEvent;
-        use clack_common::utils::{ClapId, Cookie};
+        use clack_common::utils::ClapId;
         use nam_plug::clap::extensions::params::PARAM_INPUT_GAIN;
 
         let n = 256usize;
@@ -169,8 +169,7 @@ proptest! {
                 offset.min((n - 1) as u32),
                 ClapId::new(PARAM_INPUT_GAIN),
                 Pckn::match_all(),
-                val,
-                Cookie::empty(),
+                val
             );
             event_buffer.push(&ev);
         }

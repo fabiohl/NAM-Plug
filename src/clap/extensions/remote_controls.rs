@@ -53,11 +53,11 @@ pub fn fill_remote_controls_page(index: u32, writer: &mut RemoteControlsPageWrit
 }
 
 impl<'a> PluginRemoteControlsImpl for NamClapMainThread<'a> {
-    fn count(&mut self) -> u32 {
+    fn count(&self) -> u32 {
         get_page_count()
     }
 
-    fn get(&mut self, index: u32, writer: &mut RemoteControlsPageWriter) {
+    fn get(&self, index: u32, writer: &mut RemoteControlsPageWriter) {
         fill_remote_controls_page(index, writer);
     }
 }

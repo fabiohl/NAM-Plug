@@ -7,7 +7,7 @@ mod tests {
     use crate::clap::test_util::{self, StereoTestBuffers};
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
-    use clack_common::utils::{ClapId, Cookie};
+    use clack_common::utils::ClapId;
     use clack_host::prelude::*;
 
     #[test]
@@ -36,7 +36,6 @@ mod tests {
                         ClapId::new(pid),
                         Pckn::match_all(),
                         val,
-                        Cookie::empty(),
                     ));
                 }
                 let input_events = InputEvents::from_buffer(&input_events_buffer);
@@ -146,7 +145,6 @@ mod tests {
                         ClapId::new(pid),
                         Pckn::match_all(),
                         val,
-                        Cookie::empty(),
                     ));
                 }
                 let input_events = InputEvents::from_buffer(&input_events_buffer);
@@ -265,7 +263,6 @@ mod tests {
                 ClapId::new(*pid),
                 Pckn::match_all(),
                 *val,
-                Cookie::empty(),
             ));
         }
         let input_events = InputEvents::from_buffer(&input_events_buffer);

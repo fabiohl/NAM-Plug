@@ -38,9 +38,9 @@ fn test_state_context_roundtrip() {
         activation_precision: neural_amp_modeler_rs::common::params::ActivationPrecision::Standard,
     };
     let state_bytes = serde_json::to_vec(&params).unwrap();
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     state_ext
-        .load(&mut handle, &mut state_bytes.as_slice())
+        .load(&handle, &mut state_bytes.as_slice())
         .expect("Failed to load model via PluginState");
 
     let model_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
@@ -48,9 +48,9 @@ fn test_state_context_roundtrip() {
 
     // --- Save: ForPreset context ---
     let mut preset_buffer = Vec::new();
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     state_ctx_ext
-        .save(&mut handle, &mut preset_buffer, StateContextType::ForPreset)
+        .save(&handle, &mut preset_buffer, StateContextType::ForPreset)
         .expect("save ForPreset should succeed");
 
     let preset_json: serde_json::Value =
@@ -78,13 +78,9 @@ fn test_state_context_roundtrip() {
 
     // --- Save: ForProject context ---
     let mut project_buffer = Vec::new();
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     state_ctx_ext
-        .save(
-            &mut handle,
-            &mut project_buffer,
-            StateContextType::ForProject,
-        )
+        .save(&handle, &mut project_buffer, StateContextType::ForProject)
         .expect("save ForProject should succeed");
 
     let project_json: serde_json::Value =
@@ -104,10 +100,10 @@ fn test_state_context_roundtrip() {
 
     // --- Load: ForPreset context (only audio params restored, model_path unchanged) ---
     let preset_json_str = r#"{"input_gain_db":1.5,"output_gain_db":-2.0,"gate_threshold_db":-40.0,"model_path":null,"model_basename":null,"model_search_paths":[],"bypass":false,"adaptive_compute":"Off"}"#;
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     state_ctx_ext
         .load(
-            &mut handle,
+            &handle,
             &mut preset_json_str.as_bytes(),
             StateContextType::ForPreset,
         )
@@ -131,10 +127,10 @@ fn test_state_context_roundtrip() {
         model_path.to_str().unwrap(),
         model_hash
     );
-    let mut handle = plugin_instance.plugin_handle();
+    let handle = plugin_instance.plugin_handle();
     state_ctx_ext
         .load(
-            &mut handle,
+            &handle,
             &mut project_with_path.as_bytes(),
             StateContextType::ForProject,
         )
@@ -206,18 +202,18 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
     };
     let state_bytes = serde_json::to_vec(&original).unwrap();
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut state_bytes.as_slice())
+            .load(&handle, &mut state_bytes.as_slice())
             .expect("state.load should succeed");
     }
 
     // ── Save as ForPreset ──
     let mut preset_buffer = Vec::new();
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         state_ctx_ext
-            .save(&mut handle, &mut preset_buffer, StateContextType::ForPreset)
+            .save(&handle, &mut preset_buffer, StateContextType::ForPreset)
             .expect("save ForPreset should succeed");
     }
 
@@ -256,17 +252,17 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
             ..Default::default()
         };
         let clear_bytes = serde_json::to_vec(&clear_params).unwrap();
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut clear_bytes.as_slice())
+            .load(&handle, &mut clear_bytes.as_slice())
             .expect("clear state load should succeed");
     }
 
     // Reload the preset via state.load — should find model via basename + search_paths
     {
-        let mut handle = plugin_instance.plugin_handle();
+        let handle = plugin_instance.plugin_handle();
         state_ext
-            .load(&mut handle, &mut preset_buffer.as_slice())
+            .load(&handle, &mut preset_buffer.as_slice())
             .expect("state.load of preset should succeed (preset equivalence)");
     }
 

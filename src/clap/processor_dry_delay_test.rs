@@ -27,7 +27,7 @@ mod tests {
     use crate::clap::test_util::tmp_path;
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
-    use clack_common::utils::{ClapId, Cookie};
+    use clack_common::utils::ClapId;
     use clack_host::prelude::*;
     use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
     use std::path::PathBuf;
@@ -109,7 +109,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t41_cabsim");
         mt.load_cabsim(&ir).expect("load pre-delay IR");
         assert!(
@@ -266,7 +266,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t41_xfade");
         mt.load_cabsim(&ir).expect("load pre-delay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
@@ -280,13 +280,8 @@ mod tests {
         // 2 index 0 — the same index where the (now paused) wet would have
         // placed it. No transient may be swallowed or split.
         let mut event_buffer = EventBuffer::new();
-        let bypass_event = ParamValueEvent::new(
-            0u32,
-            ClapId::new(PARAM_BYPASS),
-            Pckn::match_all(),
-            1.0f64,
-            Cookie::empty(),
-        );
+        let bypass_event =
+            ParamValueEvent::new(0u32, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 1.0f64);
         event_buffer.push(&bypass_event);
         let input_events = InputEvents::from_buffer(&event_buffer);
 
@@ -336,7 +331,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t41_ss");
         mt.load_cabsim(&ir).expect("load pre-delay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
@@ -377,7 +372,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
-        let mt = unsafe { &mut *extract_plugin_main_thread(&mut instance) };
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t41_zalloc");
         mt.load_cabsim(&ir).expect("load pre-delay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
@@ -395,7 +390,6 @@ mod tests {
             ClapId::new(PARAM_BYPASS),
             Pckn::match_all(),
             1.0f64,
-            Cookie::empty(),
         ));
         let input_events = InputEvents::from_buffer(&event_buffer);
         let mut il = input.to_vec();
@@ -439,7 +433,6 @@ mod tests {
             ClapId::new(PARAM_BYPASS),
             Pckn::match_all(),
             0.0f64,
-            Cookie::empty(),
         ));
         let input_events = InputEvents::from_buffer(&event_buffer);
         let mut il = input.to_vec();

@@ -20,11 +20,11 @@ fn test_model_load_failed_edge_detection() {
     let main_thread_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
-            |w| Ok(w.main_thread().as_ptr()),
+            |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
         )
         .unwrap()
     };
-    let mt = unsafe { &mut *main_thread_ptr };
+    let mt = unsafe { &*main_thread_ptr };
 
     let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
     let mut started_processor = stopped_processor.start_processing().unwrap();

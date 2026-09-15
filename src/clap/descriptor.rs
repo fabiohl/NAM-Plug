@@ -3,13 +3,15 @@
 
 //! Identity descriptor of the NAM-Plug plugin in CLAP format.
 
+use clack_common::plugin::features;
 use clack_plugin::prelude::*;
 
 /// Returns the immutable plugin descriptor.
 /// Read by the host during scan — must be deterministic and without allocations.
 ///
-/// Feature strings validated against CLAP 1.2.2 (clap-sys 0.5 / clack 0.1),
-/// as defined in `include/clap/plugin-features.h` from the CLAP SDK.
+/// Feature identifiers are taken from the SDK constants exported by
+/// `clack_common::plugin::features` (mirroring `include/clap/plugin-features.h`
+/// from the CLAP 1.2.2 SDK / clap-sys 0.5).
 /// Standard features only — non-standard features ($namespace:$feature)
 /// are ignored by most hosts and should not be declared here.
 pub fn nam_descriptor() -> PluginDescriptor {
@@ -17,5 +19,11 @@ pub fn nam_descriptor() -> PluginDescriptor {
         .with_vendor("Fabio Lima")
         .with_url("https://github.com/fabiohl/NAM-Plug")
         .with_description("Real-time Neural Amp Modeler plugin (CLAP)")
-        .with_features([c"audio-effect", c"distortion", c"gate", c"mono"])
+        // `gate` uses the canonical SDK constant from clack-common 0.2.
+        .with_features([
+            features::AUDIO_EFFECT,
+            features::DISTORTION,
+            features::GATE,
+            features::MONO,
+        ])
 }

@@ -69,12 +69,12 @@ fn process_block(
 
 fn main_thread_ptr(
     instance: &mut PluginInstance<TestHost>,
-) -> *mut crate::clap::plugin::NamClapMainThread<'static> {
+) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
-            |w| Ok(w.main_thread().as_ptr()),
+            |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
         )
         .unwrap()
     }
@@ -86,7 +86,7 @@ fn activate_plugin(
 ) -> (
     StartedPluginAudioProcessor<TestHost>,
     *const crate::clap::plugin::NamClapShared,
-    *mut crate::clap::plugin::NamClapMainThread<'static>,
+    *const crate::clap::plugin::NamClapMainThread<'static>,
 ) {
     let stopped = plugin_instance
         .activate(|_, _| (), audio_config(max_frames))
@@ -127,11 +127,13 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
 
     // Push two structural commands; the first block applies #1 and defers #2.
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
+            .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { adapter: None })
             .expect("push #1 must succeed");
         mt.cmd_producer
+            .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { adapter: None })
             .expect("push #2 must succeed");
     }
@@ -148,8 +150,9 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
         activate_plugin(&mut plugin_instance, N as u32);
     let shared = unsafe { &*shared_ptr };
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
+            .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::RestoreTxn(
                 crate::clap::plugin::RestoreTxn {
                     generation: 42,
@@ -171,11 +174,14 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
 
     // Ack phase: housekeeping publishes the restore.
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         mt.housekeeping();
     }
     assert!(
-        unsafe { &*main_thread_ptr }.pending_restore.is_none(),
+        unsafe { &*main_thread_ptr }
+            .pending_restore
+            .borrow()
+            .is_none(),
         "the restore must be acked and published after the deferred-drop resolution"
     );
 }
@@ -191,9 +197,10 @@ fn test_structural_budget_one_per_callback() {
         activate_plugin(&mut plugin_instance, N as u32);
     let shared = unsafe { &*shared_ptr };
 
-    let mt = unsafe { &mut *main_thread_ptr };
+    let mt = unsafe { &*main_thread_ptr };
     for generation in 1..=8u64 {
         mt.cmd_producer
+            .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::RestoreTxn(
                 crate::clap::plugin::RestoreTxn {
                     generation,
@@ -263,18 +270,21 @@ fn test_structural_coalescing_supersedes_same_kind() {
     let ir_c = make_adapter(2048);
 
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
+            .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
                 adapter: Some(ir_a),
             })
             .expect("IR A push must succeed");
         mt.cmd_producer
+            .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
                 adapter: Some(ir_b),
             })
             .expect("IR B push must succeed");
         mt.cmd_producer
+            .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
                 adapter: Some(ir_c),
             })
@@ -329,7 +339,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
     // The superseded IR B adapter must be drained off-RT (never dropped on the
     // audio thread, never leaked).
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         mt.housekeeping();
     }
     assert!(
@@ -369,9 +379,10 @@ fn test_structural_burst_p99_within_contract() {
     // superseded, so every block applies exactly one structural transaction —
     // the worst-case drain cost per callback.
     {
-        let mt = unsafe { &mut *main_thread_ptr };
+        let mt = unsafe { &*main_thread_ptr };
         for generation in 1..=64u64 {
             mt.cmd_producer
+                .borrow_mut()
                 .push_command(crate::clap::plugin::ClapParamPayload::RestoreTxn(
                     crate::clap::plugin::RestoreTxn {
                         generation,
