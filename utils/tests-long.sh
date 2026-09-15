@@ -173,8 +173,11 @@ maybe_taskset() {
 run_cargo_test() {
     local log_file="$1"
     shift
-    local cmd_prefix
-    cmd_prefix="$(maybe_taskset)"
+    local cmd_prefix=""
+    if [ "${1:-}" = "--affinity" ]; then
+        cmd_prefix="$(maybe_taskset)"
+        shift
+    fi
     local full_cmd
     if [ -n "$cmd_prefix" ]; then
         full_cmd="$cmd_prefix cargo test --features testing --release $*"
@@ -376,9 +379,9 @@ else
     set +e
     echo -e "  ${BLUE}→ Running test_multi_instance_rt_priority under affinity core $BENCH_CORE...${NC}"
     if [ -n "$NOCAPTURE_FLAG" ]; then
-        run_cargo_test "$PHASE3_LOG" --test clap test_multi_instance_rt_priority -- --ignored --nocapture
+        run_cargo_test "$PHASE3_LOG" --affinity --test clap test_multi_instance_rt_priority -- --ignored --nocapture
     else
-        run_cargo_test "$PHASE3_LOG" --test clap test_multi_instance_rt_priority -- --ignored
+        run_cargo_test "$PHASE3_LOG" --affinity --test clap test_multi_instance_rt_priority -- --ignored
     fi
     RC=$?
     set -e

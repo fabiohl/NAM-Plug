@@ -248,7 +248,11 @@ fn run_idempotence_case(total_swaps: usize, producer_threads: usize, prefill: us
                 let mut consumer = drain_side_cons.lock().expect("drain lock");
                 drain_pass(&mut consumer, &overflow_cons, &rt_status_cons)
             };
-            recorded_cons.lock().expect("ledger lock").extend(ids);
+            if ids.is_empty() {
+                std::thread::yield_now();
+            } else {
+                recorded_cons.lock().expect("ledger lock").extend(ids);
+            }
         }
     });
 
@@ -280,6 +284,7 @@ fn run_idempotence_case(total_swaps: usize, producer_threads: usize, prefill: us
                     drain_pass(&mut consumer, &overflow_p, &rt_status_p)
                 };
                 recorded_p.lock().expect("ledger lock").extend(ids);
+                std::thread::yield_now();
             }
         }));
     }
