@@ -670,11 +670,6 @@ fn local_commit(
         main_thread
             .shared
             .cold
-            .model_load_counter
-            .fetch_add(1, Ordering::Relaxed);
-        main_thread
-            .shared
-            .cold
             .model_sample_rate
             .store(48000, Ordering::Relaxed);
     }

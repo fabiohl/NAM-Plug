@@ -228,6 +228,14 @@ fn test_integration_v1_round_trip() {
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
+    assert_eq!(
+        shared
+            .cold
+            .model_load_counter
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "model_load_counter must remain 0 when restoring state without a model"
+    );
 }
 
 #[test]

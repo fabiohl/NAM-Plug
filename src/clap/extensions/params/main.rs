@@ -170,12 +170,23 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     .param_bypass
                     .load(std::sync::atomic::Ordering::Relaxed) as f64,
             ),
-            PARAM_ACTIVE_MODEL => Some(
-                self.shared
-                    .cold
-                    .model_load_counter
-                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
-            ),
+            PARAM_ACTIVE_MODEL => {
+                let guard = self.shared.cold.ui_model_name.lock().unwrap_or_else(|e| {
+                    log::error!("PoisonError in ui_model_name lock: {e:?}");
+                    e.into_inner()
+                });
+                if guard.is_empty() {
+                    Some(0.0)
+                } else {
+                    Some(
+                        self.shared
+                            .cold
+                            .model_load_counter
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as f64,
+                    )
+                }
+            }
             PARAM_ADAPTIVE_COMPUTE => Some(
                 self.shared
                     .ui_to_rt
@@ -291,13 +302,17 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 };
 
                 if text_str == current_name {
-                    Some(
-                        self.shared
-                            .cold
-                            .model_load_counter
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                            as f64,
-                    )
+                    if guard.is_empty() {
+                        Some(0.0)
+                    } else {
+                        Some(
+                            self.shared
+                                .cold
+                                .model_load_counter
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                as f64,
+                        )
+                    }
                 } else if let Ok(val) = text_str.parse::<f64>() {
                     if val.is_finite() { Some(val) } else { None }
                 } else {
