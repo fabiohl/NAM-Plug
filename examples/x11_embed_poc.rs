@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! X11 embedding proof-of-concept (E4 / Sprint 7 — Opção A).
+//! X11 embedding proof-of-concept.
 //!
 //! Proves that a Slint 1.17 window can be created as a **native X11 child**
 //! (XEmbed) of an arbitrary host window, **without forking Slint**, via the

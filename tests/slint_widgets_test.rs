@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! # Integration Tests for Slint Audio Widgets (Sprint 2)
+//! # Integration Tests for Slint Audio Widgets
 //!
 //! Validates `MainWindow` instantiation, initial properties, and interactive callbacks
 //! for `RotaryKnob`, `VuMeter`, `ToggleSwitch`, `LedIndicator`, and `SelectorButton`.

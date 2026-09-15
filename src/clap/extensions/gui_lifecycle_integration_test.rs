@@ -52,7 +52,7 @@ fn x11_floating() -> GuiConfiguration<'static> {
     }
 }
 
-/// Fixed X11 embedded configuration (E4/Sprint 8).
+/// Fixed X11 embedded configuration.
 fn x11_embedded() -> GuiConfiguration<'static> {
     GuiConfiguration {
         api_type: GuiApiType::X11,
@@ -154,7 +154,7 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
         .get_extension::<PluginGui>()
         .expect("PluginGui extension not found");
 
-    // Negotiation: embedded X11 is advertised (E4/Sprint 8).
+    // Negotiation: embedded X11 is advertised.
     {
         let handle = plugin_instance.plugin_handle();
         assert!(

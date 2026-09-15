@@ -254,7 +254,7 @@ pub struct LoadModelPayload {
 }
 
 /// A latency-affecting resource swap staged to land only on the next host
-/// restart cycle (Strict Restart Policy / TR.1).
+/// restart cycle (Strict Restart Policy).
 ///
 /// Built entirely on the main thread (off-RT) exactly like the SPSC payloads.
 /// When a model/IR swap would change the *physical* latency applied by the DSP,
@@ -373,8 +373,7 @@ pub struct PendingRestore {
 }
 
 /// A validated restore transaction staged on the main thread to land only on
-/// the next host restart cycle (Strict Restart Policy / TR.1 extended to
-/// RestoreTxn).
+/// the next host restart cycle (Strict Restart Policy).
 ///
 /// Holds the entire atomic transaction and its publication payload together so
 /// that no component is installed piecemeal before the host restart.

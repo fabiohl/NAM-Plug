@@ -451,7 +451,7 @@ fn test_same_latency_swap_supersedes_staged() {
     let _ = std::fs::remove_file(&model_44k);
 }
 
-/// Notification ordering (Política-A acceptance): `RestartRequested` is emitted
+/// Notification ordering (Strict Restart Policy): `RestartRequested` is emitted
 /// before any latency change; `LatencyChanged` fires only after the restart
 /// cycle applies the new physical latency.
 #[test]
@@ -537,7 +537,7 @@ fn load_state(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TR.2 — State Restore under Política A
+// State Restore under Strict Restart Policy
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// A state restore that keeps the exact same latency must be a continuous

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! X11 XEmbed embedding engine (E4 / Sprint 8 — delivery of Opção A).
+//! X11 XEmbed embedding engine.
 //!
 //! Implements *embed-at-creation*: the Slint/winit window is created **already
 //! parented** under the host's X11 `Window` (CLAP `set_parent`) via
@@ -26,7 +26,7 @@
 //! - [`BACKEND_ONCE`]: exactly-once backend selection across all plugin
 //!   instances in the process.
 //!
-//! # Honesty invariants (E2/Sprint 4 + "never two windows")
+//! # Honesty invariants ("never two windows")
 //!
 //! An embedded request is accepted only when embedding is actually possible —
 //! the process event loop is X11, or still undecided and can be forced to

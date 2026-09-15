@@ -203,7 +203,7 @@ impl<'a> NamClapMainThread<'a> {
                         )
                     })?;
 
-            // Explicit user load supersedes any pending staged restore (TR.1 #5).
+            // Explicit user load supersedes any pending staged restore.
             *self.staged_restore.borrow_mut() = None;
 
             // Strict Restart Policy: a model swap only changes the
@@ -275,7 +275,7 @@ impl<'a> NamClapMainThread<'a> {
                     }
                 }
             } else {
-                // Different latency ⇒ strict Política A: the resources are
+                // Different latency ⇒ Strict Restart Policy: the resources are
                 // staged off-RT and land only on the next host restart cycle
                 // (`activate()` consumes `staged_swap`). The DSP keeps the
                 // old, still-reported latency until then — no sample ever
@@ -403,7 +403,7 @@ impl<'a> NamClapMainThread<'a> {
         // requested; swapping one IR for another (same partition) keeps the
         // exact same latency and applies continuously through the SPSC.
         let delivered = if buffer_size > 0 {
-            // Explicit user IR load supersedes any pending staged restore (TR.1 #5).
+            // Explicit user IR load supersedes any pending staged restore.
             *self.staged_restore.borrow_mut() = None;
 
             // Box here on the main thread so the SPSC payload
@@ -458,7 +458,7 @@ impl<'a> NamClapMainThread<'a> {
                     }
                 }
             } else {
-                // Latency changes (first IR load) ⇒ strict Política A: stage
+                // Latency changes (first IR load) ⇒ Strict Restart Policy: stage
                 // the adapter and request a host restart. The DSP keeps running
                 // without the IR (and reporting the old latency) until the
                 // restart cycle installs the staged IR in `activate()`.

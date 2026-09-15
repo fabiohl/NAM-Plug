@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Persistent per-instance GUI worker thread (E4 / Sprint 8).
+//! Persistent per-instance GUI worker thread.
 //!
 //! Slint 1.17 pins the platform — and with it the winit event loop and the
 //! X11 XEmbed hook — to the **thread that first initializes it**. A

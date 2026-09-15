@@ -17,7 +17,7 @@ mod tests {
     ///
     /// Valid:
     ///   - X11 floating (plugin-managed top-level window)
-    ///   - X11 embedded (native XEmbed — E4/Sprint 8; the definitive guarantee
+    ///   - X11 embedded (native XEmbed; the definitive guarantee
     ///     is enforced in `set_parent`, which errors instead of downgrading)
     ///   - Wayland floating (only Wayland mode allowed by CLAP spec)
     ///
@@ -44,7 +44,7 @@ mod tests {
                     is_floating: false
                 }
             ),
-            "X11 embedded must be supported (E4/Sprint 8 — embed-at-creation)"
+            "X11 embedded must be supported (embed-at-creation)"
         );
         assert!(
             gui_ext.is_api_supported(
@@ -162,7 +162,7 @@ mod tests {
             );
             assert!(
                 !pref.is_floating,
-                "X11 session: preferred mode must be embedded (E4/Sprint 8 native XEmbed)"
+                "X11 session: preferred mode must be embedded (native XEmbed)"
             );
         }
     }
@@ -218,7 +218,7 @@ mod tests {
                 created.is_ok(),
                 has_display,
                 "create(X11 embedded) must succeed with a display and fail without one \
-                 (E4/Sprint 8 create-time viability gate), got {created:?}"
+                 (create-time viability gate), got {created:?}"
             );
         }
 
@@ -454,7 +454,7 @@ mod tests {
         //    The host window handle is intentionally not dereferenced by the
         //    floating path: `set_transient` creates a plugin-owned top-level
         //    window and never reparents into the host (embedded X11 is a
-        //    separate `set_parent` negotiation — E4/Sprint 8). Passing a dummy
+        //    separate `set_parent` negotiation). Passing a dummy
         //    handle is therefore safe.
         // SAFETY: The dummy window handle is not dereferenced by the plugin.
         let result = unsafe {

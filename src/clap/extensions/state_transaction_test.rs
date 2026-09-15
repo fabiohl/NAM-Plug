@@ -2,8 +2,12 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
 use super::*;
+use crate::clap::plugin::NamModelMetadata;
+use neural_amp_modeler_rs::common::params::ProcessingParams;
+use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use std::fs::File;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 fn make_model_resources(mult_adj: f32) -> ModelResources {
     ModelResources {

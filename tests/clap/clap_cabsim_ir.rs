@@ -176,7 +176,7 @@ fn test_cabsim_ir_changes_audio_release_artifact() {
         },
     );
 
-    // Under Política A, clearing the IR changes latency (256 -> 0) and requests
+    // Under the Strict Restart Policy, clearing the IR changes latency (256 -> 0) and requests
     // a host restart. Simulate the host restart cycle (deactivate -> activate):
     let stopped = started.stop_processing();
     instance.deactivate(stopped);

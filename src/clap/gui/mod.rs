@@ -13,9 +13,9 @@ pub(crate) mod file_dialogs;
 pub mod lifecycle;
 /// Slint view-model and telemetry/event bridge.
 pub mod slint_view_model;
-/// Persistent per-instance GUI worker thread (E4/Sprint 8).
+/// Persistent per-instance GUI worker thread.
 pub(crate) mod worker;
-/// Process-global X11 XEmbed embed-at-creation engine (E4/Sprint 8).
+/// Process-global X11 XEmbed embed-at-creation engine.
 pub(crate) mod x11_embed;
 pub use slint_view_model::{MainWindow, SlintViewModel};
 
@@ -46,7 +46,7 @@ pub const GUI_HEIGHT: u32 = 275;
 /// struct encapsulates the pointer with explicit safety documentation at
 /// the creation site — no transmute necessary.
 ///
-/// # Embedded X11 windows (E4/Sprint 8)
+/// # Embedded X11 windows
 ///
 /// An embedded child window is created *inside* the host's window tree via
 /// the XEmbed hook (`x11_embed`): the hook captures the host X11 parent id by

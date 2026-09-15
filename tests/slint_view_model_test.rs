@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! # Integration Tests for Slint View-Model (Sprint 4)
+//! # Integration Tests for Slint View-Model
 //!
 //! Validates:
 //! 1. Initial property synchronization between `GuiSharedState` and Slint `MainWindow`.

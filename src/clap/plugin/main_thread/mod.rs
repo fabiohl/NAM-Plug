@@ -101,14 +101,14 @@ pub struct NamClapMainThread<'a> {
     /// never shared with the audio thread or GUI.
     pub(crate) pending_restore: RefCell<Option<PendingRestore>>,
     /// Latency-affecting full state restore staged to land only on the next
-    /// host restart cycle (Strict Restart Policy / TR.1).
+    /// host restart cycle (Strict Restart Policy).
     ///
     /// Set by `atomic_commit()` when the restore package changes physical
     /// stream latency, physical cabsim latency, or oversampling factor.
     /// Parked here until `activate()` installs the entire package atomically.
     pub(crate) staged_restore: RefCell<Option<StagedRestore>>,
     /// Latency-affecting model/IR swap staged to land only on the next host
-    /// restart cycle (Strict Restart Policy / TR.1).
+    /// restart cycle (Strict Restart Policy).
     ///
     /// Set by `load_model()`/`load_cabsim()`/IR-clear when the swap would
     /// change the physical latency: the resources are fully built off-RT here,

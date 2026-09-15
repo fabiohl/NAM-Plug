@@ -131,32 +131,32 @@ without a digest is never adopted, and therefore never persisted.
 
 Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-extensions`:
 
-| Extension                            | Reference File                                  | Purpose                                                                                    |
-|:------------------------------------ |:----------------------------------------------- |:------------------------------------------------------------------------------------------ |
-| `clap_plugin_audio_ports`            | `src/clap/extensions/audio_ports.rs`            | Mono input/output audio ports, in-place processing pair enabled.                           |
-| `clap_plugin_audio_ports_activation` | `src/clap/extensions/audio_ports_activation.rs` | Dynamic channel deactivation (e.g. right channel on mono tracks) saving gain/copy compute. |
-| `clap_plugin_params`                 | `src/clap/extensions/params/`                   | Parameter mapping, DAW automation, gesture tracking, and `flush()`.                        |
-| `clap_plugin_state`                  | `src/clap/extensions/state.rs`                  | DAW project state serialization (parameters + model path + IR path).                       |
-| `clap_plugin_state_context`          | `src/clap/extensions/state_context.rs`          | Context-aware state restore (distinguishes portable preset vs project duplicate).          |
-| `clap_plugin_latency`                | `src/clap/extensions/latency.rs`                | Dynamic latency reporting (resampler + oversample + cabsim total delay).                   |
-| `clap_plugin_track_info`             | `src/clap/extensions/track_info.rs`             | Host track color synchronization to GUI accent theme.                                      |
-| `clap_plugin_remote_controls`        | `src/clap/extensions/remote_controls.rs`        | "Main" and "Gate" control pages for hardware controllers / device panels.                  |
-| `clap_plugin_param_indication`       | `src/clap/extensions/param_indication.rs`       | GUI visual cues for mapped/automated/overridden parameter status.                          |
-| `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                            |
-| `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision. |
-| `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining cab-sim IR ring-out frames.                            |
-| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint declarative GUI with **native X11 XEmbed embedding** and X11/Wayland floating support (E4/Sprint 8, Opção A). |
+| Extension                            | Reference File                                  | Purpose                                                                                                           |
+|:------------------------------------ |:----------------------------------------------- |:----------------------------------------------------------------------------------------------------------------- |
+| `clap_plugin_audio_ports`            | `src/clap/extensions/audio_ports.rs`            | Mono input/output audio ports, in-place processing pair enabled.                                                  |
+| `clap_plugin_audio_ports_activation` | `src/clap/extensions/audio_ports_activation.rs` | Dynamic channel deactivation (e.g. right channel on mono tracks) saving gain/copy compute.                        |
+| `clap_plugin_params`                 | `src/clap/extensions/params/`                   | Parameter mapping, DAW automation, gesture tracking, and `flush()`.                                               |
+| `clap_plugin_state`                  | `src/clap/extensions/state.rs`                  | DAW project state serialization (parameters + model path + IR path).                                              |
+| `clap_plugin_state_context`          | `src/clap/extensions/state_context.rs`          | Context-aware state restore (distinguishes portable preset vs project duplicate).                                 |
+| `clap_plugin_latency`                | `src/clap/extensions/latency.rs`                | Dynamic latency reporting (resampler + oversample + cabsim total delay).                                          |
+| `clap_plugin_track_info`             | `src/clap/extensions/track_info.rs`             | Host track color synchronization to GUI accent theme.                                                             |
+| `clap_plugin_remote_controls`        | `src/clap/extensions/remote_controls.rs`        | "Main" and "Gate" control pages for hardware controllers / device panels.                                         |
+| `clap_plugin_param_indication`       | `src/clap/extensions/param_indication.rs`       | GUI visual cues for mapped/automated/overridden parameter status.                                                 |
+| `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                                                   |
+| `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision.                        |
+| `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining cab-sim IR ring-out frames.                                                   |
+| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint declarative GUI with **native X11 XEmbed embedding** and X11/Wayland floating support. |
 
 > **Host Compatibility Note:** Native Wayland and X11 window negotiation (`CLAP_WINDOW_API_WAYLAND` and `CLAP_WINDOW_API_X11`) is verified across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. PreSonus Studio One / Fender Studio Pro for Linux is supported via floating window mode with bounded join teardown (`nam-gui-reaper`).
 
-#### 4.10 Windowing Support Matrix (E4/Sprint 8)
+### 4.10 Windowing Support Matrix
 
-| Negotiation (`is_floating`)                  | Wayland session (`WAYLAND_DISPLAY`)                      | X11 session / XWayland                                          |
-|:---------------------------------------------|:-------------------------------------------------------- |:--------------------------------------------------------------- |
-| `CLAP_WINDOW_API_X11`, **embedded**          | `create` rejected unless `DISPLAY` reachable (XWayland); X11 event loop forced → **native XEmbed child** (embed-at-creation) | **Native XEmbed child** of the host `Window` (preferred API)     |
-| `CLAP_WINDOW_API_X11`, floating              | X11-floating window via XWayland (first window forces X11 loop) | Plugin-owned top-level X11 window                                |
-| `CLAP_WINDOW_API_WAYLAND`, floating          | Native Wayland top-level window (preferred API)          | Wayland window only if a Wayland compositor is present; else rejected by negotiation |
-| `CLAP_WINDOW_API_WAYLAND`, embedded          | **Rejected** (no XEmbed equivalent on Wayland; CLAP spec) | **Rejected**                                                     |
+| Negotiation (`is_floating`)         | Wayland session (`WAYLAND_DISPLAY`)                                                                                          | X11 session / XWayland                                                               |
+|:----------------------------------- |:---------------------------------------------------------------------------------------------------------------------------- |:------------------------------------------------------------------------------------ |
+| `CLAP_WINDOW_API_X11`, **embedded** | `create` rejected unless `DISPLAY` reachable (XWayland); X11 event loop forced → **native XEmbed child** (embed-at-creation) | **Native XEmbed child** of the host `Window` (preferred API)                         |
+| `CLAP_WINDOW_API_X11`, floating     | X11-floating window via XWayland (first window forces X11 loop)                                                              | Plugin-owned top-level X11 window                                                    |
+| `CLAP_WINDOW_API_WAYLAND`, floating | Native Wayland top-level window (preferred API)                                                                              | Wayland window only if a Wayland compositor is present; else rejected by negotiation |
+| `CLAP_WINDOW_API_WAYLAND`, embedded | **Rejected** (no XEmbed equivalent on Wayland; CLAP spec)                                                                    | **Rejected**                                                                         |
 
 Guarantees: an embedded request is honored **only** when embedding actually
 happens (create-time viability gate + strict `set_parent` error path); the
@@ -290,7 +290,8 @@ The invariant is **"old-complete or
 new-complete"**: no observer ever sees a hybrid of two restore generations.
 
 1. **Stage** — `build_restore_package(validated, current_params, host_rate, mode)`
-   (`src/clap/extensions/state_transaction.rs`): validates the requested state
+   (`src/clap/extensions/state_transaction/commit.rs`, pre-validated via
+   `src/clap/extensions/state_transaction/validate.rs`): validates the requested state
    (asset digests, resampler feasibility), derives the effective parameters
    (Full = everything; ForPreset = identity subset incl. oversample/activation),
    clones the lightweight metadata into a publish payload, and moves the heavy
@@ -299,14 +300,14 @@ new-complete"**: no observer ever sees a hybrid of two restore generations.
    active DSP intact.
 2. **Commit (RT)** — the whole package is pushed as a **single**
    `ClapParamPayload::RestoreTxn` item (`generation`, `model`, `ir`, `params`)
-   into the SPSC command ring (`atomic_commit` → `deliver_pending_restore`). A
+   into the SPSC command ring (`atomic_commit` → `deliver_pending_restore` in `commit.rs`). A
    single item guarantees the audio block that drains it applies the entire
    package atomically — three separate commands could interleave a `Full`
    between model and IR, producing the forbidden hybrid. If the ring is full,
    the full package (txn + publish) is retained in
    `NamClapMainThread::pending_restore` and `request_callback()` schedules a
    retry (fail-closed — never dropped).
-3. **Ack** — `flush_pending_restore()` (in `housekeeping()`) retries the push
+3. **Ack** — `flush_pending_restore()` (in `src/clap/extensions/state_transaction/commit.rs`) retries the push
    and, once the audio thread has acknowledged the sequence number
    (`is_acked(seq)`), calls `publish_restore()`: it publishes
    `full_wavenet_model`, `ui_model_*`, `model_sample_rate`, IR path/samples,
@@ -453,8 +454,8 @@ The graphical interface is built using the declarative Slint UI framework (v1.17
 ### 7.1 Module Organization
 
 - `src/clap/gui/mod.rs` — GUI entry point, window dimensions (`600x275`), `GuiHostBridge`.
-- `src/clap/gui/worker.rs` — persistent per-instance GUI worker thread (`GuiWorker`): owns the Slint platform + event loop for the instance lifetime, so repeated `create`/`destroy` cycles (and the X11 embed hook) keep working (E4/Sprint 8).
-- `src/clap/gui/x11_embed.rs` — process-global X11 XEmbed embed-at-creation engine: dynamic `with_winit_window_attributes_hook`, backend pin bookkeeping, embed target by value (E4/Sprint 8).
+- `src/clap/gui/worker.rs` — persistent per-instance GUI worker thread (`GuiWorker`): owns the Slint platform + event loop for the instance lifetime, so repeated `create`/`destroy` cycles (and the X11 embed hook) keep working.
+- `src/clap/gui/x11_embed.rs` — process-global X11 XEmbed embed-at-creation engine: dynamic `with_winit_window_attributes_hook`, backend pin bookkeeping, embed target by value.
 - `src/clap/gui/lifecycle.rs` — `GuiLifecycle` finite state machine for window visibility (`Hidden`/`ShowRequested`/`Active`/`HideRequested`/`Destroyed`).
 - `src/clap/gui/slint/main.slint` — 5-Zone declarative UI layout (`MainWindow`).
 - `src/clap/gui/slint/` — Modular Slint component definitions (`RotaryKnob`, `VuMeter`, `ToggleSwitch`, `LedIndicator`, `SelectorButton`, `ModelCard`, `IrCard`).
@@ -466,6 +467,7 @@ The graphical interface is built using the declarative Slint UI framework (v1.17
 ### 7.2 Telemetry Synchronization & IEC 60268-10 Ballistics
 
 To provide smooth metering without degrading the audio thread:
+
 - A dedicated 60 Hz Slint `Timer` (`slint::Timer`) runs inside `"nam-slint-gui"`.
 - Polling reads atomic telemetry (`NamClapShared::rt_to_ui`, `sample_rate`, `effective_latency_samples`).
 - Peak levels are processed with standard IEC 60268-10 Type I (DIN) ballistics:
@@ -474,18 +476,18 @@ To provide smooth metering without degrading the audio thread:
   - **Peak-hold indicator:** 1.5 seconds retention before release.
 - **Dynamic track configuration (`active_channel_count`):** Automatically adapts the meter between centered mono bar and independent stereo L/R bars.
 
-#### 7.2.1 Status-Bar Badges: Live vs. Static-per-Window (Finding F6)
+#### 7.2.1 Status-Bar Badges: Live vs. Static-per-Window
 
 The status bar exposes four informational strings that are **never** hard-coded design-time placeholders in production:
 
 - **`model_arch`** — live: sourced from `ColdShared::ui_model_metadata` (`NamModelMetadata::architecture`/`topology`), diffed every 60 Hz tick with the same echo-guard pattern as `model_name`/`ir_name`. Shows `"No model loaded"` when no model is active, never a stale architecture after a swap or clear.
 - **`simd_badge`** — static-per-window: the runtime-detected SIMD backend (`neural_amp_modeler_rs::math::common::SIMD_MATH.instruction_set`) never changes for the lifetime of a process, so it is read and set once in `SlintViewModel::new()` rather than every tick. Reads `"AVX2+FMA"` in every standard build (the opt-in `avx512` feature is not enabled by `NAM-Plug`).
-- **`backend_text`** — static-per-window: the negotiated windowing backend (`"X11 (Embedded)"` / `"X11 (Floating)"` / `"Wayland (Floating)"` / `"Floating"`) is computed once in `spawn_gui()` from the CLAP host's `Window::api_type()` and the negotiated mode, and passed into `SlintViewModel::new()` (Finding F2 / Opção A + F6).
+- **`backend_text`** — static-per-window: the negotiated windowing backend (`"X11 (Embedded)"` / `"X11 (Floating)"` / `"Wayland (Floating)"` / `"Floating"`) is computed once in `spawn_gui()` from the CLAP host's `Window::api_type()` and the negotiated mode, and passed into `SlintViewModel::new()`.
 - **`dsp_load_text`** — **honest placeholder**: no real per-block DSP-load percentage metric exists yet in the codebase (verified: no such counter is computed anywhere in `src/clap/processor/`). The design-time default was corrected from a hard-coded, misleading `"1.4% DSP"` to `"—"`; `SlintViewModel` intentionally never overwrites it. Wiring a real metric here is a distinct, larger follow-up (would require instrumenting an RT-safe cycle/deadline counter and publishing it through `RtToUi`), tracked as future work rather than bundled into this fix.
 
 ### 7.3 Persistent GUI Worker & Bounded Teardown (`nam-gui-reaper`)
 
-**Why a persistent worker (E4/Sprint 8):** Slint 1.17 pins the platform — and
+**Why a persistent worker:** Slint 1.17 pins the platform — and
 with it the winit event loop and the X11 XEmbed hook — to the **thread that
 first initializes it**. A per-generation "one thread per window" model breaks
 the first `destroy()` + re-open cycle (the new thread gets
@@ -496,6 +498,7 @@ it exactly once, every window generation reuses the same event loop, and the
 dynamic embed hook applies the negotiated parent id per generation.
 
 Window closing and destruction follow a deterministic, leak-free protocol:
+
 1. The DAW host invokes `gui.destroy()` or the user closes the window
    (`on_close_requested`).
 2. The plugin closes the window (`close_current_window`: `slint::quit_event_loop()`
@@ -544,28 +547,26 @@ the dispatched `Window::hide()` as the completion of the request and drives
 as well, so a host that hides before `WindowReady` never leaves a window stuck
 visible.
 
-### 7.5 X11 Embedding — Spike, Design & Delivery (Finding F2 / Opção A)
+### 7.5 X11 Embedding — Architecture & Implementation
 
-> **Status:** delivered (E4 / Sprint 8). Production code in `src/clap/gui/x11_embed.rs`
+> **Status:** Production implementation in `src/clap/gui/x11_embed.rs`
 > (process-global embed engine) + `src/clap/gui/worker.rs` (persistent GUI
-> worker). The spike POC lives on the `spike/x11-embed` branch
-> (`examples/x11_embed_poc.rs`); Sprint 8 supersedes it with the delivery
-> below. Verified by headless gates plus the display-only Xvfb/X11 test
+> worker). Validated by headless unit tests and the display-backed Xvfb/X11 test
 > `gui_embedded_x11_open_close_cycles_no_leak` (10 open/close cycles, zero
 > orphan children).
 
 **Go/no-go verdict: GO.** Slint 1.17 can create a window as a native X11 child
 (XEmbed) **without forking Slint**, using the officially exposed
-`unstable-winit-030` feature. This unblocks E4 / Sprint 8 (Opção A).
+`unstable-winit-030` feature.
 
 **Spike evidence (read-only, Slint 1.17.1 / winit 0.30.13 / clack-extensions 0.2.0):**
 
-| Question                                                                                     | Finding                                                                                                                                                                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| (a) Can a custom `slint::platform::WindowAdapter`/`Platform` inject an existing X11 `Window`? | Not required. Slint 1.17 exposes `slint::BackendSelector::with_winit_window_attributes_hook(Fn(WindowAttributes) -> WindowAttributes)` (feature `unstable-winit-030`), invoked in `i-slint-backend-winit::Backend::create_window_adapter` on **every** window creation. A custom `WindowAdapter` is therefore unnecessary for embedding.                                      |
-| (b) How to extract the host X11 `Window` id from CLAP?                                        | `clack_extensions::gui::Window::as_x11_handle() -> Option<XlibHandle>` returns the host `Window` directly (the `raw-window-handle_06` feature is **not** needed). Fallbacks: `Window::to_standard_api_type()` + the rwh-0.6 `HasWindowHandle` impl (`XlibWindowHandle`).                                                                                                              |
-| (c) Does `winit` expose the X11 window id for `XReparentWindow`/`xcb_reparent_window`?       | Yes, and better: `winit::platform::x11::WindowAttributesExtX11::with_embed_parent_window(XWindow)` sets `platform_specific.x11.embed_window`; the X11 backend then creates the window as a child (`create_window(..., parent=embed_window, ...)`, `platform_impl/linux/x11/window.rs:305`) and sets the `_XEMBED` property `[0,1]` (version 0, mapped) via `embed_window()` (`window.rs:368`). |
-| (d) Is `build.rs` affected?                                                                   | No. `slint_build::compile("src/clap/gui/slint/main.slint")` stays untouched; the feature flag and backend selection are runtime-only.                                                                                                                                                                                                                                    |
+| Question                                                                                      | Finding                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| (a) Can a custom `slint::platform::WindowAdapter`/`Platform` inject an existing X11 `Window`? | Not required. Slint 1.17 exposes `slint::BackendSelector::with_winit_window_attributes_hook(Fn(WindowAttributes) -> WindowAttributes)` (feature `unstable-winit-030`), invoked in `i-slint-backend-winit::Backend::create_window_adapter` on **every** window creation. A custom `WindowAdapter` is therefore unnecessary for embedding.                                                       |
+| (b) How to extract the host X11 `Window` id from CLAP?                                        | `clack_extensions::gui::Window::as_x11_handle() -> Option<XlibHandle>` returns the host `Window` directly (the `raw-window-handle_06` feature is **not** needed). Fallbacks: `Window::to_standard_api_type()` + the rwh-0.6 `HasWindowHandle` impl (`XlibWindowHandle`).                                                                                                                       |
+| (c) Does `winit` expose the X11 window id for `XReparentWindow`/`xcb_reparent_window`?        | Yes, and better: `winit::platform::x11::WindowAttributesExtX11::with_embed_parent_window(XWindow)` sets `platform_specific.x11.embed_window`; the X11 backend then creates the window as a child (`create_window(..., parent=embed_window, ...)`, `platform_impl/linux/x11/window.rs:305`) and sets the `_XEMBED` property `[0,1]` (version 0, mapped) via `embed_window()` (`window.rs:368`). |
+| (d) Is `build.rs` affected?                                                                   | No. `slint_build::compile("src/clap/gui/slint/main.slint")` stays untouched; the feature flag and backend selection are runtime-only.                                                                                                                                                                                                                                                          |
 
 **Selected design (decision): embed-at-creation (option i).**
 
@@ -592,7 +593,7 @@ visible.
 - The child window is created *inside* the host's window tree; if the host
   closes its panel without `destroy()`, the child is destroyed by X11
   automatically (it is a descendant), so no orphan top-level remains. The
-  plugin still drives `on_close_requested`/`gui_user_closed` (Sprint 2) unchanged.
+  plugin still drives `on_close_requested`/`gui_user_closed` unchanged.
 
 **Order of `set_parent` vs `show` (design constraint):**
 
@@ -619,7 +620,7 @@ visible.
   process can no longer embed (non-X11 loop pinned) or when no X11 display is
   reachable (`DISPLAY` unset — pure Wayland without XWayland). `create()` *does*
   propagate, so a conforming host falls back to a floating negotiation.
-- `is_api_supported(X11, embedded) == true` is restored (E4/Sprint 8) behind
+- `is_api_supported(X11, embedded) == true` is guaranteed behind
   that gate. Defense-in-depth: `set_parent` still returns `Err` (logged loudly,
   `gui_host.closed()` notified) without creating a window on any embedding
   failure — never a silently-floating embedded contract, never two windows.
@@ -630,8 +631,8 @@ visible.
 
 **Stability caveat:** `unstable-winit-030` is a normal Cargo feature on the stable
 toolchain (not nightly); the "unstable" prefix flags that its API may change in
-future minor Slint releases as winit majors evolve. E4/Sprint 8 must pin the
-winit minor and re-validate the hook signature on any Slint upgrade.
+future minor Slint releases as winit majors evolve. Slint upgrades must pin the
+winit minor and re-validate the hook signature.
 
 ---
 
@@ -797,7 +798,7 @@ When deploying and inspecting the Flatpak extension, several architectural behav
 - **Absence of AppStream Branch:** Standalone `.flatpak` bundles do **not** bundle or unpack the auxiliary repository-wide AppStream catalog branches (`appstream/x86_64` or `appstream2/x86_64`).
 - **Unindexed Local Origins:** Installing a bundle locally via `flatpak install --user bundle.flatpak` creates an unindexed local origin (e.g., `namplug-origin`). Because this is a static local origin without an HTTP remote URL, no background AppStream synchronization occurs, leaving `~/.local/share/flatpak/appstream/` unpopulated for that ref.
 - **Software Center Impact:** Graphical managers (like Warehouse) query the centralized AppStream database (`/var/lib/flatpak/appstream/` or `~/.local/share/flatpak/appstream/`) rather than scanning unpacked XML files inside `files/share/metainfo/`. Consequently, locally installed bundles display as *"No metadata"* (*"Sem metadados"*), show fallback IDs, and display generic system gear icons.
-- **Production Resolution on Flathub:** When distributed via Flathub or a standard remote OSTree repository, the build pipeline executes `flatpak build-update-repo` (using `appstream-compose`), which indexes [`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`](packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml) into the `appstream/x86_64` branch. Software centers downloading from Flathub immediately display the full human-readable title (*"NAM Plug"*), release version (`0.8.0`), category, summary, URLs, and release notes.
+- **Production Resolution on Flathub:** When distributed via Flathub or a standard remote OSTree repository, the build pipeline executes `flatpak build-update-repo` (using `appstream-compose`), which indexes [`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`](../packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml) into the `appstream/x86_64` branch. Software centers downloading from Flathub immediately display the full human-readable title (*"NAM Plug"*), release version (`0.8.0`), category, summary, URLs, and release notes.
 
 #### 2. Semantic Versioning in `flatpak list`
 

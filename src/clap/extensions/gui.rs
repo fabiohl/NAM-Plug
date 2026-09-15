@@ -330,7 +330,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     ///
     /// Accepted configurations (per CLAP GUI extension v1.2+):
     /// - **X11 floating**: the plugin manages its own top-level X11 window.
-    /// - **X11 embedded** (E4/Sprint 8): native XEmbed reparenting via
+    /// - **X11 embedded**: native XEmbed reparenting via
     ///   embed-at-creation, when the process can still honor it (the winit
     ///   event loop is X11 or undecided). The definitive guarantee happens in
     ///   `set_parent`, which returns an error — and no window — when
@@ -380,7 +380,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
         log::debug!("GUI API negotiation: no WAYLAND_DISPLAY, preferring X11 embedded");
         Some(GuiConfiguration {
             api_type: GuiApiType::X11,
-            is_floating: false, // Native X11 XEmbed into the host panel (E4/Sprint 8).
+            is_floating: false, // Native X11 XEmbed into the host panel.
         })
     }
 
@@ -395,7 +395,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
         if !self.is_api_supported(configuration) {
             return Err(PluginError::Message("GUI configuration not supported"));
         }
-        // Embedded viability gate (E4/Sprint 8): beyond the backend pin check
+        // Embedded viability gate: beyond the backend pin check
         // (is_api_supported), an X11 embedded negotiation also requires a
         // reachable X11 display (pure-Wayland sessions without XWayland have
         // none). The definitive embedding happens at `set_parent`; failing the
