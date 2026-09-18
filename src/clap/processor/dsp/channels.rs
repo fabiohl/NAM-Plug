@@ -52,11 +52,11 @@ pub(super) fn extract_channels<'a>(
         active_channel_count.store(channel_count, Ordering::Relaxed);
     }
 
-    #[cfg(feature = "stereo")]
+    #[cfg(feature = "dual-mono")]
     {
         *process_mono = !has_r_input;
     }
-    #[cfg(not(feature = "stereo"))]
+    #[cfg(not(feature = "dual-mono"))]
     {
         let _ = has_r_input;
         *process_mono = true;
@@ -107,9 +107,9 @@ pub(super) fn extract_channels<'a>(
             }
         }
     } else {
-        #[cfg(feature = "stereo")]
+        #[cfg(feature = "dual-mono")]
         buf_host_r[..n_samples].copy_from_slice(&buf_host_l[..n_samples]);
-        #[cfg(not(feature = "stereo"))]
+        #[cfg(not(feature = "dual-mono"))]
         let _ = buf_host_r;
     }
 

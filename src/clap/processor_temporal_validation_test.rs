@@ -397,6 +397,8 @@ mod tests {
 
     #[test]
     fn test_temporal_transitions_zero_alloc() {
+        use crate::clap::test_util::{StereoTestBuffers, process_stereo_block_prealloc};
+
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
         let stopped = instance
             .activate(
@@ -416,28 +418,55 @@ mod tests {
         let silence = [0.0f32; BLOCK];
         let noise = noise_pattern(BLOCK, 0xFEED_FACE, 0.8);
 
+        // Pre-built per-iteration event sets: constructing and pushing events
+        // inside the audited window would count scaffolding allocations, so
+        // the three possible input states are materialized once, up front.
+        let no_events: Option<InputEvents<'static>> = None;
+        let mut bypass_on_buf = EventBuffer::new();
+        bypass_on_buf.push(&ParamValueEvent::new(
+            0,
+            ClapId::new(PARAM_BYPASS),
+            Pckn::match_all(),
+            1.0,
+        ));
+        let mut bypass_off_buf = EventBuffer::new();
+        bypass_off_buf.push(&ParamValueEvent::new(
+            0,
+            ClapId::new(PARAM_BYPASS),
+            Pckn::match_all(),
+            0.0,
+        ));
+        let bypass_on = InputEvents::from_buffer(&bypass_on_buf);
+        let bypass_off = InputEvents::from_buffer(&bypass_off_buf);
+
+        // Pre-allocated block infrastructure; the first prealloc call
+        // constructs the ports' internal view state outside the window.
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.0, 0.0);
+        process_stereo_block_prealloc(&mut started, &mut bufs, None);
+
         assert_zero_alloc("temporal_transitions_zero_alloc", || {
             for i in 0..30 {
                 let input = if i % 2 == 0 { &noise[..] } else { &silence[..] };
+                bufs.in_l.copy_from_slice(input);
+                bufs.in_r.copy_from_slice(input);
 
-                let mut event_buf = EventBuffer::new();
-                if i % 3 == 0 {
-                    let ev = ParamValueEvent::new(
-                        0,
-                        ClapId::new(PARAM_BYPASS),
-                        Pckn::match_all(),
-                        if (i / 3) % 2 == 0 { 1.0 } else { 0.0 },
-                    );
-                    event_buf.push(&ev);
-                }
-
-                let in_events = InputEvents::from_buffer(&event_buf);
-                let _ = process_block(&mut started, input, Some(&in_events));
+                let in_events: Option<&InputEvents<'_>> = if i % 3 == 0 {
+                    if (i / 3) % 2 == 0 {
+                        Some(&bypass_on)
+                    } else {
+                        Some(&bypass_off)
+                    }
+                } else {
+                    no_events.as_ref()
+                };
+                process_stereo_block_prealloc(&mut started, &mut bufs, in_events);
 
                 if i % 10 == 0 {
                     started.reset();
                 }
             }
         });
+
+        let _ = std::fs::remove_file(&ir);
     }
 }

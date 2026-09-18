@@ -377,12 +377,6 @@ mod tests {
         mt.load_cabsim(&ir).expect("load pre-delay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
 
-        // Warm up (wet path).
-        let input = [0.2f32; 256];
-        for _ in 0..4 {
-            let _ = process_block(&mut started, &input, None);
-        }
-
         // Bypass ON at offset 0 → crossfade entry.
         let mut event_buffer = EventBuffer::new();
         event_buffer.push(&ParamValueEvent::new(
@@ -392,35 +386,31 @@ mod tests {
             1.0f64,
         ));
         let input_events = InputEvents::from_buffer(&event_buffer);
-        let mut il = input.to_vec();
-        let mut ir_buf = input.to_vec();
-        let mut ol = vec![0.0f32; 256];
-        let mut or_buf = vec![0.0f32; 256];
+
+        // Pre-allocated block infrastructure + wet-path warm-up: the audited
+        // windows below reuse these buffers/ports, so the counted allocations
+        // are attributable to the plugin, not to scaffolding. The warm-up also
+        // constructs the ports' internal view state outside the counted
+        // windows.
+        let mut bufs = crate::clap::test_util::StereoTestBuffers::new(256, 0.2, 0.2);
+        for _ in 0..4 {
+            crate::clap::test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
+        }
 
         assert_zero_alloc("bypass crossfade entry", || {
-            let _ = process_block_harness(
+            crate::clap::test_util::process_stereo_block_prealloc(
                 &mut started,
-                &mut il,
-                &mut ir_buf,
-                &mut ol,
-                &mut or_buf,
+                &mut bufs,
                 Some(&input_events),
             );
         });
 
         // Bypass steady state (delayed dry).
         for _ in 0..4 {
-            let mut il = input.to_vec();
-            let mut ir_buf = input.to_vec();
-            let mut ol = vec![0.0f32; 256];
-            let mut or_buf = vec![0.0f32; 256];
             assert_zero_alloc("bypass steady-state", || {
-                let _ = process_block_harness(
+                crate::clap::test_util::process_stereo_block_prealloc(
                     &mut started,
-                    &mut il,
-                    &mut ir_buf,
-                    &mut ol,
-                    &mut or_buf,
+                    &mut bufs,
                     None,
                 );
             });
@@ -435,18 +425,11 @@ mod tests {
             0.0f64,
         ));
         let input_events = InputEvents::from_buffer(&event_buffer);
-        let mut il = input.to_vec();
-        let mut ir_buf = input.to_vec();
-        let mut ol = vec![0.0f32; 256];
-        let mut or_buf = vec![0.0f32; 256];
 
         assert_zero_alloc("bypass crossfade exit", || {
-            let _ = process_block_harness(
+            crate::clap::test_util::process_stereo_block_prealloc(
                 &mut started,
-                &mut il,
-                &mut ir_buf,
-                &mut ol,
-                &mut or_buf,
+                &mut bufs,
                 Some(&input_events),
             );
         });

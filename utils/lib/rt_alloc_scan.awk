@@ -17,6 +17,10 @@
 #     allocation site (main thread, CLAP lifecycle); the panic helper only
 #     runs during exceptional unwinding (its `Box::leak` is the sole
 #     sanctioned leak).
+#   - `DryDelayLine::new` in `src/clap/processor/dsp/dry_delay.rs`: the
+#     `#[cold]` constructor that pre-allocates the two engine `DelayLine<f32>`
+#     rings. It is called only from `activate()`, i.e. the plugin-side
+#     continuation of the documented off-RT allocation site.
 #   - `Arc::clone` is a refcount bump, never an allocation — not flagged.
 #
 # Exit status: 0 when the scanned code is clean, 1 when any pattern matches
@@ -173,6 +177,18 @@ FNR == 1 {
     # --- Whitelisted off-RT functions in processor/mod.rs ---
     if (skipping == 0 &&
         $0 ~ /^[ \t]*(pub(\(crate\)|\(super\))? )?fn (buffer_prealloc_error|panic_to_error|activate|deactivate|build_cab_sim_from_raw_samples)[ \t]*\(/) {
+        begin_region()
+        depth_count(s)
+        maybe_close_region()
+        next
+    }
+
+    # --- Whitelisted off-RT constructor in `dsp/dry_delay.rs` ---
+    # `DryDelayLine::new` composes the two engine delay-line rings; it is
+    # `#[cold]` and called only from `activate()`, so its
+    # `DelayLine::with_capacity` calls are off-RT by contract.
+    if (skipping == 0 && FILENAME ~ /dsp\/dry_delay\.rs$/ &&
+        $0 ~ /^[ \t]*(pub(\(crate\)|\(super\))? )?fn new[ \t]*\(/) {
         begin_region()
         depth_count(s)
         maybe_close_region()

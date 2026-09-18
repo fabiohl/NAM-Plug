@@ -3,14 +3,14 @@
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(feature = "stereo"))]
+    #[cfg(not(feature = "dual-mono"))]
     use crate::clap::test_util::{self};
-    #[cfg(not(feature = "stereo"))]
+    #[cfg(not(feature = "dual-mono"))]
     use clack_host::prelude::*;
-    #[cfg(not(feature = "stereo"))]
+    #[cfg(not(feature = "dual-mono"))]
     use std::sync::atomic::Ordering;
 
-    #[cfg(not(feature = "stereo"))]
+    #[cfg(not(feature = "dual-mono"))]
     #[test]
     fn test_mono_clipping_detection() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();

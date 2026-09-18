@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Reactive rearming of the CabSim tail counter.
+//! Reactive rearming of the CabSim IR ring-out budget.
 //!
-//! Validates that `cabsim_tail_remaining` is re-armed to the full impulse
-//! response duration whenever active audio is fed into the convolution module,
-//! so every note produces a complete ring-out:
+//! Validates that the `CabSimAdapter` tail budget is re-armed to the full
+//! impulse response duration whenever active audio is fed into the convolution
+//! module, so every note produces a complete ring-out:
 //!
 //! * The pattern `impulse → silence → impulse → silence` yields **two** full
 //!   acoustic tails (the second re-arms the counter after the first fully
@@ -206,6 +206,8 @@ mod tests {
 
     #[test]
     fn test_cabsim_tail_rearm_drain_zero_alloc() {
+        use crate::clap::test_util::{StereoTestBuffers, process_stereo_block_prealloc};
+
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
@@ -220,17 +222,19 @@ mod tests {
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
         let _ = shared;
 
-        // Warm-up + impulse through the wet path.
-        let mut impulse = [0.0f32; BLOCK];
-        impulse[0] = 1.0;
-        let _ = process_block(&mut started, &impulse);
+        // Warm-up + impulse through the wet path. The first prealloc call also
+        // constructs the reused ports' internal view state outside the counted
+        // window.
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.0, 0.0);
+        bufs.in_l[0] = 1.0;
+        process_stereo_block_prealloc(&mut started, &mut bufs, None);
+        bufs.in_l[0] = 0.0;
 
         // Rearm happens on the open-gate conv path; the drain runs on the
         // closed-gate path. Both must be zero-alloc.
-        let silence = [0.0f32; BLOCK];
         assert_zero_alloc("cabsim tail rearm + drain (open-gate rearm)", || {
             for _ in 0..12 {
-                let _ = process_block(&mut started, &silence);
+                process_stereo_block_prealloc(&mut started, &mut bufs, None);
             }
         });
 

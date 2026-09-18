@@ -157,10 +157,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .map_err(|e| buffer_prealloc_error("mid", e))?;
             let buf_mid_r = AlignedVec::new(buf_capacity, 0.0f32)
                 .map_err(|e| buffer_prealloc_error("mid", e))?;
-            let buf_model_l = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("model", e))?;
-            let buf_model_r = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("model", e))?;
             let buf_out_l = AlignedVec::new(buf_capacity, 0.0f32)
                 .map_err(|e| buffer_prealloc_error("output", e))?;
             let buf_out_r = AlignedVec::new(buf_capacity, 0.0f32)
@@ -753,25 +749,17 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
             let cmd_consumer = CommandConsumer::new(channels.param_rx, &shared.cold.cmd_last_ack);
 
-            let cabsim_tail_initial = cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
-
             // Pre-allocate the circular dry delay line sized for the maximum
             // possible DSP latency (cab-sim partition == host block size, plus
             // the resampler/oversampler group-delay headroom). Its delay tracks
             // `initial_latency` and is kept in sync whenever a
             // latency-affecting resource is swapped (recompute_effective_latency).
-            // Allocation happens here in `activate()` — the plugin's single
-            // documented allocation site.
+            // The two engine `DelayLine<f32>` rings are allocated here in
+            // `activate()` — the plugin's single documented allocation site.
             let dry_delay_capacity = (audio_config.max_frames_count as usize)
                 .max(MAX_RESAMP_BUF)
                 .saturating_add(DRY_DELAY_MAX_EXTRA);
-            let dry_delay = DryDelayLine::new(
-                AlignedVec::new(dry_delay_capacity, 0.0f32)
-                    .map_err(|e| buffer_prealloc_error("dry delay (L)", e))?,
-                AlignedVec::new(dry_delay_capacity, 0.0f32)
-                    .map_err(|e| buffer_prealloc_error("dry delay (R)", e))?,
-                initial_latency as usize,
-            );
+            let dry_delay = DryDelayLine::new(dry_delay_capacity, initial_latency as usize);
 
             Ok(Self {
                 model_l,
@@ -787,8 +775,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 buf_host_r,
                 buf_mid_l,
                 buf_mid_r,
-                buf_model_l,
-                buf_model_r,
                 buf_out_l,
                 buf_out_r,
                 buf_os_in_l,
@@ -835,7 +821,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 realtime_activation:
                     neural_amp_modeler_rs::common::params::ActivationPrecision::Standard,
                 gain_lut: get_gain_lut(),
-                cabsim_tail_remaining: cabsim_tail_initial,
                 cached_effective_latency: initial_latency,
                 host,
             })
@@ -1080,7 +1065,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.os_r.reset();
 
             // 5. CabSim convolution adapter: clears the FDL and the input/output
-            //    FIFOs, rewinds the partition accumulator (keeps the IR).
+            //    FIFOs, rewinds the partition accumulator and the IR ring-out
+            //    budget (keeps the IR).
             if let Some(adapter) = &mut self.cabsim_adapter {
                 adapter.reset();
             }
@@ -1115,8 +1101,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.buf_host_r.fill(0.0);
             self.buf_mid_l.fill(0.0);
             self.buf_mid_r.fill(0.0);
-            self.buf_model_l.fill(0.0);
-            self.buf_model_r.fill(0.0);
             self.buf_out_l.fill(0.0);
             self.buf_out_r.fill(0.0);
             self.buf_os_in_l.fill(0.0);
@@ -1128,14 +1112,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.buf_xfd_scratch_l.fill(0.0);
             self.buf_xfd_scratch_r.fill(0.0);
 
-            // 12. Tail counter re-armed to the full IR duration like a fresh
-            //     activation — the FDL is empty, so the post-reset drain is
-            //     silence (the correct choice is to re-arm, not to drain a
-            //     stale tail).
-            self.cabsim_tail_remaining =
-                self.cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
-
-            // 13. Per-block caches a fresh activation starts with: gate cache
+            // 12. Per-block caches a fresh activation starts with: gate cache
             //     invalidated (recomputed from the preserved params on the
             //     next block), modulation offsets zeroed, mono flag at the
             //     default, telemetry cycle counter and one-time probes re-armed.

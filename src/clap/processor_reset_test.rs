@@ -303,10 +303,14 @@ mod tests {
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
 
         // Warm up the full chain (model + OS X2 + conv) so every reset stage
-        // has live state to clear.
+        // has live state to clear. The prealloc runner also constructs the
+        // reused ports' internal view state outside the counted windows.
         let pattern = noise_pattern(BLOCK, 0x5555, 0.5);
+        let mut bufs = crate::clap::test_util::StereoTestBuffers::new(BLOCK, 0.0, 0.0);
+        bufs.in_l.copy_from_slice(&pattern);
+        bufs.in_r.copy_from_slice(&pattern);
         for _ in 0..2 {
-            let _ = process_block(&mut started, &pattern);
+            crate::clap::test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
         }
 
         // The reset itself must be zero-alloc in real time.
@@ -316,7 +320,7 @@ mod tests {
 
         // And the first post-reset block remains zero-alloc too.
         assert_zero_alloc("post-reset process()", || {
-            let _ = process_block(&mut started, &pattern);
+            crate::clap::test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
         });
 
         let _ = std::fs::remove_file(&ir);

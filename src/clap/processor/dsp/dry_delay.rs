@@ -12,20 +12,24 @@
 //! fully-bypassed state returns to zero physical latency while the plugin keeps
 //! announcing the wet latency — a PDC inconsistency.
 //!
-//! [`DryDelayLine`] is a bounded ring buffer that delays the dry signal by
-//! exactly the applied wet latency. Dry and wet then represent the same input
-//! instant at every output sample, and the fully-bypassed path keeps the
-//! latency the plugin declares to the host (the host's PDC compensates it).
+//! [`DryDelayLine`] is a thin stereo wrapper over two engine
+//! [`DelayLine<f32>`] rings (one per channel) that delays the dry signal by
+//! exactly the applied wet latency, reusing the engine's RT-safe ring
+//! implementation instead of duplicating ring storage and pointer arithmetic
+//! in the plugin. Dry and wet then represent the same input instant at every
+//! output sample, and the fully-bypassed path keeps the latency the plugin
+//! declares to the host (the host's PDC compensates it).
 //!
 //! # RT-safety
 //!
-//! The ring is allocated once at `activate()` with capacity sized for the
-//! maximum possible latency; the hot path ([`DryDelayLine::process_block`])
-//! performs zero allocations. [`DryDelayLine::set_delay`] and
-//! [`DryDelayLine::reset`] are also allocation-free and are called from the
-//! audio thread only inside cold resource-swap handlers.
+//! The rings are allocated once at [`DryDelayLine::new`] with capacity sized
+//! for the maximum possible latency; the hot path
+//! ([`DryDelayLine::process_block`]) performs zero allocations.
+//! [`DryDelayLine::set_delay`] and [`DryDelayLine::reset`] are also
+//! allocation-free and are called from the audio thread only inside cold
+//! resource-swap handlers.
 
-use neural_amp_modeler_rs::math::common::AlignedVec;
+use neural_amp_modeler_rs::dsp::utils::DelayLine;
 
 /// Maximum additional dry-delay headroom beyond the host block size.
 ///
@@ -42,39 +46,30 @@ use neural_amp_modeler_rs::math::common::AlignedVec;
 /// oversampling X4 half-band delay (2 × HB_DELAY = 24) with margin.
 pub(crate) const DRY_DELAY_MAX_EXTRA: usize = 3200;
 
-/// Bounded circular dry delay line (host-rate samples, per channel).
+/// Stereo dry delay line: one bounded engine ring per channel.
+///
+/// The two [`DelayLine<f32>`] instances are independent — no dry signal ever
+/// leaks between L and R — and share the same capacity/delay contract.
 pub(crate) struct DryDelayLine {
-    buf_l: AlignedVec<f32>,
-    buf_r: AlignedVec<f32>,
-    /// Index of the next sample to write.
-    head: usize,
-    /// Applied delay in samples (`< capacity`).
-    delay: usize,
+    line_l: DelayLine<f32>,
+    line_r: DelayLine<f32>,
 }
 
 impl DryDelayLine {
-    /// Wraps the two pre-allocated ring buffers (off-RT only — the buffers
-    /// must be allocated by the caller, conventionally in `activate()`, the
-    /// plugin's single documented allocation site).
+    /// Allocates the two per-channel engine rings (off-RT only — the single
+    /// plugin allocation site is conventionally `activate()`).
+    ///
+    /// The engine ring holds `capacity + 1` aligned slots, so the effective
+    /// maximum latency is exactly `capacity`; a `delay` above that is clamped.
     #[cold]
-    pub(crate) fn new(buf_l: AlignedVec<f32>, buf_r: AlignedVec<f32>, delay: usize) -> Self {
-        let capacity = buf_l.len().min(buf_r.len()).max(1);
-        debug_assert_eq!(
-            buf_l.len(),
-            buf_r.len(),
-            "dry delay ring channels must have equal capacity"
-        );
-        let mut line = Self {
-            buf_l,
-            buf_r,
-            head: 0,
-            delay: 0,
-        };
-        line.set_delay(delay.min(capacity - 1));
-        line
+    pub(crate) fn new(capacity: usize, delay: usize) -> Self {
+        Self {
+            line_l: DelayLine::with_capacity(capacity, delay),
+            line_r: DelayLine::with_capacity(capacity, delay),
+        }
     }
 
-    /// Sets the applied delay, clamped to `capacity - 1`.
+    /// Sets the applied delay on both channels, clamped to `capacity`.
     ///
     /// RT-safe (no allocation). The ring history is retained, so changing the
     /// delay mid-stream does not create a discontinuity in the buffered signal
@@ -86,18 +81,18 @@ impl DryDelayLine {
     /// for pathological inputs.
     #[inline(always)]
     pub(crate) fn set_delay(&mut self, delay: usize) {
-        self.delay = delay.min(self.buf_l.len() - 1);
+        self.line_l.set_delay(delay);
+        self.line_r.set_delay(delay);
     }
 
-    /// Resets the ring to its zeroed initial state. RT-safe.
+    /// Resets both rings to their zeroed initial state. RT-safe.
     #[inline(always)]
     pub(crate) fn reset(&mut self) {
-        self.buf_l.fill(0.0);
-        self.buf_r.fill(0.0);
-        self.head = 0;
+        self.line_l.reset();
+        self.line_r.reset();
     }
 
-    /// Pushes `n` host input samples into the ring and writes the
+    /// Pushes `n` host input samples into each ring and writes the
     /// `delay`-delayed dry signal into `out_l`/`out_r`.
     ///
     /// Invariant: `out[i] == in[i - delay]` for `i >= delay` (with `in[j] == 0`
@@ -115,56 +110,38 @@ impl DryDelayLine {
         out_r: &mut [f32],
         n: usize,
     ) {
-        let cap = self.buf_l.len();
-        let d = self.delay;
         let n = n
             .min(in_l.len())
             .min(in_r.len())
             .min(out_l.len())
             .min(out_r.len());
-        if n == 0 {
-            return;
-        }
-        let bl = &mut self.buf_l;
-        let br = &mut self.buf_r;
-        let mut head = self.head;
         for i in 0..n {
-            bl[head] = in_l[i];
-            br[head] = in_r[i];
-            head += 1;
-            if head == cap {
-                head = 0;
-            }
-            // Read position: `delay` samples behind the just-written slot.
-            let mut rp = head + cap - 1 - d;
-            if rp >= cap {
-                rp -= cap;
-            }
-            out_l[i] = bl[rp];
-            out_r[i] = br[rp];
+            self.line_l.push(in_l[i]);
+            self.line_r.push(in_r[i]);
+            out_l[i] = self.line_l.pop();
+            out_r[i] = self.line_r.pop();
         }
-        self.head = head;
     }
 }
 
 #[cfg(test)]
 mod dry_delay_test {
+    //! Wrapper-contract tests only. The raw ring mechanics (dynamic retarget,
+    //! zero-priming, clamping, reset, zero-allocation) are unit-tested by the
+    //! engine's `DelayLine`, and the end-to-end dry/wet alignment by the
+    //! integration tests in `src/clap/processor_dry_delay_test.rs`; these tests
+    //! cover what is unique here: slice bridging, stereo independence and
+    //! per-channel delegation.
     use super::*;
 
     /// Builds a fresh `DryDelayLine` with `capacity` samples per channel.
     fn make_line(capacity: usize, delay: usize) -> DryDelayLine {
-        let capacity = capacity.max(1);
-        DryDelayLine::new(
-            AlignedVec::new(capacity, 0.0f32).unwrap(),
-            AlignedVec::new(capacity, 0.0f32).unwrap(),
-            delay,
-        )
+        DryDelayLine::new(capacity, delay)
     }
 
-    /// Runs `input` through a fresh `DryDelayLine` in fixed-size blocks,
-    /// returning the concatenated delayed output (L channel; R asserted equal).
-    fn run_blocks(capacity: usize, delay: usize, input: &[f32], block: usize) -> Vec<f32> {
-        let mut line = make_line(capacity, delay);
+    /// Runs `input` through `line` in fixed-size blocks, returning the
+    /// concatenated delayed L output (R is asserted equal for equal inputs).
+    fn run_on(line: &mut DryDelayLine, input: &[f32], block: usize) -> Vec<f32> {
         let mut out = vec![0.0f32; input.len()];
         let mut out_r = vec![0.0f32; input.len()];
         let mut offset = 0;
@@ -183,133 +160,40 @@ mod dry_delay_test {
         out
     }
 
-    #[test]
-    fn test_delay_zero_is_passthrough() {
-        let input: Vec<f32> = (0..64).map(|i| i as f32 * 0.01).collect();
-        let out = run_blocks(128, 0, &input, 16);
-        for i in 0..input.len() {
-            assert_eq!(out[i], input[i], "delay=0 must be exact passthrough at {i}");
-        }
+    /// Runs `input` through a fresh `DryDelayLine` in fixed-size blocks.
+    fn run_blocks(capacity: usize, delay: usize, input: &[f32], block: usize) -> Vec<f32> {
+        run_on(&mut make_line(capacity, delay), input, block)
     }
 
     #[test]
-    fn test_impulse_peak_aligned_at_delay() {
-        // Impulse at index 0 must reappear exactly `delay` samples later —
-        // verifying the dry/wet time-alignment invariant.
-        for &delay in &[1usize, 12, 64, 256, 511] {
-            let cap = delay + 16;
-            let mut input = vec![0.0f32; delay + 64];
-            input[0] = 1.0;
-            let out = run_blocks(cap, delay, &input, 1);
-            for (i, &o) in out.iter().enumerate() {
-                let expected = if i == delay { 1.0 } else { 0.0 };
-                assert!(
-                    (o - expected).abs() < 1e-7,
-                    "delay={delay} impulse misaligned at {i}: got {o}, expected {expected}",
+    fn test_block_chunked_exact_shift_survives_wraps_and_passthrough() {
+        // `process_block` bridges host slices to the engine rings: the exact
+        // `in[i - delay]` shift must survive arbitrary block boundaries and
+        // ring wraps, and `delay == 0` must be an exact passthrough.
+        let n = 2048;
+        let input: Vec<f32> = (0..n).map(|i| (i % 997) as f32 * 0.001).collect();
+        for &(cap, delay, block) in &[
+            (128usize, 0usize, 16usize),
+            (160, 128, 7),
+            (69, 37, 23),
+            (1, 1, 1),
+        ] {
+            let out = run_blocks(cap, delay, &input, block);
+            assert_eq!(out.len(), n);
+            for i in 0..n {
+                let expected = if i >= delay { input[i - delay] } else { 0.0 };
+                assert_eq!(
+                    out[i], expected,
+                    "cap={cap} delay={delay} block={block} mismatch at {i}"
                 );
             }
         }
-    }
 
-    #[test]
-    fn test_steady_state_gain_and_dc_unchanged() {
-        // Rollback condition: the delay line must not alter gain or DC
-        // in steady state. A constant signal comes out unchanged after the
-        // initial zero-priming.
-        let delay = 37usize;
-        let cap = delay + 32;
-        let input = vec![0.5f32; delay + 128];
-        let out = run_blocks(cap, delay, &input, 23);
-        for (i, &o) in out.iter().take(delay).enumerate() {
-            assert_eq!(o, 0.0, "zero-priming at {i}");
-        }
-        for (i, &o) in out.iter().enumerate().skip(delay) {
-            assert!(
-                (o - 0.5).abs() < 1e-7,
-                "steady-state gain altered at {i}: {o}",
-            );
-        }
-    }
-
-    #[test]
-    fn test_multi_block_wrap_around_exact_shift() {
-        // A ramp input spanning many ring wraps must reproduce the exact
-        // `in[i - delay]` shift at every sample.
-        let delay = 128usize;
-        let cap = 160;
-        let n = 2048;
-        let input: Vec<f32> = (0..n).map(|i| (i % 997) as f32 * 0.001).collect();
-        let out = run_blocks(cap, delay, &input, 7);
-        for i in 0..n {
-            let expected = if i >= delay { input[i - delay] } else { 0.0 };
-            assert_eq!(out[i], expected, "wrap shift mismatch at {i}");
-        }
-    }
-
-    #[test]
-    fn test_set_delay_mid_stream_shifts_alignment() {
-        // Changing the delay mid-stream must only change the read alignment —
-        // the ring history is preserved, so the output continues to represent
-        // the exact input shift for the *new* delay.
-        let delay_a = 8usize;
-        let delay_b = 32usize;
-        let cap = 64;
-        let n = 512;
-        let input: Vec<f32> = (0..n).map(|i| i as f32 * 0.001).collect();
-        let mut line = make_line(cap, delay_a);
-        let mut out = vec![0.0f32; n];
-        let mut out_r = vec![0.0f32; n];
-        let split = 200usize;
-
-        line.process_block(
-            &input[..split],
-            &input[..split],
-            &mut out[..split],
-            &mut out_r[..split],
-            split,
-        );
-        line.set_delay(delay_b);
-        line.process_block(
-            &input[split..],
-            &input[split..],
-            &mut out[split..],
-            &mut out_r[split..],
-            n - split,
-        );
-
-        for (i, &o) in out.iter().enumerate() {
-            let d = if i < split { delay_a } else { delay_b };
-            let expected = if i >= d { input[i - d] } else { 0.0 };
-            assert_eq!(o, expected, "mid-stream delay switch mismatch at {i}");
-        }
-    }
-
-    #[test]
-    fn test_delay_clamped_to_capacity() {
-        let mut line = make_line(64, 10);
-        line.set_delay(64);
-        assert_eq!(line.delay, 63, "delay must clamp to capacity - 1");
-        line.set_delay(usize::MAX);
-        assert_eq!(line.delay, 63, "saturating clamp for oversized delays");
-    }
-
-    #[test]
-    fn test_reset_clears_history() {
-        let delay = 16usize;
-        let mut line = make_line(32, delay);
-        let input = vec![0.5f32; 64];
-        let mut out = vec![0.0f32; 64];
-        let mut out_r = vec![0.0f32; 64];
-        line.process_block(&input, &input, &mut out, &mut out_r, 64);
-        assert!((out[delay] - 0.5).abs() < 1e-7);
-
-        line.reset();
-        let input2 = vec![0.25f32; 64];
-        line.process_block(&input2, &input2, &mut out, &mut out_r, 64);
-        for (i, &o) in out.iter().take(delay).enumerate() {
-            assert_eq!(o, 0.0, "reset must clear pre-history at {i}");
-        }
-        assert!((out[delay] - 0.25).abs() < 1e-7, "post-reset signal intact");
+        // `n` above the shortest slice is clamped instead of panicking.
+        let mut line = make_line(16, 4);
+        let mut out_l = [0.0f32; 8];
+        let mut out_r = [0.0f32; 8];
+        line.process_block(&[1.0; 32], &[1.0; 32], &mut out_l, &mut out_r, 1024);
     }
 
     #[test]
@@ -333,5 +217,42 @@ mod dry_delay_test {
                 assert!((out_r[i] - 0.9).abs() < 1e-7, "R must stay on R at {i}");
             }
         }
+    }
+
+    #[test]
+    fn test_set_delay_and_reset_delegate_to_both_channels() {
+        let capacity = 64usize;
+        let mut line = make_line(capacity, 8);
+
+        // Fill with distinct L/R history, then reset: both channels re-prime.
+        let in_l = vec![0.1f32; capacity + 8];
+        let in_r = vec![0.9f32; capacity + 8];
+        let mut out_l = vec![0.0f32; capacity + 8];
+        let mut out_r = vec![0.0f32; capacity + 8];
+        line.process_block(&in_l, &in_r, &mut out_l, &mut out_r, capacity + 8);
+        assert!((out_l[8] - 0.1).abs() < 1e-7, "L aligned before reset");
+        assert!((out_r[8] - 0.9).abs() < 1e-7, "R aligned before reset");
+
+        line.reset();
+        line.process_block(&in_l, &in_r, &mut out_l, &mut out_r, capacity + 8);
+        for i in 0..8 {
+            assert_eq!(out_l[i], 0.0, "reset must clear L pre-history at {i}");
+            assert_eq!(out_r[i], 0.0, "reset must clear R pre-history at {i}");
+        }
+        assert!((out_l[8] - 0.1).abs() < 1e-7, "post-reset L intact");
+        assert!((out_r[8] - 0.9).abs() < 1e-7, "post-reset R intact");
+
+        // An oversized retarget clamps to `capacity` on both channels: an
+        // impulse must reappear at exactly `capacity`.
+        line.set_delay(usize::MAX);
+        line.reset();
+        let mut impulse = vec![0.0f32; capacity + 16];
+        impulse[0] = 1.0;
+        let out = run_on(&mut line, &impulse, 13);
+        assert_eq!(
+            out.iter().position(|&s| s.abs() >= 0.5),
+            Some(capacity),
+            "oversized delay must clamp to capacity and still align exactly"
+        );
     }
 }

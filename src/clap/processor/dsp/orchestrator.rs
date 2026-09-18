@@ -19,6 +19,7 @@ use neural_amp_modeler_rs::common::spsc::{
 use neural_amp_modeler_rs::dsp::gate::GateState;
 use neural_amp_modeler_rs::dsp::gate_flags;
 use neural_amp_modeler_rs::dsp::pipeline::DspPipelineContext;
+use neural_amp_modeler_rs::math::dsp::all_finite_f32;
 use neural_amp_modeler_rs::models::NamModel;
 use std::sync::atomic::Ordering;
 
@@ -141,23 +142,14 @@ impl<'a> NamClapProcessor<'a> {
                 continue;
             };
 
-            // Non-finite input sample detection & containment
-            let mut non_finite = false;
-            for &s in &self.buf_host_l[..n_samples] {
-                if !s.is_finite() {
-                    non_finite = true;
-                    break;
-                }
-            }
-            #[cfg(feature = "stereo")]
-            if !non_finite && !self.process_mono {
-                for &s in &self.buf_host_r[..n_samples] {
-                    if !s.is_finite() {
-                        non_finite = true;
-                        break;
-                    }
-                }
-            }
+            // Non-finite input sample detection & containment.
+            // Vectorized scan (AVX2 `_mm256_cmp_ps` + movemask) replaces the
+            // per-sample `is_finite` loop; the R channel is scanned only for
+            // real stereo input (`process_mono` is host-driven and always
+            // `true` in mono builds, so the short-circuit keeps the semantics
+            // of the previous cfg-gated scan).
+            let non_finite = !all_finite_f32(&self.buf_host_l[..n_samples])
+                || (!self.process_mono && !all_finite_f32(&self.buf_host_r[..n_samples]));
 
             if non_finite {
                 self.rt_status.set_flag(RT_STATUS_NON_FINITE_INPUT_DETECTED);
@@ -172,8 +164,6 @@ impl<'a> NamClapProcessor<'a> {
                 }
                 self.buf_mid_l.fill(0.0);
                 self.buf_mid_r.fill(0.0);
-                self.buf_model_l.fill(0.0);
-                self.buf_model_r.fill(0.0);
                 self.buf_out_l.fill(0.0);
                 self.buf_out_r.fill(0.0);
                 self.buf_os_in_l.fill(0.0);
@@ -312,8 +302,6 @@ impl<'a> NamClapProcessor<'a> {
                             &mut self.buf_mid_r,
                             &mut self.buf_out_l,
                             &mut self.buf_out_r,
-                            &mut self.buf_model_l,
-                            &mut self.buf_model_r,
                             &mut self.buf_os_in_l,
                             &mut self.buf_os_in_r,
                             &mut self.buf_os_model_l,
@@ -321,7 +309,6 @@ impl<'a> NamClapProcessor<'a> {
                             model_output_mult_adj,
                             shared_sample_rate,
                             self.gain_lut,
-                            &mut self.cabsim_tail_remaining,
                         )
                     };
 

@@ -12,6 +12,7 @@ use neural_amp_modeler_rs::dsp::pipeline::{
 use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
 use neural_amp_modeler_rs::dsp::smoother::ParamSmoother;
 use neural_amp_modeler_rs::math::dsp::gain_lut::GainLUT;
+use neural_amp_modeler_rs::math::dsp::sanitize_nonfinite_f32;
 
 /// Processes an audio sub-block (chunked up to MAX_RESAMP_BUF) through input staging,
 /// streaming neural inference, gate hysteresis, output gain, and latency-compensated dry delay blending.
@@ -42,8 +43,6 @@ pub(crate) fn process_sub_block(
     buf_mid_r: &mut [f32],
     buf_out_l: &mut [f32],
     buf_out_r: &mut [f32],
-    buf_model_l: &mut [f32],
-    buf_model_r: &mut [f32],
     buf_os_in_l: &mut [f32],
     buf_os_in_r: &mut [f32],
     buf_os_model_l: &mut [f32],
@@ -51,7 +50,6 @@ pub(crate) fn process_sub_block(
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
     gain_lut: &GainLUT,
-    cabsim_tail_remaining: &mut usize,
 ) -> (usize, GateState) {
     if n_samples > neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF {
         let mut total_out = 0;
@@ -87,8 +85,6 @@ pub(crate) fn process_sub_block(
                 buf_mid_r,
                 buf_out_l,
                 buf_out_r,
-                buf_model_l,
-                buf_model_r,
                 buf_os_in_l,
                 buf_os_in_r,
                 buf_os_model_l,
@@ -96,7 +92,6 @@ pub(crate) fn process_sub_block(
                 model_output_mult_adj,
                 shared_sample_rate,
                 gain_lut,
-                cabsim_tail_remaining,
             );
             total_out += c_out;
             last_gate = c_gate;
@@ -145,8 +140,6 @@ pub(crate) fn process_sub_block(
             buf_mid_r,
             buf_out_l,
             buf_out_r,
-            buf_model_l,
-            buf_model_r,
             buf_os_in_l,
             buf_os_in_r,
             buf_os_model_l,
@@ -154,7 +147,6 @@ pub(crate) fn process_sub_block(
             model_output_mult_adj,
             shared_sample_rate,
             gain_lut,
-            cabsim_tail_remaining,
         );
     }
 
@@ -162,8 +154,8 @@ pub(crate) fn process_sub_block(
         copy_delayed_dry_to_output(
             out_l,
             out_r,
-            &buf_xfade_dry_l[..n_samples],
-            &buf_xfade_dry_r[..n_samples],
+            &mut buf_xfade_dry_l[..n_samples],
+            &mut buf_xfade_dry_r[..n_samples],
             output_offset,
             process_mono,
         );
@@ -188,26 +180,19 @@ pub(crate) fn process_sub_block(
     );
 
     if gate_state == GateState::Closed {
-        if *cabsim_tail_remaining > 0 {
-            return process_tail_drain(
-                n_samples,
-                out_l,
-                out_r,
-                output_offset,
-                ctx,
-                process_mono,
-                smoother_out,
-                buf_out_l,
-                buf_out_r,
-                buf_model_l,
-                buf_model_r,
-                model_output_mult_adj,
-                shared_sample_rate,
-                cabsim_tail_remaining,
-            );
-        }
-        copy_silence_to_output(out_l, out_r, output_offset, n_samples, process_mono);
-        return (n_samples, GateState::Closed);
+        return process_tail_drain(
+            n_samples,
+            out_l,
+            out_r,
+            output_offset,
+            ctx,
+            process_mono,
+            smoother_out,
+            buf_out_l,
+            buf_out_r,
+            model_output_mult_adj,
+            shared_sample_rate,
+        );
     }
 
     let n_out = run_inference_streaming(
@@ -229,25 +214,20 @@ pub(crate) fn process_sub_block(
     if let Some(ref mut conv) = ctx.conv
         && !conv.is_passthrough()
     {
-        conv.process_variable(
-            &buf_out_l[..n_out],
-            &mut buf_model_l[..n_out],
-            Some(ctx.rt_status),
-        );
-        // The tail counter is re-armed to the full IR duration whenever active
+        // The IR operates directly on the final output scratch: `process_in_place`
+        // consumes the model output and writes the convolution result back into
+        // the same buffer, so no intermediate model buffer (and no transfer copy)
+        // is needed on the audio callback.
+        conv.process_in_place(&mut buf_out_l[..n_out], Some(ctx.rt_status));
+        // The tail budget is re-armed to the full IR duration whenever active
         // audio is effectively fed into the convolution module. Without this,
-        // the first gate close consumes the counter to zero and every later note
+        // the first gate close consumes the budget to zero and every later note
         // is truncated to immediate silence on the next close. Rearming in the
         // drain paths is deliberately avoided (no signal reaches the conv there)
         // so the drain always terminates.
-        *cabsim_tail_remaining = conv.tail_samples();
-        unsafe {
-            core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), n_out);
-        }
+        conv.rearm_tail();
         if !process_mono {
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), n_out);
-            }
+            buf_out_r[..n_out].copy_from_slice(&buf_out_l[..n_out]);
         }
     }
 
@@ -288,9 +268,12 @@ pub(crate) fn process_sub_block(
 
 /// Drains the cab-sim IR tail ring-out after the noise gate closes.
 ///
-/// Feeds zero-input blocks through the convolution adapter and output stage.
-/// The tail counter (`cabsim_tail_remaining`) is decremented until zero, after
-/// which the caller switches to true silence.
+/// The [`CabSimAdapter`] owns the ring-out budget (armed by `rearm_tail` on the
+/// active-audio path): when a budget remains, `drain_tail` feeds its own
+/// zero-input partitions through the engine and renders the decaying IR
+/// response directly into the output scratch. The drain never re-arms, so the
+/// ring-out terminates; once the budget is spent (or there is no active
+/// adapter) the output switches to true silence.
 #[inline(always)]
 #[expect(clippy::too_many_arguments)]
 fn process_tail_drain(
@@ -303,33 +286,27 @@ fn process_tail_drain(
     smoother_out: &mut ParamSmoother,
     buf_out_l: &mut [f32],
     buf_out_r: &mut [f32],
-    buf_model_l: &mut [f32],
-    _buf_model_r: &mut [f32],
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
-    cabsim_tail_remaining: &mut usize,
 ) -> (usize, GateState) {
-    let drain = n_samples.min(*cabsim_tail_remaining);
-
-    buf_out_l[..drain].fill(0.0);
-    buf_out_r[..drain].fill(0.0);
-
-    if let Some(ref mut conv) = ctx.conv
-        && !conv.is_passthrough()
-    {
-        conv.process_variable(
-            &buf_out_l[..drain],
-            &mut buf_model_l[..drain],
-            Some(ctx.rt_status),
-        );
-        unsafe {
-            core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), drain);
+    let drain = n_samples.min(ctx.conv.as_ref().map_or(0, |conv| {
+        if conv.is_passthrough() {
+            0
+        } else {
+            conv.remaining_tail_samples()
         }
-        if !process_mono {
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), drain);
-            }
-        }
+    }));
+
+    if drain == 0 {
+        copy_silence_to_output(out_l, out_r, output_offset, n_samples, process_mono);
+        return (n_samples, GateState::Closed);
+    }
+
+    if let Some(ref mut conv) = ctx.conv {
+        conv.drain_tail(&mut buf_out_l[..drain], Some(ctx.rt_status));
+    }
+    if !process_mono {
+        buf_out_r[..drain].copy_from_slice(&buf_out_l[..drain]);
     }
 
     // The ring-out is intentional signal, not noise floor — the output stage
@@ -379,7 +356,6 @@ fn process_tail_drain(
         process_mono,
     );
 
-    *cabsim_tail_remaining -= drain;
     (n_samples, GateState::Closed)
 }
 
@@ -408,8 +384,6 @@ fn process_crossfade_sub_block(
     _buf_mid_r: &mut [f32],
     buf_out_l: &mut [f32],
     buf_out_r: &mut [f32],
-    buf_model_l: &mut [f32],
-    _buf_model_r: &mut [f32],
     buf_os_in_l: &mut [f32],
     buf_os_in_r: &mut [f32],
     buf_os_model_l: &mut [f32],
@@ -417,7 +391,6 @@ fn process_crossfade_sub_block(
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
     _gain_lut: &GainLUT,
-    cabsim_tail_remaining: &mut usize,
 ) -> (usize, GateState) {
     // 1. Dry source: `buf_xfade_dry` already holds the latency-compensated dry
     // for this sub-block (fed by `process_sub_block` via the DryDelayLine, so
@@ -449,33 +422,19 @@ fn process_crossfade_sub_block(
     );
 
     let n_out = if gate_state == GateState::Closed {
-        if *cabsim_tail_remaining > 0 {
-            let drain = n_samples.min(*cabsim_tail_remaining);
-            if let Some(ref mut conv) = ctx.conv
-                && !conv.is_passthrough()
-            {
-                buf_out_l[..drain].fill(0.0);
-                conv.process_variable(
-                    &buf_out_l[..drain],
-                    &mut buf_model_l[..drain],
-                    Some(ctx.rt_status),
-                );
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        buf_model_l.as_ptr(),
-                        buf_out_l.as_mut_ptr(),
-                        drain,
-                    );
-                }
-                if !process_mono {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            buf_out_l.as_ptr(),
-                            buf_out_r.as_mut_ptr(),
-                            drain,
-                        );
-                    }
-                }
+        let drain = n_samples.min(ctx.conv.as_ref().map_or(0, |conv| {
+            if conv.is_passthrough() {
+                0
+            } else {
+                conv.remaining_tail_samples()
+            }
+        }));
+        if drain > 0 {
+            if let Some(ref mut conv) = ctx.conv {
+                conv.drain_tail(&mut buf_out_l[..drain], Some(ctx.rt_status));
+            }
+            if !process_mono {
+                buf_out_r[..drain].copy_from_slice(&buf_out_l[..drain]);
             }
             // Same unity-gate semantics as `process_tail_drain` — the cab
             // ring-out must not be gated to zero by the closed gate.
@@ -500,7 +459,6 @@ fn process_crossfade_sub_block(
                 false,
                 &mut false,
             );
-            *cabsim_tail_remaining -= drain;
             // Strict cardinality: the sub-block must deliver exactly
             // `n_samples` host samples. Zero-fill the suffix after the
             // ring-out so no stale/sentinel residue reaches the host.
@@ -534,21 +492,14 @@ fn process_crossfade_sub_block(
         if let Some(ref mut conv) = ctx.conv
             && !conv.is_passthrough()
         {
-            conv.process_variable(
-                &buf_out_l[..n_o],
-                &mut buf_model_l[..n_o],
-                Some(ctx.rt_status),
-            );
-            // Re-arm the tail counter for active audio (see the main-path
+            // The IR operates directly on the final output scratch (see the
+            // main-path comment in `process_sub_block`).
+            conv.process_in_place(&mut buf_out_l[..n_o], Some(ctx.rt_status));
+            // Re-arm the tail budget for active audio (see the main-path
             // comment in `process_sub_block`).
-            *cabsim_tail_remaining = conv.tail_samples();
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf_model_l.as_ptr(), buf_out_l.as_mut_ptr(), n_o);
-            }
+            conv.rearm_tail();
             if !process_mono {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(buf_out_l.as_ptr(), buf_out_r.as_mut_ptr(), n_o);
-                }
+                buf_out_r[..n_o].copy_from_slice(&buf_out_l[..n_o]);
             }
         }
 
@@ -665,7 +616,7 @@ pub(crate) fn apply_iir_gain_ramp_sub_block(
 
     // Fast path: gain is stable — single SIMD multiply.
     if (start - target).abs() < 1e-9 {
-        #[cfg(feature = "stereo")]
+        #[cfg(feature = "dual-mono")]
         {
             if detect_clip {
                 let clipped = unsafe {
@@ -688,7 +639,7 @@ pub(crate) fn apply_iir_gain_ramp_sub_block(
                 }
             }
         }
-        #[cfg(not(feature = "stereo"))]
+        #[cfg(not(feature = "dual-mono"))]
         {
             let _ = buf_r;
             if detect_clip {
@@ -723,7 +674,7 @@ pub(crate) fn apply_iir_gain_ramp_sub_block(
     let slice_l = &mut buf_l[offset..offset + n];
     let slice_r = &mut buf_r[offset..offset + n];
 
-    #[cfg(feature = "stereo")]
+    #[cfg(feature = "dual-mono")]
     {
         for i in 0..n {
             let gain = target + bp * diff;
@@ -739,7 +690,7 @@ pub(crate) fn apply_iir_gain_ramp_sub_block(
             bp *= beta;
         }
     }
-    #[cfg(not(feature = "stereo"))]
+    #[cfg(not(feature = "dual-mono"))]
     {
         let _ = &slice_r;
         let _ = buf_r;
@@ -780,30 +731,32 @@ pub(crate) fn copy_silence_to_output(
     }
 }
 
+/// Copies the wet model output to the host buffers.
+///
+/// Containment happens at the source: the scratch buffers are sanitized
+/// in-place once (branchless AVX2 `_mm256_blendv_ps`, replacing the
+/// per-sample `is_finite` branches) and then transferred with bulk
+/// `copy_from_slice` — the host copy itself carries no per-sample logic.
 #[inline(always)]
 pub(crate) fn copy_output_from_sub_block(
     out_l: &mut Option<&mut [f32]>,
     out_r: &mut Option<&mut [f32]>,
-    buf_out_l: &[f32],
-    buf_out_r: &[f32],
+    buf_out_l: &mut [f32],
+    buf_out_r: &mut [f32],
     n_out: usize,
     output_offset: usize,
     process_mono: bool,
 ) {
+    sanitize_nonfinite_f32(&mut buf_out_l[..n_out]);
+    sanitize_nonfinite_f32(&mut buf_out_r[..n_out]);
     if let Some(o_l) = out_l {
         let n = n_out.min(o_l.len().saturating_sub(output_offset));
-        for i in 0..n {
-            let s = buf_out_l[i];
-            o_l[output_offset + i] = if s.is_finite() { s } else { 0.0 };
-        }
+        o_l[output_offset..output_offset + n].copy_from_slice(&buf_out_l[..n]);
     }
     if let Some(o_r) = out_r {
+        let src: &[f32] = if process_mono { buf_out_l } else { buf_out_r };
         let n = n_out.min(o_r.len().saturating_sub(output_offset));
-        let src = if process_mono { buf_out_l } else { buf_out_r };
-        for i in 0..n {
-            let s = src[i];
-            o_r[output_offset + i] = if s.is_finite() { s } else { 0.0 };
-        }
+        o_r[output_offset..output_offset + n].copy_from_slice(&src[..n]);
     }
 }
 
@@ -811,29 +764,26 @@ pub(crate) fn copy_output_from_sub_block(
 /// fully-bypassed state. `dry_l`/`dry_r` are the `DryDelayLine` output staged
 /// into `buf_xfade_dry`, delayed by exactly the applied wet latency — the
 /// bypass path therefore keeps the physical latency declared to the host
-/// instead of snapping back to zero.
+/// instead of snapping back to zero. The staged dry is sanitized in-place
+/// (branchless AVX2) before the bulk copy, mirroring the wet-path containment.
 #[inline(always)]
 pub(crate) fn copy_delayed_dry_to_output(
     out_l: &mut Option<&mut [f32]>,
     out_r: &mut Option<&mut [f32]>,
-    dry_l: &[f32],
-    dry_r: &[f32],
+    dry_l: &mut [f32],
+    dry_r: &mut [f32],
     output_offset: usize,
     process_mono: bool,
 ) {
+    sanitize_nonfinite_f32(dry_l);
+    sanitize_nonfinite_f32(dry_r);
     if let Some(o_l) = out_l {
         let n = dry_l.len().min(o_l.len().saturating_sub(output_offset));
-        for i in 0..n {
-            let s = dry_l[i];
-            o_l[output_offset + i] = if s.is_finite() { s } else { 0.0 };
-        }
+        o_l[output_offset..output_offset + n].copy_from_slice(&dry_l[..n]);
     }
     if let Some(o_r) = out_r {
-        let src = if process_mono { dry_l } else { dry_r };
+        let src: &[f32] = if process_mono { dry_l } else { dry_r };
         let n = src.len().min(o_r.len().saturating_sub(output_offset));
-        for i in 0..n {
-            let s = src[i];
-            o_r[output_offset + i] = if s.is_finite() { s } else { 0.0 };
-        }
+        o_r[output_offset..output_offset + n].copy_from_slice(&src[..n]);
     }
 }

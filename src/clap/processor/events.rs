@@ -404,7 +404,6 @@ impl<'a> NamClapProcessor<'a> {
             .rt_to_ui
             .cabsim_tail_samples
             .store(cabsim_tail, Ordering::Relaxed);
-        self.cabsim_tail_remaining = self.cabsim_adapter.as_ref().map_or(0, |a| a.tail_samples());
 
         self.recompute_effective_latency();
 

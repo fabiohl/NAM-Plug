@@ -257,7 +257,40 @@ pub fn register_test_sink() -> (TestSinkCapture, TestSink) {
 
 /// Runs `f` with allocation tracking enabled and asserts no allocations occurred.
 /// `label` identifies the test context in the failure message.
+///
+/// With the `heap-audit` feature, `AUDIT_ENABLED` is forced off for the counted
+/// window: when it is set, the processor installs its own `TrackingGuard`
+/// inside `process()`, and that guard zeroes this thread's counters at entry
+/// and exit — making the measured delta read as zero regardless of what `f`
+/// actually allocated. Forcing it off keeps the TLS diff authoritative (the
+/// processor's own `RT_STATUS_HEAP_ALLOC` telemetry, activated with
+/// `AUDIT_ENABLED = true`, remains the authoritative signal in the dedicated
+/// heap-audit lane). Without the feature the counting allocator is not even
+/// installed, so there is nothing to mask.
 pub fn assert_zero_alloc<F: FnOnce()>(label: &str, f: F) {
+    #[cfg(feature = "heap-audit")]
+    struct RestoreAuditEnabled(bool);
+
+    #[cfg(feature = "heap-audit")]
+    impl Drop for RestoreAuditEnabled {
+        fn drop(&mut self) {
+            if self.0 {
+                neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED
+                    .store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    // Restores the previous global audit state on scope exit (panic-safe), so
+    // concurrent heap-audit telemetry keeps its intended `AUDIT_ENABLED`.
+    #[cfg(feature = "heap-audit")]
+    let _restore = {
+        let was_enabled =
+            neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED.load(Ordering::Relaxed);
+        neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED.store(false, Ordering::Relaxed);
+        RestoreAuditEnabled(was_enabled)
+    };
+
     let _guard = TrackingGuard::new();
     let before = get_alloc_count();
     f();
@@ -266,6 +299,45 @@ pub fn assert_zero_alloc<F: FnOnce()>(label: &str, f: F) {
         after - before,
         0,
         "{label}: allocations detected in hot-path"
+    );
+}
+
+/// Runs one stereo processing block reusing the audio ports and the output
+/// event buffer owned by `bufs`.
+///
+/// Unlike a per-call rebuild of ports/buffers (e.g. via
+/// `process_block_harness`), no allocation can originate from the harness
+/// scaffolding itself, so this runner is safe to invoke inside an
+/// [`assert_zero_alloc`] window: any counted allocation is attributable to the
+/// plugin or the host wrapper. The `AudioPorts` must have been "warmed" with at
+/// least one call before the counted window opens (first view construction
+/// allocates its internal channel state).
+pub fn process_stereo_block_prealloc<H: HostHandlers>(
+    started: &mut StartedPluginAudioProcessor<H>,
+    bufs: &mut StereoTestBuffers,
+    events: Option<&InputEvents<'_>>,
+) {
+    let mut input_channels = [bufs.in_l.as_mut_slice(), bufs.in_r.as_mut_slice()];
+    let input_audio = bufs.input_ports.with_input_buffers([AudioPortBuffer {
+        latency: 0,
+        channels: AudioPortBufferType::f32_input_only(
+            input_channels.iter_mut().map(InputChannel::constant),
+        ),
+    }]);
+    let output_channels = [bufs.out_l.as_mut_slice(), bufs.out_r.as_mut_slice()];
+    let mut output_audio = bufs.output_ports.with_output_buffers([AudioPortBuffer {
+        latency: 0,
+        channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+    }]);
+    let mut output_events = OutputEvents::from_buffer(&mut bufs.output_events_buffer);
+
+    let _ = started.process(
+        &input_audio,
+        &mut output_audio,
+        events.unwrap_or(&InputEvents::empty()),
+        &mut output_events,
+        None,
+        None,
     );
 }
 

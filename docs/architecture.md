@@ -398,7 +398,8 @@ preventing comb filtering or transient cancellation, and the fully-bypassed
 state matches the declared plugin latency for seamless host PDC.
 
 - **Pre-allocated circular delay line:** `DryDelayLine` (`src/clap/processor/dsp/dry_delay.rs`)
-  is a bounded L/R ring buffer allocated once in `activate()` (capacity =
+  is a thin stereo wrapper over two engine `DelayLine<f32>` rings (one per
+  channel), allocated once in `activate()` (capacity =
   `max(max_frames_count, MAX_RESAMP_BUF) + DRY_DELAY_MAX_EXTRA`, covering the
   cab-sim partition plus the worst-case resampler/oversampler group delay).
   The hot path (`process_block`) is zero-alloc.

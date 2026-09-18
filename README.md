@@ -286,6 +286,7 @@ The following technical documents are maintained in the source repository:
 | [`docs/testing.md`](docs/testing.md)                                                                                             | Test suite layout, host-harness verification phases, CLAP test policies, and test coverage matrix     |
 | [`docs/functional-tests.md`](docs/functional-tests.md)                                                                           | Plugin functional test checklist and verification matrices                                            |
 | [`docs/postmortem-libm-symbol-interposition.md`](docs/postmortem-libm-symbol-interposition.md)                                   | Technical postmortem on libm symbol interposition resolution on Linux dynamic linkers                 |
+| [`docs/rt-hardening-evaluation.md`](docs/rt-hardening-evaluation.md)                                                               | Formal architectural evaluation of `rt-hardening` for CLAP plugins (E.5 / S6-T5) — decision: not activated in plugin, delegated to host |
 | [`NeuralAmpModeler-rs: Audio Fidelity Map`](https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/audio_fidelity_map.md) | DSP decision quality trade-off matrix and frequency response analysis (NeuralAmpModeler-rs engine)    |
 
 ---

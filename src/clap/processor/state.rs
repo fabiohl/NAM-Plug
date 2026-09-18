@@ -153,16 +153,13 @@ pub struct NamClapProcessor<'a> {
     /// 2. Post-resampler input / Pre-model (f32 @ 48kHz)
     pub(crate) buf_mid_l: AlignedVec<f32>,
     pub(crate) buf_mid_r: AlignedVec<f32>,
-    /// 3. Post-model / Pre-resampler output (f32 @ 48kHz)
-    pub(crate) buf_model_l: AlignedVec<f32>,
-    pub(crate) buf_model_r: AlignedVec<f32>,
-    /// 4. Post-resampler output / Final (variable sample_rate)
+    /// 3. Post-resampler output / Final (variable sample_rate)
     pub(crate) buf_out_l: AlignedVec<f32>,
     pub(crate) buf_out_r: AlignedVec<f32>,
-    /// 5. Oversampled input buffers (pre-model, at 2×/4× rate).
+    /// 4. Oversampled input buffers (pre-model, at 2×/4× rate).
     pub(crate) buf_os_in_l: AlignedVec<f32>,
     pub(crate) buf_os_in_r: AlignedVec<f32>,
-    /// 6. Oversampled model output buffers (post-model, at 2×/4× rate).
+    /// 5. Oversampled model output buffers (post-model, at 2×/4× rate).
     pub(crate) buf_os_model_l: AlignedVec<f32>,
     pub(crate) buf_os_model_r: AlignedVec<f32>,
 
@@ -190,7 +187,7 @@ pub struct NamClapProcessor<'a> {
     /// *delayed* dry signal for the bypass output and the crossfade blend.
     pub(crate) buf_xfade_dry_l: AlignedVec<f32>,
     pub(crate) buf_xfade_dry_r: AlignedVec<f32>,
-    /// 7. WaveNet crossfade scratch buffers (motor 0.5.0 `run_inference`):
+    /// 6. WaveNet crossfade scratch buffers (motor 0.5.0 `run_inference`):
     ///    second-pass output used when processing is chunked (active
     ///    resampler). Pre-allocated `MAX_RESAMP_BUF` each — zero alloc in
     ///    `process()`.
@@ -272,10 +269,6 @@ pub struct NamClapProcessor<'a> {
     pub(crate) realtime_activation: ActivationPrecision,
     /// Pre-resolved gain LUT reference, hoisted from process_events hot-path.
     pub(crate) gain_lut: &'static GainLUT,
-    /// Remaining cab-sim tail samples to drain after the noise gate closes.
-    /// Decremented by `process_tail_drain` until zero, at which point the
-    /// tail ring-out is complete and true silence can be emitted.
-    pub(crate) cabsim_tail_remaining: usize,
     /// Effective latency (resampler + oversample + cab-sim) in host-rate
     /// samples, cached on the audio thread. Recomputed only in the cold
     /// handlers that swap latency-affecting resources (model/resampler,
