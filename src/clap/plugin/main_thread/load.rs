@@ -8,7 +8,6 @@ use super::super::shared::{ClapParamPayload, LoadModelPayload, NamModelMetadata,
 use super::NamClapMainThread;
 use crate::clap::plugin::command_scheduler::PushError;
 use neural_amp_modeler_rs::common::diagnostics::{NamDiagnostic, NamErrorCode};
-use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::loader::load_and_build_model;
 use neural_amp_modeler_rs::models::slimmable::clone_wavenet_for_slimmable_storage;
@@ -65,14 +64,15 @@ impl<'a> NamClapMainThread<'a> {
                  resampler will convert internally"
             );
         }
-        let _new_resampler =
-            Box::new(NamResampler::new(host_rate, model_rate, 0).map_err(|e| {
+        let _new_resampler = Box::new(NamResampler::new_simple(host_rate, model_rate).map_err(
+            |e| {
                 Box::new(
                     NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
                         .message("Failed to build resampler")
                         .param("error", e.to_string()),
                 )
-            })?);
+            },
+        )?);
 
         {
             let mut params = self.params.borrow_mut();
@@ -169,17 +169,15 @@ impl<'a> NamClapMainThread<'a> {
 
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
         if buffer_size > 0 {
-            // Buffer size is known: create resampler with real host sample rate and capacity
-            let buf_capacity = buffer_size.max(MAX_RESAMP_BUF);
-            let new_resampler = Box::new(
-                NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
+            let new_resampler = Box::new(NamResampler::new_simple(host_rate, model_rate).map_err(
+                |e| {
                     Box::new(
                         NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
                             .message("Failed to build polyphase resampler for model")
                             .param("error", e.to_string()),
                     )
-                })?,
-            );
+                },
+            )?);
 
             if let Some(ref mut model) = model_l
                 && let Err(e) = model.set_max_buffer_size(buffer_size)
@@ -537,16 +535,14 @@ impl<'a> NamClapMainThread<'a> {
             .store(0, Ordering::Relaxed);
 
         if buffer_size > 0 {
-            let buf_capacity = buffer_size.max(MAX_RESAMP_BUF);
-            let new_resampler = Box::new(
-                NamResampler::new(host_rate, host_rate, buf_capacity).map_err(|e| {
+            let new_resampler =
+                Box::new(NamResampler::new_simple(host_rate, host_rate).map_err(|e| {
                     Box::new(
                         NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
                             .message("Failed to build dummy resampler for clear")
                             .param("error", e.to_string()),
                     )
-                })?,
-            );
+                })?);
 
             let new_stream =
                 crate::clap::plugin::build_stream_adapter(host_rate, host_rate, buffer_size)

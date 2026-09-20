@@ -72,7 +72,8 @@ fn make_swap_item(id: u64) -> GcItem {
         GcItem::ResamplerSwap(Box::new(ResamplerSwapPayload {
             generation: id,
             resampler: Box::new(
-                NamResampler::new(HOST_RATE, MODEL_RATE, 0).expect("equal-rate resampler builds"),
+                NamResampler::new_simple(HOST_RATE, MODEL_RATE)
+                    .expect("equal-rate resampler builds"),
             ),
             stream: Box::new(
                 StreamingResampleBuffer::new(HOST_RATE, MODEL_RATE, MAX_BLOCK)

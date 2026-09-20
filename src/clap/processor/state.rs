@@ -20,6 +20,7 @@ use neural_amp_modeler_rs::math::dsp::gain_lut::GainLUT;
 use neural_amp_modeler_rs::models::StaticModel;
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub const BYPASS_XFADE_SAMPLES: usize = 64;
 pub(crate) const BYPASS_XFADE_INV: f32 = 1.0 / BYPASS_XFADE_SAMPLES as f32;
@@ -105,6 +106,25 @@ impl BypassCrossfader {
 ///
 /// Holds pre-allocated buffers and mutable inference state.
 /// Created in `activate()` and destroyed in `deactivate()`.
+///
+/// T8.5 migration contract: the structural-swap *scheduler* is the engine's
+/// generic scheduler (Sprint 7, Epic E.2 — the canonical 3-phase protocol in
+/// `NeuralAmpModeler-rs/src/common/spsc/swap.rs`), adopted here through its
+/// documented tuning surface (`SwapTunables` values mirror this consumer's
+/// historical `MAX_STRUCTURAL_COMMANDS_PER_CALLBACK` = 1, 64-pop window,
+/// `RT_STATUS_STRUCTURAL_DEFERRED`/`SUPERSEDED` telemetry, and the ack-gapless
+/// `advance_pending`/`rollback_last_pop` hooks — never an averaged or unified
+/// configuration). The cold *handlers* (`apply_structural` /
+/// `discard_structural_payload` in `events.rs`) are the NAM-Plug-specific part
+/// and stay here: decomposition into [`GcItem`]s, latency recompute, and the
+/// `CommandConsumer` sequence bookkeeping are host-specific and cannot move to
+/// the host-agnostic engine. `CommandConsumer` already implements the engine
+/// `SwapRing` acknowledge hooks (`advance_resolved` ≡ `advance_pending`,
+/// `rollback_last_pop` ≡ `rollback_last_pop`), so no second ring exists: the
+/// drain operates on the single source of truth (`cmd_consumer`), and the
+/// `deferred_structural` slot beside it is the drain's observable parking
+/// slot — kept for the `deactivate()` ack-gapless contract, never written
+/// independently of the 3-phase resolution.
 pub struct NamClapProcessor<'a> {
     /// Active model for the left channel (None = bypass).
     pub(crate) model_l: Option<Box<StaticModel>>,
@@ -213,7 +233,16 @@ pub struct NamClapProcessor<'a> {
     /// user-configured output gain applied via `smoother_out`.
     pub(crate) model_output_mult_adj: f32,
     /// Parking lot for model/resampler disposal if the GC channel is full.
+    /// `parking_lot_dirty` mirrors the NAM-Audio-Pipe dirty latch: stored with
+    /// `Release` before each GC cascade so the audio-thread drain can skip the
+    /// 16-slot sweep with a single `Acquire` load when nothing was ever
+    /// parked (F-PERF-24).
     pub(crate) parking_lot: [Option<GcItem>; 16],
+    /// Dirty latch for the RT parking lot. Set with `Release` by every
+    /// [`GcSink`](neural_amp_modeler_rs::common::spsc::GcSink)-style cascade
+    /// before retiring through the parking lot; cleared with `Release` by the
+    /// audio thread once the sweep finds the lot empty.
+    pub(crate) parking_lot_dirty: AtomicBool,
     /// Command consumer with acknowledgment.
     pub(crate) cmd_consumer: CommandConsumer<'a>,
     /// Single-slot deferral for Command Budgeting.

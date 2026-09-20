@@ -460,6 +460,11 @@ impl<'a> CommandConsumer<'a> {
     /// unapplied. The deferred command reoccupies its sequence slot when it is
     /// applied at the start of the next callback (see
     /// [`advance_pending`](Self::advance_pending)), keeping the ack gapless.
+    ///
+    /// Engine-contract alias: this is the `rollback_last_pop` hook of the
+    /// generic scheduler's ring surface (`SwapRing`, Sprint 7 / Epic E.2) —
+    /// the most recent pop is parked unapplied and its slot is re-resolved by
+    /// the next callback's Phase 0.
     pub(crate) fn rollback_last_pop(&mut self) {
         self.processed_seq = self.processed_seq.wrapping_sub(1);
     }
@@ -473,6 +478,11 @@ impl<'a> CommandConsumer<'a> {
     /// by a newer same-kind ring head and discarded (its slot is consumed by
     /// the discard; the superseding command reoccupies the following slot when
     /// popped). In both cases this keeps the item↔sequence mapping gapless.
+    ///
+    /// Engine-contract alias: this is the `advance_resolved` hook of the
+    /// generic scheduler's ring surface (`SwapRing`, Sprint 7 / Epic E.2) — a
+    /// payload parked in the deferred slot was resolved (applied or discarded)
+    /// without a ring pop and consumes its sequence slot.
     pub(crate) fn advance_pending(&mut self) {
         self.processed_seq = self.processed_seq.wrapping_add(1);
     }

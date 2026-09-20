@@ -304,13 +304,15 @@ pub(crate) fn build_model_resources(
         ));
     }
 
-    let new_resampler = Box::new(NamResampler::new(host_rate, model_rate, 0).map_err(|e| {
-        Box::new(
-            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
-                .message("Failed to build resampler")
-                .param("error", e.to_string()),
-        )
-    })?);
+    let new_resampler = Box::new(
+        NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
+            Box::new(
+                NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                    .message("Failed to build resampler")
+                    .param("error", e.to_string()),
+            )
+        })?,
+    );
 
     // Streaming resample adapter, sized for the host buffer.
     // When `buffer_size` is 0 (pre-activation restore), `flush_pending_model()`

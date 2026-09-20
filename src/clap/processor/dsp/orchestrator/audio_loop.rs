@@ -170,6 +170,7 @@ pub(crate) fn process_sub_block(
         n_samples,
         true,
         input_clipped,
+        process_mono,
     );
 
     let gate_state = apply_input_stage(
@@ -251,6 +252,7 @@ pub(crate) fn process_sub_block(
         n_out,
         false,
         &mut false,
+        process_mono,
     );
 
     copy_output_from_sub_block(
@@ -335,6 +337,7 @@ fn process_tail_drain(
         drain,
         false,
         &mut false,
+        process_mono,
     );
 
     // Strict cardinality: every sub-block must deliver exactly `n_samples` host
@@ -412,6 +415,7 @@ fn process_crossfade_sub_block(
         n_samples,
         true,
         input_clipped,
+        process_mono,
     );
 
     let gate_state = apply_input_stage(
@@ -458,6 +462,7 @@ fn process_crossfade_sub_block(
                 drain,
                 false,
                 &mut false,
+                process_mono,
             );
             // Strict cardinality: the sub-block must deliver exactly
             // `n_samples` host samples. Zero-fill the suffix after the
@@ -523,6 +528,7 @@ fn process_crossfade_sub_block(
             n_o,
             false,
             &mut false,
+            process_mono,
         );
 
         n_o
@@ -602,6 +608,10 @@ fn process_crossfade_sub_block(
 }
 
 #[inline(always)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "FFI design or complex DSP kernel signature required by construction"
+)]
 pub(crate) fn apply_iir_gain_ramp_sub_block(
     smoother: &mut ParamSmoother,
     buf_l: &mut [f32],
@@ -610,33 +620,67 @@ pub(crate) fn apply_iir_gain_ramp_sub_block(
     n: usize,
     detect_clip: bool,
     input_clipped: &mut bool,
+    process_mono: bool,
 ) {
     let start = smoother.peek();
     let target = smoother.target_value();
 
+    // F-PERF-15 fast path: for mono (`process_mono`), the R channel
+    // duplicates L everywhere downstream (see `extract_channels`) and the
+    // stereo engine stages short-circuit on `ctx.process_mono` — an extra R
+    // pass would touch a second cache line and a second dispatch frame for
+    // identical samples. Mono therefore touches L only and mirrors L→R once
+    // at the end (the DSP stages already do this via `ctx.process_mono`; the
+    // mirror below extends it to the plugin-level IIR ramps, pure gain, and
+    // delay-line dry feeds).
+    #[cfg(feature = "dual-mono")]
+    let stereo = !process_mono;
+    #[cfg(not(feature = "dual-mono"))]
+    let _stereo = false;
+    #[cfg(not(feature = "dual-mono"))]
+    let _ = process_mono;
     // Fast path: gain is stable — single SIMD multiply.
     if (start - target).abs() < 1e-9 {
         #[cfg(feature = "dual-mono")]
         {
-            if detect_clip {
+            if stereo {
+                if detect_clip {
+                    let clipped = unsafe {
+                        neural_amp_modeler_rs::math::dsp::gain::apply_gain_and_detect_clipping_stereo(
+                            &mut buf_l[offset..offset + n],
+                            &mut buf_r[offset..offset + n],
+                            start,
+                        )
+                    };
+                    if clipped {
+                        *input_clipped = true;
+                    }
+                } else {
+                    unsafe {
+                        neural_amp_modeler_rs::math::dsp::gain::apply_gain_stereo(
+                            &mut buf_l[offset..offset + n],
+                            &mut buf_r[offset..offset + n],
+                            start,
+                        );
+                    }
+                }
+            } else if detect_clip {
                 let clipped = unsafe {
-                    neural_amp_modeler_rs::math::dsp::gain::apply_gain_and_detect_clipping_stereo(
+                    neural_amp_modeler_rs::math::dsp::gain::apply_gain_and_detect_clipping_mono(
                         &mut buf_l[offset..offset + n],
-                        &mut buf_r[offset..offset + n],
                         start,
                     )
                 };
                 if clipped {
                     *input_clipped = true;
                 }
+                buf_r[offset..offset + n].copy_from_slice(&buf_l[offset..offset + n]);
             } else {
-                unsafe {
-                    neural_amp_modeler_rs::math::dsp::gain::apply_gain_stereo(
-                        &mut buf_l[offset..offset + n],
-                        &mut buf_r[offset..offset + n],
-                        start,
-                    );
-                }
+                neural_amp_modeler_rs::math::dsp::gain::apply_gain_simd(
+                    &mut buf_l[offset..offset + n],
+                    start,
+                );
+                buf_r[offset..offset + n].copy_from_slice(&buf_l[offset..offset + n]);
             }
         }
         #[cfg(not(feature = "dual-mono"))]
@@ -680,20 +724,28 @@ pub(crate) fn apply_iir_gain_ramp_sub_block(
             let gain = target + bp * diff;
             unsafe {
                 let p_l = slice_l.get_unchecked_mut(i);
-                let p_r = slice_r.get_unchecked_mut(i);
                 *p_l *= gain;
-                *p_r *= gain;
-                if detect_clip && ((*p_l).abs() > 1.0 || (*p_r).abs() > 1.0) {
+                if stereo {
+                    let p_r = slice_r.get_unchecked_mut(i);
+                    *p_r *= gain;
+                    if detect_clip && ((*p_l).abs() > 1.0 || (*p_r).abs() > 1.0) {
+                        *input_clipped = true;
+                    }
+                } else if detect_clip && (*p_l).abs() > 1.0 {
                     *input_clipped = true;
                 }
             }
             bp *= beta;
+        }
+        if !stereo {
+            slice_r.copy_from_slice(slice_l);
         }
     }
     #[cfg(not(feature = "dual-mono"))]
     {
         let _ = &slice_r;
         let _ = buf_r;
+        let _ = _stereo;
         for i in 0..n {
             let gain = target + bp * diff;
             unsafe {
@@ -747,8 +799,18 @@ pub(crate) fn copy_output_from_sub_block(
     output_offset: usize,
     process_mono: bool,
 ) {
+    // T8.4 (F-PERF-16): the wet model output is already sanitized by the
+    // engine output stage (`apply_output_stage` fuses non-finite containment
+    // into its gain pass at ~zero cost). This sanitize is the plugin-level
+    // backstop for residue introduced *after* that stage (smoother ramps,
+    // crossfade blends) before the host copy — it is not a duplicated
+    // input scan. Mono skips the R pass: `buf_out_r` mirrors L by
+    // construction (see the L→R copies above), so sanitizing L then copying
+    // L→R covers both channels with one pass.
     sanitize_nonfinite_f32(&mut buf_out_l[..n_out]);
-    sanitize_nonfinite_f32(&mut buf_out_r[..n_out]);
+    if !process_mono {
+        sanitize_nonfinite_f32(&mut buf_out_r[..n_out]);
+    }
     if let Some(o_l) = out_l {
         let n = n_out.min(o_l.len().saturating_sub(output_offset));
         o_l[output_offset..output_offset + n].copy_from_slice(&buf_out_l[..n]);
@@ -775,8 +837,13 @@ pub(crate) fn copy_delayed_dry_to_output(
     output_offset: usize,
     process_mono: bool,
 ) {
+    // Same T8.4 backstop semantics as `copy_output_from_sub_block`: the
+    // bypass dry never passes through the engine output stage, so this
+    // sanitize is the only containment on this path. Mono mirrors L→R.
     sanitize_nonfinite_f32(dry_l);
-    sanitize_nonfinite_f32(dry_r);
+    if !process_mono {
+        sanitize_nonfinite_f32(dry_r);
+    }
     if let Some(o_l) = out_l {
         let n = dry_l.len().min(o_l.len().saturating_sub(output_offset));
         o_l[output_offset..output_offset + n].copy_from_slice(&dry_l[..n]);

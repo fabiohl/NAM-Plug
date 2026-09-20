@@ -241,7 +241,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     None
                 } else {
                     Some(Box::new(
-                        NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
+                        NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
                             static_plugin_error(
                                 errors::dsp_resources::RESAMPLER_BUILD_FAILED,
                                 format_args!("{e:?}"),
@@ -303,7 +303,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 (res, stream, cab, os)
             } else {
                 let res = Some(Box::new(
-                    NamResampler::new(host_rate, model_rate, buf_capacity).map_err(|e| {
+                    NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
                         static_plugin_error(
                             errors::dsp_resources::RESAMPLER_BUILD_FAILED,
                             format_args!("{e:?}"),
@@ -806,6 +806,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 slimmable_rx: channels.slimmable_rx,
                 gc_overflow: Arc::clone(&shared.cold.gc_overflow),
                 parking_lot: Default::default(),
+                parking_lot_dirty: std::sync::atomic::AtomicBool::new(false),
                 mod_input_gain: 0.0,
                 mod_output_gain: 0.0,
                 mod_gate_thresh: 0.0,

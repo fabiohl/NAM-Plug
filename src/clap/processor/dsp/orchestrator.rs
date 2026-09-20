@@ -13,13 +13,10 @@ use crate::clap::plugin::PendingRestartOs;
 use crate::clap::processor::dsp::{channels, peaks};
 use clack_plugin::events::event_types::{ParamModEvent, ParamValueEvent};
 use clack_plugin::prelude::*;
-use neural_amp_modeler_rs::common::spsc::{
-    RT_STATUS_HOST_CONTRACT_VIOLATION, RT_STATUS_NON_FINITE_INPUT_DETECTED,
-};
+use neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION;
 use neural_amp_modeler_rs::dsp::gate::GateState;
 use neural_amp_modeler_rs::dsp::gate_flags;
 use neural_amp_modeler_rs::dsp::pipeline::DspPipelineContext;
-use neural_amp_modeler_rs::math::dsp::all_finite_f32;
 use neural_amp_modeler_rs::models::NamModel;
 use std::sync::atomic::Ordering;
 
@@ -142,17 +139,25 @@ impl<'a> NamClapProcessor<'a> {
                 continue;
             };
 
-            // Non-finite input sample detection & containment.
-            // Vectorized scan (AVX2 `_mm256_cmp_ps` + movemask) replaces the
-            // per-sample `is_finite` loop; the R channel is scanned only for
-            // real stereo input (`process_mono` is host-driven and always
-            // `true` in mono builds, so the short-circuit keeps the semantics
-            // of the previous cfg-gated scan).
-            let non_finite = !all_finite_f32(&self.buf_host_l[..n_samples])
-                || (!self.process_mono && !all_finite_f32(&self.buf_host_r[..n_samples]));
+            // T8.4 containment (F-PERF-16): the engine input stage
+            // (`apply_input_stage_inner`, legs T8.1/T8.4 of the engine
+            // Sprint-3 equivalents) fuses non-finite detection into the
+            // already-loaded energy pass (`compute_energy_stereo` returns the
+            // `non_finite` flag at ~zero cost; `apply_output_stage` does the
+            // same) and raises `RT_STATUS_NON_FINITE_INPUT_DETECTED` itself.
+            // A pre-stage scan here is intentionally NOT (re)introduced: it
+            // would pay a second full-buffer pass (~16 KiB/frame @512) on
+            // every block, while the post-stage gate below observes the
+            // engine flag and performs the plugin-level containment (buffer
+            // zeroing + state reset) the engine stage alone cannot do — it
+            // only sanitizes its input slices, not the downstream scratch
+            // buffers. A host buffer already sanitized by the engine stage
+            // reports finite here by design; the flag/zero path reads the
+            // ENGINE flag after `apply_input_stage` runs, not a pre-scan.
 
-            if non_finite {
-                self.rt_status.set_flag(RT_STATUS_NON_FINITE_INPUT_DETECTED);
+            if self.rt_status.check_flag(
+                neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED,
+            ) {
                 self.buf_host_l[..n_samples].fill(0.0);
                 self.buf_host_r[..n_samples].fill(0.0);
                 if let Some(model) = &mut self.model_l {

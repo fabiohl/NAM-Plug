@@ -394,7 +394,7 @@ fn reference_resample(signal: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
     if from_sr == to_sr {
         return signal.to_vec();
     }
-    let mut rs = NamResampler::new(to_sr, from_sr, 0)
+    let mut rs = NamResampler::new_simple(to_sr, from_sr)
         .unwrap_or_else(|e| panic!("reference_resample {from_sr} Hz → {to_sr} Hz failed: {e}"));
     let est = (signal.len() as f64 * to_sr as f64 / from_sr as f64).ceil() as usize + 512;
     let mut out_l = vec![0.0f32; est];
@@ -437,7 +437,7 @@ fn resampler_latency_samples(host_sr: u32, model_sr: u32) -> usize {
     if host_sr == model_sr {
         return 0;
     }
-    NamResampler::new(host_sr, model_sr, 0)
+    NamResampler::new_simple(host_sr, model_sr)
         .map(|r| r.latency_samples(host_sr) as usize)
         .unwrap_or(0)
 }

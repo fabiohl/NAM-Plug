@@ -22,7 +22,6 @@ use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{self, GcItem};
-use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::NamModel;
 use rtrb::{Consumer, Producer};
@@ -200,15 +199,14 @@ impl<'a> NamClapMainThread<'a> {
         let sample_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
 
         // Construct the resampler HERE with the real host sample rate
-        // and buffer capacity — both are known now that activate() has been called.
-        let buf_capacity = buffer_size.max(MAX_RESAMP_BUF).max(1024) * 2;
-        let new_resampler = Box::new(
-            NamResampler::new(sample_rate, model_rate, buf_capacity).map_err(|e| {
+        // now that activate() has been called.
+        let new_resampler = Box::new(NamResampler::new_simple(sample_rate, model_rate).map_err(
+            |e| {
                 PluginError::Message(Box::leak(
                     format!("Failed to create deferred resampler: {:?}", e).into_boxed_str(),
                 ))
-            })?,
-        );
+            },
+        )?);
 
         // Streaming resample adapter (T1.2/F-PERF-002), sized for the worst-case
         // host block now that `buffer_size` is known.

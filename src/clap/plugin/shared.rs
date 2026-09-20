@@ -1005,6 +1005,14 @@ impl GuiSharedState {
             ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent,
         };
 
+        // F-PERF-23: fast path for the common headless/steady case — a single
+        // Relaxed load avoids 24 LOCKed RMW `fetch_and` operations per callback
+        // when no GUI gesture occurred. A gesture racing this load is delayed
+        // by at most one block (same as the generation-counter guard).
+        if self.ui_to_rt.gesture_flags.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+
         let params: [(u32, u32, &AtomicU32); 8] = [
             (
                 PARAM_INPUT_GAIN,

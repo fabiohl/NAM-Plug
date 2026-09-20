@@ -24,22 +24,45 @@ impl<'a> NamClapProcessor<'a> {
         self.drain_parking_lot();
 
         // 1. Event Processing (Main Thread SPSC)
-        // Command Budgeting:
-        // - Light parameter updates (Params) drain freely up to the queue cap.
+        // Command Budgeting — the engine's generic structural-swap scheduler
+        // (Sprint 7, Epic E.2: canonical 3-phase protocol in
+        // `NeuralAmpModeler-rs/src/common/spsc/swap.rs`), instantiated here
+        // with this consumer's historical tuning (no averaging, no unification):
+        // - Light parameter updates (Params) apply inline during the drain,
+        //   never parked, never coalesced by the scheduler.
         // - Structural commands (model/IR/oversample swaps, full restores) are
-        //   budgeted to at most MAX_STRUCTURAL_COMMANDS_PER_CALLBACK per
+        //   budgeted to at most MAX_STRUCTURAL_COMMANDS_PER_CALLBACK (= 1,
+        //   `swaps_per_callback`) per callback with a 64-pop coalescing
+        //   window (`pops_per_callback`), shared across all drains of the
         //   callback. A structural apply recomputes latency, feeds the GC
         //   cascade and may call host extensions (`HostTail::changed`), so a
-        //   burst of 64 structural payloads must not all execute in one
-        //   callback — the excess is deferred (parked) and the drain stops,
-        //   preserving FIFO ordering and composite-transaction atomicity.
+        //   burst of structural payloads must not all execute in one
+        //   callback — the excess parks in the single deferred slot and the
+        //   drain stops, preserving FIFO ordering and composite-transaction
+        //   atomicity. Latest-wins per coalesce key (`StructuralKind`,
+        //   `Restore` never coalescible); a superseded deferred payload is
+        //   discarded off-RT through the GC cascade (never dropped on the
+        //   callback) with `RT_STATUS_STRUCTURAL_SUPERSEDED` telemetry, and a
+        //   parked one raises `RT_STATUS_STRUCTURAL_DEFERRED`.
+        //
+        // The generic protocol's `SwapRing` acknowledge hooks map 1:1 onto the
+        // existing `CommandConsumer` sequence bookkeeping: `advance_pending` ≡
+        // `advance_resolved` (a parked payload resolved without a pop consumes
+        // its slot), `rollback_last_pop` ≡ `rollback_last_pop` (a candidate
+        // parked unapplied rewinds its slot so the ack never covers it). The
+        // phases below (0 = deferred resolution, 1 = bounded drain with
+        // latest-wins coalescing, 2 = budgeted apply-or-park + 64-pop
+        // truncation flag) implement that protocol verbatim; only the cold
+        // `apply_structural` / `discard_structural_payload` handlers are
+        // NAM-Plug-specific (GcItem decomposition, latency recompute).
         let mut drained_count = 0u32;
         let mut structural_applied = 0u32;
         let mut processed_any = false;
 
         // Phase 0 — resolve a structural command deferred by the previous
-        // callback. It is causally *before* everything still in the ring, so it
-        // applies first. Command coalescing (latest-wins): if the ring head is
+        // callback (engine protocol: deferred resolution — the parked payload
+        // is causally *before* everything still in the ring, so it resolves
+        // first). Command coalescing (latest-wins): if the ring head is
         // a newer same-kind coalescible command, the deferred one is superseded
         // — never applied, its resources discarded off-RT via the GC cascade.
         if let Some(deferred) = self.deferred_structural.take() {
@@ -71,7 +94,13 @@ impl<'a> NamClapProcessor<'a> {
             }
         }
 
-        // Phase 1 — drain the ring under the structural budget.
+        // Phase 1 — bounded drain with latest-wins coalescing (engine
+        // protocol: a different-key structural flush-installs the pending
+        // candidate first — FIFO across keys; light scalars install inline).
+        // When the structural budget is exhausted the drain stops at the
+        // structural head (it stays queued, FIFO intact) — everything behind
+        // it is causally after it, so order is preserved (engine protocol:
+        // Phase 2 budgeted apply-or-park).
         while let Some(payload) = self.cmd_consumer.pop() {
             drained_count += 1;
             processed_any = true;

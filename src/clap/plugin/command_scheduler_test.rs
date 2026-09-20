@@ -26,7 +26,7 @@ fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
         model: Some(crate::clap::plugin::LoadModelPayload {
             generation,
             model_l: None,
-            new_resampler: Box::new(NamResampler::new(48000, 48000, 0).unwrap()),
+            new_resampler: Box::new(NamResampler::new_simple(48000, 48000).unwrap()),
             new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
             input_mult_adj: mult_adj,
             output_mult_adj: mult_adj,
@@ -668,7 +668,7 @@ fn structural_classification_light_vs_heavy() {
         ClapParamPayload::LoadModel {
             generation: 0,
             model_l: None,
-            new_resampler: Box::new(NamResampler::new(48000, 48000, 0).unwrap()),
+            new_resampler: Box::new(NamResampler::new_simple(48000, 48000).unwrap()),
             new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,

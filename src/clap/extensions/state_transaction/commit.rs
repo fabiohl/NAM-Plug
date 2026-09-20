@@ -230,7 +230,7 @@ pub(crate) fn build_restore_package(
                 // Explicitly clear the model on the RT thread.
                 // Building the passthrough resampler is part of the transaction:
                 // a failure aborts the entire commit — nothing is published.
-                let new_resampler = NamResampler::new(host_rate, 48000, 0).map_err(|e| {
+                let new_resampler = NamResampler::new_simple(host_rate, 48000).map_err(|e| {
                     static_plugin_error(
                         errors::dsp_resources::CLEAR_MODEL_RESAMPLER_FAILED,
                         format_args!("{e:?}"),

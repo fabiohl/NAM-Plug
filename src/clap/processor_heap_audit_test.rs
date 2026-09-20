@@ -516,7 +516,7 @@ mod tests {
                 m.set_max_buffer_size(BLOCK).expect("model pre-size failed");
             }
             let new_resampler =
-                Box::new(NamResampler::new(HOST_RATE, pair.sample_rate, 0).expect("resampler"));
+                Box::new(NamResampler::new_simple(HOST_RATE, pair.sample_rate).expect("resampler"));
             let new_stream =
                 crate::clap::plugin::build_stream_adapter(HOST_RATE, pair.sample_rate, BLOCK)
                     .expect("streaming adapter");
