@@ -18,6 +18,10 @@ fn make_test_scheduler() -> (CommandScheduler, Arc<AtomicU64>, Arc<AtomicU64>) {
     (sched, next_seq, last_ack)
 }
 
+fn rt_gain(input_gain_db: f32) -> RtProcessingParams {
+    RtProcessingParams::default().with_input_gain_db(input_gain_db)
+}
+
 /// Builds a complete atomic restore transaction. `mult_adj` differentiates the
 /// model component between restores so snapshots can be told apart.
 fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
@@ -32,10 +36,7 @@ fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
             output_mult_adj: mult_adj,
         }),
         ir: Some(None),
-        params: RtProcessingParams {
-            input_gain_db: gain,
-            ..Default::default()
-        },
+        params: rt_gain(gain),
     }
 }
 
@@ -45,11 +46,9 @@ fn coalesce_single_param_and_flush() {
     let (tx, _rx) = rtrb::RingBuffer::new(256);
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
-    let params = RtProcessingParams {
-        input_gain_db: 5.0,
-        bypass: false,
-        ..Default::default()
-    };
+    let params = RtProcessingParams::default()
+        .with_input_gain_db(5.0)
+        .with_bypass(false);
 
     let is_new = producer.push_params(params);
     assert!(is_new, "first push should start a new batch");
@@ -65,10 +64,7 @@ fn coalesce_merges_consecutive_param_updates() {
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
     for gain in 0..100 {
-        let p = RtProcessingParams {
-            input_gain_db: gain as f32,
-            ..Default::default()
-        };
+        let p = rt_gain(gain as f32);
         let is_new = producer.push_params(p);
         // First is new, rest are coalesced
         if gain == 0 {
@@ -97,20 +93,16 @@ fn coalesce_preserves_multi_param_merging() {
     let (tx, mut rx) = rtrb::RingBuffer::new(256);
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
-    let p1 = RtProcessingParams {
-        input_gain_db: 3.0,
-        bypass: true,
-        ..Default::default()
-    };
+    let p1 = RtProcessingParams::default()
+        .with_input_gain_db(3.0)
+        .with_bypass(true);
     assert!(producer.push_params(p1));
 
-    let p2 = RtProcessingParams {
-        input_gain_db: 3.0,
-        bypass: true,
-        output_gain_db: -6.0,
-        gate_threshold_db: -50.0,
-        ..Default::default()
-    };
+    let p2 = RtProcessingParams::default()
+        .with_input_gain_db(3.0)
+        .with_bypass(true)
+        .with_output_gain_db(-6.0)
+        .with_gate_threshold_db(-50.0);
     assert!(!producer.push_params(p2));
 
     producer.force_flush().unwrap();
@@ -134,10 +126,7 @@ fn non_coalescable_flushes_pending_params_first() {
     let (tx, mut rx) = rtrb::RingBuffer::new(256);
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
-    let p = RtProcessingParams {
-        input_gain_db: 12.0,
-        ..Default::default()
-    };
+    let p = rt_gain(12.0);
     assert!(producer.push_params(p));
 
     let seq = producer
@@ -167,10 +156,7 @@ fn ack_tracking_basic() {
     let (tx, rx) = rtrb::RingBuffer::new(256);
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
-    let mut p = RtProcessingParams {
-        input_gain_db: 1.0,
-        ..Default::default()
-    };
+    let mut p = rt_gain(1.0);
     producer.push_params(p);
     let seq1 = producer.force_flush().unwrap();
 
@@ -207,13 +193,11 @@ fn stress_10k_param_burst_no_loss_no_deadlock() {
 
         for i in 0..10_000u32 {
             let val = i as f32 * 0.01;
-            let p = RtProcessingParams {
-                input_gain_db: val,
-                output_gain_db: -val,
-                gate_threshold_db: -70.0 + val * 0.1,
-                bypass: i % 100 == 0,
-                ..Default::default()
-            };
+            let p = RtProcessingParams::default()
+                .with_input_gain_db(val)
+                .with_output_gain_db(-val)
+                .with_gate_threshold_db(-70.0 + val * 0.1)
+                .with_bypass(i % 100 == 0);
 
             producer.push_params(p);
         }
@@ -277,10 +261,7 @@ fn interleaved_commands_preserve_ordering() {
 
     let mut producer = CommandProducer::new(cmd_tx, &next_seq, &last_ack);
 
-    let mut p = RtProcessingParams {
-        input_gain_db: 3.0,
-        ..Default::default()
-    };
+    let mut p = rt_gain(3.0);
     producer.push_params(p);
 
     let _ = producer
@@ -315,10 +296,7 @@ fn spin_wait_for_ack_does_not_deadlock() {
     let (tx, rx) = rtrb::RingBuffer::new(256);
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
-    let p = RtProcessingParams {
-        input_gain_db: 7.0,
-        ..Default::default()
-    };
+    let p = rt_gain(7.0);
     producer.push_params(p);
     let seq = producer.force_flush().unwrap();
 
@@ -380,10 +358,7 @@ fn wait_for_ack_timeout_returns_true_when_ack_arrives() {
     let (tx, rx) = rtrb::RingBuffer::new(256);
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
-    let p = RtProcessingParams {
-        input_gain_db: 1.0,
-        ..Default::default()
-    };
+    let p = rt_gain(1.0);
     producer.push_params(p);
     let seq = producer.force_flush().unwrap();
 
@@ -405,10 +380,7 @@ fn producer_without_consumer_returns_full_on_overflow() {
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
     for i in 0..8 {
-        let p = RtProcessingParams {
-            input_gain_db: i as f32,
-            ..Default::default()
-        };
+        let p = rt_gain(i as f32);
         producer.push_params(p);
         let r = producer.force_flush();
         if i < 3 {
@@ -418,10 +390,7 @@ fn producer_without_consumer_returns_full_on_overflow() {
 
     let mut full_count = 0;
     for _ in 0..64 {
-        let p = RtProcessingParams {
-            input_gain_db: 99.0,
-            ..Default::default()
-        };
+        let p = rt_gain(99.0);
         producer.push_params(p);
         if producer.force_flush().is_err() {
             full_count += 1;
@@ -475,18 +444,12 @@ fn force_flush_full_retains_snapshot() {
     let mut producer = CommandProducer::new(tx, &next_seq, &last_ack);
 
     // First snapshot fills the capacity-1 ring.
-    let p1 = RtProcessingParams {
-        input_gain_db: 1.0,
-        ..Default::default()
-    };
+    let p1 = rt_gain(1.0);
     assert!(producer.push_params(p1));
     assert!(producer.force_flush().is_ok());
 
     // Second snapshot hits Full — and MUST be retained, not dropped (T6.1 #4).
-    let p2 = RtProcessingParams {
-        input_gain_db: 42.0,
-        ..Default::default()
-    };
+    let p2 = rt_gain(42.0);
     assert!(producer.push_params(p2));
     assert!(
         producer.force_flush().is_err(),
@@ -726,11 +689,8 @@ fn consumer_rollback_and_advance_pending_keep_ack_gapless() {
     let mut consumer = CommandConsumer::new(rx, &last_ack);
 
     for i in 0..3u32 {
-        tx.push(ClapParamPayload::Params(RtProcessingParams {
-            input_gain_db: i as f32,
-            ..Default::default()
-        }))
-        .unwrap();
+        tx.push(ClapParamPayload::Params(rt_gain(i as f32)))
+            .unwrap();
     }
 
     // Pop two applied commands, then pop a third that will be DEFERRED

@@ -189,16 +189,14 @@ fn test_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     let model_a = model_fixture("lstm.nam");
 
     // ── Step 1: Load valid model A via state ──
-    let params_a = ProcessingParams {
-        model_path: Some(model_a.clone()),
-        model_basename: Some("lstm.nam".into()),
-        model_hash: test_util::asset_hash(&model_a),
-        input_gain_db: 0.0,
-        output_gain_db: 0.0,
-        gate_threshold_db: -90.0,
-        bypass: false,
-        ..Default::default()
-    };
+    let mut params_a = ProcessingParams::default();
+    params_a.model_path = Some(model_a.clone());
+    params_a.model_basename = Some("lstm.nam".into());
+    params_a.model_hash = test_util::asset_hash(&model_a);
+    params_a.input_gain_db = 0.0;
+    params_a.output_gain_db = 0.0;
+    params_a.gate_threshold_db = -90.0;
+    params_a.bypass = false;
 
     {
         let state_ext = test_util::get_state_ext(&mut plugin_instance);
@@ -240,22 +238,21 @@ fn test_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
 
     // ── Step 3: Attempt to load nonexistent model B via state ──
     let missing_path = PathBuf::from("/nonexistent/model_b.nam");
-    let params_b = ProcessingParams {
-        model_path: Some(missing_path),
-        model_basename: Some("model_b.nam".into()),
-        model_search_paths: vec![],
-        input_gain_db: params_a.input_gain_db,
-        output_gain_db: params_a.output_gain_db,
-        gate_threshold_db: params_a.gate_threshold_db,
-        bypass: false,
-        adaptive_compute: params_a.adaptive_compute,
-        slim_override: params_a.slim_override,
-        oversample: params_a.oversample,
-        activation_precision: params_a.activation_precision,
-        ir_path: None,
-        ir_hash: None,
-        model_hash: None,
-    };
+    let mut params_b = ProcessingParams::default();
+    params_b.model_path = Some(missing_path);
+    params_b.model_basename = Some("model_b.nam".into());
+    params_b.model_search_paths = vec![];
+    params_b.input_gain_db = params_a.input_gain_db;
+    params_b.output_gain_db = params_a.output_gain_db;
+    params_b.gate_threshold_db = params_a.gate_threshold_db;
+    params_b.bypass = false;
+    params_b.adaptive_compute = params_a.adaptive_compute;
+    params_b.slim_override = params_a.slim_override;
+    params_b.oversample = params_a.oversample;
+    params_b.activation_precision = params_a.activation_precision;
+    params_b.ir_path = None;
+    params_b.ir_hash = None;
+    params_b.model_hash = None;
 
     {
         let state_ext = test_util::get_state_ext(&mut plugin_instance);

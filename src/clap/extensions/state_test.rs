@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
 use super::*;
-use neural_amp_modeler_rs::common::params::ActivationPrecision;
-use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use std::path::PathBuf;
 
 #[test]
@@ -33,22 +31,12 @@ fn test_v0_legacy_load_with_missing_fields() {
 
 #[test]
 fn test_v1_round_trip() {
-    let original = ProcessingParams {
-        input_gain_db: 2.5,
-        output_gain_db: -3.0,
-        gate_threshold_db: -40.0,
-        model_path: Some(PathBuf::from("/tmp/test.nam")),
-        model_basename: None,
-        model_search_paths: Vec::new(),
-        model_hash: None,
-        bypass: true,
-        adaptive_compute: neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Off,
-        slim_override: Default::default(),
-        oversample: OversampleFactor::Off,
-        ir_path: None,
-        ir_hash: None,
-        activation_precision: ActivationPrecision::Standard,
-    };
+    let mut original = ProcessingParams::default();
+    original.input_gain_db = 2.5;
+    original.output_gain_db = -3.0;
+    original.gate_threshold_db = -40.0;
+    original.model_path = Some(PathBuf::from("/tmp/test.nam"));
+    original.bypass = true;
 
     let envelope = StateEnvelope {
         version: CURRENT_STATE_VERSION,
@@ -92,22 +80,14 @@ fn test_v1_round_trip_with_search_fields() {
         std::path::PathBuf::from("/usr/share/nam-models"),
         std::path::PathBuf::from("/home/user/models"),
     ];
-    let original = ProcessingParams {
-        input_gain_db: 2.5,
-        output_gain_db: -3.0,
-        gate_threshold_db: -40.0,
-        model_path: Some(PathBuf::from("/tmp/test.nam")),
-        model_basename: Some("test.nam".to_string()),
-        model_search_paths: search_paths.clone(),
-        model_hash: None,
-        bypass: true,
-        adaptive_compute: neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Off,
-        slim_override: Default::default(),
-        oversample: OversampleFactor::Off,
-        ir_path: None,
-        ir_hash: None,
-        activation_precision: ActivationPrecision::Standard,
-    };
+    let mut original = ProcessingParams::default();
+    original.input_gain_db = 2.5;
+    original.output_gain_db = -3.0;
+    original.gate_threshold_db = -40.0;
+    original.model_path = Some(PathBuf::from("/tmp/test.nam"));
+    original.model_basename = Some("test.nam".to_string());
+    original.model_search_paths = search_paths.clone();
+    original.bypass = true;
 
     let envelope = StateEnvelope {
         version: CURRENT_STATE_VERSION,
@@ -124,11 +104,9 @@ fn test_v1_round_trip_with_search_fields() {
 
 #[test]
 fn test_v1_search_fields_serialization_format() {
-    let params = ProcessingParams {
-        model_basename: Some("tone.nam".to_string()),
-        model_search_paths: vec![PathBuf::from("/models")],
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_basename = Some("tone.nam".to_string());
+    params.model_search_paths = vec![PathBuf::from("/models")];
     let envelope = StateEnvelope {
         version: CURRENT_STATE_VERSION,
         params,
@@ -141,22 +119,9 @@ fn test_v1_search_fields_serialization_format() {
 
 #[test]
 fn test_v1_round_trip_with_ir_path() {
-    let original = ProcessingParams {
-        input_gain_db: 0.0,
-        output_gain_db: 0.0,
-        gate_threshold_db: -70.0,
-        model_path: None,
-        model_basename: None,
-        model_search_paths: Vec::new(),
-        model_hash: None,
-        bypass: false,
-        adaptive_compute: neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Off,
-        slim_override: Default::default(),
-        oversample: OversampleFactor::Off,
-        ir_path: Some(PathBuf::from("/tmp/cab.wav")),
-        ir_hash: None,
-        activation_precision: ActivationPrecision::Standard,
-    };
+    let mut original = ProcessingParams::default();
+    original.gate_threshold_db = -70.0;
+    original.ir_path = Some(PathBuf::from("/tmp/cab.wav"));
 
     let envelope = StateEnvelope {
         version: CURRENT_STATE_VERSION,
@@ -173,10 +138,8 @@ fn test_v1_round_trip_with_ir_path() {
 
 #[test]
 fn test_v1_ir_path_serialization_format() {
-    let params = ProcessingParams {
-        ir_path: Some(PathBuf::from("/path/to/cab.wav")),
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.ir_path = Some(PathBuf::from("/path/to/cab.wav"));
     let envelope = StateEnvelope {
         version: CURRENT_STATE_VERSION,
         params,

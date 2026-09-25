@@ -1,29 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-use neural_amp_modeler_rs::common::params::{
-    ActivationPrecision, AdaptiveComputeMode, ProcessingParams,
-};
-use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
+use neural_amp_modeler_rs::common::params::ProcessingParams;
 use std::path::PathBuf;
 
 fn make_test_params() -> ProcessingParams {
-    ProcessingParams {
-        input_gain_db: 3.0,
-        output_gain_db: -6.0,
-        gate_threshold_db: -50.0,
-        model_path: Some(PathBuf::from("/tmp/test.nam")),
-        model_basename: Some("test.nam".to_string()),
-        model_hash: None,
-        model_search_paths: vec![PathBuf::from("/tmp")],
-        bypass: false,
-        adaptive_compute: AdaptiveComputeMode::Off,
-        slim_override: Default::default(),
-        oversample: OversampleFactor::Off,
-        ir_path: None,
-        ir_hash: None,
-        activation_precision: ActivationPrecision::Standard,
-    }
+    let mut params = ProcessingParams::default();
+    params.input_gain_db = 3.0;
+    params.output_gain_db = -6.0;
+    params.gate_threshold_db = -50.0;
+    params.model_path = Some(PathBuf::from("/tmp/test.nam"));
+    params.model_basename = Some("test.nam".to_string());
+    params.model_search_paths = vec![PathBuf::from("/tmp")];
+    params
 }
 
 fn deserialize_from_context(buf: &[u8]) -> ProcessingParams {
@@ -139,10 +128,8 @@ fn test_v1_envelope_load_preserves_full_state() {
 
 #[test]
 fn test_v1_envelope_round_trip_preserves_ir_path() {
-    let params = ProcessingParams {
-        ir_path: Some(PathBuf::from("/tmp/cab.wav")),
-        ..make_test_params()
-    };
+    let mut params = make_test_params();
+    params.ir_path = Some(PathBuf::from("/tmp/cab.wav"));
 
     let buf = crate::clap::extensions::state::serialize_envelope(&params).unwrap();
     let loaded = deserialize_from_context(&buf);

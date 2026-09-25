@@ -651,10 +651,7 @@ mod tests {
                             output_mult_adj,
                         }),
                         ir: Some(Some(build_ir(4096))),
-                        params: RtProcessingParams {
-                            oversample: OversampleFactor::X2,
-                            ..Default::default()
-                        },
+                        params: RtProcessingParams::default().with_oversample(OversampleFactor::X2),
                     }))
                     .expect("mixed RestoreTxn push must succeed");
             }
@@ -684,10 +681,8 @@ mod tests {
                             generation: next_gen,
                             model: None,
                             ir: Some(None),
-                            params: RtProcessingParams {
-                                oversample: OversampleFactor::X2,
-                                ..Default::default()
-                            },
+                            params: RtProcessingParams::default()
+                                .with_oversample(OversampleFactor::X2),
                         }))
                         .expect("restore burst push must succeed");
                 }

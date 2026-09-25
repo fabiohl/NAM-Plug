@@ -53,6 +53,7 @@ impl<'a> PluginRenderImpl for NamClapMainThread<'a> {
                 neural_amp_modeler_rs::dsp::oversample::OversampleFactor::Off => "1x (Off)",
                 neural_amp_modeler_rs::dsp::oversample::OversampleFactor::X2 => "2x",
                 neural_amp_modeler_rs::dsp::oversample::OversampleFactor::X4 => "4x",
+                _ => "unknown",
             };
             log::info!(
                 "Render mode changed: {old_mode} -> {new_mode} \

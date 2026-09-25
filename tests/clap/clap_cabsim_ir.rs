@@ -135,16 +135,12 @@ fn test_cabsim_ir_changes_audio_release_artifact() {
     write_synthetic_ir(&ir_path, 48000);
 
     // ── 1. Load model + IR and measure wet RMS ──
-    load_state(
-        &mut instance,
-        &ProcessingParams {
-            model_path: Some(model.clone()),
-            model_hash: nam_plug::clap::test_util::asset_hash(&model),
-            ir_path: Some(ir_path.clone()),
-            ir_hash: nam_plug::clap::test_util::asset_hash(&ir_path),
-            ..Default::default()
-        },
-    );
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(model.clone());
+    params.model_hash = nam_plug::clap::test_util::asset_hash(&model);
+    params.ir_path = Some(ir_path.clone());
+    params.ir_hash = nam_plug::clap::test_util::asset_hash(&ir_path);
+    load_state(&mut instance, &params);
 
     let audio_config = PluginAudioConfiguration {
         sample_rate: 48000.0,
@@ -166,15 +162,11 @@ fn test_cabsim_ir_changes_audio_release_artifact() {
         "wet output must be non-silent (model + IR active), got {wet_rms:.6}"
     );
     // ── 2. Clear the IR (state without ir_path) and measure dry RMS ──
-    load_state(
-        &mut instance,
-        &ProcessingParams {
-            model_path: Some(model.clone()),
-            model_hash: nam_plug::clap::test_util::asset_hash(&model),
-            ir_path: None,
-            ..Default::default()
-        },
-    );
+    let mut params_dry = ProcessingParams::default();
+    params_dry.model_path = Some(model.clone());
+    params_dry.model_hash = nam_plug::clap::test_util::asset_hash(&model);
+    params_dry.ir_path = None;
+    load_state(&mut instance, &params_dry);
 
     // Under the Strict Restart Policy, clearing the IR changes latency (256 -> 0) and requests
     // a host restart. Simulate the host restart cycle (deactivate -> activate):

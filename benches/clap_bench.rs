@@ -266,10 +266,8 @@ fn bench_clap_infrastructure(c: &mut Criterion) {
     let mut group_bypass = c.benchmark_group("CLAP_Infrastructure/Bypass");
     {
         let block_size = 64;
-        let params = ProcessingParams {
-            bypass: true,
-            ..Default::default()
-        };
+        let mut params = ProcessingParams::default();
+        params.bypass = true;
         let (mut plugin_instance, stopped_processor) =
             create_and_activate_bench_plugin(48000.0, block_size, &params, None);
         let mut started_processor = stopped_processor
@@ -365,11 +363,9 @@ fn bench_clap_inference(c: &mut Criterion) {
         let mut group = c.benchmark_group(&group_name);
 
         for &block_size in BLOCK_SIZES {
-            let params = ProcessingParams {
-                model_path: Some(model_file.to_path_buf()),
-                model_hash: asset_hash(model_file),
-                ..Default::default()
-            };
+            let mut params = ProcessingParams::default();
+            params.model_path = Some(model_file.to_path_buf());
+            params.model_hash = asset_hash(model_file);
 
             let (mut plugin_instance, stopped_processor) =
                 create_and_activate_bench_plugin(48000.0, block_size, &params, None);
@@ -472,11 +468,9 @@ fn bench_clap_inference(c: &mut Criterion) {
 
         for (label, sr) in sample_rates {
             let block_size = 64;
-            let params = ProcessingParams {
-                model_path: Some(a1_path.clone()),
-                model_hash: asset_hash(&a1_path),
-                ..Default::default()
-            };
+            let mut params = ProcessingParams::default();
+            params.model_path = Some(a1_path.clone());
+            params.model_hash = asset_hash(&a1_path);
 
             let (mut plugin_instance, stopped_processor) =
                 create_and_activate_bench_plugin(*sr, block_size, &params, None);
@@ -550,12 +544,10 @@ fn bench_clap_inference(c: &mut Criterion) {
 
         for (label, os_factor, render_mode) in modes {
             let block_size = 64;
-            let params = ProcessingParams {
-                model_path: Some(a1_path.clone()),
-                model_hash: asset_hash(&a1_path),
-                oversample: *os_factor,
-                ..Default::default()
-            };
+            let mut params = ProcessingParams::default();
+            params.model_path = Some(a1_path.clone());
+            params.model_hash = asset_hash(&a1_path);
+            params.oversample = *os_factor;
 
             let (mut plugin_instance, stopped_processor) =
                 create_and_activate_bench_plugin(48000.0, block_size, &params, *render_mode);
@@ -621,13 +613,11 @@ fn bench_clap_inference(c: &mut Criterion) {
         // CabSim Off
         {
             let block_size = 64;
-            let params = ProcessingParams {
-                model_path: Some(a1_path.clone()),
-                model_hash: asset_hash(&a1_path),
-                ir_path: None,
-                ir_hash: None,
-                ..Default::default()
-            };
+            let mut params = ProcessingParams::default();
+            params.model_path = Some(a1_path.clone());
+            params.model_hash = asset_hash(&a1_path);
+            params.ir_path = None;
+            params.ir_hash = None;
 
             let (mut plugin_instance, stopped_processor) =
                 create_and_activate_bench_plugin(48000.0, block_size, &params, None);
@@ -686,13 +676,11 @@ fn bench_clap_inference(c: &mut Criterion) {
         // CabSim On
         {
             let block_size = 64;
-            let params = ProcessingParams {
-                model_path: Some(a1_path.clone()),
-                model_hash: asset_hash(&a1_path),
-                ir_path: Some(ir_path.clone()),
-                ir_hash: asset_hash(&ir_path),
-                ..Default::default()
-            };
+            let mut params = ProcessingParams::default();
+            params.model_path = Some(a1_path.clone());
+            params.model_hash = asset_hash(&a1_path);
+            params.ir_path = Some(ir_path.clone());
+            params.ir_hash = asset_hash(&ir_path);
 
             let (mut plugin_instance, stopped_processor) =
                 create_and_activate_bench_plugin(48000.0, block_size, &params, None);

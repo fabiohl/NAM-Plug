@@ -226,34 +226,91 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
 
-            let (new_resampler, new_stream, new_cabsim, new_os) = if let Some(ref deact) =
-                rollback.deactivated
-            {
-                let rate_matches = deact.sample_rate == host_rate;
-                let buf_matches = deact.buffer_size == host_buffer;
-                let os_matches = deact.os_factor == os_factor;
-                let cab_matches = deact.cabsim_adapter.is_some() && buf_matches && rate_matches;
-                // The streaming adapter's FIFO capacities are sized by the
-                // worst-case host block, so it also needs `buf_matches`.
-                let stream_matches = rate_matches && buf_matches;
+            let (new_resampler, new_stream, new_cabsim, new_os) =
+                if let Some(ref deact) = rollback.deactivated {
+                    let rate_matches = deact.sample_rate == host_rate;
+                    let buf_matches = deact.buffer_size == host_buffer;
+                    let os_matches = deact.os_factor == os_factor;
+                    let cab_matches = deact.cabsim_adapter.is_some() && buf_matches && rate_matches;
+                    // The streaming adapter's FIFO capacities are sized by the
+                    // worst-case host block, so it also needs `buf_matches`.
+                    let stream_matches = rate_matches && buf_matches;
 
-                let res = if rate_matches {
-                    None
+                    let res = if rate_matches {
+                        None
+                    } else {
+                        Some(Box::new(
+                            NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
+                                static_plugin_error(
+                                    errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                                    format_args!("{e:?}"),
+                                )
+                            })?,
+                        ))
+                    };
+
+                    let stream = if stream_matches {
+                        None
+                    } else {
+                        Some(
+                            crate::clap::plugin::build_stream_adapter(
+                                host_rate,
+                                model_rate,
+                                host_buffer as usize,
+                            )
+                            .map_err(|e| {
+                                static_plugin_error(
+                                    errors::dsp_resources::STREAM_BUILD_FAILED,
+                                    format_args!("{e:?}"),
+                                )
+                            })?,
+                        )
+                    };
+
+                    let cab = if cab_matches {
+                        None
+                    } else {
+                        Some(build_cab_sim_from_raw_samples(
+                            shared,
+                            audio_config.max_frames_count as usize,
+                            host_rate,
+                        )?)
+                    };
+
+                    let os = if os_matches {
+                        None
+                    } else {
+                        let os_l = Box::new(
+                            OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(|e| {
+                                static_plugin_error(
+                                    errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
+                                    format_args!("(L) engine: {e:?}"),
+                                )
+                            })?,
+                        );
+                        let os_r = Box::new(
+                            OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(|e| {
+                                static_plugin_error(
+                                    errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
+                                    format_args!("(R) engine: {e:?}"),
+                                )
+                            })?,
+                        );
+                        Some((os_l, os_r))
+                    };
+
+                    (res, stream, cab, os)
                 } else {
-                    Some(Box::new(
+                    let res = Some(Box::new(
                         NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
                             static_plugin_error(
                                 errors::dsp_resources::RESAMPLER_BUILD_FAILED,
                                 format_args!("{e:?}"),
                             )
                         })?,
-                    ))
-                };
+                    ));
 
-                let stream = if stream_matches {
-                    None
-                } else {
-                    Some(
+                    let stream = Some(
                         crate::clap::plugin::build_stream_adapter(
                             host_rate,
                             model_rate,
@@ -265,22 +322,14 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                                 format_args!("{e:?}"),
                             )
                         })?,
-                    )
-                };
+                    );
 
-                let cab = if cab_matches {
-                    None
-                } else {
-                    Some(build_cab_sim_from_raw_samples(
+                    let cab = Some(build_cab_sim_from_raw_samples(
                         shared,
                         audio_config.max_frames_count as usize,
                         host_rate,
-                    )?)
-                };
+                    )?);
 
-                let os = if os_matches {
-                    None
-                } else {
                     let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
                         |e| {
                             static_plugin_error(
@@ -297,59 +346,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                             )
                         },
                     )?);
-                    Some((os_l, os_r))
+
+                    (res, stream, cab, Some((os_l, os_r)))
                 };
-
-                (res, stream, cab, os)
-            } else {
-                let res = Some(Box::new(
-                    NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
-                        static_plugin_error(
-                            errors::dsp_resources::RESAMPLER_BUILD_FAILED,
-                            format_args!("{e:?}"),
-                        )
-                    })?,
-                ));
-
-                let stream = Some(
-                    crate::clap::plugin::build_stream_adapter(
-                        host_rate,
-                        model_rate,
-                        host_buffer as usize,
-                    )
-                    .map_err(|e| {
-                        static_plugin_error(
-                            errors::dsp_resources::STREAM_BUILD_FAILED,
-                            format_args!("{e:?}"),
-                        )
-                    })?,
-                );
-
-                let cab = Some(build_cab_sim_from_raw_samples(
-                    shared,
-                    audio_config.max_frames_count as usize,
-                    host_rate,
-                )?);
-
-                let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
-                    |e| {
-                        static_plugin_error(
-                            errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
-                            format_args!("(L) engine: {e:?}"),
-                        )
-                    },
-                )?);
-                let os_r = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
-                    |e| {
-                        static_plugin_error(
-                            errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
-                            format_args!("(R) engine: {e:?}"),
-                        )
-                    },
-                )?);
-
-                (res, stream, cab, Some((os_l, os_r)))
-            };
 
             // Flush any model deferred by load_model() (state-restore-before-activate).
             // This calls set_max_buffer_size on the main thread before process() starts.
@@ -675,12 +674,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // call (SPSC drain or GUI generation guard). Full-param snapshot
             // would trigger AdaptiveCompute::set_mode log on audio thread when
             // values differ from SPSC-delivered state.
-            let params = RtProcessingParams {
-                input_gain_db: input_db,
-                output_gain_db: output_db,
-                oversample: os_factor,
-                ..RtProcessingParams::default()
-            };
+            let mut params = RtProcessingParams::default();
+            params.input_gain_db = input_db;
+            params.output_gain_db = output_db;
+            params.oversample = os_factor;
             debug_assert!(
                 (smoother_in.current_value() - gain_lut.db_to_linear(params.input_gain_db)).abs()
                     < f32::EPSILON * 10.0,

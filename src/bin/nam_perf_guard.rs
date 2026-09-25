@@ -147,13 +147,11 @@ fn measure_scenario(
         (None, None)
     };
 
-    let params = ProcessingParams {
-        oversample: OversampleFactor::Off,
-        activation_precision: ActivationPrecision::Standard,
-        model_path,
-        model_hash,
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.oversample = OversampleFactor::Off;
+    params.activation_precision = ActivationPrecision::Standard;
+    params.model_path = model_path;
+    params.model_hash = model_hash;
 
     let state_bytes = serde_json::to_vec(&params).map_err(|e| e.to_string())?;
     if let Some(state_ext) = plugin_instance

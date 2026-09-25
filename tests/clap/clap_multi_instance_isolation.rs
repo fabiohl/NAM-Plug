@@ -123,10 +123,7 @@ fn test_integration_16_instances_log_and_diagnostic_isolation() {
             });
         }
 
-        let meta = AudioMetadata {
-            channel_count: 2,
-            host_name: format!("Integration_Host_{}", inst_id),
-        };
+        let meta = AudioMetadata::new(2, format!("Integration_Host_{}", inst_id));
 
         let bundle = DiagnosticBundle::capture_for_instance_with_runtime(inst_id, shared, &meta);
         let rendered = bundle.render();

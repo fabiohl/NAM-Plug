@@ -21,22 +21,23 @@ fn test_state_context_roundtrip() {
     let model_path = crate::clap::test_util::model_path("lstm.nam");
 
     use neural_amp_modeler_rs::common::params::ProcessingParams;
-    let params = ProcessingParams {
-        model_path: Some(model_path.clone()),
-        input_gain_db: 3.5,
-        output_gain_db: -4.0,
-        gate_threshold_db: -45.0,
-        model_basename: Some("lstm.nam".to_string()),
-        model_search_paths: vec![],
-        model_hash: test_util::asset_hash(&model_path),
-        bypass: false,
-        adaptive_compute: neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Conservative,
-        slim_override: Default::default(),
-        oversample: neural_amp_modeler_rs::dsp::oversample::OversampleFactor::Off,
-        ir_path: None,
-        ir_hash: None,
-        activation_precision: neural_amp_modeler_rs::common::params::ActivationPrecision::Standard,
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(model_path.clone());
+    params.input_gain_db = 3.5;
+    params.output_gain_db = -4.0;
+    params.gate_threshold_db = -45.0;
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_search_paths = vec![];
+    params.model_hash = test_util::asset_hash(&model_path);
+    params.bypass = false;
+    params.adaptive_compute =
+        neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Conservative;
+    params.slim_override = Default::default();
+    params.oversample = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::Off;
+    params.ir_path = None;
+    params.ir_hash = None;
+    params.activation_precision =
+        neural_amp_modeler_rs::common::params::ActivationPrecision::Standard;
     let state_bytes = serde_json::to_vec(&params).unwrap();
     let handle = plugin_instance.plugin_handle();
     state_ext
@@ -184,22 +185,21 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
     let model_dir = model_path.parent().unwrap().to_path_buf();
 
     // ── Load model via state.load (full params) ──
-    let original = ProcessingParams {
-        model_path: Some(model_path.clone()),
-        input_gain_db: 2.0,
-        output_gain_db: -3.5,
-        gate_threshold_db: -55.0,
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: test_util::asset_hash(&model_path),
-        model_search_paths: vec![model_dir],
-        bypass: true,
-        adaptive_compute: AdaptiveComputeMode::Conservative,
-        slim_override: Default::default(),
-        oversample: OversampleFactor::X2,
-        ir_path: None,
-        ir_hash: None,
-        activation_precision: ActivationPrecision::Fast,
-    };
+    let mut original = ProcessingParams::default();
+    original.model_path = Some(model_path.clone());
+    original.input_gain_db = 2.0;
+    original.output_gain_db = -3.5;
+    original.gate_threshold_db = -55.0;
+    original.model_basename = Some("lstm.nam".to_string());
+    original.model_hash = test_util::asset_hash(&model_path);
+    original.model_search_paths = vec![model_dir];
+    original.bypass = true;
+    original.adaptive_compute = AdaptiveComputeMode::Conservative;
+    original.slim_override = Default::default();
+    original.oversample = OversampleFactor::X2;
+    original.ir_path = None;
+    original.ir_hash = None;
+    original.activation_precision = ActivationPrecision::Fast;
     let state_bytes = serde_json::to_vec(&original).unwrap();
     {
         let handle = plugin_instance.plugin_handle();
@@ -244,13 +244,11 @@ fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
 
     // Clear the params on the current instance to simulate a fresh load
     {
-        let clear_params = ProcessingParams {
-            input_gain_db: 99.0, // value that would never match
-            output_gain_db: 99.0,
-            gate_threshold_db: -10.0,
-            bypass: false,
-            ..Default::default()
-        };
+        let mut clear_params = ProcessingParams::default();
+        clear_params.input_gain_db = 99.0; // value that would never match
+        clear_params.output_gain_db = 99.0;
+        clear_params.gate_threshold_db = -10.0;
+        clear_params.bypass = false;
         let clear_bytes = serde_json::to_vec(&clear_params).unwrap();
         let handle = plugin_instance.plugin_handle();
         state_ext

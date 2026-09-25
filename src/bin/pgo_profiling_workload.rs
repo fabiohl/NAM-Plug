@@ -532,15 +532,13 @@ fn run_clap_scenario(
         None => (None, None),
     };
 
-    let params = ProcessingParams {
-        model_path: Some(PathBuf::from(model_path)),
-        model_hash: asset_hash(Path::new(model_path)),
-        oversample,
-        activation_precision,
-        ir_path: ir_path_buf,
-        ir_hash: ir_hash_opt,
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(PathBuf::from(model_path));
+    params.model_hash = asset_hash(Path::new(model_path));
+    params.oversample = oversample;
+    params.activation_precision = activation_precision;
+    params.ir_path = ir_path_buf;
+    params.ir_hash = ir_hash_opt;
 
     test_util::load_plugin_state(&mut plugin_instance, &params);
 

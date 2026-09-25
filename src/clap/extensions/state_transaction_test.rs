@@ -177,13 +177,10 @@ fn test_validate_ir_hash_mismatch() {
         let _ = f.write_all(b"fake-ir-data");
     }
 
-    let params = ProcessingParams {
-        ir_path: Some(ir_file.clone()),
-        ir_hash: Some(
-            "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-        ),
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.ir_path = Some(ir_file.clone());
+    params.ir_hash =
+        Some("0000000000000000000000000000000000000000000000000000000000000000".to_string());
 
     let sys = neural_amp_modeler_rs::common::diagnostics::SystemSnapshot::capture();
     let result = validate_ir(&params, 48000, 256, &sys);
@@ -239,12 +236,10 @@ fn test_is_valid_sha256_hex() {
 #[test]
 fn test_validate_model_full_omitted_hash_rejected() {
     let model = fixture_model_path("lstm.nam");
-    let params = ProcessingParams {
-        model_path: Some(model),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: None,
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(model);
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = None;
     let result = validate_model_full(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
@@ -255,12 +250,10 @@ fn test_validate_model_full_omitted_hash_rejected() {
 #[test]
 fn test_validate_model_full_malformed_hash_rejected() {
     let model = fixture_model_path("lstm.nam");
-    let params = ProcessingParams {
-        model_path: Some(model),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: Some("not-a-sha256".to_string()),
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(model);
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = Some("not-a-sha256".to_string());
     let result = validate_model_full(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
@@ -273,14 +266,11 @@ fn test_validate_model_full_wrong_hash_no_fallback_match_rejected() {
     let model = fixture_model_path("lstm.nam");
     // Well-formed but wrong digest; no search dir is provided, so the basename
     // candidate cannot be resolved → the restore must be rejected.
-    let params = ProcessingParams {
-        model_path: Some(model),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: Some(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
-        ),
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(model);
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash =
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
     let result = validate_model_full(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
@@ -298,13 +288,11 @@ fn test_validate_model_full_wrong_path_falls_back_to_matching_basename_hash() {
     let target_dir = target.parent().unwrap().to_path_buf();
     let expected_hash = compute_file_hash(&target).expect("hash target fixture");
 
-    let params = ProcessingParams {
-        model_path: Some(other),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: Some(expected_hash.clone()),
-        model_search_paths: vec![target_dir],
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(other);
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = Some(expected_hash.clone());
+    params.model_search_paths = vec![target_dir];
     let result = validate_model_full(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_ok(),
@@ -328,12 +316,10 @@ fn test_validate_model_from_basename_omitted_hash_rejected() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let params = ProcessingParams {
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: None,
-        model_search_paths: vec![model_dir],
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = None;
+    params.model_search_paths = vec![model_dir];
     let result = validate_model_from_basename(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
@@ -347,12 +333,10 @@ fn test_validate_model_from_basename_malformed_hash_rejected() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let params = ProcessingParams {
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: Some("zz".to_string()),
-        model_search_paths: vec![model_dir],
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = Some("zz".to_string());
+    params.model_search_paths = vec![model_dir];
     let result = validate_model_from_basename(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
@@ -366,12 +350,10 @@ fn test_validate_model_from_basename_valid_hash_adopts_matching_candidate() {
     let model_dir = target.parent().unwrap().to_path_buf();
     let expected_hash = compute_file_hash(&target).expect("hash target fixture");
 
-    let params = ProcessingParams {
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: Some(expected_hash.clone()),
-        model_search_paths: vec![model_dir],
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = Some(expected_hash.clone());
+    params.model_search_paths = vec![model_dir];
     let result = validate_model_from_basename(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_ok(),
@@ -389,10 +371,8 @@ fn test_validate_model_from_basename_valid_hash_adopts_matching_candidate() {
 
 #[test]
 fn test_validate_model_from_basename_without_basename_is_no_model() {
-    let params = ProcessingParams {
-        model_basename: None,
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_basename = None;
     let result = validate_model_from_basename(&params, 48000, 256, &sys_snapshot());
     assert!(
         matches!(result, Ok((None, None, None, None, None))),
@@ -409,11 +389,9 @@ fn test_validate_ir_omitted_hash_rejected() {
         let _ = f.write_all(b"fake-ir-data");
     }
 
-    let params = ProcessingParams {
-        ir_path: Some(ir_file.clone()),
-        ir_hash: None,
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.ir_path = Some(ir_file.clone());
+    params.ir_hash = None;
     let result = validate_ir(&params, 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
@@ -432,11 +410,9 @@ fn test_validate_ir_malformed_hash_rejected() {
         let _ = f.write_all(b"fake-ir-data");
     }
 
-    let params = ProcessingParams {
-        ir_path: Some(ir_file.clone()),
-        ir_hash: Some("malformed".to_string()),
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.ir_path = Some(ir_file.clone());
+    params.ir_hash = Some("malformed".to_string());
     let result = validate_ir(&params, 48000, 256, &sys_snapshot());
     assert!(result.is_err(), "IR with a malformed hash must be rejected");
 
@@ -451,11 +427,9 @@ fn test_validate_ir_valid_hash_accepts_real_wav() {
         .expect("failed to write synthetic IR WAV");
     let expected_hash = compute_file_hash(&ir_file).expect("hash IR");
 
-    let params = ProcessingParams {
-        ir_path: Some(ir_file.clone()),
-        ir_hash: Some(expected_hash.clone()),
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.ir_path = Some(ir_file.clone());
+    params.ir_hash = Some(expected_hash.clone());
     let result = validate_ir(&params, 48000, 256, &sys_snapshot());
     assert!(result.is_ok(), "IR with matching hash must load");
     let (resources, path_on_disk, hash) = result.unwrap();
@@ -488,14 +462,13 @@ fn test_next_restore_generation_monotonic() {
 
 #[test]
 fn test_build_restore_package_full_with_model() {
-    let mut validated = make_validated(ProcessingParams {
-        input_gain_db: 3.0,
-        output_gain_db: -6.0,
-        model_path: Some(PathBuf::from("/tmp/a.nam")),
-        model_basename: Some("a.nam".to_string()),
-        model_hash: Some("deadbeef".to_string()),
-        ..Default::default()
-    });
+    let mut p = ProcessingParams::default();
+    p.input_gain_db = 3.0;
+    p.output_gain_db = -6.0;
+    p.model_path = Some(PathBuf::from("/tmp/a.nam"));
+    p.model_basename = Some("a.nam".to_string());
+    p.model_hash = Some("deadbeef".to_string());
+    let mut validated = make_validated(p);
     validated.model = Some(make_model_resources(1.0));
     validated.model_path_on_disk = Some(PathBuf::from("/tmp/a.nam"));
     validated.model_basename = Some("a.nam".to_string());
@@ -592,18 +565,15 @@ fn test_build_restore_package_full_clear_resampler_failure_aborts() {
 
 #[test]
 fn test_build_restore_package_for_preset_no_model() {
-    let validated = make_validated(ProcessingParams {
-        input_gain_db: 1.5,
-        output_gain_db: -2.0,
-        gate_threshold_db: -40.0,
-        ..Default::default()
-    });
-    let current = ProcessingParams {
-        input_gain_db: 9.0,
-        output_gain_db: 9.0,
-        gate_threshold_db: -10.0,
-        ..Default::default()
-    };
+    let mut p = ProcessingParams::default();
+    p.input_gain_db = 1.5;
+    p.output_gain_db = -2.0;
+    p.gate_threshold_db = -40.0;
+    let validated = make_validated(p);
+    let mut current = ProcessingParams::default();
+    current.input_gain_db = 9.0;
+    current.output_gain_db = 9.0;
+    current.gate_threshold_db = -10.0;
     let shared = crate::clap::plugin::make_test_shared();
     let (publish, txn) = build_restore_package(
         validated,

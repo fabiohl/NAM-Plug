@@ -128,14 +128,12 @@ fn test_restore_ui_not_published_until_ack() {
 
     // Load a Full restore (model + params) while the ring is saturated.
     let model = model_path("lstm.nam");
-    let params = ProcessingParams {
-        model_path: Some(model.clone()),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model),
-        input_gain_db: 5.0,
-        output_gain_db: -3.0,
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(model.clone());
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = crate::clap::test_util::asset_hash(&model);
+    params.input_gain_db = 5.0;
+    params.output_gain_db = -3.0;
     load_state(&mut plugin_instance, &params);
 
     // Stage phase: the whole transaction is retained; NOTHING is published yet.
@@ -238,13 +236,11 @@ fn test_restore_full_clear_removes_rt_model() {
 
     // 1. Load a model via a Full restore.
     let model = model_path("lstm.nam");
-    let params = ProcessingParams {
-        model_path: Some(model.clone()),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model),
-        input_gain_db: 1.0,
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(model.clone());
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = crate::clap::test_util::asset_hash(&model);
+    params.input_gain_db = 1.0;
     let mut bufs = StereoTestBuffers::new(N, 0.1, 0.1);
     load_state(&mut plugin_instance, &params);
     settle(&mut started, main_thread_ptr, &mut bufs);
@@ -255,11 +251,9 @@ fn test_restore_full_clear_removes_rt_model() {
     );
 
     // 2. Load a Full restore WITHOUT a model (explicit clear).
-    let clear_params = ProcessingParams {
-        input_gain_db: 2.0,
-        output_gain_db: -1.0,
-        ..Default::default()
-    };
+    let mut clear_params = ProcessingParams::default();
+    clear_params.input_gain_db = 2.0;
+    clear_params.output_gain_db = -1.0;
     load_state(&mut plugin_instance, &clear_params);
     settle(&mut started, main_thread_ptr, &mut bufs);
 
@@ -305,13 +299,11 @@ fn test_restore_hash_rejected_keeps_previous_dsp() {
 
     // 1. Load a valid model (with hash) and settle it.
     let model = model_path("lstm.nam");
-    let params = ProcessingParams {
-        model_path: Some(model.clone()),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model),
-        input_gain_db: 1.0,
-        ..Default::default()
-    };
+    let mut params = ProcessingParams::default();
+    params.model_path = Some(model.clone());
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = crate::clap::test_util::asset_hash(&model);
+    params.input_gain_db = 1.0;
     let mut bufs = StereoTestBuffers::new(N, 0.1, 0.1);
     load_state(&mut plugin_instance, &params);
     settle(&mut started, main_thread_ptr, &mut bufs);
@@ -325,14 +317,12 @@ fn test_restore_hash_rejected_keeps_previous_dsp() {
 
     // 2. Restore the same path with the hash omitted → must be rejected
     //    (asset integrity requires a SHA-256 digest in the same cycle).
-    let hashless = ProcessingParams {
-        model_path: Some(model),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: None,
-        input_gain_db: 42.0,
-        output_gain_db: 13.0,
-        ..Default::default()
-    };
+    let mut hashless = ProcessingParams::default();
+    hashless.model_path = Some(model);
+    hashless.model_basename = Some("lstm.nam".to_string());
+    hashless.model_hash = None;
+    hashless.input_gain_db = 42.0;
+    hashless.output_gain_db = 13.0;
     assert!(
         try_load_state(&mut plugin_instance, &hashless).is_err(),
         "hashless restore must fail explicitly"

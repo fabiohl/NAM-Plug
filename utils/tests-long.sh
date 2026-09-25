@@ -5,24 +5,45 @@
 # Long QA Suite for NAM-Plug — nightly/pre-release certification.
 #
 # Executes the heavy `#[ignore]` stress tests that `tests-quick.sh` deliberately
-# leaves out (GC/SPSC cascade, teardown drain, multi-instance RT priority).
+# leaves out (GC/SPSC cascade, teardown drain, multi-instance RT priority, GUI/X11).
 # Each phase runs in isolation, persists its log to target/logs/long-phaseN.log,
 # and appends a structured JSONL line to target/logs/long-audit-receipt.jsonl.
 #
+# Build optimisation:
+#   Before any timed phase begins, a single `cargo test --no-run` pass pre-compiles
+#   all test binaries in release mode, ensuring 100 % artifact reuse by subsequent
+#   phases. This eliminates the cold-cache compilation overhead (~7 min) from the
+#   phase timing windows so that reported durations reflect pure test execution time.
+#
+# Thermal cooldown:
+#   After pre-compilation, NAM_THERMAL_COOLDOWN_S seconds of idle time (default: 0,
+#   i.e. disabled) allow the CPU to return to base frequency and temperature before
+#   SCHED_FIFO / taskset-pinned tests run, preserving measurement determinism on
+#   isolated cores.
+#
 # Phases:
-#   1. GC Stress — 1000 model swaps + drain-on-destroy leak check
-#   2. Teardown  — 25 swaps without housekeeping, off-RT drain verification
+#   0. Pre-build    — `--no-run` warm-up; not timed individually
+#   1. GC Stress    — 1000 model swaps + drain-on-destroy leak check
+#   2. Teardown     — 25 swaps without housekeeping, off-RT drain verification
 #   3. Multi-instance RT priority — 10 instances, SCHED_FIFO detection
+#   4. GUI/X11      — headless Xvfb GUI lifecycle, XEmbed cycles, clipboard
+#                     (conditional: skipped with a gap warning if xvfb-run absent)
 #
 # Usage:
-#   ./utils/tests-long.sh [--strict-pre-release] [--nocapture] [--dry-run]
+#   ./utils/tests-long.sh [--strict-pre-release] [--nocapture] [--dry-run] [--gui]
 #   chrt -f 80 ./utils/tests-long.sh --strict-pre-release  # official pre-release ceremony
+#
+# Environment variables:
+#   NAM_BENCH_CORE              CPU core for affinity pinning (default: half of nproc)
+#   NAM_THERMAL_COOLDOWN_S      Seconds to idle after pre-compilation (default: 0)
+#   NAM_GUI_PHASE_AUTO          Set to 0 to suppress auto-trigger of GUI phase (default: 1)
 
 set -euo pipefail
 
 STRICT_PRE_RELEASE=0
 NOCAPTURE=0
 DRY_RUN=0
+RUN_GUI=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -35,8 +56,11 @@ for arg in "$@"; do
         --dry-run)
             DRY_RUN=1
             ;;
+        --gui)
+            RUN_GUI=1
+            ;;
         --help|-h)
-            echo "Usage: $(basename "$0") [--strict-pre-release] [--nocapture] [--dry-run]"
+            echo "Usage: $(basename "$0") [--strict-pre-release] [--nocapture] [--dry-run] [--gui]"
             echo ""
             echo "Long audit suite for NAM-Plug — runs heavy #[ignore] stress tests."
             echo ""
@@ -44,14 +68,20 @@ for arg in "$@"; do
             echo "  --strict-pre-release  Fail closed on any gap or inconclusive phase"
             echo "  --nocapture           Pass --nocapture to cargo test for verbose output"
             echo "  --dry-run             Print planned commands without executing"
+            echo "  --gui                 Run the GUI/Xvfb phase (Phase 4) explicitly"
             echo "  -h, --help            Show this help and exit"
+            echo ""
+            echo "Environment variables:"
+            echo "  NAM_BENCH_CORE            CPU core for affinity pinning (default: nproc/2)"
+            echo "  NAM_THERMAL_COOLDOWN_S    Idle seconds after pre-compilation (default: 0)"
+            echo "  NAM_GUI_PHASE_AUTO        Set 0 to suppress auto GUI trigger (default: 1)"
             echo ""
             echo "Receipt: target/logs/long-audit-receipt.jsonl"
             exit 0
             ;;
         *)
             echo "Unknown option: $arg" >&2
-            echo "Usage: $(basename "$0") [--strict-pre-release] [--nocapture] [--dry-run]" >&2
+            echo "Usage: $(basename "$0") [--strict-pre-release] [--nocapture] [--dry-run] [--gui]" >&2
             exit 1
             ;;
     esac
@@ -61,21 +91,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Detect whether xvfb-run is available for GUI phase auto-trigger.
+HAVE_XVFB_RUN=0
+if command -v xvfb-run >/dev/null 2>&1; then
+    HAVE_XVFB_RUN=1
+    # Auto-enable GUI phase when xvfb-run is present, unless overridden to 0.
+    if [ "${RUN_GUI}" = "0" ] && [ "${NAM_GUI_PHASE_AUTO:-1}" = "1" ]; then
+        RUN_GUI=1
+    fi
+fi
+
 if [ -f "$LIB_DIR/_lib.sh" ]; then
     # shellcheck source=utils/lib/_lib.sh
-    PHASE_TOTAL=3
+    PHASE_TOTAL=4
     export PHASE_TOTAL
     source "$LIB_DIR/_lib.sh"
 else
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    CYAN='\033[0;36m'
-    BOLD='\033[1m'
-    NC='\033[0m'
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
     PHASE_NUM=0
-    PHASE_TOTAL=3
+    PHASE_TOTAL=4
     phase() {
         PHASE_NUM=$((PHASE_NUM + 1))
         echo -e "\n${BLUE}${BOLD}[${PHASE_NUM}/${PHASE_TOTAL}]${NC} $*"
@@ -84,12 +119,8 @@ else
         echo -e "${RED}${BOLD}[FATAL]${NC} $*" >&2
         exit 1
     }
-    ok() {
-        echo -e "  ${GREEN}OK${NC} $*"
-    }
-    warn() {
-        echo -e "  ${YELLOW}ⓘ${NC} $*"
-    }
+    ok() { echo -e "  ${GREEN}OK${NC} $*"; }
+    warn() { echo -e "  ${YELLOW}ⓘ${NC} $*"; }
     PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     cd "$PROJECT_DIR" || exit 1
 fi
@@ -200,8 +231,9 @@ run_cargo_test() {
 echo -e "${BLUE}${BOLD}=============================================================${NC}"
 echo -e "${BLUE}${BOLD}     NAM-Plug Long-Duration Stress & Audit Suite             ${NC}"
 echo -e "${BLUE}${BOLD}=============================================================${NC}"
-echo -e "  Strict pre-release: ${BOLD}$STRICT_PRE_RELEASE${NC}  Nocapture: ${BOLD}$NOCAPTURE${NC}  Dry-run: ${BOLD}$DRY_RUN${NC}"
+echo -e "  Strict pre-release: ${BOLD}$STRICT_PRE_RELEASE${NC}  Nocapture: ${BOLD}$NOCAPTURE${NC}  Dry-run: ${BOLD}$DRY_RUN${NC}  GUI: ${BOLD}$RUN_GUI${NC}"
 echo -e "  Bench core: ${BOLD}$BENCH_CORE${NC} (of $NUM_CORES, HAS_TASKSET=$HAS_TASKSET)  Receipt: ${CYAN}$RECEIPT_FILE${NC}"
+echo -e "  xvfb-run available: ${BOLD}$HAVE_XVFB_RUN${NC}  Thermal cooldown: ${BOLD}${NAM_THERMAL_COOLDOWN_S:-0}s${NC}"
 if [ "$ORIG_PARANOID" != "2" ] || [ "$STRICT_PRE_RELEASE" = "1" ]; then
     echo -e "  kernel.perf_event_paranoid: ${BOLD}$ORIG_PARANOID${NC}"
 fi
@@ -222,6 +254,50 @@ fi
 PHASE_STATUS=()
 PHASE_DURATIONS=()
 OVERALL_FAILED=0
+
+# ── Phase 0: Pre-compilation warm-up (--no-run) ───────────────────────────────
+# Compile all test binaries in a single upfront pass, identical flags to those
+# used by Phases 1-4, so that every subsequent `cargo test` hits a warm cache
+# and pays only linkage + runner overhead (< 1 s per invocation instead of
+# several minutes on a cold cache). This pass is NOT counted in any phase timer.
+PREBUILD_LOG="target/logs/long-prebuild.log"
+: > "$PREBUILD_LOG" 2>/dev/null || true
+
+echo -e "\n${BLUE}${BOLD}[0/4] Pre-build — compiling all test artefacts (--no-run)...${NC}"
+if [ "$DRY_RUN" = "1" ]; then
+    echo -e "  ${YELLOW}[dry-run]${NC} cargo test --features testing --release --no-run --lib --tests 2>&1 | tee $PREBUILD_LOG"
+else
+    PREBUILD_START=$(date +%s%N)
+    echo -e "  ${BLUE}→${NC} cargo test --features testing --release --no-run --lib --tests"
+    if cargo test --features testing --release --no-run --lib --tests 2>&1 | tee "$PREBUILD_LOG"; then
+        PREBUILD_END=$(date +%s%N)
+        PREBUILD_DUR_MS=$(( (PREBUILD_END - PREBUILD_START) / 1000000 ))
+        prebuild_str=$(format_duration_ms "$PREBUILD_DUR_MS")
+        ok "Pre-build completed in ${prebuild_str} — artefacts cached for Phases 1-4."
+    else
+        PREBUILD_END=$(date +%s%N)
+        PREBUILD_DUR_MS=$(( (PREBUILD_END - PREBUILD_START) / 1000000 ))
+        prebuild_str=$(format_duration_ms "$PREBUILD_DUR_MS")
+        # A pre-build failure is fatal: subsequent phases would recompile and give
+        # misleading timings, or fail for the same underlying reason.
+        echo -e "  ${RED}${BOLD}✗ Pre-build failed after ${prebuild_str} — aborting audit.${NC}" >&2
+        exit 1
+    fi
+fi
+
+# ── Thermal cooldown (NAM_THERMAL_COOLDOWN_S) ────────────────────────────────
+# After compilation the CPU may be at elevated frequency/temperature due to the
+# parallel codegen workload. Allow it to return to base state before timed RT
+# phases run under SCHED_FIFO / taskset affinity, ensuring measurement
+# determinism. Default is 0 (disabled) — enable for pre-release ceremonies.
+COOLDOWN_S="${NAM_THERMAL_COOLDOWN_S:-0}"
+if [ "$COOLDOWN_S" -gt 0 ] 2>/dev/null && [ "$DRY_RUN" != "1" ]; then
+    echo -e "  ${CYAN}[INFO] Resfriamento térmico: aguardando ${COOLDOWN_S}s para estabilização da CPU antes dos testes RT...${NC}"
+    sleep "$COOLDOWN_S"
+    ok "Cooldown concluído — CPU pronta para medição determinística."
+elif [ "$DRY_RUN" = "1" ] && [ "${NAM_THERMAL_COOLDOWN_S:-0}" -gt 0 ] 2>/dev/null; then
+    echo -e "  ${YELLOW}[dry-run]${NC} sleep ${COOLDOWN_S}  # NAM_THERMAL_COOLDOWN_S"
+fi
 
 # ── Phase 1: GC Stress ────────────────────────────────────────────────────────
 phase "GC Stress — SPSC cascade, drain-on-destroy & property soak (Phase 1/3)"
@@ -407,6 +483,55 @@ emit_receipt "phase3" "Multi-Instance — RT priority under CPU affinity" "$PHAS
 PHASE_STATUS+=("$PHASE3_STATUS")
 PHASE_DURATIONS+=("$PHASE3_DUR_MS")
 
+# ── Phase 4: GUI / Xvfb ─────────────────────────────────────────────────────
+phase "GUI/X11 Headless — Xvfb lifecycle, XEmbed cycles, clipboard (Phase 4/4)"
+PHASE4_START=$(date +%s%N)
+PHASE4_STATUS="SKIPPED"
+PHASE4_DUR_MS=0
+PHASE4_LOG="target/logs/long-phase4.log"
+: > "$PHASE4_LOG" 2>/dev/null || true
+
+if [ "$RUN_GUI" = "0" ]; then
+    warn "GUI phase skipped (xvfb-run not found and --gui not requested)."
+    warn "Install 'xvfb' or pass --gui to enable this phase."
+elif [ "$DRY_RUN" = "1" ]; then
+    echo -e "  ${YELLOW}[dry-run] Phase 4 would execute:${NC}"
+    echo -e "    ./utils/tests-gui.sh --dry-run"
+    PHASE4_STATUS="SKIPPED"
+else
+    set +e
+    echo -e "  ${BLUE}→ Delegating to utils/tests-gui.sh...${NC}"
+    GUI_ARGS=""
+    [ "$NOCAPTURE" = "1" ] && GUI_ARGS="--nocapture"
+    bash "$SCRIPT_DIR/tests-gui.sh" $GUI_ARGS 2>&1 | tee "$PHASE4_LOG"
+    PHASE4_RC=$?
+    set -e
+    PHASE4_END=$(date +%s%N)
+    PHASE4_DUR_MS=$(( (PHASE4_END - PHASE4_START) / 1000000 ))
+    dur4_str=$(format_duration_ms "$PHASE4_DUR_MS")
+    if [ $PHASE4_RC -ne 0 ]; then
+        PHASE4_STATUS="FAILED"
+        OVERALL_FAILED=1
+        echo -e "  ${RED}${BOLD}Phase 4 FAILED (rc=$PHASE4_RC, ${dur4_str})${NC}"
+    else
+        if grep -q "GAP\|not installed" "$PHASE4_LOG" 2>/dev/null; then
+            PHASE4_STATUS="GAP"
+            warn "Phase 4: xvfb-run absent — GUI coverage gap reported."
+            if [ "$STRICT_PRE_RELEASE" = "1" ]; then
+                OVERALL_FAILED=1
+                echo -e "  ${RED}${BOLD}Phase 4 GAP treated as FAILED under --strict-pre-release.${NC}"
+            fi
+        else
+            PHASE4_STATUS="PASSED"
+            echo -e "  ${GREEN}${BOLD}Phase 4 PASSED (${dur4_str})${NC}"
+        fi
+    fi
+fi
+
+emit_receipt "phase4" "GUI/X11 Headless — Xvfb lifecycle, XEmbed cycles, clipboard" "$PHASE4_STATUS" "$PHASE4_DUR_MS" "$PHASE4_LOG"
+PHASE_STATUS+=("$PHASE4_STATUS")
+PHASE_DURATIONS+=("$PHASE4_DUR_MS")
+
 # ── Overall receipt ─────────────────────────────────────────────────────────
 OVERALL_STATUS="PASSED"
 if [ "$OVERALL_FAILED" -ne 0 ]; then
@@ -415,7 +540,7 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
     OVERALL_STATUS="PASSED"
 fi
-TOTAL_DUR_MS=$(( PHASE1_DUR_MS + PHASE2_DUR_MS + PHASE3_DUR_MS ))
+TOTAL_DUR_MS=$(( PHASE1_DUR_MS + PHASE2_DUR_MS + PHASE3_DUR_MS + PHASE4_DUR_MS ))
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 python3 -c "
 import json
@@ -429,7 +554,8 @@ rec = {
     'phases': [
         {'id': 'phase1', 'status': '''${PHASE_STATUS[0]}''', 'duration_ms': ${PHASE_DURATIONS[0]}},
         {'id': 'phase2', 'status': '''${PHASE_STATUS[1]}''', 'duration_ms': ${PHASE_DURATIONS[1]}},
-        {'id': 'phase3', 'status': '''${PHASE_STATUS[2]}''', 'duration_ms': ${PHASE_DURATIONS[2]}}
+        {'id': 'phase3', 'status': '''${PHASE_STATUS[2]}''', 'duration_ms': ${PHASE_DURATIONS[2]}},
+        {'id': 'phase4', 'status': '''${PHASE_STATUS[3]}''', 'duration_ms': ${PHASE_DURATIONS[3]}}
     ]
 }
 with open('''$RECEIPT_FILE''', 'a') as f:
@@ -438,7 +564,7 @@ with open('''$RECEIPT_FILE''', 'a') as f:
 "
 
 echo -e "\n${BLUE}${BOLD}================ AUDIT SUMMARY ================${NC}"
-for i in 0 1 2; do
+for i in 0 1 2 3; do
     s="${PHASE_STATUS[$i]}"
     d="${PHASE_DURATIONS[$i]}"
     name=""
@@ -446,9 +572,12 @@ for i in 0 1 2; do
         0) name="Phase 1 — GC Stress" ;;
         1) name="Phase 2 — Teardown Drain" ;;
         2) name="Phase 3 — Multi-Instance RT" ;;
+        3) name="Phase 4 — GUI/X11 Headless" ;;
     esac
     if [ "$s" = "PASSED" ]; then
         echo -e "  ${GREEN}✓ $name: $s (${d} ms)${NC}"
+    elif [ "$s" = "SKIPPED" ] || [ "$s" = "GAP" ]; then
+        echo -e "  ${YELLOW}⚠ $name: $s (${d} ms)${NC}"
     else
         echo -e "  ${RED}✗ $name: $s (${d} ms)${NC}"
     fi

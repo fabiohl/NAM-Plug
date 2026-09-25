@@ -554,13 +554,11 @@ fn test_restore_same_latency_is_continuous_no_restart() {
     let mut started = stopped.start_processing().expect("start_processing");
 
     let model = crate::clap::test_util::model_path("lstm.nam");
-    let params = neural_amp_modeler_rs::common::params::ProcessingParams {
-        model_path: Some(model.clone()),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model),
-        input_gain_db: 3.5,
-        ..Default::default()
-    };
+    let mut params = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params.model_path = Some(model.clone());
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = crate::clap::test_util::asset_hash(&model);
+    params.input_gain_db = 3.5;
     let initial_gen = shared.cold.last_applied_generation.load(Ordering::Relaxed);
     load_state(&mut instance, &params);
 
@@ -611,13 +609,11 @@ fn test_restore_diff_rate_stages_and_requests_restart() {
 
     let base = crate::clap::test_util::model_path("lstm.nam");
     let model_44k = write_model_with_rate(&base, 44100);
-    let params = neural_amp_modeler_rs::common::params::ProcessingParams {
-        model_path: Some(model_44k.clone()),
-        model_basename: Some("model_44100.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model_44k),
-        input_gain_db: 4.5,
-        ..Default::default()
-    };
+    let mut params = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params.model_path = Some(model_44k.clone());
+    params.model_basename = Some("model_44100.nam".to_string());
+    params.model_hash = crate::clap::test_util::asset_hash(&model_44k);
+    params.input_gain_db = 4.5;
 
     let initial_gen = shared.cold.last_applied_generation.load(Ordering::Relaxed);
     load_state(&mut instance, &params);
@@ -696,11 +692,9 @@ fn test_restore_ir_stages_and_requests_restart() {
     let started = stopped.start_processing().expect("start_processing");
 
     let ir = write_ir(512, "restore_ir");
-    let params = neural_amp_modeler_rs::common::params::ProcessingParams {
-        ir_path: Some(ir.clone()),
-        ir_hash: crate::clap::test_util::asset_hash(&ir),
-        ..Default::default()
-    };
+    let mut params = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params.ir_path = Some(ir.clone());
+    params.ir_hash = crate::clap::test_util::asset_hash(&ir);
 
     load_state(&mut instance, &params);
     assert!(
@@ -729,11 +723,9 @@ fn test_restore_ir_stages_and_requests_restart() {
 
     // Clear IR via restore
     state.restart_requested.store(false, Ordering::SeqCst);
-    let params_clear = neural_amp_modeler_rs::common::params::ProcessingParams {
-        ir_path: None,
-        ir_hash: None,
-        ..Default::default()
-    };
+    let mut params_clear = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params_clear.ir_path = None;
+    params_clear.ir_hash = None;
     load_state(&mut instance, &params_clear);
     assert!(
         state.restart_requested.load(Ordering::SeqCst),
@@ -772,13 +764,11 @@ fn test_restore_coalescing_latest_wins() {
     let model_48k = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
 
     // 1. First restore: 44.1k (staged + restart)
-    let params_44k = neural_amp_modeler_rs::common::params::ProcessingParams {
-        model_path: Some(model_44k.clone()),
-        model_basename: Some("model_44100.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model_44k),
-        input_gain_db: 1.0,
-        ..Default::default()
-    };
+    let mut params_44k = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params_44k.model_path = Some(model_44k.clone());
+    params_44k.model_basename = Some("model_44100.nam".to_string());
+    params_44k.model_hash = crate::clap::test_util::asset_hash(&model_44k);
+    params_44k.input_gain_db = 1.0;
     load_state(&mut instance, &params_44k);
     assert!(state.restart_requested.load(Ordering::SeqCst));
 
@@ -787,13 +777,11 @@ fn test_restore_coalescing_latest_wins() {
     assert!(mt.staged_restore.borrow().is_some());
 
     // 2. Second restore before restart: 48k (same rate as baseline)
-    let params_48k = neural_amp_modeler_rs::common::params::ProcessingParams {
-        model_path: Some(model_48k.clone()),
-        model_basename: Some("wavenet_a1_standard.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model_48k),
-        input_gain_db: 2.0,
-        ..Default::default()
-    };
+    let mut params_48k = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params_48k.model_path = Some(model_48k.clone());
+    params_48k.model_basename = Some("wavenet_a1_standard.nam".to_string());
+    params_48k.model_hash = crate::clap::test_util::asset_hash(&model_48k);
+    params_48k.input_gain_db = 2.0;
     load_state(&mut instance, &params_48k);
 
     assert!(
@@ -844,13 +832,11 @@ fn test_restore_combined_model_and_oversample_single_restart() {
     let base = crate::clap::test_util::model_path("lstm.nam");
     let model_44k = write_model_with_rate(&base, 44100);
 
-    let params = neural_amp_modeler_rs::common::params::ProcessingParams {
-        model_path: Some(model_44k.clone()),
-        model_basename: Some("model_44100.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model_44k),
-        oversample: OversampleFactor::X2,
-        ..Default::default()
-    };
+    let mut params = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params.model_path = Some(model_44k.clone());
+    params.model_basename = Some("model_44100.nam".to_string());
+    params.model_hash = crate::clap::test_util::asset_hash(&model_44k);
+    params.oversample = OversampleFactor::X2;
 
     load_state(&mut instance, &params);
     assert!(
@@ -899,13 +885,11 @@ fn test_restore_pre_activate_remains_local_commit() {
     let base = crate::clap::test_util::model_path("lstm.nam");
     let model_44k = write_model_with_rate(&base, 44100);
 
-    let params = neural_amp_modeler_rs::common::params::ProcessingParams {
-        model_path: Some(model_44k.clone()),
-        model_basename: Some("model_44100.nam".to_string()),
-        model_hash: crate::clap::test_util::asset_hash(&model_44k),
-        input_gain_db: 6.0,
-        ..Default::default()
-    };
+    let mut params = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params.model_path = Some(model_44k.clone());
+    params.model_basename = Some("model_44100.nam".to_string());
+    params.model_hash = crate::clap::test_util::asset_hash(&model_44k);
+    params.input_gain_db = 6.0;
 
     // Load state before activate (buffer_size == 0)
     load_state(&mut instance, &params);
@@ -971,15 +955,13 @@ fn test_restore_for_preset_without_model_preserves_active_model() {
 
     // Restore with ForPreset context (e.g. preset change without model, but with an IR)
     let ir = write_ir(512, "preset_ir");
-    let params = neural_amp_modeler_rs::common::params::ProcessingParams {
-        model_path: None,
-        model_basename: None,
-        model_hash: None,
-        ir_path: Some(ir.clone()),
-        ir_hash: crate::clap::test_util::asset_hash(&ir),
-        input_gain_db: 7.0,
-        ..Default::default()
-    };
+    let mut params = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params.model_path = None;
+    params.model_basename = None;
+    params.model_hash = None;
+    params.ir_path = Some(ir.clone());
+    params.ir_hash = crate::clap::test_util::asset_hash(&ir);
+    params.input_gain_db = 7.0;
 
     // Load state with state context = ForPreset
     let state_ctx_ext = instance

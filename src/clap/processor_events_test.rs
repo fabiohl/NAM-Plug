@@ -19,10 +19,7 @@ mod tests {
         // Create a fresh SPSC channel pair and populate it with 70 commands before activation.
         let (mut tx, rx) = RingBuffer::new(CMD_QUEUE_CAPACITY);
         for i in 0..70 {
-            let params = RtProcessingParams {
-                input_gain_db: i as f32 * 0.1,
-                ..Default::default()
-            };
+            let params = RtProcessingParams::default().with_input_gain_db(i as f32 * 0.1);
             let _ = tx.push(ClapParamPayload::Params(params));
         }
 

@@ -150,10 +150,7 @@ fn test_sixteen_concurrent_instances_diagnostic_bundle_isolation() {
                 log::info!("Instance {} unique diagnostic telemetry trace", inst_id);
             }
 
-            let meta = AudioMetadata {
-                channel_count: 2,
-                host_name: format!("DAW_Host_{}", inst_id),
-            };
+            let meta = AudioMetadata::new(2, format!("DAW_Host_{}", inst_id));
 
             let bundle =
                 DiagnosticBundle::capture_for_instance_with_runtime(inst_id, shared, &meta);

@@ -113,11 +113,10 @@ pub fn make_default_params(model_path: Option<PathBuf>) -> ProcessingParams {
             None
         }
     });
-    ProcessingParams {
-        model_path,
-        model_hash,
-        ..Default::default()
-    }
+    let mut params = ProcessingParams::default();
+    params.model_path = model_path;
+    params.model_hash = model_hash;
+    params
 }
 
 /// Computes the SHA-256 hex digest of `path` with the same streaming hasher the

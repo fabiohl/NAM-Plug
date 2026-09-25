@@ -140,16 +140,14 @@ fn test_missing_model_path_is_rejected_and_keeps_old_dsp() {
 
     // Load valid model first
     let model_a = model_fixture("wavenet_a1_standard.nam");
-    let params_a = ProcessingParams {
-        model_path: Some(model_a.clone()),
-        model_basename: Some("wavenet_a1_standard.nam".to_string()),
-        model_hash: test_util::asset_hash(&model_a),
-        input_gain_db: 0.0,
-        output_gain_db: 0.0,
-        gate_threshold_db: -90.0,
-        bypass: false,
-        ..Default::default()
-    };
+    let mut params_a = ProcessingParams::default();
+    params_a.model_path = Some(model_a.clone());
+    params_a.model_basename = Some("wavenet_a1_standard.nam".to_string());
+    params_a.model_hash = test_util::asset_hash(&model_a);
+    params_a.input_gain_db = 0.0;
+    params_a.output_gain_db = 0.0;
+    params_a.gate_threshold_db = -90.0;
+    params_a.bypass = false;
 
     let state_ext = test_util::get_state_ext(&mut instance);
     let state_bytes = serde_json::to_vec(&params_a).unwrap();
@@ -178,16 +176,14 @@ fn test_missing_model_path_is_rejected_and_keeps_old_dsp() {
     let model_a_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
 
     // Attempt bad load
-    let bad_params = ProcessingParams {
-        model_path: Some(PathBuf::from("/nonexistent/model_x.nam")),
-        model_basename: Some("model_x.nam".to_string()),
-        model_search_paths: vec![],
-        input_gain_db: 99.0,
-        output_gain_db: 99.0,
-        gate_threshold_db: -10.0,
-        bypass: true,
-        ..Default::default()
-    };
+    let mut bad_params = ProcessingParams::default();
+    bad_params.model_path = Some(PathBuf::from("/nonexistent/model_x.nam"));
+    bad_params.model_basename = Some("model_x.nam".to_string());
+    bad_params.model_search_paths = vec![];
+    bad_params.input_gain_db = 99.0;
+    bad_params.output_gain_db = 99.0;
+    bad_params.gate_threshold_db = -10.0;
+    bad_params.bypass = true;
 
     let state_bad = serde_json::to_vec(&bad_params).unwrap();
     {
@@ -218,12 +214,10 @@ fn test_corrupted_model_weights_rejected_gracefully() {
     let shared = unsafe { &*shared_ptr };
 
     let model_a = model_fixture("lstm.nam");
-    let params_a = ProcessingParams {
-        model_path: Some(model_a.clone()),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: test_util::asset_hash(&model_a),
-        ..Default::default()
-    };
+    let mut params_a = ProcessingParams::default();
+    params_a.model_path = Some(model_a.clone());
+    params_a.model_basename = Some("lstm.nam".to_string());
+    params_a.model_hash = test_util::asset_hash(&model_a);
 
     let state_ext = test_util::get_state_ext(&mut instance);
     let state_bytes = serde_json::to_vec(&params_a).unwrap();
@@ -249,10 +243,8 @@ fn test_corrupted_model_weights_rejected_gracefully() {
     let model_a_name = shared.cold.ui_model_name.lock().unwrap().clone();
     let model_a_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
 
-    let bad_params = ProcessingParams {
-        model_path: Some(corrupted_path.clone()),
-        ..Default::default()
-    };
+    let mut bad_params = ProcessingParams::default();
+    bad_params.model_path = Some(corrupted_path.clone());
     let bad_bytes = serde_json::to_vec(&bad_params).unwrap();
     {
         let state_ext = test_util::get_state_ext(&mut instance);
@@ -278,10 +270,8 @@ fn test_truncated_model_file_rejected_gracefully() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let state_ext = test_util::get_state_ext(&mut instance);
 
-    let bad_params = ProcessingParams {
-        model_path: Some(truncated_path.clone()),
-        ..Default::default()
-    };
+    let mut bad_params = ProcessingParams::default();
+    bad_params.model_path = Some(truncated_path.clone());
     let bad_bytes = serde_json::to_vec(&bad_params).unwrap();
     let handle = instance.plugin_handle();
     let result = state_ext.load(&handle, &mut bad_bytes.as_slice());
@@ -298,10 +288,8 @@ fn test_zero_byte_model_file_rejected_gracefully() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let state_ext = test_util::get_state_ext(&mut instance);
 
-    let bad_params = ProcessingParams {
-        model_path: Some(zero_path.clone()),
-        ..Default::default()
-    };
+    let mut bad_params = ProcessingParams::default();
+    bad_params.model_path = Some(zero_path.clone());
     let bad_bytes = serde_json::to_vec(&bad_params).unwrap();
     let handle = instance.plugin_handle();
     let result = state_ext.load(&handle, &mut bad_bytes.as_slice());
@@ -320,19 +308,17 @@ fn test_cross_machine_restore_via_basename_search_succeeds() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let shared_ptr = test_util::extract_shared(&mut instance);
 
-    let cross_params = ProcessingParams {
-        model_path: Some(PathBuf::from(
-            "/home/otheruser/models/wavenet_a1_standard.nam",
-        )),
-        model_basename: Some("wavenet_a1_standard.nam".to_string()),
-        model_hash: test_util::asset_hash(&model_fixture("wavenet_a1_standard.nam")),
-        model_search_paths: vec![model_dir],
-        input_gain_db: 0.0,
-        output_gain_db: 0.0,
-        gate_threshold_db: -90.0,
-        bypass: false,
-        ..Default::default()
-    };
+    let mut cross_params = ProcessingParams::default();
+    cross_params.model_path = Some(PathBuf::from(
+        "/home/otheruser/models/wavenet_a1_standard.nam",
+    ));
+    cross_params.model_basename = Some("wavenet_a1_standard.nam".to_string());
+    cross_params.model_hash = test_util::asset_hash(&model_fixture("wavenet_a1_standard.nam"));
+    cross_params.model_search_paths = vec![model_dir];
+    cross_params.input_gain_db = 0.0;
+    cross_params.output_gain_db = 0.0;
+    cross_params.gate_threshold_db = -90.0;
+    cross_params.bypass = false;
 
     let state_ext = test_util::get_state_ext(&mut instance);
     let state_bytes = serde_json::to_vec(&cross_params).unwrap();
@@ -356,16 +342,14 @@ fn test_cross_machine_basename_not_found_is_rejected() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let state_ext = test_util::get_state_ext(&mut instance);
 
-    let cross_params = ProcessingParams {
-        model_path: Some(PathBuf::from("/home/otheruser/models/unknown.nam")),
-        model_basename: Some("unknown.nam".to_string()),
-        model_search_paths: vec![non_existent_dir.clone()],
-        input_gain_db: 0.0,
-        output_gain_db: 0.0,
-        gate_threshold_db: -90.0,
-        bypass: false,
-        ..Default::default()
-    };
+    let mut cross_params = ProcessingParams::default();
+    cross_params.model_path = Some(PathBuf::from("/home/otheruser/models/unknown.nam"));
+    cross_params.model_basename = Some("unknown.nam".to_string());
+    cross_params.model_search_paths = vec![non_existent_dir.clone()];
+    cross_params.input_gain_db = 0.0;
+    cross_params.output_gain_db = 0.0;
+    cross_params.gate_threshold_db = -90.0;
+    cross_params.bypass = false;
 
     let state_bytes = serde_json::to_vec(&cross_params).unwrap();
     let handle = instance.plugin_handle();
@@ -385,15 +369,12 @@ fn test_bad_model_hash_is_rejected() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let state_ext = test_util::get_state_ext(&mut instance);
 
-    let bad_hash_params = ProcessingParams {
-        model_path: None,
-        model_basename: Some("wavenet_a1_standard.nam".to_string()),
-        model_hash: Some(
-            "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-        ),
-        model_search_paths: vec![model_dir],
-        ..Default::default()
-    };
+    let mut bad_hash_params = ProcessingParams::default();
+    bad_hash_params.model_path = None;
+    bad_hash_params.model_basename = Some("wavenet_a1_standard.nam".to_string());
+    bad_hash_params.model_hash =
+        Some("0000000000000000000000000000000000000000000000000000000000000000".to_string());
+    bad_hash_params.model_search_paths = vec![model_dir];
 
     let state_bytes = serde_json::to_vec(&bad_hash_params).unwrap();
     let handle = instance.plugin_handle();
@@ -410,12 +391,10 @@ fn test_state_load_after_failed_restore_still_works() {
     let shared_ptr = test_util::extract_shared(&mut instance);
 
     let model_a = model_fixture("wavenet_a1_standard.nam");
-    let params_a = ProcessingParams {
-        model_path: Some(model_a.clone()),
-        model_basename: Some("wavenet_a1_standard.nam".to_string()),
-        model_hash: test_util::asset_hash(&model_a),
-        ..Default::default()
-    };
+    let mut params_a = ProcessingParams::default();
+    params_a.model_path = Some(model_a.clone());
+    params_a.model_basename = Some("wavenet_a1_standard.nam".to_string());
+    params_a.model_hash = test_util::asset_hash(&model_a);
 
     let state_ext = test_util::get_state_ext(&mut instance);
     let state_bytes = serde_json::to_vec(&params_a).unwrap();
@@ -427,10 +406,8 @@ fn test_state_load_after_failed_restore_still_works() {
     }
 
     // Failed restore
-    let bad_params = ProcessingParams {
-        model_path: Some(PathBuf::from("/nonexistent/x.nam")),
-        ..Default::default()
-    };
+    let mut bad_params = ProcessingParams::default();
+    bad_params.model_path = Some(PathBuf::from("/nonexistent/x.nam"));
     let bad_bytes = serde_json::to_vec(&bad_params).unwrap();
     {
         let state_ext = test_util::get_state_ext(&mut instance);
@@ -441,13 +418,11 @@ fn test_state_load_after_failed_restore_still_works() {
 
     // Valid restore afterward
     let valid_b = model_fixture("lstm.nam");
-    let valid_params = ProcessingParams {
-        model_path: Some(valid_b.clone()),
-        model_basename: Some("lstm.nam".to_string()),
-        model_hash: test_util::asset_hash(&valid_b),
-        input_gain_db: 2.5,
-        ..Default::default()
-    };
+    let mut valid_params = ProcessingParams::default();
+    valid_params.model_path = Some(valid_b.clone());
+    valid_params.model_basename = Some("lstm.nam".to_string());
+    valid_params.model_hash = test_util::asset_hash(&valid_b);
+    valid_params.input_gain_db = 2.5;
     let valid_bytes = serde_json::to_vec(&valid_params).unwrap();
     {
         let state_ext = test_util::get_state_ext(&mut instance);
@@ -472,12 +447,10 @@ fn test_all_failure_modes_preserve_dsp_and_produce_finite_output() {
     let shared = unsafe { &*shared_ptr };
 
     let model_a = model_fixture("wavenet_a1_standard.nam");
-    let params_a = ProcessingParams {
-        model_path: Some(model_a.clone()),
-        model_basename: Some("wavenet_a1_standard.nam".to_string()),
-        model_hash: test_util::asset_hash(&model_a),
-        ..Default::default()
-    };
+    let mut params_a = ProcessingParams::default();
+    params_a.model_path = Some(model_a.clone());
+    params_a.model_basename = Some("wavenet_a1_standard.nam".to_string());
+    params_a.model_hash = test_util::asset_hash(&model_a);
 
     let state_ext = test_util::get_state_ext(&mut instance);
     let state_bytes = serde_json::to_vec(&params_a).unwrap();
@@ -503,22 +476,18 @@ fn test_all_failure_modes_preserve_dsp_and_produce_finite_output() {
     let model_a_name = shared.cold.ui_model_name.lock().unwrap().clone();
     let model_a_counter = shared.cold.model_load_counter.load(Ordering::Relaxed);
 
-    let failure_params_list: Vec<ProcessingParams> = vec![
-        ProcessingParams {
-            model_path: Some(PathBuf::from("/nonexistent/a.nam")),
-            model_basename: Some("a.nam".to_string()),
-            model_search_paths: vec![],
-            ..Default::default()
-        },
-        ProcessingParams {
-            model_path: Some(PathBuf::from("/nonexistent/b.nam")),
-            ..Default::default()
-        },
-        ProcessingParams {
-            model_path: Some(std::env::temp_dir().join("doesnotexist.nam")),
-            ..Default::default()
-        },
-    ];
+    let mut p1 = ProcessingParams::default();
+    p1.model_path = Some(PathBuf::from("/nonexistent/a.nam"));
+    p1.model_basename = Some("a.nam".to_string());
+    p1.model_search_paths = vec![];
+
+    let mut p2 = ProcessingParams::default();
+    p2.model_path = Some(PathBuf::from("/nonexistent/b.nam"));
+
+    let mut p3 = ProcessingParams::default();
+    p3.model_path = Some(std::env::temp_dir().join("doesnotexist.nam"));
+
+    let failure_params_list: Vec<ProcessingParams> = vec![p1, p2, p3];
 
     for (i, bad_params) in failure_params_list.iter().enumerate() {
         let bad_bytes = serde_json::to_vec(bad_params).unwrap();

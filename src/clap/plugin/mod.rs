@@ -331,10 +331,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             // is overridden here to the range minimum (-90.0 dB), the most permissive
             // setting, so the gate practically never closes unless the user/host
             // explicitly tightens the threshold.
-            params: RefCell::new(ProcessingParams {
-                gate_threshold_db: -90.0,
-                ..ProcessingParams::default()
-            }),
+            params: RefCell::new(ProcessingParams::builder().with_gate_threshold_db(-90.0)),
             host,
             sys: SystemSnapshot::capture(),
             cmd_producer: RefCell::new(cmd_producer),

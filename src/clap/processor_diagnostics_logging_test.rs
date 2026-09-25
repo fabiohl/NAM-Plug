@@ -109,23 +109,13 @@ fn test_state_save_emits_confirmation_log() {
 
     let model_path = crate::clap::test_util::model_path("lstm.nam");
 
-    use neural_amp_modeler_rs::common::params::ProcessingParams;
-    let params = ProcessingParams {
-        model_path: Some(model_path.clone()),
-        input_gain_db: 1.0,
-        output_gain_db: -2.0,
-        gate_threshold_db: -50.0,
-        model_basename: Some("lstm.nam".to_string()),
-        model_search_paths: vec![],
-        model_hash: crate::clap::test_util::asset_hash(&model_path),
-        bypass: false,
-        adaptive_compute: neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Off,
-        slim_override: Default::default(),
-        oversample: neural_amp_modeler_rs::dsp::oversample::OversampleFactor::Off,
-        ir_path: None,
-        ir_hash: None,
-        activation_precision: neural_amp_modeler_rs::common::params::ActivationPrecision::Standard,
-    };
+    let mut params = neural_amp_modeler_rs::common::params::ProcessingParams::default();
+    params.model_path = Some(model_path.clone());
+    params.input_gain_db = 1.0;
+    params.output_gain_db = -2.0;
+    params.gate_threshold_db = -50.0;
+    params.model_basename = Some("lstm.nam".to_string());
+    params.model_hash = crate::clap::test_util::asset_hash(&model_path);
     let state_bytes = serde_json::to_vec(&params).unwrap();
     let state_ext = test_util::get_state_ext(&mut plugin_instance);
     let handle = plugin_instance.plugin_handle();
