@@ -28,8 +28,17 @@ mod state;
 pub(crate) use deactivated::DeactivatedDspState;
 pub use state::BYPASS_XFADE_SAMPLES;
 pub use state::BypassCrossfader;
-pub(crate) use state::MAX_STRUCTURAL_COMMANDS_PER_CALLBACK;
 pub(crate) use state::NamClapProcessor;
+pub(crate) use state::{CMD_SWAP_TUNABLES, SLIMMABLE_SWAP_TUNABLES};
+
+/// Test-only drain-latency probe: latest duration (ns) of the canonical
+/// per-callback drain window (`SwapBudget` construction + both
+/// `RtSwapDrain::drain` calls), recorded by `events::process_events` on x86_64
+/// test builds via calibrated TSC reads. Consumed by the drain-latency
+/// certification gate; absent from every non-test build.
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) static DRAIN_PROBE_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 use crate::clap::plugin::errors::{self, static_plugin_error};
 use crate::clap::plugin::{
@@ -38,6 +47,7 @@ use crate::clap::plugin::{
 use crate::clap::processor::dsp::dry_delay::{DRY_DELAY_MAX_EXTRA, DryDelayLine};
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
+use neural_amp_modeler_rs::common::spsc::RtSwapDrain;
 #[cfg(target_arch = "x86_64")]
 use neural_amp_modeler_rs::common::tsc::rdtsc_nanos;
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
@@ -231,7 +241,15 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     let rate_matches = deact.sample_rate == host_rate;
                     let buf_matches = deact.buffer_size == host_buffer;
                     let os_matches = deact.os_factor == os_factor;
-                    let cab_matches = deact.cabsim_adapter.is_some() && buf_matches && rate_matches;
+                    // The cab-sim adapter is block-agnostic (`process_block`
+                    // chunks arbitrary host blocks against the fixed partition
+                    // internally), so a buffer-size renegotiation no longer
+                    // invalidates it: only the sample rate does (the IR was
+                    // resampled to the host rate at build time). Quantum
+                    // changes reuse the adapter — keeping its partition (and
+                    // the latency the host already received) instead of paying
+                    // a full FFT rebuild per buffer-size change.
+                    let cab_matches = deact.cabsim_adapter.is_some() && rate_matches;
                     // The streaming adapter's FIFO capacities are sized by the
                     // worst-case host block, so it also needs `buf_matches`.
                     let stream_matches = rate_matches && buf_matches;
@@ -642,6 +660,21 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 )
             };
 
+            // A reinstalled cab-sim adapter must not bleed the previous host
+            // session's convolution tail into the restarted timeline: the
+            // deactivate/activate boundary is a timeline discontinuity (the
+            // stream adapter is rebuilt fresh and the smoothers re-sync), so
+            // clear the FDL and FIFO history in place. Zero-alloc — the IR and
+            // the RFFT plan are preserved, so a quantum renegotiation still
+            // avoids the full rebuild.
+            let cabsim_adapter = {
+                let mut cabsim_adapter = cabsim_adapter;
+                if let Some(ref mut adapter) = cabsim_adapter {
+                    adapter.reset();
+                }
+                cabsim_adapter
+            };
+
             let silence_hyst = DynamicHysteresis::new();
             let mono_hyst = DynamicHysteresis::new();
 
@@ -744,7 +777,15 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // ownership back for processor construction. Guard Drop is now a no-op.
             let channels = rollback.defuse()?;
 
-            let cmd_consumer = CommandConsumer::new(channels.param_rx, &shared.cold.cmd_last_ack);
+            // The engine structural-swap scheduler owns the command consumer
+            // end-to-end: the 3-phase drain (deferred resolution, bounded
+            // coalescing, budgeted apply-or-park) runs on this single ring
+            // with the consumer's historical tuning (CMD_SWAP_TUNABLES).
+            let cmd_drain = RtSwapDrain::new(
+                CommandConsumer::new(channels.param_rx, &shared.cold.cmd_last_ack),
+                CMD_SWAP_TUNABLES,
+            );
+            let slimmable_drain = RtSwapDrain::new(channels.slimmable_rx, SLIMMABLE_SWAP_TUNABLES);
 
             // Pre-allocate the circular dry delay line sized for the maximum
             // possible DSP latency (cab-sim partition == host block size, plus
@@ -797,10 +838,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 smoother_out,
                 model_input_mult_adj,
                 model_output_mult_adj,
-                cmd_consumer,
-                deferred_structural: None,
+                cmd_drain,
                 gc_tx: channels.gc_tx,
-                slimmable_rx: channels.slimmable_rx,
+                slimmable_drain,
                 gc_overflow: Arc::clone(&shared.cold.gc_overflow),
                 parking_lot: Default::default(),
                 parking_lot_dirty: std::sync::atomic::AtomicBool::new(false),
@@ -838,10 +878,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // rolled-back sequence slot is consumed so the ack stays gapless
             // across a subsequent deactivate/activate cycle (the ring may still
             // hold commands for the next activate).
-            if self.deferred_structural.take().is_some() {
-                self.cmd_consumer.advance_pending();
-                self.cmd_consumer.ack_processed();
+            let (mut cmd_consumer, parked) = self.cmd_drain.into_parts();
+            if parked.is_some() {
+                cmd_consumer.advance_pending();
+                cmd_consumer.ack_processed();
             }
+            drop(parked);
 
             let mut param_rx_guard = self
                 .shared
@@ -849,7 +891,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .param_rx
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            *param_rx_guard = Some(self.cmd_consumer.into_inner());
+            *param_rx_guard = Some(cmd_consumer.into_inner());
 
             let mut gc_tx_guard = self
                 .shared
@@ -859,13 +901,19 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .unwrap_or_else(|e| e.into_inner());
             *gc_tx_guard = Some(self.gc_tx);
 
+            let (slimmable_rx, parked_slimmable) = self.slimmable_drain.into_parts();
+            // A slimmable rebuild parked by the final callback drops here on
+            // the main thread (safe — never on the audio thread). The plain
+            // ring carries no ack, so no sequence bookkeeping is needed.
+            drop(parked_slimmable);
+
             let mut slimmable_rx_guard = self
                 .shared
                 .cold
                 .slimmable_rx
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            *slimmable_rx_guard = Some(self.slimmable_rx);
+            *slimmable_rx_guard = Some(slimmable_rx);
 
             // Preserve heavy DSP resources across deactivate/activate cycles
             // to avoid I/O, filter-bank recompute, and FFT setup on the next
@@ -1255,6 +1303,14 @@ mod processor_slimmable_generation_test;
 mod processor_command_budget_test;
 
 #[cfg(test)]
+#[path = "../processor_drain_latency_test.rs"]
+mod processor_drain_latency_test;
+
+#[cfg(test)]
+#[path = "../processor_swap_handler_test.rs"]
+mod processor_swap_handler_test;
+
+#[cfg(test)]
 #[path = "../processor_latency_policy_test.rs"]
 mod processor_latency_policy_test;
 
@@ -1265,6 +1321,10 @@ mod processor_dry_delay_test;
 #[cfg(test)]
 #[path = "../processor_tail_rearm_test.rs"]
 mod processor_tail_rearm_test;
+
+#[cfg(test)]
+#[path = "../processor_cabsim_block_test.rs"]
+mod processor_cabsim_block_test;
 
 #[cfg(test)]
 #[path = "../processor_reset_test.rs"]

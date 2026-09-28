@@ -4,6 +4,7 @@
 #[cfg(test)]
 mod tests {
     use crate::clap::extensions::params::{PARAM_GATE_THRESH, PARAM_INPUT_GAIN};
+    use crate::clap::processor::events::command_swap_parts;
     use crate::clap::test_util::{self, StereoTestBuffers};
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
@@ -347,7 +348,11 @@ mod tests {
         let mut new_params = processor.params;
         new_params.gate_threshold_db = -30.0;
 
-        processor.apply_params_from_spsc(new_params);
+        // The SPSC snapshot apply lives on the command-swap handler (split
+        // view of the processor) — the same surface the ring drain installs
+        // light `Params` payloads through.
+        let (mut handler, _gc) = command_swap_parts!(processor);
+        handler.apply_params_from_spsc(new_params);
 
         assert!(
             processor.gate_dirty,

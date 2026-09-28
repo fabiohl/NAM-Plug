@@ -20,7 +20,7 @@ mod tests {
         let (mut tx, rx) = RingBuffer::new(CMD_QUEUE_CAPACITY);
         for i in 0..70 {
             let params = RtProcessingParams::default().with_input_gain_db(i as f32 * 0.1);
-            let _ = tx.push(ClapParamPayload::Params(params));
+            let _ = tx.push(Box::new(ClapParamPayload::Params(params)));
         }
 
         // Install our custom SPSC pair into shared.cold so processor extracts rx during activate()

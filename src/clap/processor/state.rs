@@ -3,12 +3,14 @@
 
 //! Processor state (struct definition).
 
-use crate::clap::plugin::{ClapParamPayload, CommandConsumer, NamClapShared, SlimmableRebuild};
+use crate::clap::plugin::{CommandConsumer, NamClapShared, SlimmableRebuild};
 use crate::clap::processor::dsp::dry_delay::DryDelayLine;
 use crate::clap::processor::dsp::orchestrator::ScheduledEvent;
 use clack_plugin::host::HostAudioProcessorHandle;
 use neural_amp_modeler_rs::common::params::{ActivationPrecision, RtProcessingParams};
-use neural_amp_modeler_rs::common::spsc::{GcItem, GcOverflowBuffer, RtStatusFlags};
+use neural_amp_modeler_rs::common::spsc::{
+    GcItem, GcOverflowBuffer, RtStatusFlags, RtSwapDrain, SwapTunables,
+};
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
 use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
 use neural_amp_modeler_rs::dsp::gate::{DynamicHysteresis, GateParams};
@@ -18,7 +20,7 @@ use neural_amp_modeler_rs::dsp::smoother::ParamSmoother;
 use neural_amp_modeler_rs::math::common::AlignedVec;
 use neural_amp_modeler_rs::math::dsp::gain_lut::GainLUT;
 use neural_amp_modeler_rs::models::StaticModel;
-use rtrb::{Consumer, Producer};
+use rtrb::Producer;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -36,6 +38,31 @@ pub(crate) const BYPASS_XFADE_INV: f32 = 1.0 / BYPASS_XFADE_SAMPLES as f32;
 /// and applied at the start of the next one, preserving FIFO ordering and the
 /// atomicity of composite transactions (`RestoreTxn`).
 pub(crate) const MAX_STRUCTURAL_COMMANDS_PER_CALLBACK: u32 = 1;
+
+/// Engine drain tuning for the mixed command ring — the canonical
+/// structural-swap scheduler's configuration surface for this consumer:
+/// a 64-pop coalescing window, `MAX_STRUCTURAL_COMMANDS_PER_CALLBACK`
+/// structural applies per callback, and truncation-style telemetry
+/// (`backlog_flag` off ⇒ `RT_STATUS_SPSC_DRAIN_TRUNCATED` when the pop cap
+/// is hit with a non-empty ring instead of the scalar backlog flag).
+pub(crate) const CMD_SWAP_TUNABLES: SwapTunables = SwapTunables {
+    pops_per_callback: 64,
+    swaps_per_callback: MAX_STRUCTURAL_COMMANDS_PER_CALLBACK as usize,
+    backlog_flag: false,
+};
+
+/// Engine drain tuning for the dedicated slimmable ring — the canonical
+/// structural-swap scheduler's configuration surface for this consumer:
+/// an 8-pop coalescing window covering the full queue plus refills (channel
+/// capacity 4), `MAX_STRUCTURAL_COMMANDS_PER_CALLBACK` structural applies per
+/// callback under the callback-shared budget, and truncation-style telemetry
+/// (`backlog_flag` off ⇒ `RT_STATUS_SPSC_DRAIN_TRUNCATED` when the pop cap
+/// is hit with a non-empty ring).
+pub(crate) const SLIMMABLE_SWAP_TUNABLES: SwapTunables = SwapTunables {
+    pops_per_callback: 8,
+    swaps_per_callback: MAX_STRUCTURAL_COMMANDS_PER_CALLBACK as usize,
+    backlog_flag: false,
+};
 
 /// Sample-accurate bypass crossfade state machine.
 ///
@@ -107,24 +134,20 @@ impl BypassCrossfader {
 /// Holds pre-allocated buffers and mutable inference state.
 /// Created in `activate()` and destroyed in `deactivate()`.
 ///
-/// T8.5 migration contract: the structural-swap *scheduler* is the engine's
-/// generic scheduler (Sprint 7, Epic E.2 — the canonical 3-phase protocol in
-/// `NeuralAmpModeler-rs/src/common/spsc/swap.rs`), adopted here through its
-/// documented tuning surface (`SwapTunables` values mirror this consumer's
-/// historical `MAX_STRUCTURAL_COMMANDS_PER_CALLBACK` = 1, 64-pop window,
-/// `RT_STATUS_STRUCTURAL_DEFERRED`/`SUPERSEDED` telemetry, and the ack-gapless
-/// `advance_pending`/`rollback_last_pop` hooks — never an averaged or unified
-/// configuration). The cold *handlers* (`apply_structural` /
-/// `discard_structural_payload` in `events.rs`) are the NAM-Plug-specific part
-/// and stay here: decomposition into [`GcItem`]s, latency recompute, and the
-/// `CommandConsumer` sequence bookkeeping are host-specific and cannot move to
-/// the host-agnostic engine. `CommandConsumer` already implements the engine
-/// `SwapRing` acknowledge hooks (`advance_resolved` ≡ `advance_pending`,
-/// `rollback_last_pop` ≡ `rollback_last_pop`), so no second ring exists: the
-/// drain operates on the single source of truth (`cmd_consumer`), and the
-/// `deferred_structural` slot beside it is the drain's observable parking
-/// slot — kept for the `deactivate()` ack-gapless contract, never written
-/// independently of the 3-phase resolution.
+/// The structural-swap *scheduler* is the engine's generic scheduler (the
+/// canonical 3-phase protocol in `neural_amp_modeler_rs::common::spsc::swap`),
+/// adopted here through its documented tuning surface
+/// ([`CMD_SWAP_TUNABLES`] / [`SLIMMABLE_SWAP_TUNABLES`]: never an averaged
+/// or unified configuration). [`cmd_drain`](Self::cmd_drain) owns the
+/// command ring ([`CommandConsumer`], the engine `SwapRing` impl) and its
+/// deferred slot; [`slimmable_drain`](Self::slimmable_drain) owns the
+/// dedicated slimmable ring. The drain's 3-phase resolution is the only
+/// writer of both. The cold *handlers* (`apply_structural` /
+/// `discard_structural_payload` in `events.rs`) stay here: [`GcItem`]
+/// decomposition, latency recompute, and command sequence bookkeeping are
+/// host-specific. `deactivate()` resolves a payload still parked at
+/// teardown via `RtSwapDrain::into_parts` (heap resources dropped on the
+/// main thread, never on the audio thread).
 pub struct NamClapProcessor<'a> {
     /// Active model for the left channel (None = bypass).
     pub(crate) model_l: Option<Box<StaticModel>>,
@@ -133,7 +156,7 @@ pub struct NamClapProcessor<'a> {
     /// Set to the generation carried by the model-install payload in
     /// `cold_load_model()` — never read back from the shared atomic, which may
     /// have already advanced past this model. `signal_slimmable_rebuild()`
-    /// publishes it into the rebuild request and `drain_slimmable_models()`
+    /// publishes it into the rebuild request and the slimmable swap handler
     /// compares it against each rebuilt delivery to reject stale results.
     pub(crate) model_generation: u64,
     /// Active cab-sim convolution adapter (None = bypass, zero cost).
@@ -243,21 +266,37 @@ pub struct NamClapProcessor<'a> {
     /// before retiring through the parking lot; cleared with `Release` by the
     /// audio thread once the sweep finds the lot empty.
     pub(crate) parking_lot_dirty: AtomicBool,
-    /// Command consumer with acknowledgment.
-    pub(crate) cmd_consumer: CommandConsumer<'a>,
-    /// Single-slot deferral for Command Budgeting.
+    /// Engine structural-swap scheduler for the command channel.
     ///
-    /// When the per-callback structural budget is exhausted, the drained
-    /// structural command is parked here (its sequence slot is rolled back so
-    /// the ack never covers an unapplied command) and the drain loop stops —
-    /// everything still in the ring is causally *after* this command, so FIFO
-    /// order is preserved. At the start of the next callback the parked command
-    /// is applied first (or superseded by a newer same-kind ring head via
-    /// command coalescing, in which case its resources are discarded off-RT
-    /// through the GC cascade).
-    pub(crate) deferred_structural: Option<ClapParamPayload>,
-    /// SPSC channel: Main Thread -> Audio Thread (Slimmable model consumer).
-    pub(crate) slimmable_rx: Consumer<SlimmableRebuild>,
+    /// Owns the audio-thread end of the command SPSC ([`CommandConsumer`],
+    /// the engine `SwapRing` impl with gapless sequence bookkeeping) and the
+    /// single deferred slot of the canonical 3-phase protocol. Shares the
+    /// callback [`SwapBudget`](neural_amp_modeler_rs::common::spsc::SwapBudget)
+    /// with [`slimmable_drain`](Self::slimmable_drain) (command drains first,
+    /// slimmable second — deterministic ordering). When the per-callback
+    /// structural budget is exhausted, the drained structural
+    /// command parks in the drain's deferred slot (its sequence slot rolled
+    /// back so the ack never covers an unapplied command) and the drain
+    /// stops — everything still in the ring is causally *after* this
+    /// command, so FIFO order is preserved. At the start of the next
+    /// callback the parked command resolves first: applied under the budget,
+    /// or superseded by a newer same-kind coalescible ring head (command
+    /// coalescing), in which case its resources are discarded off-RT through
+    /// the GC cascade.
+    pub(crate) cmd_drain: RtSwapDrain<CommandConsumer<'a>>,
+    /// Engine structural-swap scheduler for the dedicated slimmable ring.
+    ///
+    /// Owns the audio-thread end of the slimmable SPSC
+    /// (`Consumer<Box<SlimmableRebuild>>`, the engine `SwapRing` impl with
+    /// no-op sequence hooks — the slimmable channel carries no ack) and the
+    /// single deferred slot of the canonical 3-phase protocol. Shares the
+    /// callback [`SwapBudget`](neural_amp_modeler_rs::common::spsc::SwapBudget)
+    /// with `cmd_drain` (command drains first, slimmable second — deterministic
+    /// ordering), so at most `MAX_STRUCTURAL_COMMANDS_PER_CALLBACK` structural
+    /// applies land per callback across both drains. A budget-exhausted head
+    /// stays queued with FIFO intact; a stale or superseded delivery retires
+    /// through the GC cascade without touching the active DSP state.
+    pub(crate) slimmable_drain: RtSwapDrain<rtrb::Consumer<Box<SlimmableRebuild>>>,
     /// GC channel: Audio Thread -> Main Thread (Producer).
     pub(crate) gc_tx: Producer<GcItem>,
     /// Fallback buffer for GC overflow (overwrite).

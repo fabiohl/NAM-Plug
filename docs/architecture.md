@@ -232,7 +232,7 @@ During plugin `activate()`, channel receivers (`param_rx`, `slimmable_rx`), `gc_
 
 ### 5.5 Cold-Path Latency Caching (`cached_effective_latency`)
 
-Recomputing effective latency (resampler latency + oversample latency + cabsim IR latency) involves division and multiple structure queries. Effective latency is cached in `cached_effective_latency` (`src/clap/processor/state.rs`) and recomputed strictly during cold swap routines (`swap_model`, `swap_cabsim`, `apply_oversample`), completely eliminating latency computation from the hot `process_events` per-block path while driving instant host PDC updates via `clap_plugin_latency`.
+Recomputing effective latency (resampler latency + oversample latency + cabsim IR latency) involves division and multiple structure queries. Effective latency is cached in `cached_effective_latency` (`src/clap/processor/state.rs`) and recomputed strictly during cold swap routines (`cold_load_model`, `cold_load_cabsim`, `cold_load_os` / `apply_oversample`), completely eliminating latency computation from the hot `process_events` per-block path while driving instant host PDC updates via `clap_plugin_latency`.
 
 ### 5.6 FFI Lifetime Safety, Panic Guard & Multi-Instance Isolation
 
@@ -368,7 +368,7 @@ graph TD
 ### 6.1 Execution Sequence
 
 1. **Subnormal & Denormal Setup:** First block enables Flush-To-Zero (FTZ) and Denormals-Are-Zero (DAZ) via SSE control registers.
-2. **Event & Command Draining (`process_events()`):** Drains SPSC `param_rx` (model swaps, IR swaps, oversampling rebuilds), drains DAW sample-accurate event queues, and updates local parameter targets.
+2. **Event & Command Draining (`process_events()`):** Drains the mixed command ring and the dedicated slimmable ring through the engine `RtSwapDrain` schedulers (`cmd_drain`, `slimmable_drain`; shared `SwapBudget`, at most one structural apply per callback), then updates local parameter targets from GUI atomics. Host sample-accurate parameter events are applied later via block-splitting in `process_dsp_audio`.
 3. **Channel Extraction (`extract_channels()`):** Maps host input buffers into contiguous working scratch buffers. Counts active channels (`1` or `2`) for adaptive metering.
 4. **Input Gain & Stage:** Applies user input gain (SIMD + `ParamSmoother`), injects `-220 dBFS` anti-subnormal dither, and evaluates the Noise Gate FSM.
 5. **Neural Inference Execution (`run_inference()`):**

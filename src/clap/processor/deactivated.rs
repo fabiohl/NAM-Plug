@@ -26,9 +26,11 @@ pub(crate) struct DeactivatedDspState {
     /// Monotonic generation of the active model identity,
     /// persisted with the model so a reactivation keeps the same generation.
     pub(crate) model_generation: u64,
-    /// Cab-sim convolution adapter. Reusable only if `partition_size` matches
-    /// the current `max_frames_count` (all FFT plans and FDL are sized by
-    /// partition size at construction time). Kept `Box`ed to preserve the
+    /// Cab-sim convolution adapter. The underlying `process_block` driver is
+    /// block-agnostic — host blocks of any size are chunked against the fixed
+    /// partition internally — so the adapter is reusable across buffer-size
+    /// changes and only a host sample-rate change (the IR is resampled to the
+    /// host rate at build time) forces a rebuild. Kept `Box`ed to preserve the
     /// end-to-end real-time safe ownership contract.
     pub(crate) cabsim_adapter: Option<Box<CabSimAdapter>>,
     /// Polyphase sinc resampler. Reusable only if `host_rate` matches the

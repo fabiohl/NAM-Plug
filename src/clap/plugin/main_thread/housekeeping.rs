@@ -171,7 +171,7 @@ impl<'a> NamClapMainThread<'a> {
                 match self
                     .slimmable_tx
                     .borrow_mut()
-                    .push(SlimmableRebuild { generation, model })
+                    .push(Box::new(SlimmableRebuild { generation, model }))
                 {
                     Ok(()) => {
                         self.shared

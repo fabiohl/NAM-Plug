@@ -483,9 +483,11 @@ pub struct ColdShared {
     /// Unique instance identifier for multi-instance telemetry and logging isolation.
     pub instance_id: u64,
     /// SPSC channel: Main Thread -> Audio Thread (New parameters/models).
-    pub param_tx: Mutex<Option<Producer<ClapParamPayload>>>,
+    /// Payloads travel boxed: boxes are created on the main-thread push path
+    /// only, so the audio thread pops with zero allocation.
+    pub param_tx: Mutex<Option<Producer<Box<ClapParamPayload>>>>,
     /// SPSC channel: Main Thread -> Audio Thread (Consumer).
-    pub param_rx: Mutex<Option<Consumer<ClapParamPayload>>>,
+    pub param_rx: Mutex<Option<Consumer<Box<ClapParamPayload>>>>,
     /// GC channel: Audio Thread -> Main Thread (Obsolete models for disposal).
     pub gc_tx: Mutex<Option<Producer<GcItem>>>,
     /// GC channel: Audio Thread -> Main Thread (Consumer).
@@ -587,9 +589,12 @@ pub struct ColdShared {
     /// re-activation, the samples are resampled to the new rate.
     pub ir_raw_sample_rate: AtomicU32,
     /// SPSC channel: Main Thread -> Audio Thread (Slimmable model producer).
-    pub slimmable_tx: Mutex<Option<Producer<SlimmableRebuild>>>,
+    /// Boxed end-to-end (main thread → SPSC → RT swap → GC) so the engine
+    /// `SwapRing` surface (`Consumer<Box<P>>`) applies with zero allocation
+    /// on the audio thread.
+    pub slimmable_tx: Mutex<Option<Producer<Box<SlimmableRebuild>>>>,
     /// SPSC channel: Main Thread -> Audio Thread (Slimmable model consumer).
-    pub slimmable_rx: Mutex<Option<Consumer<SlimmableRebuild>>>,
+    pub slimmable_rx: Mutex<Option<Consumer<Box<SlimmableRebuild>>>>,
     /// Slimmable rebuild request payload: the monotonic model generation the
     /// audio thread was running when it requested the rebuild. Written by the audio thread (Relaxed, ordered by the
     /// `RT_STATUS_NEEDS_SLIMMABLE_REBUILD` Release flag), read by the main

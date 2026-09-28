@@ -215,11 +215,15 @@ pub(crate) fn process_sub_block(
     if let Some(ref mut conv) = ctx.conv
         && !conv.is_passthrough()
     {
-        // The IR operates directly on the final output scratch: `process_in_place`
+        // The IR operates directly on the final output scratch: `process_block`
         // consumes the model output and writes the convolution result back into
         // the same buffer, so no intermediate model buffer (and no transfer copy)
-        // is needed on the audio callback.
-        conv.process_in_place(&mut buf_out_l[..n_out], Some(ctx.rt_status));
+        // is needed on the audio callback. The driver is block-agnostic — it
+        // chunks arbitrary host blocks against the fixed partition internally —
+        // so the output stream is invariant to host block-size variations
+        // (including sizes that exceed the partition) and the partition-cap
+        // clamp of the legacy call can never flag a contract violation here.
+        conv.process_block(&mut buf_out_l[..n_out], Some(ctx.rt_status));
         // The tail budget is re-armed to the full IR duration whenever active
         // audio is effectively fed into the convolution module. Without this,
         // the first gate close consumes the budget to zero and every later note
@@ -498,8 +502,10 @@ fn process_crossfade_sub_block(
             && !conv.is_passthrough()
         {
             // The IR operates directly on the final output scratch (see the
-            // main-path comment in `process_sub_block`).
-            conv.process_in_place(&mut buf_out_l[..n_o], Some(ctx.rt_status));
+            // main-path comment in `process_sub_block`): the block-agnostic
+            // driver keeps the crossfade wet stream invariant to host
+            // block-size variations as well.
+            conv.process_block(&mut buf_out_l[..n_o], Some(ctx.rt_status));
             // Re-arm the tail budget for active audio (see the main-path
             // comment in `process_sub_block`).
             conv.rearm_tail();

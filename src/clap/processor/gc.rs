@@ -5,7 +5,6 @@
 //! Must remain alloc/lock-free (array parking-lot + overflow buffer).
 
 use super::NamClapProcessor;
-use neural_amp_modeler_rs::common::spsc::GcItem;
 use std::sync::atomic::Ordering;
 
 impl<'a> NamClapProcessor<'a> {
@@ -36,18 +35,5 @@ impl<'a> NamClapProcessor<'a> {
         if !any_remaining {
             self.parking_lot_dirty.store(false, Ordering::Release);
         }
-    }
-
-    /// Attempts to send an item for safe disposal (GC).
-    /// If the main channel is full, falls back to the parking lot and then the overflow buffer.
-    pub(super) fn push_to_gc(&mut self, item: GcItem) {
-        self.parking_lot_dirty.store(true, Ordering::Release);
-        neural_amp_modeler_rs::common::spsc::gc_cascade(
-            Some(item),
-            &mut self.gc_tx,
-            &mut self.parking_lot,
-            &self.gc_overflow,
-            &self.rt_status,
-        );
     }
 }

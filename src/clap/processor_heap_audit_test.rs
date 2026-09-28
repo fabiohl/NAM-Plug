@@ -431,8 +431,13 @@ mod tests {
         const BLOCK: usize = 512;
         const HOST_RATE: u32 = 48000;
         const ROUNDS: usize = 8;
-        const DEFERS_PER_ROUND: u32 = 5;
-        const SUPERSEDES_PER_ROUND: u32 = 2;
+        // Engine protocol, event-level counting per round: IR + model bursts
+        // coalesce latest-wins inside their first callback (0 defers); the
+        // mixed burst parks the restore behind the oversample install (1);
+        // the 3-restore burst yields park + stop (2), stop (1), idle (0).
+        // Total 4 defers. Supersedes: 2 per coalescing burst = 4.
+        const DEFERS_PER_ROUND: u32 = 4;
+        const SUPERSEDES_PER_ROUND: u32 = 4;
 
         let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
         assert!(
@@ -543,8 +548,9 @@ mod tests {
         let mut next_gen: u64 = 0;
 
         for round in 0..ROUNDS {
-            // Burst 1 — same-kind IR coalescing burst (3 → 2 callbacks; the
-            // deferred IR B is superseded by C on the second callback).
+            // Burst 1 — same-kind IR coalescing burst (3 payloads → 1
+            // callback: the engine collapses the burst latest-wins and
+            // applies C directly; A and B are superseded to the GC).
             {
                 let mt = unsafe { &*main_thread_ptr };
                 for len in [512usize, 1024, 2048] {
@@ -569,8 +575,9 @@ mod tests {
                 "IR burst: supersede + apply",
             ));
 
-            // Burst 2 — same-kind model coalescing burst (3 → 2 callbacks; the
-            // deferred middle model is superseded by the last one).
+            // Burst 2 — same-kind model coalescing burst (3 payloads → 1
+            // callback: only the last model installs; the two intermediates
+            // are superseded to the GC).
             {
                 let mt = unsafe { &*main_thread_ptr };
                 for name in [

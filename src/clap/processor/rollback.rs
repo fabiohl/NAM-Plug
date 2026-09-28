@@ -27,9 +27,9 @@ use super::deactivated::DeactivatedDspState;
 /// (transferring them into `NamClapProcessor`) and disarms the destructor.
 pub(crate) struct ActivateRollbackGuard<'a> {
     shared: &'a NamClapShared,
-    pub(crate) param_rx: Option<Consumer<ClapParamPayload>>,
+    pub(crate) param_rx: Option<Consumer<Box<ClapParamPayload>>>,
     pub(crate) gc_tx: Option<Producer<GcItem>>,
-    pub(crate) slimmable_rx: Option<Consumer<SlimmableRebuild>>,
+    pub(crate) slimmable_rx: Option<Consumer<Box<SlimmableRebuild>>>,
     pub(crate) deactivated: Option<DeactivatedDspState>,
     pub(crate) pending_restart_os_factor: Option<PendingRestartOs>,
 }
@@ -37,9 +37,9 @@ pub(crate) struct ActivateRollbackGuard<'a> {
 /// Resources extracted from `ColdShared` during `activate()`.
 /// Returned by `ActivateRollbackGuard::defuse()` on success.
 pub(crate) struct ActivatedResources {
-    pub(crate) param_rx: Consumer<ClapParamPayload>,
+    pub(crate) param_rx: Consumer<Box<ClapParamPayload>>,
     pub(crate) gc_tx: Producer<GcItem>,
-    pub(crate) slimmable_rx: Consumer<SlimmableRebuild>,
+    pub(crate) slimmable_rx: Consumer<Box<SlimmableRebuild>>,
 }
 
 impl<'a> ActivateRollbackGuard<'a> {

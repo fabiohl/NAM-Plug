@@ -6,6 +6,12 @@
 //! Extracts the triplicated logic of updating `self.params.*`,
 //! `self.shared.ui_to_rt.*`, `smoother`, and `gate_dirty` from the
 //! three event-processing paths (SPSC, Host Events, GUI sync).
+//!
+//! The full-snapshot apply (`apply_params_from_spsc`) and the oversample
+//! latency policy (`apply_oversample`) are defined once on
+//! [`ClapCommandSwapHandler`] — the command-swap handler — so the ring drain
+//! and the host-event/GUI paths share a single definition; the processor
+//! methods here are thin split-view adapters.
 
 use super::NamClapProcessor;
 use crate::clap::extensions::params::{
@@ -14,7 +20,9 @@ use crate::clap::extensions::params::{
     bypass_f32_to_bool, bypass_u32_to_bool, sanitize_param_value,
 };
 use crate::clap::plugin::PendingRestartOs;
+use crate::clap::processor::events::{ClapCommandSwapHandler, command_swap_parts};
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
+use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_OS_REBUILD;
 use std::sync::atomic::Ordering;
 
 impl<'a> NamClapProcessor<'a> {
@@ -112,85 +120,17 @@ impl<'a> NamClapProcessor<'a> {
 
     // ── SPSC full-apply ───────────────────────────────────────────
 
+    /// Applies an oversampling factor change (host-event or SPSC snapshot).
+    ///
+    /// Thin adapter: the actual latency policy lives on
+    /// [`ClapCommandSwapHandler::apply_oversample`]; this processor view
+    /// exists for the host-event path (`set_oversample`) and the GUI sync.
     pub(crate) fn apply_oversample(
         &mut self,
         factor: neural_amp_modeler_rs::dsp::oversample::OversampleFactor,
     ) {
-        // CLAP latency policy — while the plugin is active,
-        // structural changes that alter latency must request a host restart
-        // and defer the rebuild to the next `activate()`.
-        //
-        // The pending request uses the `PendingRestartOs` encoding, so a
-        // pending transition *to Off* is representable (the `None` variant no
-        // longer collides with "no restart pending"). Coalescing is
-        // latest-wins: if a restart for the *same* target factor is already
-        // pending, we skip the redundant `request_restart()` (exactly one
-        // restart per coalesced relevant transition).
-        let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
-        if buffer_size > 0 {
-            let prev = PendingRestartOs::load(
-                &self.shared.cold.pending_restart_os_factor,
-                Ordering::Relaxed,
-            );
-            if prev != PendingRestartOs::Pending(factor) {
-                PendingRestartOs::Pending(factor).store(
-                    &self.shared.cold.pending_restart_os_factor,
-                    Ordering::Release,
-                );
-                self.host.request_restart();
-            }
-        } else {
-            // Plugin is not active yet — safe to flag the main thread for
-            // an immediate rebuild (allocate off-RT, deliver via SPSC).
-            self.rt_status
-                .requested_os_factor
-                .store(factor.to_f32() as u32, Ordering::Relaxed);
-            self.rt_status
-                .set_flag_release(neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_OS_REBUILD);
-        }
-    }
-
-    pub(super) fn apply_params_from_spsc(&mut self, mut new_params: RtProcessingParams) {
-        new_params.input_gain_db = sanitize_param_value(PARAM_INPUT_GAIN, new_params.input_gain_db);
-        new_params.output_gain_db =
-            sanitize_param_value(PARAM_OUTPUT_GAIN, new_params.output_gain_db);
-        new_params.gate_threshold_db =
-            sanitize_param_value(PARAM_GATE_THRESH, new_params.gate_threshold_db);
-
-        let adaptive_changed = self.params.adaptive_compute != new_params.adaptive_compute;
-        let slim_override_changed = self.params.slim_override != new_params.slim_override;
-        let oversample_changed = self.params.oversample != new_params.oversample;
-        let activation_changed =
-            self.params.activation_precision != new_params.activation_precision;
-        let gate_changed = self.params.gate_threshold_db != new_params.gate_threshold_db;
-        self.params = new_params;
-        self.smoother_in.set_target(
-            self.gain_lut
-                .db_to_linear(self.params.input_gain_db + self.mod_input_gain),
-        );
-        self.smoother_out.set_target(
-            self.gain_lut
-                .db_to_linear(self.params.output_gain_db + self.mod_output_gain),
-        );
-        if adaptive_changed {
-            self.adaptive_compute
-                .set_mode(self.params.adaptive_compute, &self.rt_status);
-        }
-        if slim_override_changed {
-            self.adaptive_compute
-                .set_slim_override(self.params.slim_override);
-        }
-        if oversample_changed {
-            self.apply_oversample(self.params.oversample);
-        }
-        if activation_changed {
-            neural_amp_modeler_rs::math::activations::set_activation_tls(
-                self.params.activation_precision,
-            );
-        }
-        if gate_changed {
-            self.gate_dirty = true;
-        }
+        let (mut handler, _gc) = command_swap_parts!(self);
+        handler.apply_oversample(factor);
     }
 
     // ── GUI sync helpers ──────────────────────────────────────────
@@ -305,6 +245,97 @@ impl<'a> NamClapProcessor<'a> {
         if shared_mode != self.params.activation_precision {
             self.params.activation_precision = shared_mode;
             neural_amp_modeler_rs::math::activations::set_activation_tls(shared_mode);
+        }
+    }
+}
+
+impl ClapCommandSwapHandler<'_, '_> {
+    /// Applies an oversampling factor change under the CLAP latency policy.
+    ///
+    /// While the plugin is active, structural changes that alter latency must
+    /// request a host restart and defer the rebuild to the next `activate()`.
+    ///
+    /// The pending request uses the `PendingRestartOs` encoding, so a pending
+    /// transition *to Off* is representable (the `None` variant no longer
+    /// collides with "no restart pending"). Coalescing is latest-wins: if a
+    /// restart for the *same* target factor is already pending, the redundant
+    /// `request_restart()` is skipped (exactly one restart per coalesced
+    /// relevant transition).
+    pub(super) fn apply_oversample(
+        &mut self,
+        factor: neural_amp_modeler_rs::dsp::oversample::OversampleFactor,
+    ) {
+        let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
+        if buffer_size > 0 {
+            let prev = PendingRestartOs::load(
+                &self.shared.cold.pending_restart_os_factor,
+                Ordering::Relaxed,
+            );
+            if prev != PendingRestartOs::Pending(factor) {
+                PendingRestartOs::Pending(factor).store(
+                    &self.shared.cold.pending_restart_os_factor,
+                    Ordering::Release,
+                );
+                self.host.request_restart();
+            }
+        } else {
+            // Plugin is not active yet — safe to flag the main thread for
+            // an immediate rebuild (allocate off-RT, deliver via SPSC).
+            self.rt_status
+                .requested_os_factor
+                .store(factor.to_f32() as u32, Ordering::Relaxed);
+            self.rt_status.set_flag_release(RT_STATUS_NEEDS_OS_REBUILD);
+        }
+    }
+
+    /// Applies a full parameter snapshot delivered over the command ring
+    /// (light `Params` payload) or as part of a restore transaction.
+    ///
+    /// Values are sanitized against the declared CLAP ranges; smoothers
+    /// retarget sample-accurately (including the current modulation), and
+    /// only the fields that actually changed trigger their side effects
+    /// (adaptive mode, slim override, oversample policy, activation TLS,
+    /// gate-coefficient invalidation).
+    pub(super) fn apply_params_from_spsc(&mut self, mut new_params: RtProcessingParams) {
+        new_params.input_gain_db = sanitize_param_value(PARAM_INPUT_GAIN, new_params.input_gain_db);
+        new_params.output_gain_db =
+            sanitize_param_value(PARAM_OUTPUT_GAIN, new_params.output_gain_db);
+        new_params.gate_threshold_db =
+            sanitize_param_value(PARAM_GATE_THRESH, new_params.gate_threshold_db);
+
+        let adaptive_changed = self.params.adaptive_compute != new_params.adaptive_compute;
+        let slim_override_changed = self.params.slim_override != new_params.slim_override;
+        let oversample_changed = self.params.oversample != new_params.oversample;
+        let activation_changed =
+            self.params.activation_precision != new_params.activation_precision;
+        let gate_changed = self.params.gate_threshold_db != new_params.gate_threshold_db;
+        *self.params = new_params;
+        self.smoother_in.set_target(
+            self.gain_lut
+                .db_to_linear(self.params.input_gain_db + *self.mod_input_gain),
+        );
+        self.smoother_out.set_target(
+            self.gain_lut
+                .db_to_linear(self.params.output_gain_db + *self.mod_output_gain),
+        );
+        if adaptive_changed {
+            self.adaptive_compute
+                .set_mode(self.params.adaptive_compute, self.rt_status);
+        }
+        if slim_override_changed {
+            self.adaptive_compute
+                .set_slim_override(self.params.slim_override);
+        }
+        if oversample_changed {
+            self.apply_oversample(self.params.oversample);
+        }
+        if activation_changed {
+            neural_amp_modeler_rs::math::activations::set_activation_tls(
+                self.params.activation_precision,
+            );
+        }
+        if gate_changed {
+            *self.gate_dirty = true;
         }
     }
 }

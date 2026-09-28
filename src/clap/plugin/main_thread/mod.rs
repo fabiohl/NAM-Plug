@@ -63,7 +63,9 @@ pub struct NamClapMainThread<'a> {
     /// Consumer to collect garbage (obsolete models) from the audio thread.
     pub gc_rx: RefCell<Consumer<GcItem>>,
     /// Producer to send slimmable-rebuilt models to the audio thread.
-    pub slimmable_tx: RefCell<Producer<SlimmableRebuild>>,
+    /// Boxed end-to-end so the engine `SwapRing` surface applies with zero
+    /// allocation on the audio thread (boxes created only on the main thread).
+    pub slimmable_tx: RefCell<Producer<Box<SlimmableRebuild>>>,
     /// Cached last latency reported to the host to avoid redundant notifications.
     pub last_reported_latency: Cell<u32>,
     /// Cached last CabSim tail length reported to the host to avoid redundant notifications.

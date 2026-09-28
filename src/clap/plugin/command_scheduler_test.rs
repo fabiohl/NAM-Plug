@@ -79,7 +79,7 @@ fn coalesce_merges_consecutive_param_updates() {
 
     let mut found = false;
     while let Ok(payload) = rx.pop() {
-        if let ClapParamPayload::Params(p) = payload {
+        if let ClapParamPayload::Params(p) = *payload {
             assert_eq!(p.input_gain_db, 99.0, "should keep only the latest value");
             found = true;
         }
@@ -109,7 +109,7 @@ fn coalesce_preserves_multi_param_merging() {
 
     let mut final_params: Option<RtProcessingParams> = None;
     while let Ok(payload) = rx.pop() {
-        if let ClapParamPayload::Params(p) = payload {
+        if let ClapParamPayload::Params(p) = *payload {
             final_params = Some(p);
         }
     }
@@ -137,7 +137,7 @@ fn non_coalescable_flushes_pending_params_first() {
     let expected_order = vec!["Params", "LoadCabIr"];
     let mut actual_order = Vec::new();
     while let Ok(payload) = rx.pop() {
-        actual_order.push(match payload {
+        actual_order.push(match *payload {
             ClapParamPayload::Params(_) => "Params",
             ClapParamPayload::LoadCabIr { .. } => "LoadCabIr",
             _ => "Other",
@@ -275,7 +275,7 @@ fn interleaved_commands_preserve_ordering() {
 
     let mut order = Vec::new();
     while let Ok(payload) = consumer_rx.pop() {
-        order.push(match payload {
+        order.push(match *payload {
             ClapParamPayload::Params(_) => "P",
             ClapParamPayload::LoadCabIr { .. } => "C",
             _ => "?",
@@ -458,7 +458,7 @@ fn force_flush_full_retains_snapshot() {
 
     // Drain the ring, then retry — the retained 42.0 must arrive.
     let mut popped = rx.pop().expect("first snapshot must be present");
-    assert!(matches!(popped, ClapParamPayload::Params(_)));
+    assert!(matches!(*popped, ClapParamPayload::Params(_)));
 
     let seq = producer
         .force_flush()
@@ -466,7 +466,7 @@ fn force_flush_full_retains_snapshot() {
     assert!(seq > 0, "retained flush must consume a sequence number");
 
     popped = rx.pop().expect("retained snapshot must be delivered");
-    match popped {
+    match *popped {
         ClapParamPayload::Params(p) => {
             assert_eq!(
                 p.input_gain_db, 42.0,
@@ -689,7 +689,7 @@ fn consumer_rollback_and_advance_pending_keep_ack_gapless() {
     let mut consumer = CommandConsumer::new(rx, &last_ack);
 
     for i in 0..3u32 {
-        tx.push(ClapParamPayload::Params(rt_gain(i as f32)))
+        tx.push(Box::new(ClapParamPayload::Params(rt_gain(i as f32))))
             .unwrap();
     }
 
@@ -723,7 +723,7 @@ fn consumer_peek_does_not_consume() {
     let (mut tx, rx) = rtrb::RingBuffer::new(16);
     let mut consumer = CommandConsumer::new(rx, &last_ack);
 
-    tx.push(ClapParamPayload::LoadCabIr { adapter: None })
+    tx.push(Box::new(ClapParamPayload::LoadCabIr { adapter: None }))
         .unwrap();
 
     // Peek returns the head without consuming it.
@@ -742,4 +742,220 @@ fn consumer_peek_does_not_consume() {
     // Empty ring: peek returns None, pop returns None.
     assert!(consumer.peek().is_none());
     assert!(consumer.pop().is_none());
+}
+
+/// The engine `SwapRing` surface must behave exactly like the inherent
+/// sequence bookkeeping: the same ring, the same ack, one source of truth.
+#[test]
+fn swap_ring_hooks_mirror_sequence_bookkeeping() {
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (mut tx, rx) = rtrb::RingBuffer::new(8);
+    let mut consumer = CommandConsumer::new(rx, &last_ack);
+
+    assert!(SwapRing::is_empty(&consumer), "fresh ring must be empty");
+    assert_eq!(SwapRing::occupied(&consumer), 0);
+
+    tx.push(Box::new(ClapParamPayload::LoadCabIr { adapter: None }))
+        .unwrap();
+    assert!(!SwapRing::is_empty(&consumer));
+    assert_eq!(SwapRing::occupied(&consumer), 1);
+
+    // Peek through the trait sees the ring head without consuming it.
+    let peeked = SwapRing::peek(&consumer).expect("ring head must be visible");
+    assert!(matches!(peeked, ClapParamPayload::LoadCabIr { .. }));
+    assert_eq!(SwapRing::occupied(&consumer), 1, "peek must not consume");
+
+    // Pop through the trait advances the same sequence counter.
+    assert!(SwapRing::pop(&mut consumer).is_some());
+    consumer.ack_processed();
+    assert_eq!(
+        last_ack.load(Ordering::Relaxed),
+        1,
+        "SwapRing::pop must advance the ack sequence"
+    );
+    assert!(SwapRing::is_empty(&consumer));
+}
+
+/// Deactivation returns the channel end to cold storage and reactivation
+/// rebuilds the consumer from it: sequence tracking must reseed from the ack
+/// atomic so a command parked after the cycle never regresses the ack, and
+/// its resolution keeps the mapping monotonic and gapless.
+#[test]
+fn consumer_sequence_survives_deactivate_reactivate() {
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (mut tx, rx) = rtrb::RingBuffer::new(16);
+
+    // Active cycle 1: two commands applied and acked.
+    let mut consumer = CommandConsumer::new(rx, &last_ack);
+    tx.push(Box::new(ClapParamPayload::Params(rt_gain(1.0))))
+        .unwrap();
+    tx.push(Box::new(ClapParamPayload::Params(rt_gain(2.0))))
+        .unwrap();
+    assert!(SwapRing::pop(&mut consumer).is_some());
+    assert!(SwapRing::pop(&mut consumer).is_some());
+    consumer.ack_processed();
+    assert_eq!(last_ack.load(Ordering::Relaxed), 2);
+
+    // deactivate(): the consumer end returns to cold storage...
+    let rx = consumer.into_inner();
+    // ...and reactivation rebuilds it, reseeding the sequence tracking.
+    let mut consumer = CommandConsumer::new(rx, &last_ack);
+    assert_eq!(last_ack.load(Ordering::Relaxed), 2);
+
+    // A command parked in the new cycle must not regress the ack below the
+    // reactivation seed.
+    tx.push(Box::new(ClapParamPayload::LoadCabIr { adapter: None }))
+        .unwrap();
+    assert!(SwapRing::pop(&mut consumer).is_some());
+    SwapRing::rollback_last_pop(&mut consumer);
+    consumer.ack_processed();
+    assert_eq!(
+        last_ack.load(Ordering::Relaxed),
+        2,
+        "the parked command must not be acked"
+    );
+
+    // Resolution consumes the slot exactly once.
+    SwapRing::advance_resolved(&mut consumer);
+    consumer.ack_processed();
+    assert_eq!(
+        last_ack.load(Ordering::Relaxed),
+        3,
+        "ack must stay monotonic and gapless across the deactivate/activate cycle"
+    );
+}
+
+/// End-to-end validation through the engine structural-swap scheduler: an
+/// `RtSwapDrain` owns the command consumer via its `SwapRing` impl, and the
+/// ack stays perfectly monotonic and gapless when a structural command is
+/// parked by the budget (rollback hook) and resolved on the next callback
+/// (advance hook).
+///
+/// The counting handler publishes the ack as `seed + consumed`: every
+/// install/discard of the drain consumes exactly one sequence slot — popped
+/// payloads, or parked ones resolved without a pop — so this mirrors the
+/// end-of-drain ack flush without reaching into the consumer.
+#[test]
+fn test_sequence_ack_gapless_under_deferral() {
+    use neural_amp_modeler_rs::common::spsc::{
+        GcItem, GcOverflowBuffer, GcSink, RT_STATUS_STRUCTURAL_DEFERRED, RtStatusFlags,
+        RtSwapDrain, RtSwapHandler, SwapBudget, SwapTunables,
+    };
+    use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
+
+    struct AckCountingHandler {
+        seed: u64,
+        consumed: u64,
+        last_ack: Arc<AtomicU64>,
+    }
+
+    impl RtSwapHandler for AckCountingHandler {
+        type Payload = ClapParamPayload;
+
+        fn is_structural(&self, payload: &Self::Payload) -> bool {
+            payload.is_structural()
+        }
+
+        fn coalesce_key(&self, payload: &Self::Payload) -> Option<u64> {
+            payload
+                .structural_kind()
+                .filter(|kind| kind.is_coalescible())
+                .map(|kind| kind as u64)
+        }
+
+        fn install(&mut self, _payload: Box<Self::Payload>, _gc: &mut GcSink<'_>) {
+            self.consumed += 1;
+        }
+
+        fn discard(&mut self, _payload: Box<Self::Payload>, _gc: &mut GcSink<'_>) {
+            self.consumed += 1;
+        }
+
+        fn after_drain(&mut self, _gc: &mut GcSink<'_>) {
+            self.last_ack
+                .store(self.seed + self.consumed, Ordering::Release);
+        }
+    }
+
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let (mut tx, rx) = rtrb::RingBuffer::new(16);
+    let consumer = CommandConsumer::new(rx, &last_ack);
+    let tunables = SwapTunables {
+        pops_per_callback: 64,
+        swaps_per_callback: 1,
+        backlog_flag: false,
+    };
+    let mut drain = RtSwapDrain::new(consumer, tunables);
+
+    let mut parking_lot: [Option<GcItem>; 16] = std::array::from_fn(|_| None);
+    let overflow = GcOverflowBuffer::new(64);
+    let rt_status = RtStatusFlags::new();
+    let (mut gc_tx, _gc_rx) = rtrb::RingBuffer::new(64);
+
+    // Two different-key structural commands under a one-swap budget: the
+    // first flush-installs, the second parks (engine Phase 2).
+    tx.push(Box::new(ClapParamPayload::LoadCabIr { adapter: None }))
+        .unwrap();
+    tx.push(Box::new(ClapParamPayload::SetOversample {
+        os_l: Box::new(OversampleEngine::new(OversampleFactor::X2, 256).unwrap()),
+        os_r: Box::new(OversampleEngine::new(OversampleFactor::X2, 256).unwrap()),
+    }))
+    .unwrap();
+
+    // Callback 1 — the budget is exhausted by the flush-install, so the
+    // oversample swap parks; its sequence slot must be rolled back so the
+    // ack covers only the applied IR command.
+    let mut handler = AckCountingHandler {
+        seed: last_ack.load(Ordering::Acquire),
+        consumed: 0,
+        last_ack: Arc::clone(&last_ack),
+    };
+    {
+        let mut budget = SwapBudget::new(tunables.swaps_per_callback);
+        let mut gc = GcSink {
+            producer: &mut gc_tx,
+            parking_lot: &mut parking_lot,
+            overflow: &overflow,
+            rt_status: &rt_status,
+            parking_lot_dirty: None,
+        };
+        drain.drain(&mut handler, &mut budget, &mut gc);
+    }
+    assert_eq!(
+        last_ack.load(Ordering::Relaxed),
+        1,
+        "ack must cover exactly the applied command, never the parked one"
+    );
+    assert!(drain.has_deferred(), "the oversample swap must be parked");
+    assert!(
+        rt_status.check_and_clear_flag(RT_STATUS_STRUCTURAL_DEFERRED),
+        "parking must raise the structural-deferred flag"
+    );
+
+    // Callback 2 — the parked command resolves without a ring pop: its slot
+    // is consumed exactly once (advance hook), keeping the mapping gapless
+    // with the first command.
+    let mut handler = AckCountingHandler {
+        seed: last_ack.load(Ordering::Acquire),
+        consumed: 0,
+        last_ack: Arc::clone(&last_ack),
+    };
+    {
+        let mut budget = SwapBudget::new(tunables.swaps_per_callback);
+        let mut gc = GcSink {
+            producer: &mut gc_tx,
+            parking_lot: &mut parking_lot,
+            overflow: &overflow,
+            rt_status: &rt_status,
+            parking_lot_dirty: None,
+        };
+        drain.drain(&mut handler, &mut budget, &mut gc);
+    }
+    assert_eq!(
+        last_ack.load(Ordering::Relaxed),
+        2,
+        "ack must stay monotonic and gapless across the deferral"
+    );
+    assert!(!drain.has_deferred(), "the parked command must be resolved");
+    assert!(drain.is_empty(), "the ring must be fully drained");
 }

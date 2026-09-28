@@ -138,10 +138,10 @@ mod tests {
             let mt = unsafe { &*main_thread_ptr };
             mt.slimmable_tx
                 .borrow_mut()
-                .push(SlimmableRebuild {
+                .push(Box::new(SlimmableRebuild {
                     generation: stale_gen,
                     model: make_linear_model(0.5),
-                })
+                }))
                 .expect("slimmable push must succeed");
         }
         process_block(&mut started, &mut bufs);
@@ -180,10 +180,10 @@ mod tests {
             let mt = unsafe { &*main_thread_ptr };
             mt.slimmable_tx
                 .borrow_mut()
-                .push(SlimmableRebuild {
+                .push(Box::new(SlimmableRebuild {
                     generation: active_gen,
                     model: make_linear_model(0.9),
-                })
+                }))
                 .expect("slimmable push must succeed");
         }
         process_block(&mut started, &mut bufs);

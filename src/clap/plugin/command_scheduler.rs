@@ -17,9 +17,22 @@
 //! 3. **Ordering** — non-coalescable commands (model load, IR swap,
 //!    oversampling engine hot-swap) flush any pending coalesced parameters
 //!    *before* being enqueued, preserving the total causal order.
+//!
+//! # Boxed transport and the engine `SwapRing` surface
+//!
+//! The ring carries `Box<ClapParamPayload>`: boxes are created only on the
+//! main-thread push path (allocation is legal there), while the audio thread
+//! receives payloads already boxed — zero allocation when popping. This is
+//! the element shape the engine's structural-swap scheduler expects, so
+//! [`CommandConsumer`] implements
+//! [`SwapRing`](neural_amp_modeler_rs::common::spsc::SwapRing) directly and
+//! can be owned by an `RtSwapDrain` without any adapter ring: the drain
+//! operates on the single source of truth for commands, and the sequence
+//! bookkeeping stays in one place.
 
 use super::shared::ClapParamPayload;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
+use neural_amp_modeler_rs::common::spsc::SwapRing;
 use rtrb::{Consumer, Producer};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -141,7 +154,7 @@ impl CoalesceBuffer {
 /// Wraps an SPSC producer with coalescing logic and acknowledgment
 /// tracking. Owned exclusively by [`NamClapMainThread`](super::main_thread::NamClapMainThread).
 pub struct CommandProducer<'a> {
-    tx: Producer<ClapParamPayload>,
+    tx: Producer<Box<ClapParamPayload>>,
     next_seq: &'a AtomicU64,
     last_ack: &'a AtomicU64,
     coalescing: CoalesceBuffer,
@@ -151,16 +164,18 @@ pub struct CommandProducer<'a> {
 ///
 /// Wraps an SPSC consumer. Drains commands in `process_events()` and
 /// updates the atomic acknowledgment counter so the main thread can
-/// confirm delivery.
+/// confirm delivery. The ring carries boxed payloads so the consumer can
+/// implement the engine [`SwapRing`] surface with zero allocation on the
+/// audio thread.
 pub struct CommandConsumer<'a> {
-    rx: Consumer<ClapParamPayload>,
+    rx: Consumer<Box<ClapParamPayload>>,
     last_ack: &'a AtomicU64,
     /// Monotonic sequence number of the last command popped from the ring.
     ///
     /// The SPSC is FIFO and the producer assigns one sequence number per
     /// pushed item (no gaps), so the `k`-th popped command carries sequence
     /// `base + k`. This field tracks the exact sequence of the most recently
-    /// popped command, enabling strict `ack_up_to` semantics.
+    /// popped command, enabling strict `ack_processed` semantics.
     processed_seq: u64,
 }
 
@@ -168,9 +183,9 @@ pub struct CommandConsumer<'a> {
 /// plugin initialisation.
 pub struct CommandSchedulerChannels {
     /// Producer (main-thread → audio-thread).
-    pub cmd_tx: Producer<ClapParamPayload>,
+    pub cmd_tx: Producer<Box<ClapParamPayload>>,
     /// Consumer (audio-thread side).
-    pub cmd_rx: Consumer<ClapParamPayload>,
+    pub cmd_rx: Consumer<Box<ClapParamPayload>>,
 }
 
 /// Shared portion of the command scheduler stored in [`ColdShared`](super::shared::ColdShared).
@@ -180,9 +195,9 @@ pub struct CommandSchedulerChannels {
 /// sequence-number-based acknowledgment.
 pub struct CommandScheduler {
     /// Lock-protected SPSC producer (main-thread side).
-    pub cmd_tx: Mutex<Option<Producer<ClapParamPayload>>>,
+    pub cmd_tx: Mutex<Option<Producer<Box<ClapParamPayload>>>>,
     /// Lock-protected SPSC consumer (audio-thread side).
-    pub cmd_rx: Mutex<Option<Consumer<ClapParamPayload>>>,
+    pub cmd_rx: Mutex<Option<Consumer<Box<ClapParamPayload>>>>,
     /// Monotonic sequence counter incremented by the main thread.
     pub cmd_next_seq: AtomicU64,
     /// Last sequence fully drained by the audio thread (ack).
@@ -232,7 +247,11 @@ impl CommandScheduler {
 
     /// Returns previously extracted channel ends to the cold storage
     /// (used during deactivate / rollback).
-    pub fn restore_channels(&self, tx: Producer<ClapParamPayload>, rx: Consumer<ClapParamPayload>) {
+    pub fn restore_channels(
+        &self,
+        tx: Producer<Box<ClapParamPayload>>,
+        rx: Consumer<Box<ClapParamPayload>>,
+    ) {
         if let Ok(mut g) = self.cmd_tx.lock() {
             *g = Some(tx);
         }
@@ -252,7 +271,7 @@ impl<'a> CommandProducer<'a> {
     /// Creates a new producer wrapping the given SPSC endpoint and
     /// ack atomics.
     pub fn new(
-        tx: Producer<ClapParamPayload>,
+        tx: Producer<Box<ClapParamPayload>>,
         next_seq: &'a AtomicU64,
         last_ack: &'a AtomicU64,
     ) -> Self {
@@ -324,12 +343,15 @@ impl<'a> CommandProducer<'a> {
         if let Err(e) = self.force_flush() {
             return Err((e, cmd));
         }
-        match self.tx.push(cmd) {
+        // The box is created here on the main thread (allocation is legal
+        // off-RT); the audio thread pops it already boxed — zero allocation
+        // on the callback path.
+        match self.tx.push(Box::new(cmd)) {
             Ok(()) => {
                 let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
                 Ok(seq)
             }
-            Err(rtrb::PushError::Full(value)) => Err((PushError::Full, value)),
+            Err(rtrb::PushError::Full(value)) => Err((PushError::Full, *value)),
         }
     }
 
@@ -347,7 +369,7 @@ impl<'a> CommandProducer<'a> {
     /// `host.request_callback()`), never discard it with `let _ =`.
     pub fn force_flush(&mut self) -> Result<u64, PushError> {
         if let Some(snapshot) = self.coalescing.take_snapshot() {
-            match self.tx.push(ClapParamPayload::Params(snapshot)) {
+            match self.tx.push(Box::new(ClapParamPayload::Params(snapshot))) {
                 Ok(()) => {
                     let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
                     Ok(seq)
@@ -421,7 +443,7 @@ impl<'a> CommandConsumer<'a> {
     /// ack atomic. The internal processed-sequence counter is seeded from
     /// the current `last_ack` so sequence tracking survives deactivate /
     /// activate cycles (the ring and ack atomics persist across them).
-    pub fn new(rx: Consumer<ClapParamPayload>, last_ack: &'a AtomicU64) -> Self {
+    pub fn new(rx: Consumer<Box<ClapParamPayload>>, last_ack: &'a AtomicU64) -> Self {
         let processed_seq = last_ack.load(Ordering::Acquire);
         Self {
             rx,
@@ -432,10 +454,18 @@ impl<'a> CommandConsumer<'a> {
 
     /// Pops a single command from the SPSC channel (non-blocking).
     ///
-    /// Advances the internal processed-sequence counter on success so
-    /// [`ack_processed`](Self::ack_processed) acks the exact sequence of
-    /// the last command actually consumed.
+    /// Test helper: production draining goes through the engine
+    /// [`SwapRing`] `pop` (keeps the box). Both paths share
+    /// [`Self::pop_boxed`] as the single sequence-advance point.
+    #[cfg(test)]
     pub(crate) fn pop(&mut self) -> Option<ClapParamPayload> {
+        self.pop_boxed().map(|boxed| *boxed)
+    }
+
+    /// Pops the next boxed command — the core of the engine [`SwapRing`]
+    /// `pop` hook. The box arrives pre-allocated from the main-thread push,
+    /// so this never allocates on the audio thread.
+    fn pop_boxed(&mut self) -> Option<Box<ClapParamPayload>> {
         match self.rx.pop() {
             Ok(payload) => {
                 self.processed_seq = self.processed_seq.wrapping_add(1);
@@ -446,11 +476,11 @@ impl<'a> CommandConsumer<'a> {
     }
 
     /// Returns a shared reference to the next command in the ring without
-    /// consuming it (peek). Used by the RT drain loop to decide whether a
-    /// deferred structural command can be superseded by a newer same-kind
-    /// command already queued (command coalescing).
+    /// consuming it. The engine [`SwapRing`] drain uses this to decide
+    /// whether a deferred structural command can be superseded by a newer
+    /// same-kind head (latest-wins coalescing).
     pub(crate) fn peek(&self) -> Option<&ClapParamPayload> {
-        self.rx.peek().ok()
+        self.rx.peek().ok().map(|boxed| &**boxed)
     }
 
     /// Unwinds the sequence advance of the most recent [`pop`](Self::pop).
@@ -462,9 +492,8 @@ impl<'a> CommandConsumer<'a> {
     /// [`advance_pending`](Self::advance_pending)), keeping the ack gapless.
     ///
     /// Engine-contract alias: this is the `rollback_last_pop` hook of the
-    /// generic scheduler's ring surface (`SwapRing`, Sprint 7 / Epic E.2) —
-    /// the most recent pop is parked unapplied and its slot is re-resolved by
-    /// the next callback's Phase 0.
+    /// generic scheduler's [`SwapRing`] surface — the most recent pop is
+    /// parked unapplied and its slot is re-resolved by the next callback.
     pub(crate) fn rollback_last_pop(&mut self) {
         self.processed_seq = self.processed_seq.wrapping_sub(1);
     }
@@ -480,9 +509,9 @@ impl<'a> CommandConsumer<'a> {
     /// popped). In both cases this keeps the item↔sequence mapping gapless.
     ///
     /// Engine-contract alias: this is the `advance_resolved` hook of the
-    /// generic scheduler's ring surface (`SwapRing`, Sprint 7 / Epic E.2) — a
-    /// payload parked in the deferred slot was resolved (applied or discarded)
-    /// without a ring pop and consumes its sequence slot.
+    /// generic scheduler's [`SwapRing`] surface — a payload parked in the
+    /// deferred slot was resolved (applied or discarded) without a ring pop
+    /// and consumes its sequence slot.
     pub(crate) fn advance_pending(&mut self) {
         self.processed_seq = self.processed_seq.wrapping_add(1);
     }
@@ -490,6 +519,9 @@ impl<'a> CommandConsumer<'a> {
     /// Drains up to `max` commands from the SPSC channel, calling
     /// `process` for each one. Returns the number of commands
     /// actually drained.
+    ///
+    /// Test helper: production draining goes through `RtSwapDrain`.
+    #[cfg(test)]
     pub fn drain_and_process<F>(&mut self, max: usize, mut process: F) -> usize
     where
         F: FnMut(ClapParamPayload),
@@ -508,6 +540,7 @@ impl<'a> CommandConsumer<'a> {
 
     /// Records that all commands up to sequence `seq` have been
     /// processed (Release store).
+    #[cfg(test)]
     pub fn ack_up_to(&self, seq: u64) {
         self.last_ack.store(seq, Ordering::Release);
     }
@@ -522,8 +555,52 @@ impl<'a> CommandConsumer<'a> {
 
     /// Returns the inner SPSC consumer for channel restoration
     /// during deactivation.
-    pub(crate) fn into_inner(self) -> Consumer<ClapParamPayload> {
+    pub(crate) fn into_inner(self) -> Consumer<Box<ClapParamPayload>> {
         self.rx
+    }
+}
+
+/// Engine structural-swap scheduler surface for the command ring.
+///
+/// [`CommandConsumer`] is the single source of truth for commands: the drain
+/// operates on this impl instead of a second adapter ring. The hook mapping
+/// keeps the ack gapless across structural deferrals —
+/// `advance_resolved` ≡ [`CommandConsumer::advance_pending`] (a parked
+/// payload resolved without a pop consumes its sequence slot exactly once)
+/// and `rollback_last_pop` ≡ [`CommandConsumer::rollback_last_pop`] (a
+/// candidate parked unapplied rewinds its slot, so the ack never covers a
+/// parked command).
+impl SwapRing for CommandConsumer<'_> {
+    type Payload = ClapParamPayload;
+
+    #[inline(always)]
+    fn pop(&mut self) -> Option<Box<ClapParamPayload>> {
+        self.pop_boxed()
+    }
+
+    #[inline(always)]
+    fn peek(&self) -> Option<&ClapParamPayload> {
+        CommandConsumer::peek(self)
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.rx.is_empty()
+    }
+
+    #[inline(always)]
+    fn occupied(&self) -> usize {
+        self.rx.slots()
+    }
+
+    #[inline(always)]
+    fn advance_resolved(&mut self) {
+        self.advance_pending();
+    }
+
+    #[inline(always)]
+    fn rollback_last_pop(&mut self) {
+        CommandConsumer::rollback_last_pop(self);
     }
 }
 
