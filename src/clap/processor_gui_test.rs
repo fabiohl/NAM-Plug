@@ -334,13 +334,17 @@ mod tests {
 
     #[test]
     fn test_gui_load_error_null_byte_safety() {
+        use crate::clap::plugin::shared::{ModelRequestOrigin, PendingModelRequest};
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let path_with_null = PathBuf::from("invalid_model\0name.nam");
-        if let Ok(mut pending_guard) = shared.cold.ui_pending_model.lock() {
-            *pending_guard = Some(path_with_null);
+        if let Ok(mut pending_guard) = shared.cold.pending_model_requests.lock() {
+            pending_guard.push_back(PendingModelRequest {
+                path: path_with_null,
+                origin: ModelRequestOrigin::Gui,
+            });
         }
         shared.cold.ui_loading.store(true, Ordering::Relaxed);
 
@@ -365,14 +369,18 @@ mod tests {
     /// 2. NOT swap the active model (model_load_counter unchanged)
     #[test]
     fn test_gui_load_model_build_failed() {
+        use crate::clap::plugin::shared::{ModelRequestOrigin, PendingModelRequest};
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let invalid_path = std::env::temp_dir().join("nam_plug_gui_invalid.nam");
         test_util::write_invalid_model_fixture(&invalid_path);
 
-        if let Ok(mut pending_guard) = shared.cold.ui_pending_model.lock() {
-            *pending_guard = Some(invalid_path);
+        if let Ok(mut pending_guard) = shared.cold.pending_model_requests.lock() {
+            pending_guard.push_back(PendingModelRequest {
+                path: invalid_path,
+                origin: ModelRequestOrigin::Gui,
+            });
         }
         shared.cold.ui_loading.store(true, Ordering::Relaxed);
 

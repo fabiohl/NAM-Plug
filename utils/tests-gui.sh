@@ -49,8 +49,8 @@ for arg in "$@"; do
             echo "  --strict     Fail if xvfb-run is not installed"
             echo "  -h, --help   Show this help and exit"
             echo ""
-            echo "Log:     target/logs/gui-tests.log"
-            echo "Receipt: target/logs/gui-receipt.txt"
+            echo "Log:     target/logs/gui-tests.log (or target/logs/gui-tests.dryrun.log in --dry-run)"
+            echo "Receipt: target/logs/gui-receipt.txt (or target/logs/gui-receipt.dryrun.txt in --dry-run)"
             exit 0
             ;;
         *)
@@ -84,33 +84,22 @@ if [ "${NAM_LIB_NO_CD:-0}" != "1" ]; then
     cd "$PROJECT_DIR" || exit 1
 fi
 
-# ── Dependency check ────────────────────────────────────────────────────────
-HAVE_XVFB_RUN=0
-if command -v xvfb-run >/dev/null 2>&1; then
-    HAVE_XVFB_RUN=1
-fi
-
-if [ "$HAVE_XVFB_RUN" = "0" ]; then
-    if [ "$STRICT" = "1" ]; then
-        die "xvfb-run not found. Install the 'xvfb' package and re-run."
-    else
-        echo -e "${YELLOW}${BOLD}[GAP] xvfb-run not installed — GUI tests cannot run.${NC}"
-        echo -e "      Install with: sudo apt-get install -y xvfb"
-        echo -e "      Then re-run:  ./utils/tests-gui.sh"
-        exit 0
-    fi
-fi
-
 # ── State ───────────────────────────────────────────────────────────────────
 
 # Save original display so the trap restores it in any signal path.
 ORIG_DISPLAY="${DISPLAY:-}"
 XVFB_PID=0
-GUI_LOG="target/logs/gui-tests.log"
-GUI_RECEIPT="target/logs/gui-receipt.txt"
+if [ "$DRY_RUN" = "1" ]; then
+    GUI_LOG="target/logs/gui-tests.dryrun.log"
+    GUI_RECEIPT="target/logs/gui-receipt.dryrun.txt"
+else
+    GUI_LOG="target/logs/gui-tests.log"
+    GUI_RECEIPT="target/logs/gui-receipt.txt"
+fi
 
 mkdir -p target/logs
 : > "$GUI_LOG"
+: > "$GUI_RECEIPT"
 
 cleanup_xvfb() {
     local rc=$?
@@ -128,6 +117,29 @@ cleanup_xvfb() {
 }
 
 trap 'rc=$?; cleanup_xvfb; if [ $rc -ne 0 ]; then echo -e "\n${RED}${BOLD}❌ GUI tests interrupted at line $LINENO (rc=$rc)${NC}"; fi; exit $rc' INT TERM EXIT ERR
+
+# ── Dependency check ────────────────────────────────────────────────────────
+HAVE_XVFB_RUN=0
+if [ "${NAM_NO_XVFB:-0}" != "1" ] && command -v xvfb-run >/dev/null 2>&1; then
+    HAVE_XVFB_RUN=1
+fi
+
+if [ "$HAVE_XVFB_RUN" = "0" ]; then
+    if [ "$STRICT" = "1" ]; then
+        die "xvfb-run not found. Install the 'xvfb' package and re-run."
+    else
+        TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        echo -e "${YELLOW}${BOLD}[GAP] xvfb-run not installed — GUI tests cannot run.${NC}"
+        echo -e "      Install with: sudo apt-get install -y xvfb"
+        echo -e "      Then re-run:  ./utils/tests-gui.sh"
+        {
+            echo "gui_test_suite status=GAP timestamp=$TIMESTAMP"
+            echo "  log=$GUI_LOG"
+            echo "  reason=xvfb-run not installed"
+        } | tee "$GUI_RECEIPT"
+        exit 0
+    fi
+fi
 
 # ── Header ──────────────────────────────────────────────────────────────────
 echo -e "${BLUE}${BOLD}=============================================================${NC}"
@@ -220,7 +232,7 @@ run_gui_test \
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 GUI_STATUS="PASSED"
 [ "$OVERALL_RC" -ne 0 ] && GUI_STATUS="FAILED"
-[ "$DRY_RUN" = "1" ]    && GUI_STATUS="DRY_RUN"
+[ "$DRY_RUN" = "1" ]    && GUI_STATUS="SIMULATED"
 
 {
     echo "gui_test_suite status=$GUI_STATUS timestamp=$TIMESTAMP"
@@ -231,8 +243,8 @@ GUI_STATUS="PASSED"
 echo -e "\n${BLUE}${BOLD}================== GUI TEST SUMMARY ==================${NC}"
 if [ "$GUI_STATUS" = "PASSED" ]; then
     echo -e "  ${GREEN}${BOLD}✓ All GUI tests PASSED${NC}"
-elif [ "$GUI_STATUS" = "DRY_RUN" ]; then
-    echo -e "  ${YELLOW}Dry-run completed — no tests executed.${NC}"
+elif [ "$GUI_STATUS" = "SIMULATED" ]; then
+    echo -e "  ${YELLOW}Dry-run completed — simulated receipt in $GUI_RECEIPT (no tests executed).${NC}"
 else
     echo -e "  ${RED}${BOLD}❌ GUI tests FAILED — see $GUI_LOG${NC}"
 fi

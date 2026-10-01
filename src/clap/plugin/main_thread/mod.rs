@@ -9,10 +9,11 @@
 //! - `load` — model loading + error_code mapping
 
 mod housekeeping;
-mod load;
+pub(crate) mod load;
 mod logging;
 
 use super::command_scheduler::{CommandProducer, PushError};
+use super::errors::{self, static_plugin_error};
 use super::shared::{
     ClapParamPayload, NamClapShared, PendingModel, PendingRestore, SlimmableRebuild, StagedRestore,
     StagedSwap,
@@ -118,6 +119,9 @@ pub struct NamClapMainThread<'a> {
     /// latency until then. Same-latency swaps bypass this slot and apply
     /// continuously through the SPSC. Latest-wins coalescing per component.
     pub(crate) staged_swap: RefCell<Option<StagedSwap>>,
+    /// Flag indicating whether a restart request has already been dispatched to
+    /// the host following a fatal processor poisoning event in the RT audio loop.
+    pub(crate) poison_restart_requested: Cell<bool>,
 }
 
 impl<'a> NamClapMainThread<'a> {
@@ -204,9 +208,10 @@ impl<'a> NamClapMainThread<'a> {
         // now that activate() has been called.
         let new_resampler = Box::new(NamResampler::new_simple(sample_rate, model_rate).map_err(
             |e| {
-                PluginError::Message(Box::leak(
-                    format!("Failed to create deferred resampler: {:?}", e).into_boxed_str(),
-                ))
+                static_plugin_error(
+                    errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                    format_args!("Failed to create deferred resampler: {e:?}"),
+                )
             },
         )?);
 
@@ -215,10 +220,10 @@ impl<'a> NamClapMainThread<'a> {
         let new_stream =
             crate::clap::plugin::build_stream_adapter(sample_rate, model_rate, buffer_size)
                 .map_err(|e| {
-                    PluginError::Message(Box::leak(
-                        format!("Failed to create deferred streaming buffer: {e:?}")
-                            .into_boxed_str(),
-                    ))
+                    static_plugin_error(
+                        errors::dsp_resources::STREAM_BUILD_FAILED,
+                        format_args!("Failed to create deferred streaming buffer: {e:?}"),
+                    )
                 })?;
 
         if let Some(ref mut model) = model_l
@@ -228,13 +233,12 @@ impl<'a> NamClapMainThread<'a> {
                 .cold
                 .rt_status
                 .set_flag(spsc::RT_STATUS_MODEL_LOAD_FAILED);
-            return Err(PluginError::Message(Box::leak(
-                format!(
-                    "Failed to resize deferred model buffers for host buffer size ({}): {}",
-                    buffer_size, e
-                )
-                .into_boxed_str(),
-            )));
+            return Err(static_plugin_error(
+                errors::activation::MODEL_RESIZE_FAILED,
+                format_args!(
+                    "Failed to resize deferred model buffers for host buffer size ({buffer_size}): {e}"
+                ),
+            ));
         }
 
         let push_result =
@@ -404,17 +408,60 @@ impl<'a> NamClapMainThread<'a> {
 
 impl<'a> Drop for NamClapMainThread<'a> {
     fn drop(&mut self) {
-        log::info!("NAM-Plug: Plugin instance destroying — GUI fence down, teardown + GC drain.");
-        // Lower the alive fence BEFORE releasing any shared state, so
+        log::info!(
+            "NAM-Plug: Plugin instance destroying — sink unregister, quiescence, GUI fence down, teardown + GC drain."
+        );
+
+        // Flush any remaining telemetry flags before unregistering
+        self.emit_pending_logs();
+
+        // 1. Unregister instance sink from global NamLogger so no future logs are dispatched to this instance
+        if let Some(logger) =
+            neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
+        {
+            logger.unregister_instance_sink(self.shared.cold.instance_id);
+        }
+
+        // 2. Quiesce the host log sink: acquire write lock to guarantee all in-flight try_read
+        // dispatches have completed, then disable future dispatches (*lock = false).
+        // Bounded spin/yield timeout of 50ms to avoid blocking DAW indefinitely if host stalls.
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(50);
+        let mut acquired = false;
+        while start.elapsed() < timeout {
+            if let Ok(mut lock) = self.shared.cold.host_log_quiescence.try_write() {
+                *lock = false;
+                acquired = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        if !acquired {
+            log::warn!(
+                "NAM-Plug: Timeout waiting for host_log_quiescence write lock during destroy; forcing write lock"
+            );
+            if let Ok(mut lock) = self.shared.cold.host_log_quiescence.write() {
+                *lock = false;
+            }
+        }
+
+        // 3. Clear host log sink arc in cold shared
+        if let Ok(mut sink_guard) = self.shared.cold.host_log_sink.lock() {
+            *sink_guard = None;
+        }
+
+        // 4. Lower the alive fence BEFORE releasing any shared state, so
         // GUI/dialog threads stop dereferencing `NamClapShared` and the host
         // handle immediately. Their event loops are no-ops from this point on.
         self.shared.cold.alive_fence.store(false, Ordering::Release);
-        // Synchronous GUI teardown: close windows and bounded-join their
+
+        // 5. Synchronous GUI teardown: close windows and bounded-join their
         // threads before `NamClapShared` is dropped (the wrapper drops the
         // main thread before the shared state). A reaper is spawned only as a
         // last resort, after the fence is already down.
         self.teardown_gui_resources();
-        // On destroy, `deactivate()` has already transferred the RT parking lot
+
+        // 6. On destroy, `deactivate()` has already transferred the RT parking lot
         // for final drain (single-owner handoff). Here the lot is empty — no
         // RT producer is active — and the drain covers SPSC + overflow one final time.
         let mut empty_rt_parking_lot: [Option<GcItem>; 16] = Default::default();

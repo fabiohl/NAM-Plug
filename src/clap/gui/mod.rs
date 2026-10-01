@@ -56,27 +56,46 @@ pub const GUI_HEIGHT: u32 = 275;
 /// the host `Window`, and the fence protocol below is unchanged.
 #[derive(Clone, Copy)]
 pub struct GuiHostBridge {
-    raw: std::ptr::NonNull<()>,
+    raw: std::ptr::NonNull<clap_sys::host::clap_host>,
 }
+
+// SAFETY: HostSharedHandle is Send and Sync in clack-plugin, wrapping a thread-safe host pointer.
+unsafe impl Send for GuiHostBridge {}
+// SAFETY: HostSharedHandle is Send and Sync in clack-plugin, wrapping a thread-safe host pointer.
+unsafe impl Sync for GuiHostBridge {}
+
+// Compile-time layout assertions ensuring GuiHostBridge and HostSharedHandle have identical representation.
+const _: () = assert!(
+    std::mem::size_of::<clack_plugin::host::HostSharedHandle<'static>>()
+        == std::mem::size_of::<std::ptr::NonNull<clap_sys::host::clap_host>>()
+);
+const _: () = assert!(
+    std::mem::align_of::<clack_plugin::host::HostSharedHandle<'static>>()
+        == std::mem::align_of::<std::ptr::NonNull<clap_sys::host::clap_host>>()
+);
+const _: () = assert!(
+    std::mem::size_of::<GuiHostBridge>()
+        == std::mem::size_of::<std::ptr::NonNull<clap_sys::host::clap_host>>()
+);
+const _: () = assert!(
+    std::mem::align_of::<GuiHostBridge>()
+        == std::mem::align_of::<std::ptr::NonNull<clap_sys::host::clap_host>>()
+);
 
 impl GuiHostBridge {
     /// Creates a `GuiHostBridge` from a live `HostSharedHandle`.
     ///
-    /// # Safety
+    /// # Safety invariants
     ///
     /// The host pointer encapsulated here is valid for the lifetime of the
     /// plugin. The caller must ensure:
     /// 1. The host outlives the plugin (CLAP spec guarantee).
-    /// 2. Any GUI thread holding this bridge dereferences it only while the
-    ///    `alive_fence` is up (fence-gated event loops).
+    /// 2. Any thread holding this bridge dereferences it only while the
+    ///    `alive_fence` or quiescence lock is active.
     #[inline]
     pub fn new(host: &clack_plugin::host::HostSharedHandle<'_>) -> Self {
-        // HostSharedHandle is repr(transparent) over NonNull<clap_host>.
-        // SAFETY: transmute_copy of a repr(transparent) type to extract the
-        // inner pointer. The pointer remains valid as long as the host lives,
-        // which the CLAP spec guarantees is longer than the plugin lifetime.
-        let nn: std::ptr::NonNull<()> = unsafe { std::mem::transmute_copy(host) };
-        Self { raw: nn }
+        let raw = std::ptr::NonNull::from(host.as_raw());
+        Self { raw }
     }
 
     /// Reconstructs the `HostSharedHandle` with `'static` lifetime.
@@ -86,19 +105,45 @@ impl GuiHostBridge {
     /// The returned handle is only valid while the host is alive — which the
     /// CLAP spec guarantees is longer than the plugin's lifetime. Callers must
     /// not cache this handle beyond the plugin's `destroy()` call, and every
-    /// dereference from a GUI thread must be fenced by `alive_fence`.
+    /// dereference from a background thread must be fenced by `alive_fence`
+    /// or `host_log_quiescence`.
     #[inline]
     pub fn as_static(&self) -> clack_plugin::host::HostSharedHandle<'static> {
-        // SAFETY: HostSharedHandle is repr(transparent) over NonNull<()>.
-        // The pointer was obtained from a live HostSharedHandle at construct
-        // time and the host outlives the plugin (CLAP spec guarantee).
-        // The 'static lifetime is justified because the host's actual lifetime
-        // encompasses all plugin instance lifetimes.
-        unsafe {
-            std::mem::transmute::<
-                std::ptr::NonNull<()>,
-                clack_plugin::host::HostSharedHandle<'static>,
-            >(self.raw)
-        }
+        // SAFETY: `self.raw` was obtained from a valid HostSharedHandle during initialization.
+        // The CLAP specification guarantees that the host outlives all plugin instances and their threads.
+        // Reconstructing the handle with 'static lifetime via HostAudioProcessorHandle::from_raw(...).shared()
+        // is sound because access is fenced during destruction.
+        unsafe { clack_plugin::host::HostAudioProcessorHandle::from_raw(self.raw).shared() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gui_host_bridge_roundtrip() {
+        let mut mock_host = clap_sys::host::clap_host {
+            clap_version: clap_sys::version::CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"Test Host".as_ptr(),
+            vendor: std::ptr::null(),
+            url: std::ptr::null(),
+            version: std::ptr::null(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+
+        let raw_ptr = std::ptr::NonNull::new(&mut mock_host).unwrap();
+        // SAFETY: `raw_ptr` points to a valid mock `clap_host` allocated on the test stack.
+        let shared_handle =
+            unsafe { clack_plugin::host::HostAudioProcessorHandle::from_raw(raw_ptr).shared() };
+
+        let bridge = GuiHostBridge::new(&shared_handle);
+        let static_handle = bridge.as_static();
+
+        assert_eq!(static_handle.as_raw() as *const _, &mock_host as *const _);
     }
 }

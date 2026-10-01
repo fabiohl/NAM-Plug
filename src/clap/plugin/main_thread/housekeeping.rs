@@ -5,7 +5,9 @@
 
 use super::NamClapMainThread;
 use crate::clap::gui::dialog_state;
-use crate::clap::plugin::shared::{PendingPresetLoad, SlimmableRebuild, StagedSwap};
+use crate::clap::plugin::shared::{
+    ModelRequestOrigin, PendingModelRequest, SlimmableRebuild, StagedSwap,
+};
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::host::HostMainThreadHandle;
 use neural_amp_modeler_rs::common::spsc::{self, GcItem, drain_gc_channels};
@@ -105,6 +107,28 @@ impl<'a> NamClapMainThread<'a> {
             .check_and_clear_flag(spsc::RT_STATUS_SLIMMABLE_RESET_FAILED)
         {
             log::error!("ContainerModel submodel reset failed — model may run in previous state.");
+        }
+
+        // Processor poisoning containment (S2-T1 / F-NP-02):
+        // If the RT audio thread panicked, it transitioned to a poisoned silent state
+        // and set RT_STATUS_PROCESSOR_POISONED. The main thread detects this flag,
+        // logs an error, and requests a restart from the host (once per occurrence).
+        if self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_PROCESSOR_POISONED)
+        {
+            if !self.poison_restart_requested.get() {
+                self.poison_restart_requested.set(true);
+                log::error!(
+                    "NAM-Plug: Audio processor is poisoned due to a fatal panic in RT callback. Requesting host restart..."
+                );
+                self.host.request_restart();
+            }
+        } else if self.poison_restart_requested.get() {
+            // Processor has been reactivated cleanly; reset the latch
+            self.poison_restart_requested.set(false);
         }
     }
 
@@ -267,7 +291,7 @@ impl<'a> NamClapMainThread<'a> {
 
     /// Propagates file dialog results and processes pending model loads.
     fn handle_pending_model_load(&self) {
-        // Propagate dialog_state → ui_pending_model (R2: Arc-backed, UAF-safe)
+        // Propagate dialog_state → pending_model_requests (R2: Arc-backed, UAF-safe)
         // Always propagates: Selected(path), Cancelled, or TimedOut sentinels.
         if let Some(dialog_state) = self.shared.cold.dialog_state.as_ref() {
             let mut dialog_guard = dialog_state.pending_model.lock().unwrap_or_else(|e| {
@@ -275,65 +299,72 @@ impl<'a> NamClapMainThread<'a> {
                 e.into_inner()
             });
             if let Some(path) = dialog_guard.take() {
-                let mut ui_guard = self
+                let mut queue_guard = self
                     .shared
                     .cold
-                    .ui_pending_model
+                    .pending_model_requests
                     .lock()
                     .unwrap_or_else(|e| {
-                        log::error!("PoisonError in ui_pending_model lock: {e:?}");
+                        log::error!("PoisonError in pending_model_requests lock: {e:?}");
                         e.into_inner()
                     });
-                *ui_guard = Some(path);
+                if queue_guard.len() < crate::clap::plugin::shared::MAX_PENDING_MODEL_REQUESTS {
+                    queue_guard.push_back(PendingModelRequest {
+                        path,
+                        origin: ModelRequestOrigin::Gui,
+                    });
+                } else {
+                    log::warn!(
+                        "NAM-Plug: pending_model_requests queue full, dropping dialog result"
+                    );
+                }
             }
         }
 
-        // Check if there is a pending model sent by the UI (real path) or dialog (sentinel).
-        let pending = {
-            let mut pending_guard = self
+        // Pop at most one request per housekeeping cycle.
+        let (request, remaining_count) = {
+            let mut queue_guard = self
                 .shared
                 .cold
-                .ui_pending_model
+                .pending_model_requests
                 .lock()
                 .unwrap_or_else(|e| {
-                    log::error!("PoisonError in ui_pending_model lock: {e:?}");
+                    log::error!("PoisonError in pending_model_requests lock: {e:?}");
                     e.into_inner()
                 });
-            pending_guard.take()
+            let popped = queue_guard.pop_front();
+            let count = queue_guard.len();
+            (popped, count)
         };
 
-        if let Some(path) = pending {
+        if let Some(req) = request {
             let cancelled_sentinel = dialog_state::dialog_cancelled_sentinel();
             let timedout_sentinel = dialog_state::dialog_timedout_sentinel();
 
-            if path == cancelled_sentinel {
+            if req.path == cancelled_sentinel {
                 log::info!("NAM-Plug: model file dialog cancelled by user");
                 self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
-            } else if path == timedout_sentinel {
+            } else if req.path == timedout_sentinel {
                 log::info!("NAM-Plug: model file dialog timed out");
                 self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
             } else {
-                let res = self.load_model(&path);
+                let res = self.load_model(&req.path);
                 self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
-
-                // Notify host via HostPresetLoad if this model was
-                // queued by the preset-load extension.
-                let pending_load = self
-                    .shared
-                    .cold
-                    .pending_preset_load
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .pop_front();
 
                 match res {
                     Ok(_) => {
-                        if let Some(pending) = pending_load {
-                            notify_preset_loaded(&self.host, pending);
+                        if let ModelRequestOrigin::Preset { location, load_key } = req.origin {
+                            notify_preset_loaded(&self.host, &location, load_key.as_deref());
                         }
                     }
                     Err(e) => {
-                        let err_msg = e.error_code().message();
+                        let err_msg = if !e.user_hint().is_empty() {
+                            format!("{}: {}", e.user_message(), e.user_hint())
+                        } else if !e.user_message().is_empty() {
+                            e.user_message().to_string()
+                        } else {
+                            e.error_code().message().to_string()
+                        };
                         let mut msg_guard = self
                             .shared
                             .cold
@@ -343,24 +374,31 @@ impl<'a> NamClapMainThread<'a> {
                                 log::error!("PoisonError in ui_load_error_msg lock: {e:?}");
                                 e.into_inner()
                             });
-                        *msg_guard = err_msg.to_string();
+                        *msg_guard = err_msg.clone();
                         self.shared
                             .cold
                             .ui_load_error
                             .store(true, Ordering::Relaxed);
 
-                        if let Some(pending) = pending_load {
+                        if let ModelRequestOrigin::Preset { location, load_key } = req.origin {
                             notify_preset_error(
                                 &self.host,
-                                pending,
+                                &location,
+                                load_key.as_deref(),
                                 e.error_code() as i32,
-                                err_msg,
+                                &err_msg,
                             );
                         }
 
-                        log::error!("Failed to load model from GUI: {e:?}");
+                        log::error!("Failed to load model: {e:?}");
                     }
                 }
+            }
+
+            // If there are more requests pending in the queue, schedule the next
+            // housekeeping cycle to drain sequentially across main thread ticks.
+            if remaining_count > 0 {
+                self.host.request_callback();
             }
         }
     }
@@ -596,14 +634,16 @@ impl<'a> NamClapMainThread<'a> {
 }
 
 /// Notify the host that a preset was loaded successfully.
-/// Reconstructs the `Location` from the stored `PendingPresetLoad` and
-/// calls `HostPresetLoad::loaded()`.
-fn notify_preset_loaded(host: &HostMainThreadHandle, pending: PendingPresetLoad) {
-    let path_cstr = pending.location_path;
-    let load_key_cstr = pending.load_key;
+/// Reconstructs the `Location` and calls `HostPresetLoad::loaded()`.
+fn notify_preset_loaded(
+    host: &HostMainThreadHandle,
+    location_path: &std::ffi::CStr,
+    load_key: Option<&std::ffi::CStr>,
+) {
     if let Some(preset_load) = host.get_extension::<HostPresetLoad>() {
-        let location = Location::File { path: &path_cstr };
-        let load_key = load_key_cstr.as_deref();
+        let location = Location::File {
+            path: location_path,
+        };
         preset_load.loaded(host, location, load_key);
         log::info!("Host notified: preset loaded successfully");
     }
@@ -612,15 +652,15 @@ fn notify_preset_loaded(host: &HostMainThreadHandle, pending: PendingPresetLoad)
 /// Notify the host that a preset load failed.
 fn notify_preset_error(
     host: &HostMainThreadHandle,
-    pending: PendingPresetLoad,
+    location_path: &std::ffi::CStr,
+    load_key: Option<&std::ffi::CStr>,
     os_error: i32,
     message: &str,
 ) {
-    let path_cstr = pending.location_path;
-    let load_key_cstr = pending.load_key;
     if let Some(preset_load) = host.get_extension::<HostPresetLoad>() {
-        let location = Location::File { path: &path_cstr };
-        let load_key = load_key_cstr.as_deref();
+        let location = Location::File {
+            path: location_path,
+        };
         let msg_cstr = std::ffi::CString::new(message);
         let msg_ref = msg_cstr.as_deref().ok();
         preset_load.on_error(host, location, load_key, os_error, msg_ref);

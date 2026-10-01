@@ -11,6 +11,7 @@
 use crate::clap::extensions::state_transaction::{self, RestoreMode};
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::plugin::debug_assert_main_thread;
+use crate::clap::plugin::errors::{self, static_plugin_error};
 use clack_common::stream::{InputStream, OutputStream};
 use clack_extensions::state::PluginStateImpl;
 use clack_plugin::prelude::*;
@@ -71,69 +72,51 @@ pub(crate) fn ensure_asset_hashes(
         if let Some(ref path) = params.model_path
             && params.model_hash.is_none()
         {
-            log::error!(
-                "NAM-Plug: Refusing to persist Full state — model {path:?} has no SHA-256 hash"
-            );
-            return Err(PluginError::Message(Box::leak(
-                "Cannot persist state: model has no SHA-256 hash (re-load it via the GUI to migrate)"
-                    .to_string()
-                    .into_boxed_str(),
-            )));
+            return Err(static_plugin_error(
+                errors::state_txn::MODEL_HASH_MISSING,
+                format_args!("Refusing to persist Full state — model {path:?} has no SHA-256 hash"),
+            ));
         }
         if let Some(ref path) = params.ir_path
             && params.ir_hash.is_none()
         {
-            log::error!(
-                "NAM-Plug: Refusing to persist Full state — IR {path:?} has no SHA-256 hash"
-            );
-            return Err(PluginError::Message(Box::leak(
-                "Cannot persist state: IR has no SHA-256 hash (re-load it via the GUI to migrate)"
-                    .to_string()
-                    .into_boxed_str(),
-            )));
+            return Err(static_plugin_error(
+                errors::state_txn::IR_HASH_MISSING,
+                format_args!("Refusing to persist Full state — IR {path:?} has no SHA-256 hash"),
+            ));
         }
     }
     if let Some(ref basename) = params.model_basename
         && params.model_hash.is_none()
     {
-        log::error!(
-            "NAM-Plug: Refusing to persist state — model reference {basename:?} has no SHA-256 hash"
-        );
-        return Err(PluginError::Message(Box::leak(
-            "Cannot persist state: model has no SHA-256 hash (re-load it via the GUI to migrate)"
-                .to_string()
-                .into_boxed_str(),
-        )));
+        return Err(static_plugin_error(
+            errors::state_txn::MODEL_HASH_MISSING,
+            format_args!(
+                "Refusing to persist state — model reference {basename:?} has no SHA-256 hash"
+            ),
+        ));
     }
     if let Some(ref hash) = params.model_hash
         && !state_transaction::is_valid_sha256_hex(hash)
     {
-        log::error!(
-            "NAM-Plug: Refusing to persist state — malformed model_hash ({} chars): {hash:?}",
-            hash.len()
-        );
-        return Err(PluginError::Message(Box::leak(
-            format!(
-                "Cannot persist state: malformed model hash ({} chars, expected 64 hex)",
+        return Err(static_plugin_error(
+            errors::state_txn::MODEL_HASH_MALFORMED,
+            format_args!(
+                "Refusing to persist state — malformed model_hash ({} chars): {hash:?}",
                 hash.len()
-            )
-            .into_boxed_str(),
-        )));
+            ),
+        ));
     }
     if let Some(ref hash) = params.ir_hash
         && !state_transaction::is_valid_sha256_hex(hash)
     {
-        log::error!(
-            "NAM-Plug: Refusing to persist state — malformed ir_hash ({} chars): {hash:?}",
-            hash.len()
-        );
-        return Err(PluginError::Message(Box::leak(
-            format!(
-                "Cannot persist state: malformed IR hash ({} chars, expected 64 hex)",
+        return Err(static_plugin_error(
+            errors::state_txn::IR_HASH_MALFORMED,
+            format_args!(
+                "Refusing to persist state — malformed ir_hash ({} chars): {hash:?}",
                 hash.len()
-            )
-            .into_boxed_str(),
-        )));
+            ),
+        ));
     }
     Ok(())
 }

@@ -65,9 +65,9 @@ for arg in "$@"; do
             echo "Long audit suite for NAM-Plug — runs heavy #[ignore] stress tests."
             echo ""
             echo "Options:"
-            echo "  --strict-pre-release  Fail closed on any gap or inconclusive phase"
+            echo "  --strict-pre-release  Fail closed on any gap or inconclusive phase (rejects --dry-run)"
             echo "  --nocapture           Pass --nocapture to cargo test for verbose output"
-            echo "  --dry-run             Print planned commands without executing"
+            echo "  --dry-run             Print planned commands and write SIMULATED receipts to target/logs/long-audit-receipt.dryrun.jsonl"
             echo "  --gui                 Run the GUI/Xvfb phase (Phase 4) explicitly"
             echo "  -h, --help            Show this help and exit"
             echo ""
@@ -76,7 +76,7 @@ for arg in "$@"; do
             echo "  NAM_THERMAL_COOLDOWN_S    Idle seconds after pre-compilation (default: 0)"
             echo "  NAM_GUI_PHASE_AUTO        Set 0 to suppress auto GUI trigger (default: 1)"
             echo ""
-            echo "Receipt: target/logs/long-audit-receipt.jsonl"
+            echo "Receipt: target/logs/long-audit-receipt.jsonl (or target/logs/long-audit-receipt.dryrun.jsonl in --dry-run)"
             exit 0
             ;;
         *)
@@ -129,9 +129,18 @@ if [ "${NAM_LIB_NO_CD:-0}" != "1" ]; then
     cd "$PROJECT_DIR" || exit 1
 fi
 
+if [ "$STRICT_PRE_RELEASE" = "1" ] && [ "$DRY_RUN" = "1" ]; then
+    echo -e "${RED}${BOLD}❌ --strict-pre-release rejects simulated receipts (--dry-run is active).${NC}" >&2
+    exit 1
+fi
+
 ORIG_PARANOID="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "2")"
 PARANOID_MODIFIED=false
-RECEIPT_FILE="target/logs/long-audit-receipt.jsonl"
+if [ "$DRY_RUN" = "1" ]; then
+    RECEIPT_FILE="target/logs/long-audit-receipt.dryrun.jsonl"
+else
+    RECEIPT_FILE="target/logs/long-audit-receipt.jsonl"
+fi
 
 cleanup() {
     local rc=$?
@@ -159,11 +168,17 @@ if [ "$NOCAPTURE" = "1" ]; then
     NOCAPTURE_FLAG="--nocapture"
 fi
 
-mkdir -p target/logs
-rm -f target/logs/long-phase1.log \
-      target/logs/long-phase2.log \
-      target/logs/long-phase3.log \
-      "$RECEIPT_FILE"
+mkdir -p target/logs target/test_crashes
+export NAM_CRASH_DIR="${PROJECT_DIR}/target/test_crashes"
+if [ "$DRY_RUN" != "1" ]; then
+    rm -f target/logs/long-phase1.log \
+          target/logs/long-phase2.log \
+          target/logs/long-phase3.log \
+          target/logs/long-phase4.log \
+          "$RECEIPT_FILE"
+else
+    rm -f "$RECEIPT_FILE"
+fi
 
 : > "$RECEIPT_FILE"
 
@@ -261,7 +276,9 @@ OVERALL_FAILED=0
 # and pays only linkage + runner overhead (< 1 s per invocation instead of
 # several minutes on a cold cache). This pass is NOT counted in any phase timer.
 PREBUILD_LOG="target/logs/long-prebuild.log"
-: > "$PREBUILD_LOG" 2>/dev/null || true
+if [ "$DRY_RUN" != "1" ]; then
+    : > "$PREBUILD_LOG" 2>/dev/null || true
+fi
 
 echo -e "\n${BLUE}${BOLD}[0/4] Pre-build — compiling all test artefacts (--no-run)...${NC}"
 if [ "$DRY_RUN" = "1" ]; then
@@ -308,7 +325,7 @@ PHASE1_LOG="target/logs/long-phase1.log"
 
 if [ "$DRY_RUN" = "1" ]; then
     PHASE1_DUR_MS=0
-    PHASE1_STATUS="PASSED"
+    PHASE1_STATUS="SIMULATED"
     echo -e "  ${YELLOW}[dry-run] Phase 1 would execute:${NC}"
     echo -e "    cargo test --features testing --release --lib test_gc_stress_1000_swaps -- --ignored $NOCAPTURE_FLAG"
     echo -e "    cargo test --features testing --release --lib test_gc_drain_on_destroy_no_leak -- --ignored $NOCAPTURE_FLAG"
@@ -400,7 +417,7 @@ PHASE2_LOG="target/logs/long-phase2.log"
 
 if [ "$DRY_RUN" = "1" ]; then
     PHASE2_DUR_MS=0
-    PHASE2_STATUS="PASSED"
+    PHASE2_STATUS="SIMULATED"
     echo -e "  ${YELLOW}[dry-run] Phase 2 would execute:${NC}"
     echo -e "    cargo test --features testing --release --lib test_teardown_drains_rt_parking_lot_off_rt -- --ignored $NOCAPTURE_FLAG"
 else
@@ -435,8 +452,8 @@ emit_receipt "phase2" "Teardown — RT parking lot drain off-RT" "$PHASE2_STATUS
 PHASE_STATUS+=("$PHASE2_STATUS")
 PHASE_DURATIONS+=("$PHASE2_DUR_MS")
 
-# ── Phase 3: Multi-Instance RT Priority ─────────────────────────────────────
-phase "Multi-Instance — RT priority under CPU affinity (Phase 3/3)"
+# ── Phase 3: RT Priority & Micro-Latency Certification ──────────────────────
+phase "RT Priority & Micro-Latency Certification — Pinned Core (Phase 3/3)"
 PHASE3_START=$(date +%s%N)
 PHASE3_STATUS="PASSED"
 PHASE3_LOG="target/logs/long-phase3.log"
@@ -444,22 +461,65 @@ PHASE3_LOG="target/logs/long-phase3.log"
 
 if [ "$DRY_RUN" = "1" ]; then
     PHASE3_DUR_MS=0
-    PHASE3_STATUS="PASSED"
+    PHASE3_STATUS="SIMULATED"
     echo -e "  ${YELLOW}[dry-run] Phase 3 would execute:${NC}"
     if [ "$HAS_TASKSET" = "1" ]; then
-        echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --test clap test_multi_instance_rt_priority -- --ignored $NOCAPTURE_FLAG"
+        echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
+        echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
+        echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --lib processor_drain_latency_test -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
     else
-        echo -e "    cargo test --features testing --release --test clap test_multi_instance_rt_priority -- --ignored $NOCAPTURE_FLAG"
+        echo -e "    cargo test --features testing --release --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
+        echo -e "    cargo test --features testing --release --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
+        echo -e "    cargo test --features testing --release --lib processor_drain_latency_test -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
     fi
 else
     set +e
     echo -e "  ${BLUE}→ Running test_multi_instance_rt_priority under affinity core $BENCH_CORE...${NC}"
     if [ -n "$NOCAPTURE_FLAG" ]; then
-        run_cargo_test "$PHASE3_LOG" --affinity --test clap test_multi_instance_rt_priority -- --ignored --nocapture
+        run_cargo_test "$PHASE3_LOG" --affinity --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1 --nocapture
     else
-        run_cargo_test "$PHASE3_LOG" --affinity --test clap test_multi_instance_rt_priority -- --ignored
+        run_cargo_test "$PHASE3_LOG" --affinity --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1
     fi
-    RC=$?
+    RC1=$?
+    if [ $RC1 -ne 0 ]; then
+        echo -e "  ${RED}✗ test_multi_instance_rt_priority failed (rc=$RC1)${NC}"
+    else
+        echo -e "  ${GREEN}✓ test_multi_instance_rt_priority passed${NC}"
+    fi
+
+    echo -e "  ${BLUE}→ Running test_structural_burst_p99_within_contract under affinity core $BENCH_CORE...${NC}"
+    TMP_LOG="target/logs/long-phase3b.log"
+    if [ -n "$NOCAPTURE_FLAG" ]; then
+        run_cargo_test "$TMP_LOG" --affinity --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1 --nocapture
+    else
+        run_cargo_test "$TMP_LOG" --affinity --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1
+    fi
+    RC2=$?
+    cat "$TMP_LOG" >> "$PHASE3_LOG" 2>/dev/null || true
+    rm -f "$TMP_LOG"
+    if [ $RC2 -ne 0 ]; then
+        echo -e "  ${RED}✗ test_structural_burst_p99_within_contract failed (rc=$RC2)${NC}"
+    else
+        echo -e "  ${GREEN}✓ test_structural_burst_p99_within_contract passed${NC}"
+    fi
+
+    echo -e "  ${BLUE}→ Running processor_drain_latency_test under affinity core $BENCH_CORE...${NC}"
+    TMP_LOG="target/logs/long-phase3c.log"
+    if [ -n "$NOCAPTURE_FLAG" ]; then
+        run_cargo_test "$TMP_LOG" --affinity --lib processor_drain_latency_test -- --ignored --test-threads=1 --nocapture
+    else
+        run_cargo_test "$TMP_LOG" --affinity --lib processor_drain_latency_test -- --ignored --test-threads=1
+    fi
+    RC3=$?
+    cat "$TMP_LOG" >> "$PHASE3_LOG" 2>/dev/null || true
+    rm -f "$TMP_LOG"
+    if [ $RC3 -ne 0 ]; then
+        echo -e "  ${RED}✗ processor_drain_latency_test failed (rc=$RC3)${NC}"
+    else
+        echo -e "  ${GREEN}✓ processor_drain_latency_test passed${NC}"
+    fi
+
+    RC=$(( RC1 | RC2 | RC3 ))
     set -e
     PHASE3_END=$(date +%s%N)
     PHASE3_DUR_MS=$(( (PHASE3_END - PHASE3_START) / 1000000 ))
@@ -479,7 +539,7 @@ else
     fi
 fi
 
-emit_receipt "phase3" "Multi-Instance — RT priority under CPU affinity" "$PHASE3_STATUS" "$PHASE3_DUR_MS" "$PHASE3_LOG"
+emit_receipt "phase3" "RT Priority & Micro-Latency Certification" "$PHASE3_STATUS" "$PHASE3_DUR_MS" "$PHASE3_LOG"
 PHASE_STATUS+=("$PHASE3_STATUS")
 PHASE_DURATIONS+=("$PHASE3_DUR_MS")
 
@@ -497,7 +557,7 @@ if [ "$RUN_GUI" = "0" ]; then
 elif [ "$DRY_RUN" = "1" ]; then
     echo -e "  ${YELLOW}[dry-run] Phase 4 would execute:${NC}"
     echo -e "    ./utils/tests-gui.sh --dry-run"
-    PHASE4_STATUS="SKIPPED"
+    PHASE4_STATUS="SIMULATED"
 else
     set +e
     echo -e "  ${BLUE}→ Delegating to utils/tests-gui.sh...${NC}"
@@ -538,7 +598,7 @@ if [ "$OVERALL_FAILED" -ne 0 ]; then
     OVERALL_STATUS="FAILED"
 fi
 if [ "$DRY_RUN" = "1" ]; then
-    OVERALL_STATUS="PASSED"
+    OVERALL_STATUS="SIMULATED"
 fi
 TOTAL_DUR_MS=$(( PHASE1_DUR_MS + PHASE2_DUR_MS + PHASE3_DUR_MS + PHASE4_DUR_MS ))
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -571,11 +631,13 @@ for i in 0 1 2 3; do
     case $i in
         0) name="Phase 1 — GC Stress" ;;
         1) name="Phase 2 — Teardown Drain" ;;
-        2) name="Phase 3 — Multi-Instance RT" ;;
+        2) name="Phase 3 — RT Priority & Micro-Latency" ;;
         3) name="Phase 4 — GUI/X11 Headless" ;;
     esac
     if [ "$s" = "PASSED" ]; then
         echo -e "  ${GREEN}✓ $name: $s (${d} ms)${NC}"
+    elif [ "$s" = "SIMULATED" ]; then
+        echo -e "  ${YELLOW}⚠ $name: $s (${d} ms) [SIMULATED]${NC}"
     elif [ "$s" = "SKIPPED" ] || [ "$s" = "GAP" ]; then
         echo -e "  ${YELLOW}⚠ $name: $s (${d} ms)${NC}"
     else
@@ -586,7 +648,7 @@ echo -e "  Receipt: ${CYAN}$RECEIPT_FILE${NC}  Total: ${BOLD}${TOTAL_DUR_MS} ms$
 echo -e "${BLUE}${BOLD}================================================${NC}\n"
 
 if [ "$DRY_RUN" = "1" ]; then
-    echo -e "${GREEN}${BOLD}✓ Dry-run completed — no tests executed.${NC}"
+    echo -e "${YELLOW}${BOLD}⚠ Dry-run completed — simulated receipts recorded in $RECEIPT_FILE (no tests executed).${NC}"
     exit 0
 fi
 

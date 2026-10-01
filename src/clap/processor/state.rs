@@ -346,6 +346,11 @@ pub struct NamClapProcessor<'a> {
     /// Host audio processor handle. Used for `host.request_restart()` when
     /// structural latency changes are pending.
     pub(crate) host: HostAudioProcessorHandle<'a>,
+    /// Processor failure containment latch (Sprint 2 - S2-T1).
+    /// Latched to true when a panic occurs during audio processing or reset.
+    /// In the poisoned state, process() silences audio and returns immediately with O(1) determinism,
+    /// avoiding repeated panics, allocations, and log floods. Reset to false upon activate().
+    pub(crate) poisoned: bool,
 }
 
 #[cfg(test)]

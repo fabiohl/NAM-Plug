@@ -105,3 +105,60 @@ fn test_log_error_levels_reach_both_sinks() {
     assert!(has_error, "HostLog sink should receive ERROR messages");
     assert!(has_warn, "HostLog sink should receive WARN messages");
 }
+
+#[test]
+fn test_instance_sink_unregistered_on_drop() {
+    let (_entry, _host_info, plugin_instance) = test_util::make_test_plugin();
+    let _logger = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
+        .expect("NamLogger should be initialized");
+
+    // The plugin instance was created and its sink registered.
+    // Drop the plugin instance; this triggers NamClapMainThread::drop which
+    // unregisters the instance sink from NamLogger and quiesces the bridge.
+    drop(plugin_instance);
+
+    // After drop, logging should execute cleanly without panic, UAF, or deadlock.
+    log::info!("Log dispatched after plugin instance drop");
+    log::warn!("Warning dispatched after plugin instance drop");
+    log::error!("Error dispatched after plugin instance drop");
+}
+
+#[test]
+fn test_concurrent_logging_during_repeated_instance_lifecycle() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let mut workers = Vec::new();
+
+    // Spawn 4 concurrent worker threads spamming the log facade
+    for thread_idx in 0..4 {
+        let is_running = Arc::clone(&running);
+        workers.push(thread::spawn(move || {
+            let mut count = 0;
+            while is_running.load(Ordering::Relaxed) {
+                log::info!("Worker {} iteration {}", thread_idx, count);
+                log::warn!("Worker {} warning {}", thread_idx, count);
+                count += 1;
+                std::thread::yield_now();
+            }
+            count
+        }));
+    }
+
+    // Repeatedly instantiate and drop plugin instances while workers log concurrently
+    // 1000 cycles stress test per S3-T1 acceptance criteria.
+    for _ in 0..1000 {
+        let (_entry, _host_info, plugin_instance) = test_util::make_test_plugin();
+        log::info!("Plugin lifecycle in-flight log");
+        drop(plugin_instance);
+    }
+
+    running.store(false, Ordering::Release);
+
+    for handle in workers {
+        let log_count = handle.join().expect("Worker thread panicked");
+        assert!(log_count > 0, "Worker thread should have logged");
+    }
+}

@@ -114,8 +114,13 @@ pub enum HostEvent {
     CallbackRequested,
     LatencyChanged,
     TailChanged,
-    PresetLoaded,
+    PresetLoaded {
+        location: String,
+        load_key: Option<String>,
+    },
     PresetLoadError {
+        location: String,
+        load_key: Option<String>,
         os_error: i32,
         message: String,
     },
@@ -225,24 +230,37 @@ impl HostLatencyImpl for CompleteHostMainThread {
 impl HostPresetLoadImpl for CompleteHostMainThread {
     fn on_error(
         &self,
-        _location: Location,
-        _load_key: Option<&std::ffi::CStr>,
+        location: Location,
+        load_key: Option<&std::ffi::CStr>,
         os_error: i32,
         message: Option<&std::ffi::CStr>,
     ) {
         self.state.preset_error_count.fetch_add(1, Ordering::SeqCst);
+        let loc_str = match location {
+            Location::File { path } => path.to_string_lossy().into_owned(),
+            Location::Plugin { .. } => String::new(),
+        };
         self.state.record(HostEvent::PresetLoadError {
+            location: loc_str,
+            load_key: load_key.map(|k| k.to_string_lossy().into_owned()),
             os_error,
             message: message
                 .map(|m| m.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         });
     }
-    fn loaded(&self, _location: Location, _load_key: Option<&std::ffi::CStr>) {
+    fn loaded(&self, location: Location, load_key: Option<&std::ffi::CStr>) {
         self.state
             .preset_loaded_count
             .fetch_add(1, Ordering::SeqCst);
-        self.state.record(HostEvent::PresetLoaded);
+        let loc_str = match location {
+            Location::File { path } => path.to_string_lossy().into_owned(),
+            Location::Plugin { .. } => String::new(),
+        };
+        self.state.record(HostEvent::PresetLoaded {
+            location: loc_str,
+            load_key: load_key.map(|k| k.to_string_lossy().into_owned()),
+        });
     }
 }
 

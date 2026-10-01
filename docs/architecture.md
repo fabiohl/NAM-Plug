@@ -255,15 +255,18 @@ thread can dereference freed plugin state.
   host pointer as `NonNull<()>` and reconstructing `HostSharedHandle<'static>`
   on demand, reflecting the CLAP spec guarantee that the host outlives the
   plugin. GUI threads dereference it only while `alive_fence` is up.
-- **C-ABI Panic Guard:** `profile.release` and `profile.dist` compile with
+- **C-ABI Panic Guard & Processor Poisoning Latch (`F-NP-02`):** `profile.release` and `profile.dist` compile with
   `panic = "unwind"` (`Cargo.toml`), and every CLAP entry point — `activate`,
   `process`, `deactivate`, GUI `create`/window callbacks, and parameter
   `flush()` — wraps its body in `catch_unwind(AssertUnwindSafe(..))`
   (`src/clap/processor/mod.rs`, `src/clap/extensions/gui.rs`,
-  `src/clap/extensions/params/audio.rs`). A Rust panic is converted to a typed
-  `PluginError` (full crash report written to `~/.cache/neural-amp-modeler-rs/crash-*.txt` by
-  `install_panic_hook("clap")`) and returned as a clean failure code, never
-  crossing the C-ABI boundary as Undefined Behavior.
+  `src/clap/extensions/params/audio.rs`). If a panic occurs on the audio thread (`process()` or `reset()`),
+  it is caught without crossing the C-ABI boundary:
+  1. The panic payload is dropped without leaking heap memory (`panic_to_error` uses static catalog messages from `plugin::errors::processor::AUDIO_CALLBACK_PANICKED`, enforcing the project-wide zero `Box::leak` contract).
+  2. The processor latches `self.poisoned = true`, immediately zeroes output audio ports, and asserts the atomic status bit `RT_STATUS_PROCESSOR_POISONED` on `rt_status`.
+  3. All subsequent audio blocks execute a fast O(1) containment branch, maintaining output silence and returning `Ok(ProcessStatus::Continue)` with zero allocations and zero I/O, strictly preventing panic cascades, crash loops, and acoustic spikes.
+  4. Off-RT, the main thread detects the poisoned bit during `housekeeping()` and triggers a single `host.request_restart()` call.
+  5. Upon `deactivate()`, corrupted DSP state is discarded (`deactivated_dsp = None`), preventing state resurrection. A subsequent `activate()` clears the latch and status bit to cleanly resume audio processing.
 - **Multi-instance isolation (`instance_id`):** every plugin instance receives
   a unique `ColdShared::instance_id` (`next_instance_id()`). Diagnostics are
   scoped per instance via `scope_instance(instance_id)`, and the global
@@ -667,13 +670,22 @@ A fully functional simulated DAW host environment built within library unit test
 
 Integration tests dynamic-link against the compiled `.so` binary using `PluginEntry::load(&artifact.path)` rather than static linking, asserting ABI symbol compliance and recording SHA256 binary hashes for CI traceability.
 
-### 9.3 SIMD Segregation — Contractual via x86-64-v3 Baseline
+### 9.3 SIMD Segregation & Hardware Baseline (x86-64-v3)
 
-Adherence to the baseline `x86-64-v3` (AVX2/FMA) architecture is contractual, not enforced by post-link binary scanning:
+Adherence to the baseline `x86-64-v3` (AVX2/FMA/BMI2) architecture is contractual, not enforced by post-link binary scanning:
 
-- `NAM-Plug` links against `NeuralAmpModeler-rs` on the contractual `x86-64-v3` (AVX2/FMA) baseline without exposing the engine's opt-in `avx512` feature, so all default and release builds compile zero EVEX code into `.text` by construction.
+- `NAM-Plug` links against `NeuralAmpModeler-rs` on the contractual `x86-64-v3` (AVX2/FMA/BMI2) baseline without exposing the engine's opt-in `avx512` feature, so all default and release builds compile zero EVEX code into `.text` by construction.
 - The compile-time feature matrix in `utils/lints.sh` (`--no-default-features`, default, `--all-features`) compiles cleanly.
 - The five release gates certify the distributed artifact's exported symbols, host validation, NAMCore float parity, CabSim IR behavior, and real-time performance (`docs/testing.md` §5.4; performance gate detailed in §9.7).
+
+#### 9.3.1 Entry-Time CPU Feature Validation Gate (`F-NP-10`)
+
+To protect legacy x86-64 CPUs (e.g. pre-Haswell systems lacking AVX2, FMA, or BMI2) from violent crashes with `SIGILL` (illegal instruction) upon plugin loading, `NAM-Plug` implements an architectural validation gate at the very first entry point:
+
+- **Verification at `clap_entry.init`:** `NamEntry::new()` calls `check_cpu_requirements()` before creating factories or allocating plugin resources.
+- **Checked Extensions:** Runtime validation asserts the presence of `avx2`, `fma`, and `bmi2` via CPUID feature detection (`is_x86_feature_detected!`).
+- **Graceful Rejection:** If any required extension is absent, `NamEntry::new()` logs the failure (`log::error!`), writes a fatal diagnostic message directly to `stderr`, and returns `Err(EntryLoadError)`. This causes `clap_entry.init` to return `false` cleanly to the DAW host, allowing the host to handle incompatible hardware gracefully.
+- **Pre-Init Binary Safety:** Disassembly verification of ELF dynamic initialization sections (`.init_array`) confirms that only baseline `x86-64-v1` instructions execute prior to `clap_entry.init`, ensuring that execution is guaranteed to reach the validation gate before any compiled AVX2/FMA instructions are reached.
 
 ### 9.4 Real-Time Heap Allocation Audit (`CountingAllocator` / `tests/clap.rs`, `src/clap/processor/heap_audit.rs`)
 

@@ -87,7 +87,17 @@ Uses `proptest` to generate random audio buffer lengths, parameter value sequenc
 
 Tests plugin bypass processing, verifying bit-transparent phase cancellation (< -120 dBFS) when bypassed and smooth crossfade transitions during bypass state toggles.
 
-### 3.6 Common Test Utilities ([`tests/common/`](../tests/common/))
+### 3.6 Real-Time Fault Containment & Poisoning Suite ([`src/clap/processor_poisoning_test.rs`](../src/clap/processor_poisoning_test.rs))
+
+Guards against real-time panic cascades and memory corruption (`F-NP-02`, `F-NP-09`):
+
+- **Single Panic per Activation:** Injected panics in `process()` or `reset()` are safely caught and latch `poisoned = true` without crashing the host or causing panic loops.
+- **Zero-Alloc O(1) Containment:** Once poisoned, subsequent `process()` calls execute an early O(1) branch that immediately silences output audio ports and returns `Ok(ProcessStatus::Continue)` with zero allocations and zero I/O.
+- **Static Error Catalog & Zero Leaks:** Catches convert to `PluginError::Message(errors::processor::AUDIO_CALLBACK_PANICKED)` without `Box::leak`.
+- **Atomic Telemetry & Off-RT Restart:** Panics raise `RT_STATUS_PROCESSOR_POISONED` on the atomic bitmask; the main thread polls this in `housekeeping()` and triggers a single `host.request_restart()`.
+- **Corrupt State Discard & Clean Resumption:** Deactivating a poisoned processor discards `deactivated_dsp`, and reactivation clears the latch and status bit.
+
+### 3.7 Common Test Utilities ([`tests/common/`](../tests/common/))
 
 - **[`alloc_audit.rs`](../tests/common/alloc_audit.rs):** Global memory allocation counting interceptor.
 - **[`metrics.rs`](../tests/common/metrics.rs):** Off-RT audio fidelity metrics: Peak, RMS, SNR (Signal-to-Noise Ratio), and ESR (Error-to-Signal Ratio).

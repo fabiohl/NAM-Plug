@@ -19,10 +19,9 @@
 //!
 //! # Invariants
 //!
-//! * No `Box::leak` is used to format runtime error strings. The single
-//!   remaining `Box::leak` in the plugin error paths is the emergency panic
-//!   capture (`processor::panic_to_error`), where the process is already
-//!   recovering from a critical failure and the leak is trivial and one-shot.
+//! * No `Box::leak` is used to format runtime error strings in the entire codebase.
+//!   All error codes (including emergency panic capture in `processor::panic_to_error`
+//!   and GUI lifecycle errors) are static constants from this catalog.
 //! * Dynamic detail is emitted exclusively through the `log` facade (via
 //!   [`static_plugin_error`]); the DAW always receives the static catalog
 //!   message, which keeps error dialogs legible and bounded in memory.
@@ -70,6 +69,21 @@ pub mod activation {
     /// The fresh oversamplers expected on the fresh activation path are unavailable.
     pub const OVERSAMPLER_UNAVAILABLE_FRESH: &str =
         "Fresh oversamplers unavailable during activate (fresh path)";
+    /// Model buffer resizing failed during deferred activation.
+    pub const MODEL_RESIZE_FAILED: &str = "Failed to resize model buffers for host buffer size";
+}
+
+/// GUI lifecycle errors.
+pub mod gui {
+    /// An illegal transition occurred in the GUI lifecycle state machine.
+    pub const ILLEGAL_TRANSITION: &str = "GUI lifecycle: illegal state transition";
+}
+
+/// Audio processor errors (panic containment, real-time safety violations).
+pub mod processor {
+    /// The audio callback panicked and transitioned to a poisoned silent state.
+    pub const AUDIO_CALLBACK_PANICKED: &str =
+        "Plugin panicked — crash report saved to ~/.cache/neural-amp-modeler-rs/";
 }
 
 /// DSP resource construction errors (resampler, streaming adapter, oversampler,

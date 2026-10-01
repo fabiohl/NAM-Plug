@@ -40,6 +40,16 @@ pub(crate) use state::{CMD_SWAP_TUNABLES, SLIMMABLE_SWAP_TUNABLES};
 pub(crate) static DRAIN_PROBE_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Test-only hook to inject a panic inside the `process()` audio callback.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) static TEST_PANIC_INJECTION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Test-only hook to inject a panic inside the `reset()` audio processor method.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) static TEST_RESET_PANIC_INJECTION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 use crate::clap::plugin::errors::{self, static_plugin_error};
 use crate::clap::plugin::{
     CommandConsumer, NamClapMainThread, NamClapShared, PendingRestartOs, StagedRestore,
@@ -64,27 +74,34 @@ use std::sync::atomic::Ordering;
 
 /// Converts a panic payload into `PluginError` for `catch_unwind` guards.
 ///
-/// The panic hook has already written the full crash report to
-/// `~/.cache/neural-amp-modeler-rs/crash-*.txt`. This function extracts a human-readable
-/// message from the payload so the host can display it.
-///
-/// NOTE: this is the ONLY sanctioned intentional heap-leak of an error string
-/// in the plugin error paths: panic payload strings need a
-/// `'static` message for `PluginError::Message`, and the process is already
-/// recovering from a critical failure — the leak is trivial and one-shot. All
-/// other runtime error formatting goes through the static catalog
-/// (`plugin::errors`).
+/// In accordance with S2-T2 (zero memory leak in plugin binaries), the panic payload
+/// is dropped without leaking heap memory. Detailed panic information and backtrace
+/// were already safely written by the panic hook (`common/diagnostics/panic_hook.rs`)
+/// to `~/.cache/neural-amp-modeler-rs/crash-*.txt`.
 #[cold]
 fn panic_to_error(panic_info: Box<dyn std::any::Any + Send>) -> PluginError {
-    // NOTE: Intentional leak — PluginError requires 'static lifetime
-    if let Some(s) = panic_info.downcast_ref::<String>() {
-        PluginError::Message(Box::leak(s.clone().into_boxed_str()))
-    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-        PluginError::Message(Box::leak(s.to_string().into_boxed_str()))
-    } else {
-        PluginError::Message(
-            "Plugin panicked — crash report saved to ~/.cache/neural-amp-modeler-rs/",
-        )
+    drop(panic_info);
+    PluginError::Message(errors::processor::AUDIO_CALLBACK_PANICKED)
+}
+
+/// Helper to zero all output channels in the provided CLAP audio ports.
+///
+/// Used for deterministic O(1) silence on processor failure / poisoning without allocations.
+#[inline(always)]
+fn silence_audio_ports(audio: &mut Audio) {
+    for mut port_pair in audio {
+        if let Ok(Some(channel_pairs)) = port_pair.channels().map(|c| c.into_f32()) {
+            for pair in channel_pairs {
+                match pair {
+                    clack_plugin::process::audio::ChannelPair::InputOutput(_, o)
+                    | clack_plugin::process::audio::ChannelPair::InPlace(o)
+                    | clack_plugin::process::audio::ChannelPair::OutputOnly(o) => {
+                        o.fill(0.0);
+                    }
+                    clack_plugin::process::audio::ChannelPair::InputOnly(_) => {}
+                }
+            }
+        }
     }
 }
 
@@ -861,8 +878,13 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 gain_lut: get_gain_lut(),
                 cached_effective_latency: initial_latency,
                 host,
+                poisoned: false,
             })
         }));
+        shared
+            .cold
+            .rt_status
+            .clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
         match result {
             Ok(r) => r,
             Err(err) => Err(panic_to_error(err)),
@@ -926,26 +948,37 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // a host restart is pending. Otherwise the next activate() would
             // consider the old engines compatible with the new requested factor
             // and reuse them incorrectly.
-            let deactivated = DeactivatedDspState {
-                model_l: self.model_l,
-                model_generation: self.model_generation,
-                cabsim_adapter: self.cabsim_adapter,
-                resampler: self.resampler,
-                stream: self.stream,
-                os_l: self.os_l,
-                os_r: self.os_r,
-                os_factor: self.applied_os_factor,
-                sample_rate: self.shared.cold.sample_rate.load(Ordering::Relaxed),
-                buffer_size: self.shared.cold.buffer_size.load(Ordering::Relaxed),
-                model_input_mult_adj: self.model_input_mult_adj,
-                model_output_mult_adj: self.model_output_mult_adj,
-            };
-            *self
-                .shared
-                .cold
-                .deactivated_dsp
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(deactivated);
+            // If the processor was poisoned by a runtime panic, discard the corrupted
+            // DSP state so that the subsequent activate() rebuilds a fresh pipeline.
+            if !self.poisoned {
+                let deactivated = DeactivatedDspState {
+                    model_l: self.model_l,
+                    model_generation: self.model_generation,
+                    cabsim_adapter: self.cabsim_adapter,
+                    resampler: self.resampler,
+                    stream: self.stream,
+                    os_l: self.os_l,
+                    os_r: self.os_r,
+                    os_factor: self.applied_os_factor,
+                    sample_rate: self.shared.cold.sample_rate.load(Ordering::Relaxed),
+                    buffer_size: self.shared.cold.buffer_size.load(Ordering::Relaxed),
+                    model_input_mult_adj: self.model_input_mult_adj,
+                    model_output_mult_adj: self.model_output_mult_adj,
+                };
+                *self
+                    .shared
+                    .cold
+                    .deactivated_dsp
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(deactivated);
+            } else {
+                *self
+                    .shared
+                    .cold
+                    .deactivated_dsp
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+            }
 
             // Hand off single-owner parking-lot items to the final off-RT GC
             // drain. The audio thread has already stopped (the host calls
@@ -967,8 +1000,20 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         mut audio: Audio,
         events: Events,
     ) -> Result<ProcessStatus, PluginError> {
+        // S2-T1 / F-NP-02: Fast O(1) containment path if processor is poisoned.
+        // Zero allocations, zero I/O, zero log calls on the RT hot-path.
+        if self.poisoned {
+            silence_audio_ports(&mut audio);
+            return Ok(ProcessStatus::Continue);
+        }
+
         // Isolate panics in this instance's audio callback.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(any(test, feature = "testing"))]
+            if TEST_PANIC_INJECTION.swap(false, Ordering::Relaxed) {
+                panic!("Test injected audio processing panic");
+            }
+
             #[cfg(feature = "heap-audit")]
             let _guard = if neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED
                 .load(Ordering::Relaxed)
@@ -1008,30 +1053,47 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // One-time thread priority query on the first processed block
             if !self.prio_checked {
                 self.prio_checked = true;
-                // SAFETY: `pthread_self()` returns a valid thread handle for the
-                // calling thread. `pthread_getschedparam()` reads scheduling
-                // attributes into stack-local variables using FFI defined by POSIX.
-                unsafe {
-                    let thread_id = libc::pthread_self();
-                    let mut policy = 0i32;
-                    let mut param: libc::sched_param = std::mem::zeroed();
-                    if libc::pthread_getschedparam(thread_id, &mut policy, &mut param) == 0 {
+
+                // Query RT thread scheduling parameters via POSIX FFI.
+                // SAFETY: `pthread_self()` is POSIX FFI with no arguments; always succeeds
+                // and returns the calling thread's ID safely.
+                let thread_id = unsafe { libc::pthread_self() };
+
+                let mut policy = 0i32;
+                let mut param = libc::sched_param { sched_priority: 0 };
+                // SAFETY: `pthread_getschedparam` takes valid thread ID and valid pointers
+                // to stack-local variables with proper alignment and lifetime.
+                let getsched_res =
+                    unsafe { libc::pthread_getschedparam(thread_id, &mut policy, &mut param) };
+                if getsched_res == 0 {
+                    self.rt_status
+                        .rt_priority
+                        .store(param.sched_priority, Ordering::Relaxed);
+                    self.rt_status
+                        .confirmed_priority
+                        .store(param.sched_priority, Ordering::Relaxed);
+                    self.rt_status.rt_policy.store(policy, Ordering::Relaxed);
+                    if policy == libc::SCHED_FIFO || policy == libc::SCHED_RR {
                         self.rt_status
-                            .rt_priority
-                            .store(param.sched_priority, Ordering::Relaxed);
-                        self.rt_status
-                            .confirmed_priority
-                            .store(param.sched_priority, Ordering::Relaxed);
-                        self.rt_status.rt_policy.store(policy, Ordering::Relaxed);
-                        if policy == libc::SCHED_FIFO || policy == libc::SCHED_RR {
-                            self.rt_status.set_flag(
-                                neural_amp_modeler_rs::common::spsc::RT_STATUS_RT_IS_FIFO,
-                            );
-                        }
+                            .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_RT_IS_FIFO);
                     }
-                    let cpu = libc::sched_getcpu();
-                    self.rt_status.rt_cpu.store(cpu, Ordering::Relaxed);
-                    neural_amp_modeler_rs::math::common::set_daz_ftz();
+                }
+
+                // SAFETY: `sched_getcpu()` takes no arguments, is thread-safe (POSIX/vDSO),
+                // and never accesses or dereferences user memory.
+                let cpu = unsafe { libc::sched_getcpu() };
+                self.rt_status.rt_cpu.store(cpu, Ordering::Relaxed);
+
+                // Configure denormals handling (DAZ/FTZ) at start of processing.
+                // Architecture note: On x86_64, `set_daz_ftz()` manipulates MXCSR via SSE2 instructions.
+                // On AArch64/ARM64, flush-to-zero is handled either at the FPCR register level or denormals
+                // are flushed in hardware; `set_daz_ftz()` is currently x86_64-specific (baseline target).
+                #[cfg(target_arch = "x86_64")]
+                {
+                    // SAFETY: MXCSR modification via stmxcsr/ldmxcsr is safe on x86_64 with SSE2/AVX2.
+                    unsafe {
+                        neural_amp_modeler_rs::math::common::set_daz_ftz();
+                    }
                 }
             }
 
@@ -1039,10 +1101,14 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // (e.g. during GUI repaints or parameter flushes from another thread).
             // Reassert DAZ+FTZ every 1024 blocks using the existing telemetry counter
             // — the conditional is a single bit-test (1 cycle; cold branch).
-            // SAFETY: DAZ+FTZ are SSE2 control bits on x86-64 — unconditionally safe.
+            // On AArch64, this is a compile-time no-op as DAZ/FTZ is an x86 MXCSR mechanism.
             if self.cycles_since_telemetry & 0x3FF == 0 {
-                unsafe {
-                    neural_amp_modeler_rs::math::common::set_daz_ftz();
+                #[cfg(target_arch = "x86_64")]
+                {
+                    // SAFETY: Re-asserting DAZ+FTZ SSE2 control bits on x86_64 is unconditionally safe.
+                    unsafe {
+                        neural_amp_modeler_rs::math::common::set_daz_ftz();
+                    }
                 }
             }
 
@@ -1056,26 +1122,22 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         match result {
             Ok(r) => r,
             Err(err) => {
-                for mut port_pair in &mut audio {
-                    if let Ok(Some(channel_pairs)) = port_pair.channels().map(|c| c.into_f32()) {
-                        for pair in channel_pairs {
-                            match pair {
-                                clack_plugin::process::audio::ChannelPair::InputOutput(_, o)
-                                | clack_plugin::process::audio::ChannelPair::InPlace(o)
-                                | clack_plugin::process::audio::ChannelPair::OutputOnly(o) => {
-                                    o.fill(0.0);
-                                }
-                                clack_plugin::process::audio::ChannelPair::InputOnly(_) => {}
-                            }
-                        }
-                    }
-                }
+                // S2-T1 / F-NP-02: Latch poisoned state and signal to main thread via atomic status flag.
+                self.poisoned = true;
+                self.rt_status
+                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
+                silence_audio_ports(&mut audio);
                 Err(panic_to_error(err))
             }
         }
     }
 
     fn reset(&mut self) {
+        // S2-T1: If already poisoned, avoid running DSP reset state transitions.
+        if self.poisoned {
+            return;
+        }
+
         // Full in-place, zero-alloc DSP state reset on timeline discontinuity
         // (seek / loop relocation, `steady_time` regression).
         //
@@ -1086,6 +1148,11 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         // applied oversampling factor, latency, preset) is preserved — nothing
         // is deallocated or recreated on the audio thread.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(any(test, feature = "testing"))]
+            if TEST_RESET_PANIC_INJECTION.swap(false, Ordering::Relaxed) {
+                panic!("Test injected reset panic");
+            }
+
             // 1. Recurrent/FIR neural model state (WaveNet / LSTM / ConvNet /
             //    Linear): `NamModel::reset` zeroes internal states and
             //    prewarms exactly like a freshly built model (the engine
@@ -1175,8 +1242,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.prio_checked = false;
         }));
         if let Err(err) = result {
-            // The panic hook already wrote the crash report; the audio thread
-            // must not unwind through the host.
+            // S2-T1: Latch poisoned state and signal via atomic status flag.
+            self.poisoned = true;
+            self.rt_status
+                .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
             drop(err);
         }
     }
@@ -1341,3 +1410,7 @@ mod processor_multi_instance_isolation_test;
 #[cfg(test)]
 #[path = "../processor_temporal_validation_test.rs"]
 mod processor_temporal_validation_test;
+
+#[cfg(test)]
+#[path = "../processor_poisoning_test.rs"]
+mod processor_poisoning_test;

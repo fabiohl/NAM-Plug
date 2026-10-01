@@ -19,7 +19,7 @@ pub use shared::{
     StructuralKind, UiToRt,
 };
 
-mod main_thread;
+pub(crate) mod main_thread;
 pub use main_thread::{NamClapMainThread, debug_assert_main_thread};
 
 use crate::clap::descriptor::nam_descriptor;
@@ -27,12 +27,10 @@ use crate::clap::processor::NamClapProcessor;
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
-use neural_amp_modeler_rs::common::spsc::{GcOverflowBuffer, RtStatusFlags};
-use rtrb::RingBuffer;
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// NAM-Plug plugin: main entry point for the CLAP lifecycle.
 pub struct NamClapPlugin;
@@ -77,125 +75,7 @@ impl DefaultPluginFactory for NamClapPlugin {
         // Track active instances for multi-instance panic isolation.
         crate::clap::plugin::shared::bump_active_instances();
 
-        let (param_tx, param_rx) = RingBuffer::new(CMD_QUEUE_CAPACITY);
-        let (gc_tx, gc_rx) = RingBuffer::new(32); // Increased capacity for the plugin
-        let (slimmable_tx, slimmable_rx) = RingBuffer::new(4);
-
-        let dialog_state = Some(Arc::new(
-            crate::clap::gui::dialog_state::DialogSharedState::new(),
-        ));
-        let ir_dialog_state = Some(Arc::new(
-            crate::clap::gui::dialog_state::IrDialogSharedState::new(),
-        ));
-
-        let gui = Arc::new(GuiSharedState {
-            rt_to_ui: RtToUi {
-                ui_peak_l: AtomicU32::new(0.0f32.to_bits()),
-                ui_peak_r: AtomicU32::new(0.0f32.to_bits()),
-                ui_clipped: std::sync::atomic::AtomicBool::new(false),
-                ui_clip_indicator: std::sync::atomic::AtomicBool::new(false),
-                ui_gate_active: std::sync::atomic::AtomicBool::new(false),
-                current_latency: AtomicU32::new(0),
-                cabsim_tail_samples: AtomicU32::new(0),
-                active_channel_count: AtomicU32::new(1),
-            },
-            ui_to_rt: UiToRt {
-                param_input_gain: AtomicU32::new(0.0f32.to_bits()),
-                param_output_gain: AtomicU32::new(0.0f32.to_bits()),
-                // Gate off by default: parked at the range minimum (-90 dB), the most
-                // permissive setting available, so the noise gate practically never
-                // closes out of the box.
-                param_gate_thresh: AtomicU32::new((-90.0f32).to_bits()),
-                param_bypass: AtomicU32::new(0),
-                param_adaptive_compute: AtomicU32::new(1), // Conservative by default in CLAP plugin
-                param_slim_override: AtomicU32::new(0),    // Auto by default
-                param_oversample: AtomicU32::new(0),       // Off by default
-                param_activation: AtomicU32::new(1),       // Standard (exact-grade) by default
-                gesture_flags: AtomicU32::new(0),
-                gui_param_generation: AtomicU32::new(0),
-                host_r_deactivated: std::sync::atomic::AtomicBool::new(false),
-            },
-            cold: ColdShared {
-                instance_id: shared::next_instance_id(),
-                param_tx: Mutex::new(Some(param_tx)),
-                param_rx: Mutex::new(Some(param_rx)),
-                gc_tx: Mutex::new(Some(gc_tx)),
-                gc_rx: Mutex::new(Some(gc_rx)),
-                gc_overflow: Arc::new(GcOverflowBuffer::new(
-                    neural_amp_modeler_rs::common::spsc::SPSC_CAPACITY,
-                )),
-                rt_status: Arc::new(RtStatusFlags::new()),
-                model_sample_rate: AtomicU32::new(48000),
-                sample_rate: AtomicU32::new(0),
-                buffer_size: AtomicU32::new(0),
-                current_stream_latency: AtomicU32::new(0),
-                current_cabsim_latency: AtomicU32::new(0),
-                track_accent_color: AtomicU32::new(0),
-                param_indication: [
-                    std::sync::atomic::AtomicU8::new(0),
-                    std::sync::atomic::AtomicU8::new(0),
-                    std::sync::atomic::AtomicU8::new(0),
-                    std::sync::atomic::AtomicU8::new(0),
-                    std::sync::atomic::AtomicU8::new(0),
-                    std::sync::atomic::AtomicU8::new(0),
-                    std::sync::atomic::AtomicU8::new(0),
-                    std::sync::atomic::AtomicU8::new(0),
-                    std::sync::atomic::AtomicU8::new(0),
-                ],
-                param_indication_color: [
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                ],
-                model_load_counter: AtomicU32::new(0),
-                model_generation: std::sync::atomic::AtomicU64::new(0),
-                ui_model_name: Mutex::new(String::new()),
-                ui_model_metadata: Mutex::new(None),
-                ui_pending_model: Mutex::new(None),
-                ui_loading: std::sync::atomic::AtomicBool::new(false),
-                ui_load_error: std::sync::atomic::AtomicBool::new(false),
-                ui_load_error_msg: Mutex::new(String::new()),
-                ui_model_info: Mutex::new(None),
-                alive_fence: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-                gui_user_closed: std::sync::atomic::AtomicBool::new(false),
-                render_mode: AtomicU32::new(0),
-                gui_scale_factor: AtomicU32::new(0),
-                ir_path: Mutex::new(None),
-                ir_hash: Mutex::new(None),
-                ui_pending_ir: Mutex::new(None),
-                ui_ir_loading: std::sync::atomic::AtomicBool::new(false),
-                ui_ir_load_error: std::sync::atomic::AtomicBool::new(false),
-                ui_ir_load_error_msg: Mutex::new(String::new()),
-                ui_clear_ir: std::sync::atomic::AtomicBool::new(false),
-                ui_clear_model: std::sync::atomic::AtomicBool::new(false),
-                ir_raw_samples: Mutex::new(None),
-                ir_raw_sample_rate: AtomicU32::new(0),
-                slimmable_tx: Mutex::new(Some(slimmable_tx)),
-                slimmable_rx: Mutex::new(Some(slimmable_rx)),
-                requested_slimmable_generation: std::sync::atomic::AtomicU64::new(0),
-                slimmable_stale_discarded_total: AtomicU32::new(0),
-                full_wavenet_model: Mutex::new(None),
-                cmd_next_seq: AtomicU64::new(0),
-                cmd_last_ack: AtomicU64::new(0),
-                last_applied_generation: AtomicU64::new(0),
-                pending_restart_os_factor: AtomicU32::new(0),
-                in_flight_params: Mutex::new(None),
-                pending_preset_load: Mutex::new(std::collections::VecDeque::new()),
-                pending_model: Mutex::new(None),
-                deactivated_dsp: Mutex::new(None),
-                dialog_state: dialog_state.clone(),
-                ir_dialog_state: ir_dialog_state.clone(),
-                dialog_handle_sink: Mutex::new(None),
-                ir_dialog_handle_sink: Mutex::new(None),
-                host_log_sink: Mutex::new(None),
-            },
-        });
+        let gui = Arc::new(GuiSharedState::new(shared::next_instance_id()));
 
         Ok(NamClapShared { gui })
     }
@@ -269,23 +149,16 @@ impl DefaultPluginFactory for NamClapPlugin {
             });
 
             if let Some(host_log) = host.get_extension::<HostLog>() {
-                // SAFETY: HostSharedHandle is repr(transparent) over
-                // NonNull<clap_host>. We extract the pointer and store
-                // it as opaque usize. Valid for the plugin's lifetime.
-                let handle_copy = *host; // Copy
-                let host_nn: std::ptr::NonNull<()> =
-                    unsafe { std::mem::transmute_copy(&handle_copy) };
-                let host_addr = host_nn.as_ptr() as usize;
-                // The sink outlives the plugin (registered in the
-                // global NamLogger), so every dereference of the stored
-                // host pointer must be gated by the alive_fence (Acquire).
-                // Once the fence drops, log forwarding becomes a no-op.
-                let fence = Arc::clone(&shared.cold.alive_fence);
+                let quiescence = Arc::clone(&shared.cold.host_log_quiescence);
+                let host_bridge = crate::clap::gui::GuiHostBridge::new(&host);
 
                 let sink: Arc<HostLogFn> = Arc::new(move |severity_str, msg| {
-                    if !fence.load(Ordering::Acquire) {
-                        // Plugin destroyed — never dereference the
-                        // host handle from a dead instance's sink.
+                    let Ok(guard) = quiescence.try_read() else {
+                        // Teardown in progress or lock contended — discard log
+                        return;
+                    };
+                    if !*guard {
+                        // Plugin destroyed — never dereference the host handle
                         return;
                     }
                     let severity = match severity_str {
@@ -296,14 +169,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                         _ => LogSeverity::Info,
                     };
                     let cmsg = CString::new(msg).unwrap_or_default();
-                    // SAFETY: host_addr was obtained from a valid
-                    // HostSharedHandle during init. The pointer is
-                    // valid for the plugin's lifetime — guarded above
-                    // by the alive_fence.
-                    let ptr = host_addr as *mut ();
-                    let nn = unsafe { std::ptr::NonNull::new_unchecked(ptr) };
-                    let host_shared: HostSharedHandle<'static> =
-                        unsafe { std::mem::transmute::<std::ptr::NonNull<()>, _>(nn) };
+                    let host_shared = host_bridge.as_static();
                     host_log.log(&host_shared, severity, &cmsg);
                 });
                 if let Some(nl) = NamLogger::global() {
@@ -351,6 +217,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             pending_restore: RefCell::new(None),
             staged_restore: RefCell::new(None),
             staged_swap: RefCell::new(None),
+            poison_restart_requested: Cell::new(false),
         };
 
         let host_name = main_thread

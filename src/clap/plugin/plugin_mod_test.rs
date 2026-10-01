@@ -110,9 +110,12 @@ fn test_file_picker_alive_fence_and_timeout() {
                 if alive_fence.load(Ordering::Relaxed) {
                     let shared_ref = unsafe { &*(shared_addr as *const NamClapShared) };
                     if let Some(path) = path_opt
-                        && let Ok(mut pending_guard) = shared_ref.cold.ui_pending_model.lock()
+                        && let Ok(mut pending_guard) = shared_ref.cold.pending_model_requests.lock()
                     {
-                        *pending_guard = Some(path);
+                        pending_guard.push_back(crate::clap::plugin::shared::PendingModelRequest {
+                            path,
+                            origin: crate::clap::plugin::shared::ModelRequestOrigin::Gui,
+                        });
                     }
                 }
             }
@@ -120,13 +123,19 @@ fn test_file_picker_alive_fence_and_timeout() {
         }
 
         assert_eq!(
-            *shared.cold.ui_pending_model.lock().unwrap(),
+            shared
+                .cold
+                .pending_model_requests
+                .lock()
+                .unwrap()
+                .front()
+                .map(|r| r.path.clone()),
             Some(std::path::PathBuf::from("/tmp/model.nam"))
         );
     }
 
     // Clears the state
-    *shared.cold.ui_pending_model.lock().unwrap() = None;
+    shared.cold.pending_model_requests.lock().unwrap().clear();
 
     // 2. Case alive_fence is false: the plugin was destroyed before the picker returned
     {
@@ -147,17 +156,27 @@ fn test_file_picker_alive_fence_and_timeout() {
                     // If it entered here, it would be an error (illegal access to freed address)
                     let shared_ref = unsafe { &*(shared_addr as *const NamClapShared) };
                     if let Some(path) = path_opt
-                        && let Ok(mut pending_guard) = shared_ref.cold.ui_pending_model.lock()
+                        && let Ok(mut pending_guard) = shared_ref.cold.pending_model_requests.lock()
                     {
-                        *pending_guard = Some(path);
+                        pending_guard.push_back(crate::clap::plugin::shared::PendingModelRequest {
+                            path,
+                            origin: crate::clap::plugin::shared::ModelRequestOrigin::Gui,
+                        });
                     }
                 }
             }
             Err(_) => panic!("Should have received the path"),
         }
 
-        // Must remain None because alive_fence was false and prevented accessing shared_addr
-        assert_eq!(*shared.cold.ui_pending_model.lock().unwrap(), None);
+        // Must remain empty because alive_fence was false and prevented accessing shared_addr
+        assert!(
+            shared
+                .cold
+                .pending_model_requests
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // 3. Timeout Case: rx.recv_timeout fails due to timeout, resetting ui_loading

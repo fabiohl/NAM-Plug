@@ -3,6 +3,8 @@
 
 //! Lock-free shared state between the audio thread and the main thread.
 
+use crate::clap::gui::dialog_state::{DialogSharedState, IrDialogSharedState};
+use crate::clap::plugin::command_scheduler::CMD_QUEUE_CAPACITY;
 use crate::clap::processor::DeactivatedDspState;
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::ModelInfo;
@@ -14,7 +16,7 @@ use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
 use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::StaticModel;
-use rtrb::{Consumer, Producer};
+use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -467,15 +469,67 @@ pub struct UiToRt {
     pub host_r_deactivated: AtomicBool,
 }
 
-/// Deferred preset-load metadata for `HostPresetLoad` notification.
-/// Stored by `PluginPresetLoadImpl::load_from_location()` and consumed by
-/// `housekeeping()` to call `loaded()` or `on_error()` after the async load.
-pub struct PendingPresetLoad {
-    /// Owned copy of the file-system path from the `Location`.
-    pub location_path: CString,
-    /// Owned copy of the `load_key` (preset identifier from discovery provider).
-    pub load_key: Option<CString>,
+impl Default for RtToUi {
+    fn default() -> Self {
+        Self {
+            ui_peak_l: AtomicU32::new(0.0f32.to_bits()),
+            ui_peak_r: AtomicU32::new(0.0f32.to_bits()),
+            ui_clipped: AtomicBool::new(false),
+            ui_clip_indicator: AtomicBool::new(false),
+            ui_gate_active: AtomicBool::new(false),
+            current_latency: AtomicU32::new(0),
+            cabsim_tail_samples: AtomicU32::new(0),
+            active_channel_count: AtomicU32::new(1),
+        }
+    }
 }
+
+impl Default for UiToRt {
+    fn default() -> Self {
+        Self {
+            param_input_gain: AtomicU32::new(0.0f32.to_bits()),
+            param_output_gain: AtomicU32::new(0.0f32.to_bits()),
+            // Gate off by default: parked at the range minimum (-90 dB), the most
+            // permissive setting available, so the noise gate practically never
+            // closes out of the box.
+            param_gate_thresh: AtomicU32::new((-90.0f32).to_bits()),
+            param_bypass: AtomicU32::new(0),
+            param_adaptive_compute: AtomicU32::new(1), // Conservative by default in CLAP plugin
+            param_slim_override: AtomicU32::new(0),    // Auto by default
+            param_oversample: AtomicU32::new(0),       // Off by default
+            param_activation: AtomicU32::new(1),       // Standard (exact-grade) by default
+            gesture_flags: AtomicU32::new(0),
+            gui_param_generation: AtomicU32::new(0),
+            host_r_deactivated: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Origin of a model load request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelRequestOrigin {
+    /// Triggered via the graphical interface / file dialog.
+    Gui,
+    /// Triggered via CLAP preset-load extension.
+    Preset {
+        /// Owned copy of the file-system path from the `Location`.
+        location: CString,
+        /// Owned copy of the `load_key` (preset identifier from discovery provider).
+        load_key: Option<CString>,
+    },
+}
+
+/// A pending model load request queued for processing by the main thread.
+#[derive(Debug, Clone)]
+pub struct PendingModelRequest {
+    /// Path to the model file to load.
+    pub path: PathBuf,
+    /// Origin of this load request (GUI or CLAP preset load).
+    pub origin: ModelRequestOrigin,
+}
+
+/// Maximum capacity of the pending model load queue (bounded FIFO).
+pub const MAX_PENDING_MODEL_REQUESTS: usize = 16;
 
 /// Fields accessed at low frequency by both threads (init, shutdown, rare events).
 #[repr(align(128))]
@@ -540,9 +594,10 @@ pub struct ColdShared {
     pub ui_model_name: Mutex<String>,
     /// Loaded model metadata for UI display.
     pub ui_model_metadata: Mutex<Option<NamModelMetadata>>,
-    /// Pending model path to be loaded by the Main Thread. Written by the UI thread.
-    pub ui_pending_model: Mutex<Option<PathBuf>>,
-    /// Indicates whether the GUI is in the middle of an asynchronous model load.
+    /// Pending model load requests to be processed by the Main Thread (bounded FIFO queue).
+    /// Enqueued by the UI thread (dialog / drop) or by the preset-load extension.
+    /// Consumed sequentially by `housekeeping()` on the main thread.
+    pub pending_model_requests: Mutex<std::collections::VecDeque<PendingModelRequest>>,
     pub ui_loading: AtomicBool,
     /// Flag signaling that a model loading error occurred.
     pub ui_load_error: AtomicBool,
@@ -632,11 +687,6 @@ pub struct ColdShared {
     /// (channel full), the snapshot is stored here for retry via
     /// `host.request_callback()` → `housekeeping()`.
     pub in_flight_params: Mutex<Option<neural_amp_modeler_rs::common::params::RtProcessingParams>>,
-    /// Pending preset-load operations (bounded FIFO queue).
-    /// Enqueued by `load_from_location()` with the location and load_key for
-    /// deferred host notification. Consumed by `housekeeping()` in FIFO order to call
-    /// `HostPresetLoad::loaded()` or `on_error()` after async loads.
-    pub pending_preset_load: Mutex<std::collections::VecDeque<PendingPresetLoad>>,
     /// Model loaded before `activate()` (state restore while `buffer_size == 0`),
     /// deferred to avoid heap allocation on the audio thread.
     /// See `flush_pending_model()` in load.rs and housekeeping.rs.
@@ -661,6 +711,14 @@ pub struct ColdShared {
     /// for the plugin's lifetime.
     pub(crate) host_log_sink:
         Mutex<Option<Arc<neural_amp_modeler_rs::common::diagnostics::logger::HostLogFn>>>,
+    /// Synchronization fence for host log sink quiescence during plugin teardown.
+    ///
+    /// Sinks acquire `try_read()` before dispatching to the host logger.
+    /// During instance destruction, `NamClapMainThread::drop` unregisters the instance sink
+    /// from `NamLogger` and acquires a write lock (with a bounded 50ms spin/yield timeout),
+    /// setting the value to `false`. This guarantees that no thread is mid-call in `host_log.log()`
+    /// after teardown completes.
+    pub(crate) host_log_quiescence: Arc<std::sync::RwLock<bool>>,
 }
 
 /// Model payload deferred from the main thread until `buffer_size` is known
@@ -771,6 +829,94 @@ pub const RENDER_MODE_REALTIME: u32 = 0;
 pub const RENDER_MODE_OFFLINE: u32 = 1;
 
 impl ColdShared {
+    /// Creates a new `ColdShared` instance with default production/test fields and pre-allocated SPSC channels.
+    pub fn new(instance_id: u64) -> Self {
+        let (param_tx, param_rx) = RingBuffer::new(CMD_QUEUE_CAPACITY);
+        let (gc_tx, gc_rx) = RingBuffer::new(32);
+        let (slimmable_tx, slimmable_rx) = RingBuffer::new(4);
+
+        Self {
+            instance_id,
+            param_tx: Mutex::new(Some(param_tx)),
+            param_rx: Mutex::new(Some(param_rx)),
+            gc_tx: Mutex::new(Some(gc_tx)),
+            gc_rx: Mutex::new(Some(gc_rx)),
+            gc_overflow: Arc::new(GcOverflowBuffer::new(
+                neural_amp_modeler_rs::common::spsc::SPSC_CAPACITY,
+            )),
+            rt_status: Arc::new(RtStatusFlags::new()),
+            model_sample_rate: AtomicU32::new(48000),
+            sample_rate: AtomicU32::new(0),
+            buffer_size: AtomicU32::new(0),
+            current_stream_latency: AtomicU32::new(0),
+            current_cabsim_latency: AtomicU32::new(0),
+            track_accent_color: AtomicU32::new(0),
+            param_indication: [
+                AtomicU8::new(0),
+                AtomicU8::new(0),
+                AtomicU8::new(0),
+                AtomicU8::new(0),
+                AtomicU8::new(0),
+                AtomicU8::new(0),
+                AtomicU8::new(0),
+                AtomicU8::new(0),
+                AtomicU8::new(0),
+            ],
+            param_indication_color: [
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+            ],
+            model_load_counter: AtomicU32::new(0),
+            model_generation: AtomicU64::new(0),
+            ui_model_name: Mutex::new(String::new()),
+            ui_model_metadata: Mutex::new(None),
+            pending_model_requests: Mutex::new(std::collections::VecDeque::new()),
+            ui_loading: AtomicBool::new(false),
+            ui_load_error: AtomicBool::new(false),
+            ui_load_error_msg: Mutex::new(String::new()),
+            ui_model_info: Mutex::new(None),
+            ui_clear_model: AtomicBool::new(false),
+            alive_fence: Arc::new(AtomicBool::new(true)),
+            gui_user_closed: AtomicBool::new(false),
+            render_mode: AtomicU32::new(RENDER_MODE_REALTIME),
+            gui_scale_factor: AtomicU32::new(0),
+            ir_path: Mutex::new(None),
+            ir_hash: Mutex::new(None),
+            ui_pending_ir: Mutex::new(None),
+            ui_ir_loading: AtomicBool::new(false),
+            ui_ir_load_error: AtomicBool::new(false),
+            ui_ir_load_error_msg: Mutex::new(String::new()),
+            ui_clear_ir: AtomicBool::new(false),
+            ir_raw_samples: Mutex::new(None),
+            ir_raw_sample_rate: AtomicU32::new(0),
+            slimmable_tx: Mutex::new(Some(slimmable_tx)),
+            slimmable_rx: Mutex::new(Some(slimmable_rx)),
+            requested_slimmable_generation: AtomicU64::new(0),
+            slimmable_stale_discarded_total: AtomicU32::new(0),
+            full_wavenet_model: Mutex::new(None),
+            cmd_next_seq: AtomicU64::new(0),
+            cmd_last_ack: AtomicU64::new(0),
+            last_applied_generation: AtomicU64::new(0),
+            pending_restart_os_factor: AtomicU32::new(0),
+            in_flight_params: Mutex::new(None),
+            pending_model: Mutex::new(None),
+            deactivated_dsp: Mutex::new(None),
+            dialog_state: Some(Arc::new(DialogSharedState::new())),
+            ir_dialog_state: Some(Arc::new(IrDialogSharedState::new())),
+            dialog_handle_sink: Mutex::new(None),
+            ir_dialog_handle_sink: Mutex::new(None),
+            host_log_sink: Mutex::new(None),
+            host_log_quiescence: Arc::new(std::sync::RwLock::new(true)),
+        }
+    }
+
     /// Allocates the next monotonic model generation (1-based) and returns it.
     ///
     /// Called only on the main thread whenever a new model identity is adopted
@@ -866,124 +1012,21 @@ impl GuiSharedState {
         }
     }
 
-    /// Test helper creating an `Arc<GuiSharedState>` initialized with valid dummy channels
-    /// and dialog states for unit and integration testing.
+    /// Creates a new `GuiSharedState` instance with default production/test sub-structs.
+    pub fn new(instance_id: u64) -> Self {
+        Self {
+            rt_to_ui: RtToUi::default(),
+            ui_to_rt: UiToRt::default(),
+            cold: ColdShared::new(instance_id),
+        }
+    }
+
+    /// Test helper creating an `Arc<GuiSharedState>` initialized with valid channels,
+    /// dialog states, and a pre-configured sample rate (44100 Hz).
     pub fn new_test() -> Arc<Self> {
-        use crate::clap::gui::dialog_state::{DialogSharedState, IrDialogSharedState};
-        use neural_amp_modeler_rs::common::spsc::{GcOverflowBuffer, RtStatusFlags};
-        use rtrb::RingBuffer;
-        use std::sync::Mutex;
-        use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64};
-
-        let (param_tx, param_rx) = RingBuffer::new(8);
-        let (gc_tx, gc_rx) = RingBuffer::new(32);
-        let (slimmable_tx, slimmable_rx) = RingBuffer::new(4);
-
-        Arc::new(Self {
-            rt_to_ui: RtToUi {
-                ui_peak_l: AtomicU32::new(0.0f32.to_bits()),
-                ui_peak_r: AtomicU32::new(0.0f32.to_bits()),
-                ui_clipped: AtomicBool::new(false),
-                ui_clip_indicator: AtomicBool::new(false),
-                ui_gate_active: AtomicBool::new(false),
-                current_latency: AtomicU32::new(0),
-                cabsim_tail_samples: AtomicU32::new(0),
-                active_channel_count: AtomicU32::new(1),
-            },
-            ui_to_rt: UiToRt {
-                param_input_gain: AtomicU32::new(0.0f32.to_bits()),
-                param_output_gain: AtomicU32::new(0.0f32.to_bits()),
-                param_gate_thresh: AtomicU32::new((-90.0f32).to_bits()),
-                param_bypass: AtomicU32::new(0),
-                param_adaptive_compute: AtomicU32::new(1),
-                param_slim_override: AtomicU32::new(0),
-                param_oversample: AtomicU32::new(0),
-                param_activation: AtomicU32::new(1), // Standard (exact-grade)
-                gesture_flags: AtomicU32::new(0),
-                gui_param_generation: AtomicU32::new(0),
-                host_r_deactivated: AtomicBool::new(false),
-            },
-            cold: ColdShared {
-                instance_id: 1,
-                param_tx: Mutex::new(Some(param_tx)),
-                param_rx: Mutex::new(Some(param_rx)),
-                gc_tx: Mutex::new(Some(gc_tx)),
-                gc_rx: Mutex::new(Some(gc_rx)),
-                gc_overflow: Arc::new(GcOverflowBuffer::new(
-                    neural_amp_modeler_rs::common::spsc::SPSC_CAPACITY,
-                )),
-                rt_status: Arc::new(RtStatusFlags::new()),
-                model_sample_rate: AtomicU32::new(48000),
-                sample_rate: AtomicU32::new(44100),
-                buffer_size: AtomicU32::new(0),
-                current_stream_latency: AtomicU32::new(0),
-                current_cabsim_latency: AtomicU32::new(0),
-                track_accent_color: AtomicU32::new(0),
-                param_indication: [
-                    AtomicU8::new(0),
-                    AtomicU8::new(0),
-                    AtomicU8::new(0),
-                    AtomicU8::new(0),
-                    AtomicU8::new(0),
-                    AtomicU8::new(0),
-                    AtomicU8::new(0),
-                    AtomicU8::new(0),
-                    AtomicU8::new(0),
-                ],
-                param_indication_color: [
-                    AtomicU32::new(0),
-                    AtomicU32::new(0),
-                    AtomicU32::new(0),
-                    AtomicU32::new(0),
-                    AtomicU32::new(0),
-                    AtomicU32::new(0),
-                    AtomicU32::new(0),
-                    AtomicU32::new(0),
-                    AtomicU32::new(0),
-                ],
-                model_load_counter: AtomicU32::new(0),
-                model_generation: AtomicU64::new(0),
-                ui_model_name: Mutex::new(String::new()),
-                ui_model_metadata: Mutex::new(None),
-                ui_pending_model: Mutex::new(None),
-                ui_loading: AtomicBool::new(false),
-                ui_load_error: AtomicBool::new(false),
-                ui_load_error_msg: Mutex::new(String::new()),
-                ui_model_info: Mutex::new(None),
-                alive_fence: Arc::new(AtomicBool::new(true)),
-                gui_user_closed: AtomicBool::new(false),
-                render_mode: AtomicU32::new(RENDER_MODE_REALTIME),
-                gui_scale_factor: AtomicU32::new(0),
-                ir_path: Mutex::new(None),
-                ir_hash: Mutex::new(None),
-                ui_pending_ir: Mutex::new(None),
-                ui_ir_loading: AtomicBool::new(false),
-                ui_ir_load_error: AtomicBool::new(false),
-                ui_ir_load_error_msg: Mutex::new(String::new()),
-                ui_clear_ir: AtomicBool::new(false),
-                ui_clear_model: AtomicBool::new(false),
-                ir_raw_samples: Mutex::new(None),
-                ir_raw_sample_rate: AtomicU32::new(0),
-                slimmable_tx: Mutex::new(Some(slimmable_tx)),
-                slimmable_rx: Mutex::new(Some(slimmable_rx)),
-                requested_slimmable_generation: AtomicU64::new(0),
-                slimmable_stale_discarded_total: AtomicU32::new(0),
-                full_wavenet_model: Mutex::new(None),
-                cmd_next_seq: AtomicU64::new(0),
-                cmd_last_ack: AtomicU64::new(0),
-                last_applied_generation: AtomicU64::new(0),
-                pending_restart_os_factor: AtomicU32::new(0),
-                in_flight_params: Mutex::new(None),
-                pending_preset_load: Mutex::new(std::collections::VecDeque::new()),
-                pending_model: Mutex::new(None),
-                deactivated_dsp: Mutex::new(None),
-                dialog_state: Some(Arc::new(DialogSharedState::new())),
-                ir_dialog_state: Some(Arc::new(IrDialogSharedState::new())),
-                dialog_handle_sink: Mutex::new(None),
-                ir_dialog_handle_sink: Mutex::new(None),
-                host_log_sink: Mutex::new(None),
-            },
-        })
+        let state = Self::new(1);
+        state.cold.sample_rate.store(44100, Ordering::Relaxed);
+        Arc::new(state)
     }
 
     /// Flushes gestures and parameter updates initiated by the GUI

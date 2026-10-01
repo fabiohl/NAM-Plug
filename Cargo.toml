@@ -14,7 +14,7 @@ keywords = ["audio", "dsp", "nam", "neural-amp-modeler", "clap", "plugin"]
 categories = ["multimedia::audio", "multimedia"]
 
 [dependencies]
-NeuralAmpModeler-rs = { version = "0.8.0", default-features = false, features = [
+NeuralAmpModeler-rs = { version = "0.8.1", default-features = false, features = [
     "dual-mono",
 ] }
 clack-common = "0.2"
@@ -64,12 +64,13 @@ rtrb = "0.4.0"
 # and to NAM-Audio-Pipe (which consumes rt-hardening). See docs/rt-hardening-evaluation.md.
 libc = "0.2"
 sha2 = "0.11"
+clap-sys = "0.5"
 
 [build-dependencies]
 slint-build = "1.18"
 
 [dev-dependencies]
-NeuralAmpModeler-rs = { version = "0.8.0", features = ["testing"] }
+NeuralAmpModeler-rs = { version = "0.8.1", features = ["testing"] }
 nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.2", features = ["clack-plugin"] }
 clap-sys = "0.5"

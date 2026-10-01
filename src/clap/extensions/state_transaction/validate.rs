@@ -248,6 +248,19 @@ pub(crate) fn build_model_resources(
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
 ) -> Result<ModelResources, Box<NamDiagnostic>> {
+    let meta_before = std::fs::metadata(path).map_err(|e| {
+        Box::new(
+            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                .message(format!(
+                    "Failed to read metadata before loading model: {:?}",
+                    path
+                ))
+                .param("error", e.to_string()),
+        )
+    })?;
+    let len_before = meta_before.len();
+    let mtime_before = meta_before.modified().ok();
+
     let model_hash = compute_file_hash(path).map_err(|e| {
         Box::new(
             NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
@@ -269,6 +282,24 @@ pub(crate) fn build_model_resources(
                 .param("error", e.to_string()),
         )
     })?;
+
+    let meta_after = std::fs::metadata(path).map_err(|e| {
+        Box::new(
+            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                .message(format!(
+                    "Failed to read metadata after loading model: {:?}",
+                    path
+                ))
+                .param("error", e.to_string()),
+        )
+    })?;
+    if meta_after.len() != len_before || meta_after.modified().ok() != mtime_before {
+        return Err(Box::new(
+            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                .message(format!("Model file was modified during load: {:?}", path))
+                .hint("arquivo modificado durante a carga"),
+        ));
+    }
 
     if model_pair.model_l.is_none() {
         return Err(Box::new(

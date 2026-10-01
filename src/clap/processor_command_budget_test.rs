@@ -419,11 +419,70 @@ fn test_structural_coalescing_supersedes_same_kind() {
     );
 }
 
+/// Invariant: a burst of 64 non-coalescible structural commands (RestoreTxn)
+/// drains at exactly one apply per callback, deferring budget-blocked commands
+/// without drop or desync. Deterministic counterpart to [`test_structural_burst_p99_within_contract`].
+#[test]
+fn test_structural_burst_deferral_counts_deterministic() {
+    let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    let (mut started, shared_ptr, main_thread_ptr) = activate_plugin(&mut plugin_instance, 64);
+    let shared = unsafe { &*shared_ptr };
+
+    let mut bufs = StereoTestBuffers::new(64, 0.0, 0.0);
+
+    // Warm-up: settle one-time setup (priority query, DAZ/FTZ) and any
+    // deferred commands from activation.
+    for _ in 0..16 {
+        process_block(&mut started, &mut bufs);
+    }
+
+    // Burst: enqueue 64 non-coalescible structural commands (atomic restores)
+    // and drain them over the following 64 blocks.
+    {
+        let mt = unsafe { &*main_thread_ptr };
+        for generation in 1..=64u64 {
+            mt.cmd_producer
+                .borrow_mut()
+                .push_command(crate::clap::plugin::ClapParamPayload::RestoreTxn(
+                    crate::clap::plugin::RestoreTxn {
+                        generation,
+                        model: None,
+                        ir: None,
+                        params: RtProcessingParams::default(),
+                    },
+                ))
+                .expect("restore burst must fit the ring");
+        }
+    }
+
+    for _ in 0..64 {
+        process_block(&mut started, &mut bufs);
+    }
+
+    // Deterministic part: all 64 commands were drained (one apply + one defer
+    // per block, RestoreTxn never superseded) and the callback budget held.
+    assert_eq!(
+        shared.cold.last_applied_generation.load(Ordering::Relaxed),
+        64,
+        "the full 64-command restore burst must be applied (no loss)"
+    );
+    assert_eq!(
+        shared
+            .cold
+            .rt_status
+            .structural_deferred_total
+            .load(Ordering::Relaxed),
+        94,
+        "each budget-blocked structural event must be deferred, never dropped"
+    );
+}
+
 /// Invariant + acceptance: a burst of 64 structural commands cannot
 /// degrade the callback time — p99/max stays within the performance contract
 /// (`p99 < 1.33 ms` per 64-sample block at 48 kHz). The bypass path keeps DSP
 /// cost negligible so the measurement isolates the *drain* cost.
 #[test]
+#[ignore = "timing/micro-latency certification: run in Phase 3 of utils/tests-long.sh on a pinned core with --test-threads=1"]
 fn test_structural_burst_p99_within_contract() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (mut started, shared_ptr, main_thread_ptr) = activate_plugin(&mut plugin_instance, 64);

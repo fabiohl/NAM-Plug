@@ -19,6 +19,24 @@ use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
 use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
 use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 
+#[cfg(test)]
+type TestMidLoadHook = Box<dyn Fn(&Path) + Send + 'static>;
+
+#[cfg(test)]
+static TEST_MID_LOAD_HOOK: std::sync::Mutex<Option<TestMidLoadHook>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_test_mid_load_hook<F: Fn(&Path) + Send + 'static>(f: Option<F>) {
+    *TEST_MID_LOAD_HOOK.lock().unwrap() = f.map(|func| Box::new(func) as _);
+}
+
+#[cfg(test)]
+fn run_test_mid_load_hook(path: &Path) {
+    if let Some(ref hook) = *TEST_MID_LOAD_HOOK.lock().unwrap() {
+        hook(path);
+    }
+}
+
 impl<'a> NamClapMainThread<'a> {
     /// Loads a new neural model from the specified path.
     ///
@@ -34,6 +52,19 @@ impl<'a> NamClapMainThread<'a> {
             self.shared.cold.instance_id,
         );
 
+        let meta_before = std::fs::metadata(path).map_err(|e| {
+            Box::new(
+                NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                    .message(format!(
+                        "Failed to read metadata before loading model: {:?}",
+                        path
+                    ))
+                    .param("error", e.to_string()),
+            )
+        })?;
+        let len_before = meta_before.len();
+        let mtime_before = meta_before.modified().ok();
+
         let model_pair = load_and_build_model(
             path,
             &self.sys,
@@ -47,6 +78,9 @@ impl<'a> NamClapMainThread<'a> {
                     .param("error", e.to_string()),
             )
         })?;
+
+        #[cfg(test)]
+        run_test_mid_load_hook(path);
 
         if model_pair.model_l.is_none() {
             return Err(Box::new(
@@ -101,6 +135,26 @@ impl<'a> NamClapMainThread<'a> {
                         .hint("Assets are adopted only with a verified SHA-256 digest."),
                 )
             })?;
+
+        // TOCTOU mitigation: verify the file was not modified while loading or hashing.
+        let meta_after = std::fs::metadata(path).map_err(|e| {
+            Box::new(
+                NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                    .message(format!(
+                        "Failed to read metadata after hashing model: {:?}",
+                        path
+                    ))
+                    .param("error", e.to_string()),
+            )
+        })?;
+        if meta_after.len() != len_before || meta_after.modified().ok() != mtime_before {
+            return Err(Box::new(
+                NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                    .message(format!("Model file was modified during load: {:?}", path))
+                    .hint("arquivo modificado durante a carga"),
+            ));
+        }
+
         self.params.borrow_mut().model_hash = Some(model_hash);
 
         let metadata = model_pair.metadata.clone();

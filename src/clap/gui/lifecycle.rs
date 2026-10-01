@@ -110,15 +110,10 @@ impl GuiLifecycle {
 
             // Illegal transitions
             (current, event) => {
-                let err: &'static str = Box::leak(
-                    format!(
-                        "GUI lifecycle: illegal transition {:?} -> {:?}",
-                        current, event
-                    )
-                    .into_boxed_str(),
-                );
-                log::warn!("{err}");
-                return Err(PluginError::Message(err));
+                return Err(crate::clap::plugin::errors::static_plugin_error(
+                    crate::clap::plugin::errors::gui::ILLEGAL_TRANSITION,
+                    format_args!("illegal transition {:?} -> {:?}", current, event),
+                ));
             }
         };
         *self = next;
