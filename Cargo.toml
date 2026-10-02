@@ -131,3 +131,12 @@ allow_attributes = "warn"
 [package.metadata.docs.rs]
 features = ["testing"]
 rustdoc-args = ["--cfg", "docsrs"]
+
+# Temporary local-engine override: consume the sibling NeuralAmpModeler-rs
+# checkout instead of the crates.io release while its block delay-line APIs
+# (`DelayLine::process_block`, `DelayLine::copy_state_from`) are not yet
+# published upstream. The `[dependencies]`/`[dev-dependencies]` version pins
+# stay untouched (both resolve to this same local source, so no E0464
+# duplicates). Remove this table when the engine release lands.
+[patch.crates-io]
+NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs" }

@@ -72,6 +72,20 @@ impl DefaultPluginFactory for NamClapPlugin {
             neural_amp_modeler_rs::common::panic_hook::install_panic_hook("clap");
         });
 
+        // Initialize and calibrate hardware TSC on a background thread once per process (T-P4.2.3).
+        // Non-blocking for the host: during the 60ms calibration window, any initial audio blocks
+        // fall back safely to Instant::now(). Once calibrated, hot-path telemetry uses serialized
+        // RDTSC directly (~17 ns vs ~1134 ns fallback).
+        static INIT_TSC: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INIT_TSC.get_or_init(|| {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let _ = std::thread::Builder::new()
+                    .name("nam-tsc-calib".into())
+                    .spawn(neural_amp_modeler_rs::common::tsc::calibrate_tsc);
+            }
+        });
+
         // Track active instances for multi-instance panic isolation.
         crate::clap::plugin::shared::bump_active_instances();
 

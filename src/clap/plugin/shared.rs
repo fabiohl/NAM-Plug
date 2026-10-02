@@ -413,19 +413,29 @@ pub struct NamModelMetadata {
 // Cache-line-isolated sub-structs grouped by access pattern
 // ---------------------------------------------------------------------------
 
-/// Fields written every block by the RT thread, read by the UI thread.
+/// Telemetry fields communicated from the RT audio thread to the UI / main thread.
 ///
-/// All fields in this struct are written exclusively by the audio thread
-/// and read lock-free by the UI/main thread via `Ordering::Relaxed` (or
-/// stronger when the field is part of a synchronization pair).
-/// The UI thread must never write to any field in this struct.
+/// # Concurrency Protocol
+///
+/// Most fields in this struct (`ui_clip_indicator`, `ui_gate_active`, `current_latency`,
+/// `cabsim_tail_samples`, `active_channel_count`) are written exclusively by the audio
+/// thread and read lock-free by the UI/main thread using `Ordering::Relaxed`.
+///
+/// Two bidirectional exceptions exist to support loss-free UI metering and acknowledgement:
+/// - **Peak Telemetry (`ui_peak_l`, `ui_peak_r`)**: The audio thread atomically accumulates
+///   the maximum sample peak across audio blocks using `AtomicU32::fetch_max(peak.to_bits(), Ordering::Relaxed)`.
+///   Because non-negative IEEE 754 float bit patterns preserve monotonic order with unsigned
+///   integers, `AtomicU32::fetch_max` is strictly ordered and race-free. The UI thread
+///   periodically reads and resets the accumulated peak to zero using `swap(0.0f32.to_bits(), Ordering::Relaxed)`.
+/// - **Sticky Clip Flag (`ui_clipped`)**: Set to `true` by the audio thread upon detecting
+///   an over-scale sample (> 1.0), and cleared to `false` by the UI thread upon acknowledgement.
 #[repr(align(128))]
 pub struct RtToUi {
-    /// True Peak L level set by the audio thread (f32 bits via f32::to_bits()). Read by the UI thread.
+    /// Sample Peak L level accumulated by the audio thread (`fetch_max`) and read/reset by UI (`swap(0.0)`).
     pub ui_peak_l: AtomicU32,
-    /// True Peak R level set by the audio thread (f32 bits via f32::to_bits()). Read by the UI thread.
+    /// Sample Peak R level accumulated by the audio thread (`fetch_max`) and read/reset by UI (`swap(0.0)`).
     pub ui_peak_r: AtomicU32,
-    /// Flag indicating whether clipping has occurred since the last UI frame. Read/reset by the UI thread.
+    /// Flag indicating whether clipping has occurred since the last UI frame. Set by audio thread; read/reset by UI.
     pub ui_clipped: AtomicBool,
     /// Flag indicating whether output/input clipping is active for UI indicator display.
     pub ui_clip_indicator: AtomicBool,
@@ -811,7 +821,7 @@ impl Drop for NamClapShared {
         self.gui.cold.alive_fence.store(false, Ordering::Release); // pairs with Acquire load
         // Only signal shutdown when the last instance is destroyed.
         let prev = ACTIVE_INSTANCES
-            .fetch_update(Ordering::Release, Ordering::Relaxed, |val| {
+            .try_update(Ordering::Release, Ordering::Relaxed, |val| {
                 Some(val.saturating_sub(1))
             })
             .unwrap_or(0);

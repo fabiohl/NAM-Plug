@@ -12,9 +12,23 @@ impl<'a> NamClapProcessor<'a> {
     pub(super) fn process_telemetry(&mut self, start_nanos: u64) {
         if start_nanos > 0 {
             #[cfg(target_arch = "x86_64")]
-            let elapsed_nanos = rdtsc_nanos().wrapping_sub(start_nanos);
+            let raw_elapsed = rdtsc_nanos().wrapping_sub(start_nanos);
             #[cfg(not(target_arch = "x86_64"))]
-            let elapsed_nanos = 0;
+            let raw_elapsed = 0;
+
+            // Test-only synthetic stall injection (T-P1.3.2, one-shot):
+            // clamps the measurement up to at least the injected value so a
+            // test can force exactly one over-budget block through the real
+            // `process()` path without sleeping on the audio thread. `#[cfg]`
+            // out of every non-test build; zero-cost in production.
+            #[cfg(any(test, feature = "testing"))]
+            let elapsed_nanos = {
+                let stall =
+                    crate::clap::processor::TEST_TELEMETRY_STALL_NS.swap(0, Ordering::Relaxed);
+                raw_elapsed.max(stall)
+            };
+            #[cfg(not(any(test, feature = "testing")))]
+            let elapsed_nanos = raw_elapsed;
 
             self.rt_status
                 .dsp_cycle_time

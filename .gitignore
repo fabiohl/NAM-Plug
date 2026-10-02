@@ -9,6 +9,7 @@ repomix-*.xml
 *.bak
 *.swp
 *.log
+!/tests/fixtures/logs/*.log
 
 # Defesa em profundidade: impede commit de metadados .git/ aninhados em qualquer subdiretório
 # (ex.: se /github.com/ for futuramente unignorado por engano, .git/ aninhados não serão stagedos).

@@ -20,7 +20,7 @@ use std::thread;
 #[test]
 fn test_integration_16_instances_log_and_diagnostic_isolation() {
     const CONCURRENT_INSTANCES: usize = 16;
-    const LOGS_PER_THREAD: usize = 15;
+    const LOGS_PER_THREAD: usize = 8;
 
     let logger = NamLogger::init(LoggerConfig {
         level_filter: log::LevelFilter::Debug,

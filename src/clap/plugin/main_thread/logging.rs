@@ -212,5 +212,20 @@ impl<'a> NamClapMainThread<'a> {
                 "NAM-Plug: Deferred structural command superseded by a newer same-kind command; obsolete resources discarded off-RT (coalescing)"
             );
         }
+
+        if self.shared.cold.rt_status.check_and_clear_flag(
+            neural_amp_modeler_rs::common::spsc::RT_STATUS_EVENT_TIMING_ANOMALY,
+        ) {
+            let msg = CString::new(
+                "NAM-Plug: Parameter event timing anomaly detected (out-of-order, late, or beyond block limits); clamped defensively with zero event loss",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Warning, &msg);
+            }
+            log::warn!(
+                "NAM-Plug: Parameter event timing anomaly detected (out-of-order, late, or beyond block limits); clamped defensively with zero event loss"
+            );
+        }
     }
 }

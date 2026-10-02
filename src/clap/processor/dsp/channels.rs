@@ -12,9 +12,11 @@ type ChannelResult<'a> = (Option<&'a mut [f32]>, Option<&'a mut [f32]>);
 /// when the host track is stereo):
 ///
 /// * **Mono port** (host provides a single input channel, or channel R has no
-///   input at all): `buf_host_l` receives the mono source, `buf_host_r`
-///   mirrors it so every downstream stereo-aware stage sees coherent buffers,
-///   `process_mono` is forced `true` and the output carries the mono signal.
+///   input at all): `buf_host_l` receives the mono source. `buf_host_r` is
+///   not speculatively copied because downstream DSP executes strictly mono
+///   on channel L when `process_mono` is true; any stereo output mirroring
+///   occurs lazily when writing `out_r`. `process_mono` is forced `true`
+///   and the output carries the mono signal.
 /// * **Stereo port** (host provides two distinct input channels): `buf_host_l`
 ///   receives channel 0 (L) and `buf_host_r` receives channel 1 (R) verbatim —
 ///   it is **forbidden** to duplicate L into R when a real R input exists.
@@ -101,15 +103,16 @@ pub(super) fn extract_channels<'a>(
                 buf_host_r[..n_samples].copy_from_slice(&i[..n_samples]);
             }
             ChannelPair::OutputOnly(o) => {
-                // No R input: mono broadcast, R mirrors the L source.
-                buf_host_r[..n_samples].copy_from_slice(&buf_host_l[..n_samples]);
+                // T-P2.4.3: No R input: process_mono is active. Downstream DSP
+                // never reads buf_host_r; the stereo output mirror is applied
+                // lazily when writing host out_r. Speculative copy eliminated.
+                let _ = buf_host_r;
                 out_r = Some(o);
             }
         }
     } else {
-        #[cfg(feature = "dual-mono")]
-        buf_host_r[..n_samples].copy_from_slice(&buf_host_l[..n_samples]);
-        #[cfg(not(feature = "dual-mono"))]
+        // T-P2.4.3: No R port: process_mono is active. Downstream DSP never reads
+        // buf_host_r. Speculative copy eliminated.
         let _ = buf_host_r;
     }
 
@@ -210,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn mono_port_mirrors_l_into_r_and_stays_mono() {
+    fn mono_port_avoids_speculative_r_copy_and_stays_mono() {
         let mut in_l = [0.5f32; N];
         let mut out_l = [0.0f32; N];
         let out_l_ptr = out_l.as_ptr() as usize;
@@ -220,7 +223,10 @@ mod tests {
         let (buf_l, buf_r, ol, or, process_mono, count) = extract(&mut ins, &mut outs);
 
         assert_eq!(buf_l, vec![0.5; N]);
-        assert_eq!(buf_r, vec![0.5; N]);
+        assert!(
+            buf_r.iter().all(|x| x.is_nan()),
+            "buf_host_r must remain untouched on mono input"
+        );
         assert_eq!(ol, Some(out_l_ptr));
         assert_eq!(or, None);
         assert!(process_mono, "mono port must stay on the mono path");
@@ -228,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn mono_in_stereo_out_output_only_r_mirrors_l() {
+    fn mono_in_stereo_out_output_only_r_lazy_mirrors_l() {
         let mut in_l = [0.3f32; N];
         let mut out_l = [0.0f32; N];
         let mut out_r = [0.0f32; N];
@@ -240,7 +246,10 @@ mod tests {
         let (buf_l, buf_r, ol, or, process_mono, count) = extract(&mut ins, &mut outs);
 
         assert_eq!(buf_l, vec![0.3; N]);
-        assert_eq!(buf_r, vec![0.3; N]);
+        assert!(
+            buf_r.iter().all(|x| x.is_nan()),
+            "buf_host_r must remain untouched on mono input; lazy mirror happens at host out_r"
+        );
         assert_eq!(ol, Some(out_l_ptr));
         assert_eq!(or, Some(out_r_ptr));
         assert!(process_mono, "no R input => mono broadcast to R output");
@@ -301,7 +310,10 @@ mod tests {
         let (buf_l, buf_r, ol, or, process_mono, count) = extract(&mut ins, &mut outs);
 
         assert_eq!(buf_l, vec![0.0; N]);
-        assert_eq!(buf_r, vec![0.0; N]);
+        assert!(
+            buf_r.iter().all(|x| x.is_nan()),
+            "buf_host_r must remain untouched on mono output-only; lazy mirror happens at host out_r"
+        );
         assert_eq!(ol, Some(out_l_ptr));
         assert_eq!(or, Some(out_r_ptr));
         assert!(process_mono);

@@ -6,8 +6,10 @@
 //! Dynamically loads the final distributed CLAP artifact (post-strip and post-BOLT),
 //! executes authentic neural inference benchmarks across core topologies (WaveNet A1 Standard,
 //! WaveNet A2 Slimmable, LSTM) and block sizes (64 and 128 samples), computes statistical latency
-//! distributions (p50, p95, p99, max, mean, ns/sample), evaluates real-time deadline margins,
-//! and detects host environmental noise / thermal anomalies.
+//! distributions (p50, p95, p99, max, mean, ns/sample), evaluates real-time deadline margins
+//! against the 85%-of-budget certification gate (the same threshold the audio callback
+//! telemetry uses to flag a DSP overload), and detects host environmental noise / thermal
+//! anomalies.
 //!
 //! Exit codes:
 //!   0 — Performance certification PASSED.
@@ -28,6 +30,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
+
+/// Certification gate fraction of the real-time block deadline budget.
+///
+/// A scenario is certified only when p99 latency stays below 85% of the block
+/// budget — the same threshold the audio callback telemetry uses to count a
+/// DSP overload (`processor/dsp/telemetry.rs`) — so the certification gate
+/// fails strictly before the runtime would report an overload. This reserves
+/// headroom for the scheduling jitter a live host adds on top of the isolated
+/// measurement and is strictly stricter than the nominal 100% deadline: an
+/// artifact that passes here also passes the raw deadline check.
+const DEADLINE_GATE_FRACTION: f64 = 0.85;
 
 struct PerfHostShared;
 impl clack_host::prelude::SharedHandler<'_> for PerfHostShared {
@@ -70,7 +83,9 @@ pub struct ScenarioPerfMetrics {
     pub stddev_ns: f64,
     pub ns_per_sample: f64,
     pub deadline_budget_ns: f64,
+    pub gate_threshold_ns: f64,
     pub deadline_margin_percent: f64,
+    pub gate_headroom_percent: f64,
     pub deadline_passed: bool,
 }
 
@@ -280,10 +295,14 @@ fn measure_scenario(
     let stddev_ns = variance.sqrt();
     let ns_per_sample = mean_ns / n as f64;
 
-    // Real-time deadline budget (e.g. at 48kHz, 64 samples = 1,333,333 ns)
+    // Real-time deadline budget (e.g. at 48kHz, 64 samples = 1,333,333 ns) and
+    // the certification gate derived from it: p99 must stay below 85% of the
+    // budget, matching the audio callback's DSP overload threshold.
     let deadline_budget_ns = (n as f64 / config.sample_rate) * 1_000_000_000.0;
+    let gate_threshold_ns = deadline_budget_ns * DEADLINE_GATE_FRACTION;
     let deadline_margin_percent = ((deadline_budget_ns - p99_ns) / deadline_budget_ns) * 100.0;
-    let deadline_passed = p99_ns < deadline_budget_ns;
+    let gate_headroom_percent = ((gate_threshold_ns - p99_ns) / gate_threshold_ns) * 100.0;
+    let deadline_passed = p99_ns < gate_threshold_ns;
 
     Ok(ScenarioPerfMetrics {
         name: config.name.to_string(),
@@ -299,7 +318,9 @@ fn measure_scenario(
         stddev_ns,
         ns_per_sample,
         deadline_budget_ns,
+        gate_threshold_ns,
         deadline_margin_percent,
+        gate_headroom_percent,
         deadline_passed,
     })
 }
@@ -424,7 +445,12 @@ fn main() -> ExitCode {
                 }
 
                 println!(
-                    "✓ [{}] p50={:.1}µs, p95={:.1}µs, p99={:.1}µs, max={:.1}µs | {:.1} ns/samp | margin={:.1}% (budget={:.1}µs)",
+                    "{} [{}] p50={:.1}µs, p95={:.1}µs, p99={:.1}µs, max={:.1}µs | {:.1} ns/samp | margin={:.1}% (budget={:.1}µs) | gate(85%): {} (p99={:.1}% of budget, headroom={:.1}%)",
+                    if metrics.deadline_passed {
+                        "✓"
+                    } else {
+                        "✗"
+                    },
                     metrics.name,
                     metrics.p50_ns / 1000.0,
                     metrics.p95_ns / 1000.0,
@@ -433,6 +459,13 @@ fn main() -> ExitCode {
                     metrics.ns_per_sample,
                     metrics.deadline_margin_percent,
                     metrics.deadline_budget_ns / 1000.0,
+                    if metrics.deadline_passed {
+                        "PASS"
+                    } else {
+                        "FAIL"
+                    },
+                    (metrics.p99_ns / metrics.deadline_budget_ns) * 100.0,
+                    metrics.gate_headroom_percent,
                 );
                 results.push(metrics);
             }
@@ -453,12 +486,16 @@ fn main() -> ExitCode {
 
     println!("------------------------------------------------------------------------");
     println!("Performance Gate Result:    {overall_status}");
+    println!(
+        "Deadline Gate Threshold:    p99 < {:.0}% of block budget (RT overload threshold)",
+        DEADLINE_GATE_FRACTION * 100.0
+    );
     println!("Host Environment Stable:    {environment_stable}");
-    println!("All Deadlines Respected:    {all_deadlines_passed}");
+    println!("All Scenarios Passed Gate:  {all_deadlines_passed}");
     println!("========================================================================");
 
     let report = PerfCertificationReport {
-        schema_version: "1.0".to_string(),
+        schema_version: "1.1".to_string(),
         timestamp_utc: chrono_free_timestamp(),
         clap_artifact_path: clap_target.to_string_lossy().to_string(),
         clap_artifact_sha256: clap_sha,

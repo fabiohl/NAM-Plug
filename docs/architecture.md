@@ -193,7 +193,7 @@ Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/share
 
 To eliminate CPU cache-line bouncing (False Sharing) between the high-frequency audio thread (reading/writing every block) and the UI/Main threads:
 
-- **`RtToUi`** — Dedicated 128-byte aligned cache line for telemetry written by RT (`ui_peak_l`, `ui_peak_r`, `ui_clipped`, `current_latency`, `active_channel_count`).
+- **`RtToUi`** — Dedicated 128-byte aligned cache line for telemetry communicated from RT to UI (`ui_peak_l`, `ui_peak_r`, `ui_clipped`, `ui_clip_indicator`, `ui_gate_active`, `current_latency`, `cabsim_tail_samples`, `active_channel_count`). Telemetry is primarily unidirectional RT->UI with two lock-free handshake exceptions: (1) peak levels are accumulated across audio blocks by RT via `AtomicU32::fetch_max` and read/cleared by UI via `swap(0.0f32.to_bits())` without TOCTOU races; (2) `ui_clipped` sticky flag is set by RT and cleared by UI upon acknowledgement.
 - **`UiToRt`** — Dedicated 128-byte aligned cache line for parameters written by UI (`input_gain_db`, `output_gain_db`, etc.) and the `gui_param_generation` counter.
 - **`ColdShared`** — Dedicated 128-byte aligned structure for low-frequency channels and lifecycle flags (`alive_fence`, pending payloads).
 
@@ -386,8 +386,7 @@ graph TD
 
 To prevent audible clicks, pops, or abrupt phase shifts when toggling the plugin bypass state during live performance or automated sessions:
 
-- **Equal-Power 32 ms Crossfade:** Ramps `crossfader.mix` linearly towards the target mix (`0.0` for pure dry, `1.0` for pure wet) across sub-blocks.
-- **Branchless FMA Vector Loop:** Inner blend loop executes across `n_xfade` samples without internal branching (`wet[i] = dry[i] + (wet[i] - dry[i]) * mix`), allowing complete auto-vectorization and FMA generation.
+- **Branchless Scalar FMA Loop:** Inner blend loop executes across `n_xfade` samples without internal branching (`wet[i] = dry[i] + (wet[i] - dry[i]) * mix`) using scalar FMA instructions. Under strict IEEE-754 semantics (without non-compliant `-ffast-math`, prohibited by R1), sequential scalar recurrence (`mix += step`) precludes auto-vectorization across lanes; given that bypass transitions are rare (`#[cold]`) and the loop runs for at most `n_xfade` samples (~20–30 ns, < 1% of non-model overhead), scalar execution avoids unnecessary complexity and preserves exact numerical determinism.
 - **Cardinality Defensive Guard:** with the strict-cardinality streaming adapter `n_out == n_samples == dry_n` always; the legacy overflow region (`n_xfade..n_xfade_raw`, wet count exceeding the dry capture) remains as a cheap defensive guard with dry=0.0 semantics.
 - **Mix Value Clamping:** Mix parameters are clamped to `[0.0, 1.0]` at each step, ensuring saturation cannot overflow even with extreme buffer sizes.
 
@@ -427,6 +426,21 @@ state matches the declared plugin latency for seamless host PDC.
 ### 6.3 Model Gain Calibration Isolation
 
 NAM models supply embedded metadata (`input_level_dbu`, `loudness`). The loader computes calibration adjustments (`input_mult_adj`, `output_mult_adj`). In NAM-Plug, calibration multipliers are passed via `DspPipelineContext::input_gain_mult`/`output_gain_mult` separately from `smoother_in`/`smoother_out`. This ensures sample-accurate DAW user-gain automation never alters underlying static model loudness calibration.
+
+### 6.4 Host Event Scheduling, In-Block Slicing & Temporal Anomaly Containment
+
+Host parameter automation and modulation (`ParamValueEvent` and `ParamModEvent`) are ingested by `PluginAudioProcessor::process` in `src/clap/processor/dsp/orchestrator.rs`. To guarantee sample-accurate automation while strictly preserving Real-Time safety:
+
+1. **Bounded Event Collection (`MAX_SCHEDULED_EVENTS`):** Events from `input_events` are parsed into the pre-allocated buffer `self.scheduled_events` (static capacity `4096`, allocated once during `activate()`). If a host emits an event flood exceeding `MAX_SCHEDULED_EVENTS` in a single block, the loop truncates and asserts `RT_STATUS_SPSC_DRAIN_TRUNCATED` on `self.rt_status` for off-RT reporting, strictly avoiding reallocation on the audio thread.
+2. **Sample-Accurate Sub-Block Slicing:** The processing loop partitions `n_samples` into consecutive slices bounded by distinct event timestamps (`sub_end = scheduled_events[event_idx].time`). At each sub-block boundary:
+   - Sliced audio runs through the full DSP pipeline (`process_sub_block`).
+   - Events matching `time == sub_end` are applied via `worker::apply_scheduled_event`.
+   - Dependent caches (gain smoothers, gate open/close thresholds, bypass crossfader) are resynchronized.
+3. **Temporal Anomaly Containment Policy (F-NPPERF-10 / F-NPRES-01):**
+   DAW hosts occasionally emit out-of-order timestamps or timestamps beyond the current block boundary. NAM-Plug enforces an absolute **never silent discard** invariant through defensive clamping:
+   - **Out-of-Order / Jittered Events (`time < block_offset`):** The event timestamp is defensively clamped to `block_offset` and applied immediately before subsequent DSP processing.
+   - **Out-of-Bounds Events (`time >= n_samples`):** The event timestamp is clamped to `n_samples` and applied at the block close boundary before exiting `process_dsp_audio`, ensuring the parameter value is applied and never lost when `events.clear()` runs on the next cycle.
+   - **RT Observability (`RT_STATUS_EVENT_TIMING_ANOMALY`):** Setting bit 32 (`1 << 32`) on `RtStatusFlags` provides lock-free, zero-alloc telemetry. The main thread detects and clears this bit in `emit_pending_logs()`, emitting structured diagnostics via `log::warn!` and `clap_host_log`. Zero I/O and zero logging occur in the audio callback.
 
 ---
 
@@ -693,6 +707,7 @@ Enforces zero heap allocation on the audio thread:
 
 - Global memory interceptor (`CountingAllocator`) active under `--features "testing,heap-audit"`.
 - Static AST-light scanner (`utils/lib/verify_no_rt_alloc.sh`) parsing `src/clap/processor/` to verify zero `Box`, `Vec`, or `format!` invocations on the audio thread.
+- Static machine-code codegen guard (`utils/verify_rt_codegen.sh`) disassembling the compiled `.so` with `nm` and `objdump` to verify zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls.
 
 ### 9.5 Headless GUI Testing (Xvfb)
 

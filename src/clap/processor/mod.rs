@@ -45,6 +45,17 @@ pub(crate) static DRAIN_PROBE_NS: std::sync::atomic::AtomicU64 =
 pub(crate) static TEST_PANIC_INJECTION: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Test-only hook to inject a synthetic stalled block into telemetry
+/// (T-P1.3.2): when non-zero, `process_telemetry` clamps the measured
+/// `elapsed_nanos` up to at least this value (`elapsed.max(stall)`) and then
+/// resets the hook to zero (one-shot). Lets tests inject exactly one
+/// over-budget block deterministically through the real `process()` path
+/// without sleeping on the audio thread. `#[cfg]`-gated: absent from every
+/// non-test build, zero cost in production.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) static TEST_TELEMETRY_STALL_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Test-only hook to inject a panic inside the `reset()` audio processor method.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) static TEST_RESET_PANIC_INJECTION: std::sync::atomic::AtomicBool =
@@ -84,6 +95,76 @@ fn panic_to_error(panic_info: Box<dyn std::any::Any + Send>) -> PluginError {
     PluginError::Message(errors::processor::AUDIO_CALLBACK_PANICKED)
 }
 
+/// RAII guard that asserts DAZ/FTZ denormal flushing for the scope and
+/// restores the host's MXCSR on drop.
+///
+/// On construction reads the calling thread's MXCSR (`stmxcsr`), sets the
+/// DAZ (bit 6, `0x0040`) and FTZ (bit 15, `0x8000`) control bits and writes
+/// the result back (`ldmxcsr`); on drop restores the saved value verbatim,
+/// so no FTZ/DAZ state ever leaks to the host. Stack-only (`u32`), no
+/// allocation, no log, no lock — safe on the audio thread. `Drop` never
+/// panics (`ldmxcsr` only), hence `Drop`-safe on the `catch_unwind` panic
+/// path as well.
+///
+/// The guard owns the steady-state FTZ/DAZ invariant per `process()` block,
+/// replacing the former periodic reassertion every 1024 blocks
+/// (`cycles_since_telemetry & 0x3FF`). The one-shot
+/// [`NamClapProcessor::apply_rt_thread_setup`] still applies DAZ/FTZ in
+/// `start_processing()` (thread-sticky setup outside any block); the guard
+/// reasserts it on every block and guarantees restoration on return.
+///
+/// On non-`x86_64` targets this is a zero-sized no-op: DAZ/FTZ is an MXCSR
+/// (SSE2) mechanism, while AArch64 flushes denormals via FPCR or hardware.
+#[must_use]
+pub(crate) struct FtzDazGuard {
+    #[cfg(target_arch = "x86_64")]
+    saved: u32,
+}
+
+impl FtzDazGuard {
+    /// Asserts DAZ/FTZ on the calling thread, saving the previous MXCSR.
+    #[inline(always)]
+    pub(crate) fn new() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: `stmxcsr`/`ldmxcsr` on an aligned stack-local `u32` is
+            // unconditionally safe on x86-64 (SSE2 is part of the x86-64-v3
+            // baseline); `0x8040` (DAZ | FTZ) are valid MXCSR control flags.
+            unsafe {
+                let mut mxcsr: u32 = 0;
+                core::arch::asm!("stmxcsr [{0}]", in(reg) &mut mxcsr);
+                let saved = mxcsr;
+                mxcsr |= 0x8040;
+                core::arch::asm!("ldmxcsr [{0}]", in(reg) &mxcsr);
+                Self { saved }
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            Self {}
+        }
+    }
+}
+
+impl Drop for FtzDazGuard {
+    /// Restores the MXCSR saved at construction. Never panics.
+    #[inline(always)]
+    fn drop(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: same rationale as `new` — restoring a previously read
+            // MXCSR value via `ldmxcsr` is always safe on x86-64.
+            unsafe {
+                core::arch::asm!("ldmxcsr [{0}]", in(reg) &self.saved);
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = self;
+        }
+    }
+}
+
 /// Helper to zero all output channels in the provided CLAP audio ports.
 ///
 /// Used for deterministic O(1) silence on processor failure / poisoning without allocations.
@@ -117,6 +198,79 @@ fn buffer_prealloc_error(stage: &str, error: impl std::fmt::Debug) -> PluginErro
 
 /// Note: the entire `PluginAudioProcessor` impl must live in a single block
 /// (Rust E0119 — trait impls cannot be split across modules).
+impl<'a> NamClapProcessor<'a> {
+    /// One-shot RT-thread setup for the *current* audio thread.
+    ///
+    /// Runs from [`PluginAudioProcessor::start_processing`] (the CLAP
+    /// audio-thread callback) with a cheap `rt_thread_setup_done` re-check
+    /// kept as a defensive fallback at the top of `process()`. It:
+    /// 1. publishes the thread's confirmed scheduling parameters (POSIX
+    ///    `pthread_getschedparam`) and pinned core (`sched_getcpu`) into the
+    ///    RT telemetry;
+    /// 2. primes the activation-precision TLS slot with the mode in effect —
+    ///    the first TLS access of a `dlopen`ed module on a fresh thread may
+    ///    allocate that thread's TLS block, so it is kept off the `process()`
+    ///    hot path;
+    /// 3. applies DAZ/FTZ denormal flushing for the thread.
+    ///
+    /// Idempotent and allocation-free: `stop_processing()` (and `reset()`)
+    /// re-arm the latch so a host that migrates the audio thread re-runs this
+    /// setup on the new thread before any further block is processed.
+    pub(crate) fn apply_rt_thread_setup(&mut self) {
+        self.rt_thread_setup_done = true;
+
+        // Query RT thread scheduling parameters via POSIX FFI.
+        // SAFETY: `pthread_self()` is POSIX FFI with no arguments; always succeeds
+        // and returns the calling thread's ID safely.
+        let thread_id = unsafe { libc::pthread_self() };
+
+        let mut policy = 0i32;
+        let mut param = libc::sched_param { sched_priority: 0 };
+        // SAFETY: `pthread_getschedparam` takes valid thread ID and valid pointers
+        // to stack-local variables with proper alignment and lifetime.
+        let getsched_res =
+            unsafe { libc::pthread_getschedparam(thread_id, &mut policy, &mut param) };
+        if getsched_res == 0 {
+            self.rt_status
+                .rt_priority
+                .store(param.sched_priority, Ordering::Relaxed);
+            self.rt_status
+                .confirmed_priority
+                .store(param.sched_priority, Ordering::Relaxed);
+            self.rt_status.rt_policy.store(policy, Ordering::Relaxed);
+            if policy == libc::SCHED_FIFO || policy == libc::SCHED_RR {
+                self.rt_status
+                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_RT_IS_FIFO);
+            }
+        }
+
+        // SAFETY: `sched_getcpu()` takes no arguments, is thread-safe (POSIX/vDSO),
+        // and never accesses or dereferences user memory.
+        let cpu = unsafe { libc::sched_getcpu() };
+        self.rt_status.rt_cpu.store(cpu, Ordering::Relaxed);
+
+        // Prime the activation-precision TLS with the mode in effect. Every
+        // later precision change (host events, SPSC snapshots, render-mode
+        // transitions) refreshes the same slot on the audio thread, so the
+        // per-block unconditional set is no longer needed in `process()`.
+        neural_amp_modeler_rs::math::activations::set_activation_tls(
+            self.params.activation_precision,
+        );
+
+        // Configure denormals handling (DAZ/FTZ) at start of processing.
+        // Architecture note: On x86_64, `set_daz_ftz()` manipulates MXCSR via SSE2 instructions.
+        // On AArch64/ARM64, flush-to-zero is handled either at the FPCR register level or denormals
+        // are flushed in hardware; `set_daz_ftz()` is currently x86_64-specific (baseline target).
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: MXCSR modification via stmxcsr/ldmxcsr is safe on x86_64 with SSE2/AVX2.
+            unsafe {
+                neural_amp_modeler_rs::math::common::set_daz_ftz();
+            }
+        }
+    }
+}
+
 impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamClapProcessor<'a> {
     /// `activate` is the ONLY allocation site — kept out of `process`.
     fn activate(
@@ -868,8 +1022,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 cached_threshold_close_sq: 0.0,
                 cached_gate_params: GateParams::default(),
                 gate_dirty: true,
-                cycles_since_telemetry: 0,
-                prio_checked: false,
+                rt_thread_setup_done: false,
                 last_seen_generation: 0,
                 max_frames_count: audio_config.max_frames_count as usize,
                 last_render_mode: 0,
@@ -994,6 +1147,44 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         }
     }
 
+    /// Starts continuous audio processing (CLAP audio thread).
+    ///
+    /// Runs the one-shot RT-thread setup (confirmed scheduling telemetry,
+    /// activation TLS priming, DAZ/FTZ) on this thread so `process()` never
+    /// carries first-block setup costs. CLAP invokes this on the audio thread
+    /// immediately before the first block; a host that stops and restarts
+    /// processing (possibly on another thread) triggers it again after
+    /// [`stop_processing`](Self::stop_processing) re-armed the latch.
+    fn start_processing(&mut self) -> Result<(), PluginError> {
+        // Containment mirrors process()/reset(): any panic in the one-shot
+        // setup latches the poisoned state (silenced O(1) processing) instead
+        // of unwinding through the C ABI into the host.
+        if !self.poisoned {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.apply_rt_thread_setup();
+            }));
+            if let Err(err) = result {
+                // S2-T1 / F-NP-02: latch poisoned state and signal to main
+                // thread via atomic status flag.
+                self.poisoned = true;
+                self.rt_status
+                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
+                drop(err);
+            }
+        }
+        Ok(())
+    }
+
+    /// Stops continuous audio processing (CLAP audio thread).
+    ///
+    /// Invalidates the one-shot RT-thread setup: the next
+    /// [`start_processing`](Self::start_processing) re-runs it on the calling
+    /// thread, keeping priority/CPU telemetry and FTZ/DAZ current even when a
+    /// pool host migrates processing to another thread.
+    fn stop_processing(&mut self) {
+        self.rt_thread_setup_done = false;
+    }
+
     fn process(
         &mut self,
         _process: Process,
@@ -1006,6 +1197,15 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             silence_audio_ports(&mut audio);
             return Ok(ProcessStatus::Continue);
         }
+
+        // Per-block DAZ/FTZ guard: asserts flush-to-zero/denormals-are-zero
+        // for the DSP below and restores the host's MXCSR on scope exit —
+        // including the `catch_unwind` panic path (`Drop` never panics, so
+        // the restoration provably runs before the poisoning latch below).
+        // Instantiated OUTSIDE `catch_unwind` (a `&mut self` borrow cannot
+        // cross into the `AssertUnwindSafe` closure, and the guard owns no
+        // processor state — only a stack `u32`).
+        let _ftz_daz = FtzDazGuard::new();
 
         // Isolate panics in this instance's audio callback.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1023,94 +1223,31 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 None
             };
 
-            // Per-instance activation precision via TLS.
-            // Activation updates within process() (host events, SPSC, GUI sync, offline↔realtime)
-            // call set_activation_tls() to reflect the new value.
-            neural_amp_modeler_rs::math::activations::set_activation_tls(
-                self.params.activation_precision,
-            );
+            // One-shot RT-thread setup fallback: CLAP-conformant hosts call
+            // `start_processing()` (which already ran `apply_rt_thread_setup`
+            // on this thread) before the first block. The flag re-check is the
+            // cheap defensive path for hosts that skip it — the full setup
+            // still runs here exactly once per start, never per block.
+            if !self.rt_thread_setup_done {
+                self.apply_rt_thread_setup();
+            }
 
-            let should_measure = self.cycles_since_telemetry & 0xF == 0;
-            self.cycles_since_telemetry = self.cycles_since_telemetry.wrapping_add(1);
-
+            // Per-block telemetry (T-P1.3.2): every block is measured.
+            // The T-P1.3.1 measurement (núcleo isolado, 2026-10-01) priced the
+            // full cost (par rdtsc + stores Relaxed + histograma + orçamento +
+            // FSM) at ~90-105 ciclos ≈ 0,004% de um bloco de 64 @48 kHz — mais
+            // de 10× abaixo do limiar de 0,05%. Amostrar 1/16 perderia 15 de
+            // cada 16 estouros de deadline e enviesaria o histograma p99 e o
+            // FSM adaptativo; medir todo bloco não precisa de decimação.
+            //
             // NOTE (Architecture): rdtsc_nanos() relies on hardware TSC reading (x86_64).
             // While x86-64-v3 is the mandatory baseline target architecture for this project,
             // conditionally guarding the call with target_arch ensures transparent compilation
             // and fallback (returning 0) on non-x86_64 targets (e.g. ARM64 / AArch64).
-            let start_nanos = if should_measure {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    rdtsc_nanos()
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    0
-                }
-            } else {
-                0
-            };
-
-            // One-time thread priority query on the first processed block
-            if !self.prio_checked {
-                self.prio_checked = true;
-
-                // Query RT thread scheduling parameters via POSIX FFI.
-                // SAFETY: `pthread_self()` is POSIX FFI with no arguments; always succeeds
-                // and returns the calling thread's ID safely.
-                let thread_id = unsafe { libc::pthread_self() };
-
-                let mut policy = 0i32;
-                let mut param = libc::sched_param { sched_priority: 0 };
-                // SAFETY: `pthread_getschedparam` takes valid thread ID and valid pointers
-                // to stack-local variables with proper alignment and lifetime.
-                let getsched_res =
-                    unsafe { libc::pthread_getschedparam(thread_id, &mut policy, &mut param) };
-                if getsched_res == 0 {
-                    self.rt_status
-                        .rt_priority
-                        .store(param.sched_priority, Ordering::Relaxed);
-                    self.rt_status
-                        .confirmed_priority
-                        .store(param.sched_priority, Ordering::Relaxed);
-                    self.rt_status.rt_policy.store(policy, Ordering::Relaxed);
-                    if policy == libc::SCHED_FIFO || policy == libc::SCHED_RR {
-                        self.rt_status
-                            .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_RT_IS_FIFO);
-                    }
-                }
-
-                // SAFETY: `sched_getcpu()` takes no arguments, is thread-safe (POSIX/vDSO),
-                // and never accesses or dereferences user memory.
-                let cpu = unsafe { libc::sched_getcpu() };
-                self.rt_status.rt_cpu.store(cpu, Ordering::Relaxed);
-
-                // Configure denormals handling (DAZ/FTZ) at start of processing.
-                // Architecture note: On x86_64, `set_daz_ftz()` manipulates MXCSR via SSE2 instructions.
-                // On AArch64/ARM64, flush-to-zero is handled either at the FPCR register level or denormals
-                // are flushed in hardware; `set_daz_ftz()` is currently x86_64-specific (baseline target).
-                #[cfg(target_arch = "x86_64")]
-                {
-                    // SAFETY: MXCSR modification via stmxcsr/ldmxcsr is safe on x86_64 with SSE2/AVX2.
-                    unsafe {
-                        neural_amp_modeler_rs::math::common::set_daz_ftz();
-                    }
-                }
-            }
-
-            // Periodic DAZ/FTZ reapplication: hosts may reset MXCSR after callbacks
-            // (e.g. during GUI repaints or parameter flushes from another thread).
-            // Reassert DAZ+FTZ every 1024 blocks using the existing telemetry counter
-            // — the conditional is a single bit-test (1 cycle; cold branch).
-            // On AArch64, this is a compile-time no-op as DAZ/FTZ is an x86 MXCSR mechanism.
-            if self.cycles_since_telemetry & 0x3FF == 0 {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    // SAFETY: Re-asserting DAZ+FTZ SSE2 control bits on x86_64 is unconditionally safe.
-                    unsafe {
-                        neural_amp_modeler_rs::math::common::set_daz_ftz();
-                    }
-                }
-            }
+            #[cfg(target_arch = "x86_64")]
+            let start_nanos = rdtsc_nanos();
+            #[cfg(not(target_arch = "x86_64"))]
+            let start_nanos = 0u64;
 
             // Event drainage (SPSC + Host + GUI sync + Latency)
             self.process_events(events.output);
@@ -1228,7 +1365,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // 12. Per-block caches a fresh activation starts with: gate cache
             //     invalidated (recomputed from the preserved params on the
             //     next block), modulation offsets zeroed, mono flag at the
-            //     default, telemetry cycle counter and one-time probes re-armed.
+            //     default, telemetry cycle counter re-zeroed and the one-shot
+            //     RT-thread setup re-armed (re-runs on the next block via the
+            //     `process()` fallback, refreshing priority/CPU telemetry and
+            //     re-applying FTZ/DAZ on this thread).
             self.scheduled_events.clear();
             self.process_mono = true;
             self.mod_input_gain = 0.0;
@@ -1238,8 +1378,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.cached_threshold_close_sq = 0.0;
             self.cached_gate_params = GateParams::default();
             self.gate_dirty = true;
-            self.cycles_since_telemetry = 0;
-            self.prio_checked = false;
+            self.rt_thread_setup_done = false;
         }));
         if let Err(err) = result {
             // S2-T1: Latch poisoned state and signal via atomic status flag.
@@ -1410,6 +1549,18 @@ mod processor_multi_instance_isolation_test;
 #[cfg(test)]
 #[path = "../processor_temporal_validation_test.rs"]
 mod processor_temporal_validation_test;
+
+#[cfg(test)]
+#[path = "../processor_rt_thread_test.rs"]
+mod processor_rt_thread_test;
+
+#[cfg(test)]
+#[path = "../processor_ftz_guard_test.rs"]
+mod processor_ftz_guard_test;
+
+#[cfg(test)]
+#[path = "../processor_telemetry_test.rs"]
+mod processor_telemetry_test;
 
 #[cfg(test)]
 #[path = "../processor_poisoning_test.rs"]

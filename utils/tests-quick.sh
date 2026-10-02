@@ -270,6 +270,40 @@ elif [ -f "tests/fixtures/models/wavenet_a1_standard.nam" ]; then
     model_fixture="tests/fixtures/models/wavenet_a1_standard.nam"
 fi
 
+# verify_parity_log <logfile>
+#   Validates that the CLAP × NAMCore float parity test executed and completed
+#   successfully (T-P4.1.1, resolves H4). Under --nocapture, cargo test prints
+#   the test name, then output diagnostics, and then "ok" or summary, causing
+#   name and "ok" to fall across separate lines. The verification predicate checks:
+#     1. Executed test name present in log
+#     2. Cargo overall test run succeeded ("test result: ok.")
+#     3. Absence of failure, panic, or failures section
+verify_parity_log() {
+    local logfile="$1"
+    [ -f "$logfile" ] || return 1
+    grep -qE "(test[[:space:]]+.*test_clap_parity_multi_rate|test_clap_parity_multi_rate)" "$logfile" || return 1
+    grep -qE "^test result: ok\." "$logfile" || return 1
+    if grep -qE "(FAILED|panicked at|failures:)" "$logfile"; then
+        return 1
+    fi
+    return 0
+}
+
+# verify_parity_harness_fixtures
+#   Validates parity gate robustness against synthetic fixtures (T-P4.1.1):
+#     - Wrapped multi-line nocapture output must PASS
+#     - Missing test execution must FAIL
+verify_parity_harness_fixtures() {
+    local fixture_pass="tests/fixtures/logs/parity_wrapped_nocapture_pass.log"
+    local fixture_fail="tests/fixtures/logs/parity_missing_fail.log"
+    if [ -f "$fixture_pass" ] && ! verify_parity_log "$fixture_pass"; then
+        die "HARNESS BUG: verify_parity_log rejected valid wrapped nocapture fixture: $fixture_pass"
+    fi
+    if [ -f "$fixture_fail" ] && verify_parity_log "$fixture_fail"; then
+        die "HARNESS BUG: verify_parity_log falsely accepted missing test fixture: $fixture_fail"
+    fi
+}
+
 render_bin=$(find_namcore_render || true)
 if [ -n "$render_bin" ] && [ -x "$render_bin" ]; then
     echo -e "  ${GREEN}✓ NAMCore render binary:${NC} $render_bin"
@@ -288,6 +322,8 @@ if [ -n "$render_bin" ] && [ -x "$render_bin" ]; then
         emit "FIXTURE_SHA256: $fixture_sha"
         emit "ARTIFACT_SHA256: $artifact_sha"
 
+        verify_parity_harness_fixtures
+
         NAM_CORE_RENDER_BIN="$render_bin" timeout 600 cargo test \
             --features testing \
             --release \
@@ -295,7 +331,7 @@ if [ -n "$render_bin" ] && [ -x "$render_bin" ]; then
             test_clap_parity_multi_rate \
             -- --ignored --nocapture \
             2>&1 | tee -a target/logs/quick-phase2.log
-        if grep -q "test_clap_parity_multi_rate .* ok" target/logs/quick-phase2.log; then
+        if verify_parity_log target/logs/quick-phase2.log; then
             emit "CLAP_CPP_PARITY: PASS"
             ok "Multi-rate parity oracle: PASS"
             assert_ran_tests target/logs/quick-phase2.log 1

@@ -1,0 +1,21 @@
+running 1 test
+test clap_parity_multi_sr::test_clap_parity_multi_rate ... 
+  Calibration: input_mult_adj=1.000001, output_mult_adj=1.000001
+  Native stress: 24000 samples @ 48000 Hz
+
+=== CLAP Parity: wavenet_a1_standard.nam @ 44100 Hz ===
+  Plugin input: 22050 samples @ 44100 Hz
+  Oracle model input: 24001 samples @ 48000 Hz → raw output: 24001 samples
+  Reference: 22051 samples @ 44100 Hz
+Using build artifact: /home/fabio/NAM/NAM-Plug/target/release/libnam_plug.so
+=== CLAP Artifact ===
+path: /home/fabio/NAM/NAM-Plug/target/release/libnam_plug.so
+sha256: 9cbd230395cd1c5c3f15cb143ecc12ad6463a8c59d8cdf1509985cbfac0cf9b3
+  Resampler latency: 11 host samples (skip 27, compare window 22007)
+  ESR  = 9.01e-12  (110.5 dB)  [threshold < 1e-8]
+  SNR  = 110.5 dB                   [threshold > 80 dB]
+  Gate basis: ESR ≈ 9.01e-12, SNR ≈ 110.5 dB (2026-09-03)
+  PASS ESR=✓ SNR=✓
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.70s

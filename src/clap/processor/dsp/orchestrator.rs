@@ -13,7 +13,9 @@ use crate::clap::plugin::PendingRestartOs;
 use crate::clap::processor::dsp::{channels, peaks};
 use clack_plugin::events::event_types::{ParamModEvent, ParamValueEvent};
 use clack_plugin::prelude::*;
-use neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION;
+use neural_amp_modeler_rs::common::spsc::{
+    RT_STATUS_EVENT_TIMING_ANOMALY, RT_STATUS_HOST_CONTRACT_VIOLATION,
+};
 use neural_amp_modeler_rs::dsp::gate::GateState;
 use neural_amp_modeler_rs::dsp::gate_flags;
 use neural_amp_modeler_rs::dsp::pipeline::DspPipelineContext;
@@ -240,12 +242,53 @@ impl<'a> NamClapProcessor<'a> {
             self.bypass_xfade.trigger(self.params.bypass);
 
             while block_offset < n_samples {
+                let mut out_of_order_applied = false;
                 while event_idx < event_count
                     && self.scheduled_events[event_idx].time < block_offset
                 {
-                    // Out-of-order timestamp (already passed this block offset).
+                    // Out-of-order or late timestamp (arrived with time < current block_offset).
+                    // Defensive containment: clamp time to block_offset and apply immediately
+                    // so no parameter update is silently discarded (zero event loss).
                     core::hint::cold_path();
+                    self.rt_status.set_flag(RT_STATUS_EVENT_TIMING_ANOMALY);
+                    self.scheduled_events[event_idx].time = block_offset;
+                    let evt = &self.scheduled_events[event_idx];
+                    worker::apply_scheduled_event(
+                        evt.param_id,
+                        evt.value,
+                        evt.is_mod,
+                        &mut self.params,
+                        &mut self.smoother_in,
+                        &mut self.smoother_out,
+                        &mut self.gate_dirty,
+                        &mut self.mod_input_gain,
+                        &mut self.mod_output_gain,
+                        &mut self.mod_gate_thresh,
+                        &mut self.adaptive_compute,
+                        &self.rt_status,
+                        &self.shared.ui_to_rt,
+                        self.gain_lut,
+                        self.shared.cold.buffer_size.load(Ordering::Relaxed),
+                        &self.shared.cold.pending_restart_os_factor,
+                    );
                     event_idx += 1;
+                    out_of_order_applied = true;
+                }
+
+                if out_of_order_applied {
+                    if self.gate_dirty {
+                        let modulated_gate_db =
+                            self.params.gate_threshold_db + self.mod_gate_thresh;
+                        let close_db = modulated_gate_db - 6.0;
+                        let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
+                        self.cached_threshold_open_sq = open_linear * open_linear;
+                        let close_linear = self.gain_lut.db_to_linear(close_db);
+                        self.cached_threshold_close_sq = close_linear * close_linear;
+                        self.cached_gate_params.threshold_open_db = modulated_gate_db;
+                        self.cached_gate_params.threshold_close_db = close_db;
+                        self.gate_dirty = false;
+                    }
+                    self.bypass_xfade.trigger(self.params.bypass);
                 }
 
                 let sub_end = if event_idx < event_count {
@@ -260,7 +303,7 @@ impl<'a> NamClapProcessor<'a> {
                     let bypass = self.params.bypass;
                     let process_mono = self.process_mono;
 
-                    let (n_out, gate_state) = {
+                    let (n_out, gate_state, sub_peak_l, sub_peak_r) = {
                         let mut ctx = DspPipelineContext {
                             resampler: &mut self.resampler,
                             os_l: &mut self.os_l,
@@ -282,6 +325,21 @@ impl<'a> NamClapProcessor<'a> {
                             conv_pair: None,
                         };
 
+                        let mut scratch = audio_loop::SubBlockScratch {
+                            buf_host_l: &mut self.buf_host_l,
+                            buf_host_r: &mut self.buf_host_r,
+                            buf_out_l: &mut self.buf_out_l,
+                            buf_out_r: &mut self.buf_out_r,
+                            buf_os_in_l: &mut self.buf_os_in_l,
+                            buf_os_in_r: &mut self.buf_os_in_r,
+                            buf_os_model_l: &mut self.buf_os_model_l,
+                            buf_os_model_r: &mut self.buf_os_model_r,
+                            buf_xfade_dry_l: &mut self.buf_xfade_dry_l,
+                            buf_xfade_dry_r: &mut self.buf_xfade_dry_r,
+                            buf_xfd_scratch_l: &mut self.buf_xfd_scratch_l,
+                            buf_xfd_scratch_r: &mut self.buf_xfd_scratch_r,
+                        };
+
                         audio_loop::process_sub_block(
                             block_offset,
                             sub_n,
@@ -294,26 +352,12 @@ impl<'a> NamClapProcessor<'a> {
                             process_mono,
                             &mut self.bypass_xfade,
                             &mut self.dry_delay,
-                            &mut self.buf_xfade_dry_l,
-                            &mut self.buf_xfade_dry_r,
-                            &mut self.buf_xfd_scratch_l,
-                            &mut self.buf_xfd_scratch_r,
+                            &mut scratch,
                             &mut input_clipped,
                             &mut self.smoother_in,
                             &mut self.smoother_out,
-                            &mut self.buf_host_l,
-                            &mut self.buf_host_r,
-                            &mut self.buf_mid_l,
-                            &mut self.buf_mid_r,
-                            &mut self.buf_out_l,
-                            &mut self.buf_out_r,
-                            &mut self.buf_os_in_l,
-                            &mut self.buf_os_in_r,
-                            &mut self.buf_os_model_l,
-                            &mut self.buf_os_model_r,
                             model_output_mult_adj,
                             shared_sample_rate,
-                            self.gain_lut,
                         )
                     };
 
@@ -330,37 +374,10 @@ impl<'a> NamClapProcessor<'a> {
 
                     output_offset += n_out;
 
-                    if let (Some(o_l), Some(o_r)) = (&out_l, &out_r) {
-                        let o_start = output_offset - n_out;
-                        let o_end = o_start + n_out;
-                        let avail_l = o_l.len().min(o_end).saturating_sub(o_start);
-                        let avail_r = o_r.len().min(o_end).saturating_sub(o_start);
-                        let n = avail_l.min(avail_r);
-                        if n > 0 {
-                            let (pl, pr) = unsafe {
-                                neural_amp_modeler_rs::math::dsp::stereo::compute_peak_abs_stereo(
-                                    &o_l[o_start..o_start + n],
-                                    &o_r[o_start..o_start + n],
-                                )
-                            };
-                            peak_l = peak_l.max(pl);
-                            peak_r = peak_r.max(pr);
-                        }
-                    } else if let Some(o_l) = &out_l {
-                        let o_start = output_offset - n_out;
-                        let o_end = o_start + n_out;
-                        let avail = o_l.len().min(o_end).saturating_sub(o_start);
-                        if avail > 0 {
-                            let (pl, _) = unsafe {
-                                neural_amp_modeler_rs::math::dsp::stereo::compute_peak_abs_stereo(
-                                    &o_l[o_start..o_start + avail],
-                                    &o_l[o_start..o_start + avail],
-                                )
-                            };
-                            peak_l = peak_l.max(pl);
-                            peak_r = peak_r.max(pl);
-                        }
-                    }
+                    // SP-P2.4 / F-PERF-16: peak detection is fused into the host buffer copy
+                    // pass inside process_sub_block, eliminating redundant passes over memory.
+                    peak_l = peak_l.max(sub_peak_l);
+                    peak_r = peak_r.max(sub_peak_r);
 
                     if gate_state != GateState::Closed {
                         last_gate_state = gate_state;
@@ -368,7 +385,10 @@ impl<'a> NamClapProcessor<'a> {
                     }
                 }
 
-                while event_idx < event_count && self.scheduled_events[event_idx].time == sub_end {
+                while event_idx < event_count
+                    && self.scheduled_events[event_idx].time == sub_end
+                    && sub_end < n_samples
+                {
                     let evt = &self.scheduled_events[event_idx];
                     worker::apply_scheduled_event(
                         evt.param_id,
@@ -410,6 +430,52 @@ impl<'a> NamClapProcessor<'a> {
                 block_offset = sub_end;
             }
 
+            // Process remaining events with time >= n_samples at the block close boundary.
+            // Clamped defensively to n_samples to guarantee zero silent event loss,
+            // asserting RT_STATUS_EVENT_TIMING_ANOMALY.
+            let mut remaining_applied = false;
+            while event_idx < event_count {
+                core::hint::cold_path();
+                self.rt_status.set_flag(RT_STATUS_EVENT_TIMING_ANOMALY);
+                self.scheduled_events[event_idx].time = n_samples;
+                let evt = &self.scheduled_events[event_idx];
+                worker::apply_scheduled_event(
+                    evt.param_id,
+                    evt.value,
+                    evt.is_mod,
+                    &mut self.params,
+                    &mut self.smoother_in,
+                    &mut self.smoother_out,
+                    &mut self.gate_dirty,
+                    &mut self.mod_input_gain,
+                    &mut self.mod_output_gain,
+                    &mut self.mod_gate_thresh,
+                    &mut self.adaptive_compute,
+                    &self.rt_status,
+                    &self.shared.ui_to_rt,
+                    self.gain_lut,
+                    self.shared.cold.buffer_size.load(Ordering::Relaxed),
+                    &self.shared.cold.pending_restart_os_factor,
+                );
+                event_idx += 1;
+                remaining_applied = true;
+            }
+
+            if remaining_applied {
+                if self.gate_dirty {
+                    let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
+                    let close_db = modulated_gate_db - 6.0;
+                    let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
+                    self.cached_threshold_open_sq = open_linear * open_linear;
+                    let close_linear = self.gain_lut.db_to_linear(close_db);
+                    self.cached_threshold_close_sq = close_linear * close_linear;
+                    self.cached_gate_params.threshold_open_db = modulated_gate_db;
+                    self.cached_gate_params.threshold_close_db = close_db;
+                    self.gate_dirty = false;
+                }
+                self.bypass_xfade.trigger(self.params.bypass);
+            }
+
             let is_gate_active = any_active && last_gate_state == GateState::Closed;
             self.shared
                 .rt_to_ui
@@ -423,6 +489,53 @@ impl<'a> NamClapProcessor<'a> {
             }
 
             peaks::store_peaks(self.shared, peak_l, peak_r);
+        }
+
+        // Defensive: if audio port pairs was empty or any remaining events were not processed
+        // (e.g. n_samples == 0 or 0 audio channels), apply all pending events now to guarantee
+        // zero event loss.
+        if event_idx < event_count {
+            let mut remaining_applied = false;
+            while event_idx < event_count {
+                core::hint::cold_path();
+                self.rt_status.set_flag(RT_STATUS_EVENT_TIMING_ANOMALY);
+                self.scheduled_events[event_idx].time = 0;
+                let evt = &self.scheduled_events[event_idx];
+                worker::apply_scheduled_event(
+                    evt.param_id,
+                    evt.value,
+                    evt.is_mod,
+                    &mut self.params,
+                    &mut self.smoother_in,
+                    &mut self.smoother_out,
+                    &mut self.gate_dirty,
+                    &mut self.mod_input_gain,
+                    &mut self.mod_output_gain,
+                    &mut self.mod_gate_thresh,
+                    &mut self.adaptive_compute,
+                    &self.rt_status,
+                    &self.shared.ui_to_rt,
+                    self.gain_lut,
+                    self.shared.cold.buffer_size.load(Ordering::Relaxed),
+                    &self.shared.cold.pending_restart_os_factor,
+                );
+                event_idx += 1;
+                remaining_applied = true;
+            }
+            if remaining_applied {
+                if self.gate_dirty {
+                    let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
+                    let close_db = modulated_gate_db - 6.0;
+                    let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
+                    self.cached_threshold_open_sq = open_linear * open_linear;
+                    let close_linear = self.gain_lut.db_to_linear(close_db);
+                    self.cached_threshold_close_sq = close_linear * close_linear;
+                    self.cached_gate_params.threshold_open_db = modulated_gate_db;
+                    self.cached_gate_params.threshold_close_db = close_db;
+                    self.gate_dirty = false;
+                }
+                self.bypass_xfade.trigger(self.params.bypass);
+            }
         }
 
         // If an oversampling change was detected during active

@@ -317,12 +317,15 @@ pub struct NamClapProcessor<'a> {
     pub(crate) cached_threshold_close_sq: f32,
     pub(crate) cached_gate_params: GateParams,
     pub(crate) gate_dirty: bool,
-    /// Telemetry decimation: 1-in-16. Cycle counter since last measurement.
-    /// SHARED ALGORITHM: Same decimation strategy as `src/standalone/pw_host.rs` (frame_count & 0xF).
-    /// Any change to the decimation logic here must be mirrored in pw_host.rs, and vice-versa.
-    pub(crate) cycles_since_telemetry: u32,
-    /// Per-instance flag for one-time RT priority query on the first block.
-    pub(crate) prio_checked: bool,
+    /// One-shot RT-thread setup latch for the current audio thread.
+    ///
+    /// Set by `start_processing()` (the CLAP audio-thread callback) after the
+    /// confirmed scheduling telemetry, activation TLS priming and DAZ/FTZ
+    /// application ran for this thread; invalidated by `stop_processing()` and
+    /// re-armed by `reset()` so a host that migrates the audio thread re-runs
+    /// the setup on the new thread. `process()` keeps a cheap flag re-check as
+    /// a defensive fallback for hosts that skip `start_processing()`.
+    pub(crate) rt_thread_setup_done: bool,
     /// Monotonic generation counter for GUI param synchronization.
     /// Guard: only load atomics from UiToRt when generation differs.
     pub(crate) last_seen_generation: u32,
