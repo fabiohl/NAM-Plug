@@ -184,9 +184,14 @@ impl<'a> NamClapMainThread<'a> {
         }
 
         let model_info = model_pair.model_info(path);
+        let model_bytes = model_pair.model_memory_bytes().unwrap_or(0);
         if let Ok(mut info_guard) = self.shared.cold.ui_model_info.lock() {
             *info_guard = Some(model_info);
         }
+        self.shared
+            .cold
+            .ui_model_memory_bytes
+            .store(model_bytes, Ordering::Relaxed);
 
         self.shared
             .cold
@@ -579,6 +584,10 @@ impl<'a> NamClapMainThread<'a> {
         if let Ok(mut info_guard) = self.shared.cold.ui_model_info.lock() {
             *info_guard = None;
         }
+        self.shared
+            .cold
+            .ui_model_memory_bytes
+            .store(0, Ordering::Relaxed);
         if let Ok(mut name_guard) = self.shared.cold.ui_model_name.lock() {
             name_guard.clear();
         }

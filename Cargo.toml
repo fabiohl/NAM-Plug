@@ -4,7 +4,7 @@
 name = "nam-plug"
 version = "0.8.0"
 edition = "2024"
-rust-version = "1.98.0"
+rust-version = "1.99.0"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/fabiohl/NAM-Plug"
 description = "NAM CLAP plugin — high-performance Neural Amp Modeler (NAM) inference in CLAP (CLever Audio Plug-in) format."
@@ -124,6 +124,9 @@ debug = 1
 opt-level = 0
 incremental = true
 split-debuginfo = "unpacked"
+
+[lints.rust]
+raw_borrows_via_references = "warn"
 
 [lints.clippy]
 allow_attributes = "warn"

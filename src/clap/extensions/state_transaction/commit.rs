@@ -193,6 +193,11 @@ pub(crate) fn build_restore_package(
     let model_publish = model.as_ref().map(|r| RestoreModelPublish {
         metadata: r.model_metadata.clone(),
         info: r.model_info.clone(),
+        memory_bytes: r
+            .model_l
+            .as_ref()
+            .map(|m| m.memory_footprint())
+            .unwrap_or(0),
         full_wavenet: r.model_l.as_ref().and_then(|m| {
             if let StaticModel::WavenetDyn(w) = m.as_ref() {
                 clone_wavenet_for_slimmable_storage(w).ok()
@@ -388,6 +393,11 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         main_thread
             .shared
             .cold
+            .ui_model_memory_bytes
+            .store(model.memory_bytes, Ordering::Relaxed);
+        main_thread
+            .shared
+            .cold
             .model_sample_rate
             .store(model.model_rate, Ordering::Relaxed);
         if let Some(ref basename) = model_basename
@@ -410,6 +420,11 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         if let Ok(mut info_guard) = main_thread.shared.cold.ui_model_info.lock() {
             *info_guard = None;
         }
+        main_thread
+            .shared
+            .cold
+            .ui_model_memory_bytes
+            .store(0, Ordering::Relaxed);
         if let Ok(mut name_guard) = main_thread.shared.cold.ui_model_name.lock() {
             name_guard.clear();
         }
@@ -614,6 +629,12 @@ fn local_commit(
         if let Ok(mut info_guard) = main_thread.shared.cold.ui_model_info.lock() {
             *info_guard = Some(model_info);
         }
+        let mem_bytes = model_l.as_ref().map(|m| m.memory_footprint()).unwrap_or(0);
+        main_thread
+            .shared
+            .cold
+            .ui_model_memory_bytes
+            .store(mem_bytes, Ordering::Relaxed);
 
         if let Ok(mut pending_guard) = main_thread.shared.cold.pending_model.lock() {
             *pending_guard = Some(PendingModel {
@@ -655,6 +676,11 @@ fn local_commit(
         if let Ok(mut info_guard) = main_thread.shared.cold.ui_model_info.lock() {
             *info_guard = None;
         }
+        main_thread
+            .shared
+            .cold
+            .ui_model_memory_bytes
+            .store(0, Ordering::Relaxed);
         if let Ok(mut name_guard) = main_thread.shared.cold.ui_model_name.lock() {
             name_guard.clear();
         }

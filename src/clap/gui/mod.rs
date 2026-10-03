@@ -144,6 +144,9 @@ mod tests {
         let bridge = GuiHostBridge::new(&shared_handle);
         let static_handle = bridge.as_static();
 
-        assert_eq!(static_handle.as_raw() as *const _, &mock_host as *const _);
+        assert_eq!(
+            static_handle.as_raw() as *const _,
+            &raw const mock_host as *const _
+        );
     }
 }

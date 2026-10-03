@@ -19,7 +19,7 @@ use neural_amp_modeler_rs::models::StaticModel;
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::CString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Active plugin instance counter.
@@ -325,6 +325,8 @@ pub struct RestoreModelPublish {
     pub metadata: NamModelMetadata,
     /// Dynamic model info for diagnostics.
     pub info: ModelInfo,
+    /// Dynamic model memory footprint in bytes.
+    pub memory_bytes: usize,
     /// Clone of full WaveNet weights for slimmable rebuild storage.
     pub full_wavenet: Option<Box<StaticModel>>,
     /// Model native sample rate.
@@ -615,6 +617,8 @@ pub struct ColdShared {
     pub ui_load_error_msg: Mutex<String>,
     /// Dynamic model info for diagnostics.
     pub ui_model_info: Mutex<Option<neural_amp_modeler_rs::common::diagnostics::ModelInfo>>,
+    /// Dynamic model memory footprint in bytes for diagnostics (0 if no model).
+    pub ui_model_memory_bytes: AtomicUsize,
     /// Flag signaling that the model should be cleared (unload model).
     pub ui_clear_model: AtomicBool,
     /// Lifetime fence: true while the plugin exists. Checked by the File Picker thread.
@@ -892,6 +896,7 @@ impl ColdShared {
             ui_load_error: AtomicBool::new(false),
             ui_load_error_msg: Mutex::new(String::new()),
             ui_model_info: Mutex::new(None),
+            ui_model_memory_bytes: AtomicUsize::new(0),
             ui_clear_model: AtomicBool::new(false),
             alive_fence: Arc::new(AtomicBool::new(true)),
             gui_user_closed: AtomicBool::new(false),
@@ -1171,6 +1176,11 @@ impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for GuiShare
         }
     }
 
+    fn model_memory_bytes(&self) -> Option<usize> {
+        let bytes = self.cold.ui_model_memory_bytes.load(Ordering::Relaxed);
+        if bytes > 0 { Some(bytes) } else { None }
+    }
+
     fn audio_info(
         &self,
         consumer: &neural_amp_modeler_rs::common::diagnostics::AudioMetadata,
@@ -1201,6 +1211,10 @@ impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for GuiShare
 impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for NamClapShared {
     fn model_info(&self) -> Option<neural_amp_modeler_rs::common::diagnostics::ModelInfo> {
         self.gui.model_info()
+    }
+
+    fn model_memory_bytes(&self) -> Option<usize> {
+        self.gui.model_memory_bytes()
     }
 
     fn audio_info(

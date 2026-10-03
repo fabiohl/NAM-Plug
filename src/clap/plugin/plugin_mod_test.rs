@@ -98,7 +98,7 @@ fn test_file_picker_alive_fence_and_timeout() {
     {
         shared.cold.ui_loading.store(true, Ordering::Relaxed);
         let alive_fence = Arc::clone(&shared.cold.alive_fence);
-        let shared_addr = &*shared as *const NamClapShared as usize;
+        let shared_addr = Arc::as_ptr(&shared) as usize;
 
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Some(std::path::PathBuf::from("/tmp/model.nam")))
@@ -141,7 +141,7 @@ fn test_file_picker_alive_fence_and_timeout() {
     {
         shared.cold.ui_loading.store(true, Ordering::Relaxed);
         let alive_fence = Arc::clone(&shared.cold.alive_fence);
-        let shared_addr = &*shared as *const NamClapShared as usize;
+        let shared_addr = Arc::as_ptr(&shared) as usize;
 
         // Sets the alive fence to false (simulating plugin/GUI destruction)
         alive_fence.store(false, Ordering::Relaxed);
@@ -185,7 +185,7 @@ fn test_file_picker_alive_fence_and_timeout() {
         shared.cold.alive_fence.store(true, Ordering::Relaxed);
         shared.cold.ui_loading.store(true, Ordering::Relaxed);
         let alive_fence = Arc::clone(&shared.cold.alive_fence);
-        let shared_addr = &*shared as *const NamClapShared as usize;
+        let shared_addr = Arc::as_ptr(&shared) as usize;
 
         let (_tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
         // We don't send anything through the channel to force the timeout
