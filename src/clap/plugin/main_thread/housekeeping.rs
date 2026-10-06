@@ -593,7 +593,8 @@ impl<'a> NamClapMainThread<'a> {
 
     /// Retries delivery of parameter snapshots queued by
     /// `PluginMainThreadParams::flush()` when the SPSC channel was full.
-    /// Called from `housekeeping()` (triggered by `host.request_callback()`).
+    /// Called from `housekeeping()` (triggered periodically by the 250 ms
+    /// CLAP watchdog timer or upon `host.request_callback()`).
     fn flush_in_flight_params(&self) {
         let snapshot = self
             .shared

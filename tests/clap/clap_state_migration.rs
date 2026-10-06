@@ -57,6 +57,36 @@ fn create_plugin_instance() -> PluginInstance<TestHost> {
     .expect("Failed to instantiate plugin")
 }
 
+/// Returns a validated (non-null, aligned) pointer to the plugin's `NamClapShared`.
+///
+/// Raw pointer (not a reference) so callers can keep using `instance`; they must
+/// dereference it only while the instance is alive.
+///
+/// The plugin is loaded from a separately compiled `.so`, while this test
+/// reinterprets its `PluginWrapper<NamClapPlugin>` with the layout of the test
+/// binary's own copy of the types (unstable `repr(Rust)`). A stale artifact or
+/// mismatched build flags yields a garbage pointer (observed: ASCII bytes as
+/// address); fail early with a clear diagnostic instead of undefined behavior.
+fn plugin_shared(
+    instance: &mut PluginInstance<TestHost>,
+) -> *const nam_plug::clap::plugin::NamClapShared {
+    let raw_plugin_ptr = instance.plugin_handle().as_raw_ptr();
+    let shared_ptr = unsafe {
+        clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
+            raw_plugin_ptr,
+            |wrapper| Ok(wrapper.shared() as *const nam_plug::clap::plugin::NamClapShared),
+        )
+        .expect("Failed to obtain plugin wrapper")
+    };
+    assert!(
+        !shared_ptr.is_null() && shared_ptr.is_aligned(),
+        "NamClapShared pointer {shared_ptr:p} is null or misaligned: the loaded .so is likely \
+         stale or built with a different layout than this test binary. Rebuild the CLAP \
+         artifact (cargo build --release) and re-run."
+    );
+    shared_ptr
+}
+
 #[test]
 fn test_integration_v0_legacy_load() {
     let mut instance = create_plugin_instance();
@@ -76,15 +106,8 @@ fn test_integration_v0_legacy_load() {
     }
 
     // Verify that internal state on the main thread was properly updated and migrated
-    let raw_plugin_ptr = instance.plugin_handle().as_raw_ptr();
-    let shared_ptr = unsafe {
-        clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
-            raw_plugin_ptr,
-            |wrapper| Ok(wrapper.shared() as *const nam_plug::clap::plugin::NamClapShared),
-        )
-        .expect("Failed to obtain plugin wrapper")
-    };
-    let shared = unsafe { &*shared_ptr };
+    // SAFETY: validated by `plugin_shared`; `instance` outlives `shared`.
+    let shared = unsafe { &*plugin_shared(&mut instance) };
 
     assert_eq!(
         f32::from_bits(
@@ -131,15 +154,8 @@ fn test_integration_v1_round_trip() {
         .expect("PluginState extension not found");
 
     // 1. Modify atomic values on the plugin simulating user action
-    let raw_plugin_ptr = instance.plugin_handle().as_raw_ptr();
-    let shared_ptr = unsafe {
-        clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
-            raw_plugin_ptr,
-            |wrapper| Ok(wrapper.shared() as *const nam_plug::clap::plugin::NamClapShared),
-        )
-        .expect("Failed to obtain plugin wrapper")
-    };
-    let shared = unsafe { &*shared_ptr };
+    // SAFETY: validated by `plugin_shared`; `instance` outlives `shared`.
+    let shared = unsafe { &*plugin_shared(&mut instance) };
 
     shared
         .ui_to_rt
@@ -269,15 +285,8 @@ fn test_integration_forward_v1_to_v2() {
             .expect("Failed to process future v2 envelope");
     }
 
-    let raw_plugin_ptr = instance.plugin_handle().as_raw_ptr();
-    let shared_ptr = unsafe {
-        clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
-            raw_plugin_ptr,
-            |wrapper| Ok(wrapper.shared() as *const nam_plug::clap::plugin::NamClapShared),
-        )
-        .expect("Failed to obtain plugin wrapper")
-    };
-    let shared = unsafe { &*shared_ptr };
+    // SAFETY: validated by `plugin_shared`; `instance` outlives `shared`.
+    let shared = unsafe { &*plugin_shared(&mut instance) };
 
     assert_eq!(
         f32::from_bits(

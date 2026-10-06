@@ -354,6 +354,24 @@ pub struct NamClapProcessor<'a> {
     /// In the poisoned state, process() silences audio and returns immediately with O(1) determinism,
     /// avoiding repeated panics, allocations, and log floods. Reset to false upon activate().
     pub(crate) poisoned: bool,
+    /// Two-phase reset latch: set by the phase-zero `reset()` after
+    /// `NamModel::prewarm_reset` clears the model to the freshly-built
+    /// condition without its stabilization feed, and cleared when the model
+    /// reports convergence through the per-callback amortization window, when
+    /// a new model is installed, and on `activate()`. While armed, every
+    /// callback drains a fixed zeroed-sample budget and holds the block on
+    /// the latency-compensated dry path (bypass-leg semantics) so the
+    /// non-converged model never reaches the wet pipeline.
+    ///
+    /// Deliberately a `bool`, not a counter: the engine owns the exact
+    /// per-family accounting (`prewarm_step` returns the remainder,
+    /// `prewarm_complete` reports convergence — LSTM `usize`, WaveNet/ConvNet
+    /// one-shot `bool`, A2/Linear RF `usize`, Cascade/Container
+    /// max-of-pendings), so a plugin-side counter would duplicate units that
+    /// only the engine can interpret. A callback-window microstate: never
+    /// persisted in `DeactivatedDspState` (a re-activated model completes any
+    /// outstanding pass eagerly in `activate()`, off the audio thread).
+    pub(crate) prewarm_pending: bool,
 }
 
 #[cfg(test)]

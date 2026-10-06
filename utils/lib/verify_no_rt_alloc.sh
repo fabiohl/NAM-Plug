@@ -36,9 +36,8 @@ fi
 
 # Scope: every Rust source inside the RT processor directory. Sibling
 # `*_test.rs` files are `#[cfg(test)]`-included test modules per repo
-# convention (`#[cfg(test)] #[path = "..."] mod`) and are excluded.
 RT_FILES="$(find "$PROC_DIR" -type f -name '*.rs' | sort)"
-SCAN_FILES="$(printf '%s\n' "$RT_FILES" | grep -vE '(^|/)src/clap/processor/[A-Za-z0-9_]*_test\.rs$' || true)"
+SCAN_FILES="$(printf '%s\n' "$RT_FILES" | grep -vE '(^|/)[A-Za-z0-9_]*_test\.rs$' || true)"
 
 if [ -z "$SCAN_FILES" ]; then
     die "scan scope is empty after excluding test modules (fail-closed)"

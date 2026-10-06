@@ -83,6 +83,32 @@ use neural_amp_modeler_rs::models::NamModel;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+/// Zeroed-sample stabilization budget drained per audio callback by the
+/// two-phase reset amortization window.
+///
+/// Sized so the worst-case post-reset callback — `reset()` phase zero +
+/// `NamModel::prewarm_step(k)` + a 64-frame block — stays under the audio
+/// callback deadline (1.33 ms @ 48 kHz; design target < 1.0 ms with 25%
+/// margin), measured per fixture on a pinned isolated core:
+///
+/// // Measured: 2026-10-06, release profile, pinned core 8, N=250 @ 48 kHz,
+/// // Block=64 (S6-T1 `test_reset_wall_clock_time_within_contract`, 4 runs):
+/// // k=1024 keeps the amortized window inside the 1.33 ms callback budget
+/// // for every family as measured — window `prewarm_step(k)` + contained
+/// // 64-frame dry block p50 ≈ 69 µs (LSTM), ≈ 48 µs (WaveNet A1 one-shot),
+/// // ≈ 0.87–0.93 ms (A2: chained cascade inference ≈ 0.87 µs/sample,
+/// // structural engine cost — D6 forbids engine changes in S6). The A2
+/// // *phase-zero* `prewarm_reset` zeroes the cascade layer buffers in
+/// // place (measured ≈ 2.0–2.2 ms p50) and is covered by the D3 adendo
+/// // (budget scoped to LSTM/A1; A2 carried by its
+/// // own measured envelope — S2-T1's synchronous integral reset was
+/// // 3.29 ms p50 + 55.7 µs block, so the two-phase split still lowers the
+/// // worst-case callback for A2 as well).
+///
+/// Multiple of 64 by contract (matches the engine's `WAVENET_MAX_NUM_FRAMES`
+/// and LSTM 512-sample chunking with no straggler partial chunks).
+pub(crate) const PREWARM_STEP_SAMPLES_PER_CALLBACK: usize = 1024;
+
 /// Converts a panic payload into `PluginError` for `catch_unwind` guards.
 ///
 /// In accordance with S2-T2 (zero memory leak in plugin binaries), the panic payload
@@ -168,18 +194,32 @@ impl Drop for FtzDazGuard {
 /// Helper to zero all output channels in the provided CLAP audio ports.
 ///
 /// Used for deterministic O(1) silence on processor failure / poisoning without allocations.
+/// Directly targets output ports to eliminate buffer-pairing sample type mismatches
+/// and handles both f32 and f64 host audio ports defensively in depth (F-NP-R4).
 #[inline(always)]
 fn silence_audio_ports(audio: &mut Audio) {
     for mut port_pair in audio {
-        if let Ok(Some(channel_pairs)) = port_pair.channels().map(|c| c.into_f32()) {
-            for pair in channel_pairs {
-                match pair {
-                    clack_plugin::process::audio::ChannelPair::InputOutput(_, o)
-                    | clack_plugin::process::audio::ChannelPair::InPlace(o)
-                    | clack_plugin::process::audio::ChannelPair::OutputOnly(o) => {
-                        o.fill(0.0);
+        if let Some(mut output) = port_pair.output()
+            && let Ok(channels) = output.channels()
+        {
+            match channels {
+                clack_plugin::process::audio::SampleType::F32(channels) => {
+                    for ch in channels {
+                        ch.fill(0.0f32);
                     }
-                    clack_plugin::process::audio::ChannelPair::InputOnly(_) => {}
+                }
+                clack_plugin::process::audio::SampleType::F64(channels) => {
+                    for ch in channels {
+                        ch.fill(0.0f64);
+                    }
+                }
+                clack_plugin::process::audio::SampleType::Both(c32, c64) => {
+                    for ch in c32 {
+                        ch.fill(0.0f32);
+                    }
+                    for ch in c64 {
+                        ch.fill(0.0f64);
+                    }
                 }
             }
         }
@@ -596,7 +636,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // All fallible stages succeeded: now assemble the active DSP resources
             // by taking ownership from staged items or the rollback guard.
             let (
-                model_l,
+                mut model_l,
                 model_generation,
                 resampler,
                 stream,
@@ -846,6 +886,38 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 cabsim_adapter
             };
 
+            // Complete any outstanding split-stabilization pass of the
+            // activated model, eagerly and off the audio thread: `activate()`
+            // runs on the main thread (no RT deadline) and `prewarm_step` is
+            // allocation-free, so one full-budget call finishes every family
+            // (LSTM `usize`, WaveNet/ConvNet one-shot, A2/Linear RF). The
+            // two-phase reset latch is a callback-window microstate — never
+            // persisted in `DeactivatedDspState` — so a deactivate() that
+            // interrupted the amortization window leaves the preserved model
+            // internally pending; draining here restores the fresh-instance
+            // invariant (bit-exact post-stabilization state) before the
+            // first block runs. A converged model (fresh loader install,
+            // slimmable rebuild) reports complete immediately: the check
+            // alone is the whole cost. The bounded round cap only guards a
+            // hypothetical non-converging family against an unbounded loop.
+            if let Some(model) = &mut model_l {
+                for _ in 0..64 {
+                    if model.prewarm_complete() {
+                        break;
+                    }
+                    model.prewarm_step(usize::MAX);
+                }
+                debug_assert!(
+                    model.prewarm_complete(),
+                    "model stabilization pass must complete in activate()"
+                );
+                if !model.prewarm_complete() {
+                    log::warn!(
+                        "NAM-Plug: model stabilization pass did not complete during activate()"
+                    );
+                }
+            }
+
             let silence_hyst = DynamicHysteresis::new();
             let mono_hyst = DynamicHysteresis::new();
 
@@ -1023,6 +1095,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 cached_gate_params: GateParams::default(),
                 gate_dirty: true,
                 rt_thread_setup_done: false,
+                // Fresh models arrive converged from the off-RT loader and the
+                // eager drain above finishes any deactivate-interrupted pass,
+                // so activation never arms the amortization window.
+                prewarm_pending: false,
                 last_seen_generation: 0,
                 max_frames_count: audio_config.max_frames_count as usize,
                 last_render_mode: 0,
@@ -1252,6 +1328,34 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // Event drainage (SPSC + Host + GUI sync + Latency)
             self.process_events(events.output);
 
+            // Two-phase reset amortization window: exactly one
+            // `model_l.prewarm_step(k)` drain per callback — after
+            // `process_events` (a model swapped in mid-window is converged
+            // and clears the latch, never trained stale) and before
+            // `process_dsp_audio` (the input stage/gate). Drained callbacks
+            // that have not converged hold their block on the
+            // latency-compensated dry path (bypass-leg semantics: no
+            // crossfade trigger, no gate/FSM advance, telemetry covered); the
+            // callback where the model reports convergence clears the latch
+            // and processes the host audio through the normal pipeline, so
+            // the first wet block equals a fresh instance's first block.
+            // `poisoned` never reaches here (O(1) silence above). The
+            // latch-armed-but-model-less case is defensively degenerate: it
+            // clears and takes the normal path.
+            if self.prewarm_pending {
+                if let Some(model) = self.model_l.as_mut() {
+                    let _pending_after = model.prewarm_step(PREWARM_STEP_SAMPLES_PER_CALLBACK);
+                    if !model.prewarm_complete() {
+                        return self.process_dry_contained_block(
+                            &mut audio,
+                            events.input,
+                            start_nanos,
+                        );
+                    }
+                }
+                self.prewarm_pending = false;
+            }
+
             // DSP block (gate, inference, resampling, output, telemetry)
             // Host parameter events are handled sample-accurately via block-splitting.
             self.process_dsp_audio(&mut audio, events.input, start_nanos)
@@ -1291,12 +1395,25 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             }
 
             // 1. Recurrent/FIR neural model state (WaveNet / LSTM / ConvNet /
-            //    Linear): `NamModel::reset` zeroes internal states and
-            //    prewarms exactly like a freshly built model (the engine
-            //    loader prewarms by default at build time). In-place and
-            //    zero-alloc for the loaded model families.
+            //    Linear / Container): two-phase reset, phase zero —
+            //    `NamModel::prewarm_reset` clears the temporal state to the
+            //    freshly-built condition WITHOUT the stabilization feed
+            //    (ring/cepstral clearing only: in-place, zero-alloc, O(state);
+            //    the integral prewarm's inline zero feed measured 1.81 ms p99
+            //    for LSTM and 4.18 ms p99 for WaveNet A2 — cf. S2-T1 — moves
+            //    off the audio callback into the per-callback amortization
+            //    window below `process()`). The latch arms that window: every
+            //    following callback drains a fixed zeroed-sample budget and
+            //    holds its block on the latency-compensated dry path until
+            //    the model reports convergence, then resumes normal wet
+            //    processing with the first wet block equal to a fresh
+            //    instance's first block (engine split-vs-integral bit-exact
+            //    guarantee). Rate/buffer bookkeeping (`sample_rate`,
+            //    `max_buffer_size`) is session-constant while active, so the
+            //    integral reset's config re-statement is a no-op here.
             if let Some(model) = &mut self.model_l {
-                let _ = model.reset(self.resampler.nam_rate(), self.max_frames_count);
+                model.prewarm_reset();
+                self.prewarm_pending = true;
             }
 
             // 2. Streaming resample adapter: clears its FIFOs, resets the

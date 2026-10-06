@@ -35,6 +35,10 @@ use clack_extensions::tail::HostTail;
 use clack_extensions::tail::HostTailImpl;
 use clack_extensions::thread_check::HostThreadCheck;
 use clack_extensions::thread_check::HostThreadCheckImpl;
+use clack_extensions::timer::HostTimer;
+use clack_extensions::timer::HostTimerImpl;
+use clack_extensions::timer::PluginTimer;
+use clack_extensions::timer::TimerId;
 use clack_host::prelude::*;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -61,6 +65,12 @@ pub struct CompleteHostState {
     pub tail_changed_count: Arc<AtomicU32>,
     pub preset_loaded_count: Arc<AtomicU32>,
     pub preset_error_count: Arc<AtomicU32>,
+    pub registered_timers: Arc<Mutex<Vec<(TimerId, u32)>>>,
+    pub unregistered_timers: Arc<Mutex<Vec<TimerId>>>,
+    pub timer_register_error: Arc<AtomicBool>,
+    pub timer_unregister_error: Arc<AtomicBool>,
+    pub enable_timer_support: Arc<AtomicBool>,
+    pub next_timer_id: Arc<AtomicU32>,
 }
 
 impl CompleteHostState {
@@ -76,6 +86,12 @@ impl CompleteHostState {
             tail_changed_count: Arc::new(AtomicU32::new(0)),
             preset_loaded_count: Arc::new(AtomicU32::new(0)),
             preset_error_count: Arc::new(AtomicU32::new(0)),
+            registered_timers: Arc::new(Mutex::new(Vec::new())),
+            unregistered_timers: Arc::new(Mutex::new(Vec::new())),
+            timer_register_error: Arc::new(AtomicBool::new(false)),
+            timer_unregister_error: Arc::new(AtomicBool::new(false)),
+            enable_timer_support: Arc::new(AtomicBool::new(true)),
+            next_timer_id: Arc::new(AtomicU32::new(1)),
         }
     }
 
@@ -132,6 +148,13 @@ pub enum HostEvent {
     PluginLog {
         severity: LogSeverity,
         message: String,
+    },
+    TimerRegistered {
+        timer_id: u32,
+        period_ms: u32,
+    },
+    TimerUnregistered {
+        timer_id: u32,
     },
 }
 
@@ -275,6 +298,44 @@ impl HostParamsImplMainThread for CompleteHostMainThread {
     }
 }
 
+impl HostTimerImpl for CompleteHostMainThread {
+    fn register_timer(&self, period_ms: u32) -> Result<TimerId, HostError> {
+        if self.state.timer_register_error.load(Ordering::SeqCst) {
+            return Err(HostError::Message(
+                "Simulated host timer registration error",
+            ));
+        }
+        let id = TimerId(self.state.next_timer_id.fetch_add(1, Ordering::SeqCst));
+        self.state
+            .registered_timers
+            .lock()
+            .unwrap()
+            .push((id, period_ms));
+        self.state.record(HostEvent::TimerRegistered {
+            timer_id: id.0,
+            period_ms,
+        });
+        Ok(id)
+    }
+
+    fn unregister_timer(&self, timer_id: TimerId) -> Result<(), HostError> {
+        if self.state.timer_unregister_error.load(Ordering::SeqCst) {
+            return Err(HostError::Message(
+                "Simulated host timer unregistration error",
+            ));
+        }
+        self.state
+            .unregistered_timers
+            .lock()
+            .unwrap()
+            .push(timer_id);
+        self.state.record(HostEvent::TimerUnregistered {
+            timer_id: timer_id.0,
+        });
+        Ok(())
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // CompleteHostAudioProcessor
 // ═══════════════════════════════════════════════════════════════════════════
@@ -311,13 +372,16 @@ impl HostHandlers for CompleteHost {
     type MainThread<'a> = CompleteHostMainThread;
     type AudioProcessor<'a> = CompleteHostAudioProcessor;
 
-    fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
+    fn declare_extensions(builder: &mut HostExtensions<Self>, shared: &Self::Shared<'_>) {
         builder.register::<HostThreadCheck>();
         builder.register::<HostLog>();
         builder.register::<HostLatency>();
         builder.register::<HostTail>();
         builder.register::<HostParams>();
         builder.register::<HostPresetLoad>();
+        if shared.state.enable_timer_support.load(Ordering::SeqCst) {
+            builder.register::<HostTimer>();
+        }
     }
 }
 
@@ -325,7 +389,9 @@ impl HostHandlers for CompleteHost {
 // Bootstrap helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub fn make_test_plugin_with_harness() -> (
+pub fn make_test_plugin_with_custom_state(
+    state: CompleteHostState,
+) -> (
     PluginEntry,
     HostInfo,
     PluginInstance<CompleteHost>,
@@ -345,7 +411,6 @@ pub fn make_test_plugin_with_harness() -> (
     )
     .unwrap();
 
-    let state = CompleteHostState::new();
     state.set_main_thread();
 
     let state_shared = state.clone();
@@ -363,19 +428,51 @@ pub fn make_test_plugin_with_harness() -> (
     (entry, host_info, instance, state)
 }
 
+pub fn make_test_plugin_with_harness() -> (
+    PluginEntry,
+    HostInfo,
+    PluginInstance<CompleteHost>,
+    CompleteHostState,
+) {
+    make_test_plugin_with_custom_state(CompleteHostState::new())
+}
+
+pub fn fire_timer(instance: &mut PluginInstance<CompleteHost>, timer_id: TimerId) {
+    let handle = instance.plugin_handle();
+    if let Some(timer) = handle.get_extension::<PluginTimer>() {
+        timer.on_timer(&handle, timer_id);
+    }
+}
+
+pub fn fire_registered_timer(
+    instance: &mut PluginInstance<CompleteHost>,
+    state: &CompleteHostState,
+) {
+    let timer_id = state
+        .registered_timers
+        .lock()
+        .unwrap()
+        .first()
+        .copied()
+        .map(|(id, _)| id);
+    if let Some(id) = timer_id {
+        fire_timer(instance, id);
+    }
+}
+
 pub fn make_harness_audio_processor(state: &CompleteHostState) -> CompleteHostAudioProcessor {
     state.set_audio_thread();
     CompleteHostAudioProcessor::new(state)
 }
 
-pub fn process_block_harness(
+pub fn process_block_harness_fallible(
     started: &mut StartedPluginAudioProcessor<CompleteHost>,
     in_l: &mut [f32],
     in_r: &mut [f32],
     out_l: &mut [f32],
     out_r: &mut [f32],
     events: Option<&InputEvents<'_>>,
-) -> EventBuffer {
+) -> Result<(ProcessStatus, EventBuffer), PluginInstanceError> {
     let mut input_ports = AudioPorts::with_capacity(2, 1);
     let mut output_ports = AudioPorts::with_capacity(2, 1);
 
@@ -392,18 +489,29 @@ pub fn process_block_harness(
     let mut output_events_buffer = EventBuffer::new();
     let mut out_ev = OutputEvents::from_buffer(&mut output_events_buffer);
 
-    started
-        .process(
-            &input_audio,
-            &mut output_audio,
-            events.unwrap_or(&InputEvents::empty()),
-            &mut out_ev,
-            None,
-            None,
-        )
-        .expect("process() failed");
+    let status = started.process(
+        &input_audio,
+        &mut output_audio,
+        events.unwrap_or(&InputEvents::empty()),
+        &mut out_ev,
+        None,
+        None,
+    )?;
 
-    output_events_buffer
+    Ok((status, output_events_buffer))
+}
+
+pub fn process_block_harness(
+    started: &mut StartedPluginAudioProcessor<CompleteHost>,
+    in_l: &mut [f32],
+    in_r: &mut [f32],
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+    events: Option<&InputEvents<'_>>,
+) -> EventBuffer {
+    process_block_harness_fallible(started, in_l, in_r, out_l, out_r, events)
+        .expect("process() failed")
+        .1
 }
 
 pub fn perform_restart(

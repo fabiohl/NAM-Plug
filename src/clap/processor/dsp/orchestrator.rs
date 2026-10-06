@@ -39,6 +39,14 @@ impl<'a> NamClapProcessor<'a> {
         input_events: &InputEvents,
         start_nanos: u64,
     ) -> Result<ProcessStatus, PluginError> {
+        // S6-T0 note (implementation): when `prewarm_pending` is armed the
+        // caller (`process()` above) drains the amortization window and
+        // contains the block (dry via `dry_delay`, crossfade/gate/FSM held)
+        // in `process_dry_contained_block` — this function is not reached
+        // while the non-converged model is outstanding. The non-finite
+        // containment path below stays integral (cold, correctness-first):
+        // its `model.reset` serves the corruption-containment scope, not the
+        // seek/loop relocation scope, and keeps its full synchronous prewarm.
         // Track pending restart factor for latency-policy enforcement.
         // Decode via `PendingRestartOs` so a pending
         // transition *to Off* is observable (raw 0 == "no pending").
@@ -46,53 +54,7 @@ impl<'a> NamClapProcessor<'a> {
             &self.shared.cold.pending_restart_os_factor,
             Ordering::Relaxed,
         );
-        {
-            let events = &mut self.scheduled_events;
-            events.clear();
-
-            for event in input_events {
-                if events.len() >= MAX_SCHEDULED_EVENTS {
-                    core::hint::cold_path();
-                    // Explicit saturation: the flag is the observable signal
-                    // (logged by emit_pending_logs off-RT). Never suppress it.
-                    self.rt_status.set_flag(
-                        neural_amp_modeler_rs::common::spsc::RT_STATUS_SPSC_DRAIN_TRUNCATED,
-                    );
-                    debug_assert!(
-                        false,
-                        "Event flood > {MAX_SCHEDULED_EVENTS} in one block; truncating"
-                    );
-                    break;
-                }
-                let time = event.header().time();
-                if let Some(param_event) = event.as_event::<ParamValueEvent>() {
-                    let Some(clap_id) = param_event.param_id() else {
-                        core::hint::cold_path();
-                        continue;
-                    };
-                    events.push(ScheduledEvent {
-                        time: time as usize,
-                        param_id: clap_id.get(),
-                        value: param_event.value() as f32,
-                        is_mod: false,
-                    });
-                } else if let Some(mod_event) = event.as_event::<ParamModEvent>() {
-                    let Some(clap_id) = mod_event.param_id() else {
-                        core::hint::cold_path();
-                        continue;
-                    };
-                    events.push(ScheduledEvent {
-                        time: time as usize,
-                        param_id: clap_id.get(),
-                        value: mod_event.amount() as f32,
-                        is_mod: true,
-                    });
-                } else {
-                    // Unknown/unsupported event type for this plugin.
-                    core::hint::cold_path();
-                }
-            }
-        }
+        self.schedule_input_events(input_events);
 
         let event_count = self.scheduled_events.len();
         let mut event_idx = 0;
@@ -561,6 +523,240 @@ impl<'a> NamClapProcessor<'a> {
                 return Ok(ProcessStatus::Sleep);
             }
         }
+
+        Ok(ProcessStatus::Continue)
+    }
+
+    /// Parses the host input events of one callback into the scheduled-event
+    /// list, shared verbatim by the wet pipeline (`process_dsp_audio`) and
+    /// the two-phase reset containment leg
+    /// ([`Self::process_dry_contained_block`]) so both legs apply the exact
+    /// same event set — zero event loss in either path.
+    #[inline(always)]
+    fn schedule_input_events(&mut self, input_events: &InputEvents) {
+        let events = &mut self.scheduled_events;
+        events.clear();
+
+        for event in input_events {
+            if events.len() >= MAX_SCHEDULED_EVENTS {
+                core::hint::cold_path();
+                // Explicit saturation: the flag is the observable signal
+                // (logged by emit_pending_logs off-RT). Never suppress it.
+                self.rt_status
+                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_SPSC_DRAIN_TRUNCATED);
+                debug_assert!(
+                    false,
+                    "Event flood > {MAX_SCHEDULED_EVENTS} in one block; truncating"
+                );
+                break;
+            }
+            let time = event.header().time();
+            if let Some(param_event) = event.as_event::<ParamValueEvent>() {
+                let Some(clap_id) = param_event.param_id() else {
+                    core::hint::cold_path();
+                    continue;
+                };
+                events.push(ScheduledEvent {
+                    time: time as usize,
+                    param_id: clap_id.get(),
+                    value: param_event.value() as f32,
+                    is_mod: false,
+                });
+            } else if let Some(mod_event) = event.as_event::<ParamModEvent>() {
+                let Some(clap_id) = mod_event.param_id() else {
+                    core::hint::cold_path();
+                    continue;
+                };
+                events.push(ScheduledEvent {
+                    time: time as usize,
+                    param_id: clap_id.get(),
+                    value: mod_event.amount() as f32,
+                    is_mod: true,
+                });
+            } else {
+                // Unknown/unsupported event type for this plugin.
+                core::hint::cold_path();
+            }
+        }
+    }
+
+    /// Containment leg of the two-phase reset amortization window: renders
+    /// one callback while the split-stabilization pass armed by the
+    /// phase-zero `reset()` is still outstanding, so the non-converged model
+    /// can never leak wet audio into the mix.
+    ///
+    /// The block is held out of the DSP pipeline with bypass-leg semantics:
+    /// the staged host input feeds the latency-compensated dry delay
+    /// (preserving the ring history the wet path rejoins on the first
+    /// post-convergence block) and the delayed dry is published as the
+    /// output, while the bypass crossfader trigger, the gate/adaptive FSMs
+    /// and the smoothers stay untouched — host audio neither reaches the
+    /// model nor advances any temporal state, so the first wet block after
+    /// convergence equals a fresh instance's first block.
+    ///
+    /// Host parameter events keep applying (zero event loss): every
+    /// scheduled event is applied in delivery order as the callback's
+    /// end-of-block parameter state, mirroring the wet pipeline's
+    /// defensive-fallback semantics. Intra-block sample accuracy is not
+    /// observable because the block's audio bypasses the pipeline. The
+    /// bypass crossfader trigger is deliberately not fired: a crossfade
+    /// ramping mid-window would blend non-converged wet audio; the first
+    /// wet block re-triggers from the held crossfader state instead.
+    ///
+    /// Telemetry covers the window: the callback is measured like any other
+    /// block, so the drain cost lands in the deadline histogram and the
+    /// adaptive FSM.
+    #[cold]
+    // Standalone audit unit for `verify_rt_codegen.sh` (the gate watches the
+    // symbol; inlining into `process()` would hide the leg's .text).
+    #[inline(never)]
+    pub(crate) fn process_dry_contained_block(
+        &mut self,
+        audio: &mut Audio,
+        input_events: &InputEvents,
+        start_nanos: u64,
+    ) -> Result<ProcessStatus, PluginError> {
+        // Track pending restart factor for latency-policy enforcement (the
+        // scheduled-event application below can change the oversample
+        // target mid-window, exactly like the wet pipeline).
+        let pending_before = PendingRestartOs::load(
+            &self.shared.cold.pending_restart_os_factor,
+            Ordering::Relaxed,
+        );
+
+        self.schedule_input_events(input_events);
+
+        // Apply every scheduled event in delivery order (the wet path's
+        // defensive fallback applies leftovers the same way, in ring order
+        // with clamped times). The bypass crossfader trigger is held (see
+        // the doc comment above).
+        for evt in &self.scheduled_events {
+            worker::apply_scheduled_event(
+                evt.param_id,
+                evt.value,
+                evt.is_mod,
+                &mut self.params,
+                &mut self.smoother_in,
+                &mut self.smoother_out,
+                &mut self.gate_dirty,
+                &mut self.mod_input_gain,
+                &mut self.mod_output_gain,
+                &mut self.mod_gate_thresh,
+                &mut self.adaptive_compute,
+                &self.rt_status,
+                &self.shared.ui_to_rt,
+                self.gain_lut,
+                self.shared.cold.buffer_size.load(Ordering::Relaxed),
+                &self.shared.cold.pending_restart_os_factor,
+            );
+        }
+
+        // Parameter applications can invalidate the gate coefficients; keep
+        // the cached gate parameters current so the first wet block starts
+        // with the same gate math the wet pipeline would have.
+        if self.gate_dirty {
+            let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
+            let close_db = modulated_gate_db - 6.0;
+            let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
+            self.cached_threshold_open_sq = open_linear * open_linear;
+            let close_linear = self.gain_lut.db_to_linear(close_db);
+            self.cached_threshold_close_sq = close_linear * close_linear;
+            self.cached_gate_params.threshold_open_db = modulated_gate_db;
+            self.cached_gate_params.threshold_close_db = close_db;
+            self.gate_dirty = false;
+        }
+
+        let mut peak_l = 0.0f32;
+        let mut peak_r = 0.0f32;
+        for mut port_pair in audio {
+            let n_samples_raw = port_pair.frames_count() as usize;
+            if n_samples_raw > self.max_frames_count {
+                self.rt_status.set_flag(RT_STATUS_HOST_CONTRACT_VIOLATION);
+                if let Ok(channels) = port_pair.channels()
+                    && let Some(pairs) = channels.into_f32()
+                {
+                    for pair in pairs {
+                        match pair {
+                            ChannelPair::InputOutput(_, o)
+                            | ChannelPair::OutputOnly(o)
+                            | ChannelPair::InPlace(o) => {
+                                let len = o.len().min(n_samples_raw);
+                                o[..len].fill(0.0);
+                            }
+                            ChannelPair::InputOnly(_) => {}
+                        }
+                    }
+                }
+                return Err(PluginError::Message(
+                    "Host block size exceeds maximum configured capacity",
+                ));
+            }
+            let n_samples = n_samples_raw.min(self.max_frames_count);
+            if n_samples == 0 {
+                continue;
+            }
+            let n = n_samples as u32;
+            if self.rt_status.last_n_samples.load(Ordering::Relaxed) != n {
+                self.rt_status.last_n_samples.store(n, Ordering::Relaxed);
+            }
+
+            let Some((out_l, out_r)) = channels::extract_channels(
+                &mut port_pair,
+                &mut self.buf_host_l,
+                &mut self.buf_host_r,
+                &self.shared.rt_to_ui.active_channel_count,
+                &mut self.process_mono,
+                n_samples,
+            )?
+            else {
+                continue;
+            };
+            let (mut out_l, mut out_r) = (out_l, out_r);
+
+            // Dry leg: feed the ring with the staged host input and publish
+            // the delayed dry (single fused sanitize/peak pass). The ring
+            // keeps absorbing the host input so its latency history stays
+            // intact for the wet path's return.
+            self.dry_delay.process_block(
+                &self.buf_host_l[..n_samples],
+                &self.buf_host_r[..n_samples],
+                &mut self.buf_xfade_dry_l[..n_samples],
+                &mut self.buf_xfade_dry_r[..n_samples],
+                n_samples,
+                self.process_mono,
+            );
+            let (sub_peak_l, sub_peak_r) = audio_loop::copy_delayed_dry_to_output(
+                &mut out_l,
+                &mut out_r,
+                &mut self.buf_xfade_dry_l[..n_samples],
+                &mut self.buf_xfade_dry_r[..n_samples],
+                0,
+                self.process_mono,
+            );
+            peak_l = peak_l.max(sub_peak_l);
+            peak_r = peak_r.max(sub_peak_r);
+        }
+
+        // Bypass-leg telemetry projection: gate reported open, no FSM
+        // advance, peaks from the delayed dry.
+        self.shared
+            .rt_to_ui
+            .ui_gate_active
+            .store(false, Ordering::Relaxed);
+        gate_flags::report_gate_flags(&self.rt_status, GateState::Open);
+        peaks::store_peaks(self.shared, peak_l, peak_r);
+
+        // Oversample target change applied mid-window requests the host
+        // restart exactly like the wet pipeline does.
+        let pending_after = PendingRestartOs::load(
+            &self.shared.cold.pending_restart_os_factor,
+            Ordering::Relaxed,
+        );
+        if pending_after != pending_before && pending_after != PendingRestartOs::None {
+            self.host.request_restart();
+        }
+
+        self.process_telemetry(start_nanos);
 
         Ok(ProcessStatus::Continue)
     }

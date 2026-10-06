@@ -122,6 +122,8 @@ pub struct NamClapMainThread<'a> {
     /// Flag indicating whether a restart request has already been dispatched to
     /// the host following a fatal processor poisoning event in the RT audio loop.
     pub(crate) poison_restart_requested: Cell<bool>,
+    /// Watchdog timer ID registered with the host for periodic housekeeping ticks (if supported).
+    pub watchdog_timer: Cell<Option<clack_extensions::timer::TimerId>>,
 }
 
 impl<'a> NamClapMainThread<'a> {
@@ -448,6 +450,20 @@ impl<'a> Drop for NamClapMainThread<'a> {
         // 3. Clear host log sink arc in cold shared
         if let Ok(mut sink_guard) = self.shared.cold.host_log_sink.lock() {
             *sink_guard = None;
+        }
+
+        // 3b. Unregister periodic watchdog timer before lowering alive_fence
+        if let Some(timer_id) = self.watchdog_timer.take()
+            && let Some(timer_ext) = self
+                .host
+                .get_extension::<clack_extensions::timer::HostTimer>()
+        {
+            let unregister_res = timer_ext.unregister_timer(&self.host, timer_id);
+            if let Err(err) = unregister_res {
+                log::warn!(
+                    "NAM-Plug: Failed to unregister watchdog timer {timer_id} during destroy: {err}"
+                );
+            }
         }
 
         // 4. Lower the alive fence BEFORE releasing any shared state, so

@@ -23,7 +23,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::clap::extensions::params::{PARAM_BYPASS, bypass_bool_to_u32};
+    use crate::clap::extensions::params::{
+        PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, bypass_bool_to_u32,
+    };
     use crate::clap::host_harness::{
         extract_plugin_main_thread, extract_plugin_shared, make_harness_audio_processor,
         make_test_plugin_with_harness, perform_restart, process_block_harness,
@@ -37,6 +39,38 @@ mod tests {
     use std::f32::consts::PI;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
+
+    /// `process_block` carrying host input events (param flips).
+    fn process_block_events(
+        started: &mut StartedPluginAudioProcessor<crate::clap::host_harness::CompleteHost>,
+        input: &[f32],
+        events: &InputEvents,
+    ) -> Vec<f32> {
+        let mut il = input.to_vec();
+        let mut ir_buf = input.to_vec();
+        let mut ol = vec![0.0f32; BLOCK];
+        let mut or_buf = vec![0.0f32; BLOCK];
+        let _ = process_block_harness(
+            started,
+            &mut il,
+            &mut ir_buf,
+            &mut ol,
+            &mut or_buf,
+            Some(events),
+        );
+        ol
+    }
+
+    use crate::clap::processor::PREWARM_STEP_SAMPLES_PER_CALLBACK;
+
+    /// Expected number of post-reset callbacks until the first wet block for
+    /// lstm.nam at 48 kHz with the fixed drain budget k
+    /// = `PREWARM_STEP_SAMPLES_PER_CALLBACK`.
+    ///
+    /// Measured: engine `prewarm_samples()` for lstm.nam = 24000 (half the
+    /// 48 kHz sample rate) → ceil(24000 / 1024) = 24; deterministic: the
+    /// engine's split stabilization is chunking-independent.
+    const EXPECTED_CALLBACKS_TO_WET_LSTM: usize = 24;
 
     const BLOCK: usize = 256;
     const PARTITIONS: usize = 32;
@@ -120,6 +154,12 @@ mod tests {
 
     #[test]
     fn test_batch_reset_invariance_multi_cycle() {
+        // The expected count must track the drain budget k.
+        assert_eq!(
+            24000_usize.div_ceil(PREWARM_STEP_SAMPLES_PER_CALLBACK),
+            EXPECTED_CALLBACKS_TO_WET_LSTM,
+            "lstm expected callbacks must equal ceil(24000 / k)"
+        );
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
         let stopped = instance
             .activate(
@@ -138,11 +178,40 @@ mod tests {
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
 
         // Probe signal to measure output determinism pós-reset
+        let silence = [0.0f32; BLOCK];
         let probe = noise_pattern(BLOCK, 0xCAFE_BABE, 0.5);
 
-        // Compute fresh build output, then perform reset to get post-reset reference
+        // Adaptive-compute FSM off via the sanctioned param-event path (same
+        // rationale as the reset-test LSTM equivalence flip).
+        let mut flip_buffer = EventBuffer::new();
+        flip_buffer.push(&ParamValueEvent::new(
+            0,
+            ClapId::new(PARAM_ADAPTIVE_COMPUTE),
+            Pckn::match_all(),
+            0.0f64,
+        ));
+        let flip_events = InputEvents::from_buffer(&flip_buffer);
+
+        // Fresh timeline: settle the pipeline with two wet silence blocks,
+        // then capture the probe response reference (model converged from the
+        // loader's build-time prewarm; the FSM starts Full).
+        let _ = process_block(&mut started, &silence, None);
+        let _ = process_block_events(&mut started, &silence, &flip_events);
         let fresh_output = process_block(&mut started, &probe, None);
+
+        // Seek/loop relocation: the two-phase reset. The first N-1 post-reset
+        // callbacks are contained (dry passthrough, draining the amortized
+        // stabilization window — the same 24000 the loader's build-time
+        // prewarm consumed, one for one) and callback N is the convergence
+        // callback, which processes its host audio wet. One more wet silence
+        // block repays the fresh timeline's flip block, so both timelines run
+        // the probe over the exact same pipeline age and model state.
         started.reset();
+        for _ in 1..EXPECTED_CALLBACKS_TO_WET_LSTM {
+            let _ = process_block(&mut started, &probe, None);
+        }
+        let _ = process_block(&mut started, &silence, None);
+        let _ = process_block(&mut started, &silence, None);
         let ref_post_reset = process_block(&mut started, &probe, None);
 
         // Verify fresh build vs post-reset divergence is within RNN Kahan shadow bound (~1.5e-6)
@@ -160,10 +229,17 @@ mod tests {
                 let _ = process_block(&mut started, &pollute, None);
             }
 
-            // 2. Reset in-place
+            // 2. Reset in-place (phase zero), then drain the amortization
+            //    window: N-1 contained probes, the N-th (convergence) and one
+            //    extra wet-silence callback mirror the fresh timeline's shape.
             started.reset();
+            for _ in 1..EXPECTED_CALLBACKS_TO_WET_LSTM {
+                let _ = process_block(&mut started, &probe, None);
+            }
+            let _ = process_block(&mut started, &silence, None);
+            let _ = process_block(&mut started, &silence, None);
 
-            // 3. Process the exact same probe
+            // 3. Process the exact same probe (the aligned wet block).
             let post_reset_out = process_block(&mut started, &probe, None);
 
             // 4. Measure difference vs post-reset reference: must be bit-equivalent (< 1e-6)

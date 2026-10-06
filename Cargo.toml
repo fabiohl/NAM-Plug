@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 [package]
 name = "nam-plug"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 rust-version = "1.99.0"
 license = "GPL-3.0-or-later"
@@ -38,6 +38,7 @@ clack-extensions = { version = "0.2", features = [
     "render",
     "state-context",
     "tail",
+    "timer",
 ] }
 slint = { version = "1.18", default-features = false, features = [
     "std",

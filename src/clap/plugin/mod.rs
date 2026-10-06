@@ -56,6 +56,7 @@ impl Plugin for NamClapPlugin {
         builder.register::<crate::clap::extensions::render::NamPluginRender>();
         builder.register::<crate::clap::extensions::state_context::NamPluginStateContext>();
         builder.register::<crate::clap::extensions::tail::NamPluginTail>();
+        builder.register::<crate::clap::extensions::timer::NamPluginTimer>();
 
         builder.register::<crate::clap::extensions::gui::NamPluginGui>();
     }
@@ -232,7 +233,30 @@ impl DefaultPluginFactory for NamClapPlugin {
             staged_restore: RefCell::new(None),
             staged_swap: RefCell::new(None),
             poison_restart_requested: Cell::new(false),
+            watchdog_timer: Cell::new(None),
         };
+
+        // Register periodic main-thread watchdog timer (F-NP-R1).
+        // A 250ms period guarantees RT poison recovery <= 250ms, latency/PDC sync,
+        // and Tier 1 GC ring drain (32 slots) 4x/second without RT thread involvement.
+        if let Some(timer_ext) = main_thread
+            .host
+            .get_extension::<clack_extensions::timer::HostTimer>()
+        {
+            match timer_ext.register_timer(&main_thread.host, 250) {
+                Ok(id) => {
+                    main_thread.watchdog_timer.set(Some(id));
+                    log::info!(
+                        "NAM-Plug: Registered main-thread watchdog timer (id {id}, period 250 ms)"
+                    );
+                }
+                Err(err) => {
+                    log::warn!(
+                        "NAM-Plug: Failed to register main-thread watchdog timer ({err}); continuing in degraded mode"
+                    );
+                }
+            }
+        }
 
         let host_name = main_thread
             .host

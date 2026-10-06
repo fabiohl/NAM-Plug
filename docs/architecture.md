@@ -39,7 +39,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ### 1.1 Thread Roles & Hard Contracts
 
-- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, background model (`.nam`/`.namb`) loading, IR reading via `src/clap/plugin/main_thread/load.rs` (using `neural_amp_modeler_rs::dsp::cabsim::loader`), and Tier 1 Garbage Collection disposal.
+- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, background model (`.nam`/`.namb`) loading, IR reading via `src/clap/plugin/main_thread/load.rs` (using `neural_amp_modeler_rs::dsp::cabsim::loader`), and Tier 1 Garbage Collection disposal. Under CLAP timer support (`clap_plugin_timer_support`), the main thread registers a periodic 250 ms watchdog timer with the host, driving autonomous `housekeeping()` (RT processor poisoning containment recovery via `request_restart()`, dynamic PDC latency announcements via `HostLatency::changed()`, and Tier 1 GC SPSC queue draining) without depending on sporadic GUI events or user interactions. On hosts lacking timer support, it degrades gracefully to event-driven housekeeping.
 
 - **Audio Thread (RT)** — Driven by the host `process()` callback (`PluginAudioProcessor::process` in `src/clap/processor/mod.rs`).
 
@@ -145,6 +145,7 @@ Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-exten
 | `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                                                   |
 | `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision.                        |
 | `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining cab-sim IR ring-out frames.                                                   |
+| `clap_plugin_timer_support`          | `src/clap/extensions/timer.rs`                  | Periodic 250 ms watchdog timer driving autonomous housekeeping and RT recovery via `clap_host_timer_support`.      |
 | `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint declarative GUI with **native X11 XEmbed embedding** and X11/Wayland floating support. |
 
 > **Host Compatibility Note:** Native Wayland and X11 window negotiation (`CLAP_WINDOW_API_WAYLAND` and `CLAP_WINDOW_API_X11`) is verified across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. PreSonus Studio One / Fender Studio Pro for Linux is supported via floating window mode with bounded join teardown (`nam-gui-reaper`).

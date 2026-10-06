@@ -33,6 +33,12 @@ mod tests {
         }
     }
 
+    /// Serializes the evidence-gate tests across this audit lane: the audit
+    /// flips a global `AUDIT_ENABLED` switch, so concurrent audited tests
+    /// could mask each other's guard drop. Lock here keeps determinism.
+    #[cfg(feature = "heap-audit")]
+    static AUDIT_LANE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Runs a single stereo block through the processor, returning the
     /// `ProcessStatus`. The audio and event buffers are re-created per block
     /// so the borrows stay local to each call.
@@ -40,6 +46,20 @@ mod tests {
     fn process_block(
         started: &mut StartedPluginAudioProcessor<TestHost>,
         bufs: &mut StereoTestBuffers,
+    ) -> ProcessStatus {
+        process_block_with_events(started, bufs, &InputEvents::empty())
+    }
+
+    /// Runs a single stereo block through the processor with caller-supplied
+    /// host input events, returning the `ProcessStatus`. The audio buffer is
+    /// re-created per call so the borrows stay local; the event buffer is
+    /// owned by the caller and must be built off-RT (outside the audited
+    /// window), exactly like the DAW main thread staging automation.
+    #[cfg(feature = "heap-audit")]
+    fn process_block_with_events(
+        started: &mut StartedPluginAudioProcessor<TestHost>,
+        bufs: &mut StereoTestBuffers,
+        events: &InputEvents<'_>,
     ) -> ProcessStatus {
         let mut input_channels = [bufs.in_l.as_mut_slice(), bufs.in_r.as_mut_slice()];
         let input_audio = bufs.input_ports.with_input_buffers([AudioPortBuffer {
@@ -55,14 +75,13 @@ mod tests {
             channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
         }]);
 
-        let input_events = InputEvents::empty();
         let mut output_events = OutputEvents::from_buffer(&mut bufs.output_events_buffer);
 
         started
             .process(
                 &input_audio,
                 &mut output_audio,
-                &input_events,
+                events,
                 &mut output_events,
                 None,
                 None,
@@ -363,7 +382,21 @@ mod tests {
         shared: &crate::clap::plugin::NamClapShared,
         label: &str,
     ) -> f32 {
-        let status = process_block(started, bufs);
+        audited_block_with_events(started, bufs, shared, label, &InputEvents::empty())
+    }
+
+    /// Same zero-alloc audit contract as [`audited_block`], but drives the
+    /// block with caller-supplied host input events (e.g. bypass automation
+    /// for the crossfade transition).
+    #[cfg(feature = "heap-audit")]
+    fn audited_block_with_events(
+        started: &mut StartedPluginAudioProcessor<TestHost>,
+        bufs: &mut StereoTestBuffers,
+        shared: &crate::clap::plugin::NamClapShared,
+        label: &str,
+        events: &InputEvents<'_>,
+    ) -> f32 {
+        let status = process_block_with_events(started, bufs, events);
         assert!(
             matches!(status, ProcessStatus::Continue),
             "{label}: expected ProcessStatus::Continue (zero-alloc), got {status:?}"
@@ -931,6 +964,659 @@ mod tests {
                 .rt_status
                 .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED),
             "Expected RT_STATUS_MODEL_LOAD_FAILED to be set because invalid fixture fails to build"
+        );
+    }
+
+    /// Architectural gate: the bypass-crossfade cold path
+    /// (`process_crossfade_sub_block`) must remain allocation-free.
+    ///
+    /// The crossover is pinned by signal content, not probes: a bypass-flip
+    /// event schedules the 64-sample ramp that blends the live wet inference
+    /// against the latency-compensated dry capture. The audited ramp head
+    /// must therefore deviate from the steady-bypass dry reference wherever
+    /// the blend is active (left channel, the inference chain), and a
+    /// completed ramp-to-dry block must resume the pure delayed-dry
+    /// passthrough bit-exactly in its tail.
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_bypass_crossfade_zero_alloc() {
+        use crate::clap::extensions::params::PARAM_BYPASS;
+        use crate::clap::processor::state::BYPASS_XFADE_SAMPLES;
+        use clack_common::events::Pckn;
+        use clack_common::events::event_types::ParamValueEvent;
+        use clack_common::utils::ClapId;
+
+        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
+
+        // Host block must cover the whole ramp so the crossover lives inside
+        // one audited callback.
+        const BLOCK: usize = 128;
+        const { assert!(BLOCK >= BYPASS_XFADE_SAMPLES) };
+
+        let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
+        assert!(
+            model_path.exists(),
+            "wavenet_a1_standard.nam fixture missing — heap-audit gate requires a real model"
+        );
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let params = test_util::make_default_params(Some(model_path));
+        test_util::load_plugin_state(&mut plugin_instance, &params);
+        plugin_instance.call_on_main_thread_callback();
+
+        let audio_config = PluginAudioConfiguration {
+            sample_rate: 48000.0,
+            min_frames_count: BLOCK as u32,
+            max_frames_count: BLOCK as u32,
+        };
+        let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        assert!(
+            shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
+            "model_load_counter must be > 0 — the audit must run real inference"
+        );
+
+        // Distinct per-channel tones keep the mono detector out of the way:
+        // the crossfade blends the left inference leg against dry, while the
+        // right channel must remain the dry passthrough (dual-mono: the
+        // active inference chain is left-only).
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.0, 0.0);
+        for i in 0..BLOCK {
+            bufs.in_l[i] = (i as f32 * 0.05).sin() * 0.5;
+            bufs.in_r[i] = ((i as f32 * 0.07) + 1.13).sin() * 0.3;
+        }
+
+        // Wet warm-up: settle gate, smoothers and the inference steady state.
+        for _ in 0..8 {
+            let status = process_block(&mut started_processor, &mut bufs);
+            assert!(
+                matches!(status, ProcessStatus::Continue),
+                "wet warm-up must continue, got {status:?}"
+            );
+        }
+
+        // Bypass automation buffers (built off-RT, outside the audited
+        // window): 1.0 = bypass on, 0.0 = pipeline.
+        let mut ev_bypass = EventBuffer::new();
+        let mut ev_wet = EventBuffer::new();
+        let ever = ParamValueEvent::new(0u32, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 1.0);
+        ev_bypass.push(&ever);
+        let evwet = ParamValueEvent::new(0u32, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 0.0);
+        ev_wet.push(&evwet);
+
+        // Dry reference: identical input blocks copied through the
+        // latency-compensated dry ring are per-block constant, so the last
+        // bypass block is the reusable delayed-dry passthrough reference.
+        let bypass_events = InputEvents::from_buffer(&ev_bypass);
+        let mut dry_l_ref = vec![0.0f32; BLOCK];
+        let mut dry_r_ref = vec![0.0f32; BLOCK];
+        for _ in 0..4 {
+            let status =
+                process_block_with_events(&mut started_processor, &mut bufs, &bypass_events);
+            assert!(
+                matches!(status, ProcessStatus::Continue),
+                "dry reference phase must continue, got {status:?}"
+            );
+            dry_l_ref.copy_from_slice(&bufs.out_l);
+            dry_r_ref.copy_from_slice(&bufs.out_r);
+        }
+        let dry_peak = dry_l_ref
+            .iter()
+            .chain(dry_r_ref.iter())
+            .fold(0.0f32, |m, &x| m.max(x.abs()));
+        assert!(
+            dry_peak > 0.01,
+            "dry reference must carry passthrough signal (peak {dry_peak:.6})"
+        );
+
+        // ── Arm the audit lane for the crossfade transitions ──
+        let _audit_guard = AuditEnabledGuard::new();
+        shared
+            .cold
+            .rt_status
+            .clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC);
+
+        let wet_events = InputEvents::from_buffer(&ev_wet);
+
+        // Ramp-to-wet: the event flips bypass off and the crossover blends the
+        // live wet leg against dry; both the ramp head and the pure-wet tail
+        // must deviate from the dry reference.
+        let rms = audited_block_with_events(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "crossfade ramp to wet",
+            &wet_events,
+        );
+        assert!(
+            rms > 0.01,
+            "crossfade-to-wet must carry audio (rms {rms:.6})"
+        );
+        assert_deviation_from(&bufs.out_l, &dry_l_ref, "crossfade-to-wet left channel");
+        // The right channel is dry passthrough by architecture (the
+        // dual-mono inference chain is left-only): continuity, no wet blend.
+        assert_dry_continuity(&bufs.out_r, &dry_r_ref, "crossfade-to-wet right channel");
+
+        // Ramp-to-dry: the ramp head blends wet (deviates from dry); once the
+        // 64-sample ramp completes, the pure portion resumes the dry
+        // passthrough — the tail must equal the reference bit-exactly.
+        let rms = audited_block_with_events(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "crossfade ramp to bypass",
+            &bypass_events,
+        );
+        assert!(
+            rms > 0.01,
+            "crossfade-to-dry must carry audio (rms {rms:.6})"
+        );
+        assert_eq!(
+            bufs.out_l[BYPASS_XFADE_SAMPLES..],
+            dry_l_ref[BYPASS_XFADE_SAMPLES..],
+            "post-ramp tail must equal the dry reference bit-exactly"
+        );
+        assert_eq!(
+            bufs.out_r[BYPASS_XFADE_SAMPLES..],
+            dry_r_ref[BYPASS_XFADE_SAMPLES..],
+            "post-ramp tail must equal the dry reference bit-exactly"
+        );
+        assert_deviation_from(
+            &bufs.out_l[..BYPASS_XFADE_SAMPLES],
+            &dry_l_ref[..BYPASS_XFADE_SAMPLES],
+            "crossfade-to-dry left ramp head",
+        );
+        assert_dry_continuity(
+            &bufs.out_r[..BYPASS_XFADE_SAMPLES],
+            &dry_r_ref[..BYPASS_XFADE_SAMPLES],
+            "crossfade-to-dry right ramp head",
+        );
+
+        // One more round-trip: a second flip pair must reproduce the same
+        // signatures while staying zero-alloc.
+        let rms = audited_block_with_events(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "crossfade ramp back to wet",
+            &wet_events,
+        );
+        assert!(
+            rms > 0.01,
+            "second crossfade-to-wet must carry audio (rms {rms:.6})"
+        );
+        assert_deviation_from(
+            &bufs.out_l,
+            &dry_l_ref,
+            "second crossfade-to-wet left channel",
+        );
+        assert_dry_continuity(
+            &bufs.out_r,
+            &dry_r_ref,
+            "second crossfade-to-wet right channel",
+        );
+        let rms = audited_block_with_events(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "crossfade ramp back to bypass",
+            &bypass_events,
+        );
+        assert!(
+            rms > 0.01,
+            "second crossfade-to-dry must carry audio (rms {rms:.6})"
+        );
+        assert_eq!(
+            bufs.out_l[BYPASS_XFADE_SAMPLES..],
+            dry_l_ref[BYPASS_XFADE_SAMPLES..],
+            "post-ramp tail must equal the dry reference bit-exactly"
+        );
+        assert_eq!(
+            bufs.out_r[BYPASS_XFADE_SAMPLES..],
+            dry_r_ref[BYPASS_XFADE_SAMPLES..],
+            "post-ramp tail must equal the dry reference bit-exactly"
+        );
+        assert_deviation_from(
+            &bufs.out_l[..BYPASS_XFADE_SAMPLES],
+            &dry_l_ref[..BYPASS_XFADE_SAMPLES],
+            "second crossfade-to-dry left ramp head",
+        );
+        assert_dry_continuity(
+            &bufs.out_r[..BYPASS_XFADE_SAMPLES],
+            &dry_r_ref[..BYPASS_XFADE_SAMPLES],
+            "second crossfade-to-dry right ramp head",
+        );
+    }
+
+    /// Architectural gate: the noise-gate tail-drain cold path
+    /// (`process_tail_drain`) must remain allocation-free while a cabsim
+    /// ring-out drains under a closed gate, and must terminate into pure
+    /// silencing.
+    ///
+    /// Signal pinning: a wet chain with a loaded IR is excited, then
+    /// silenced. After the default hold/fade hysteresis elapses the gate FSM
+    /// flips to Closed (`RT_STATUS_IS_SILENT` set); the closed blocks then
+    /// carry the convolution ring-out until the tail budget is spent, after
+    /// which the output is exactly zero. Both phases must stay zero-alloc.
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_gate_tail_drain_zero_alloc() {
+        use neural_amp_modeler_rs::common::spsc::{RT_STATUS_HEAP_ALLOC, RT_STATUS_IS_SILENT};
+
+        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
+
+        let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
+        assert!(
+            model_path.exists(),
+            "wavenet_a1_standard.nam fixture missing — heap-audit gate requires a real model"
+        );
+
+        let ir_path = std::env::temp_dir().join("nam_plug_heap_audit_tail_drain_ir.wav");
+        write_synthetic_ir(&ir_path, 48000);
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let mut params = test_util::make_default_params(Some(model_path));
+        params.ir_path = Some(ir_path.clone());
+        params.ir_hash = crate::clap::test_util::asset_hash(&ir_path);
+        test_util::load_plugin_state(&mut plugin_instance, &params);
+        plugin_instance.call_on_main_thread_callback();
+
+        let audio_config = PluginAudioConfiguration {
+            sample_rate: 48000.0,
+            min_frames_count: 512,
+            max_frames_count: 512,
+        };
+        let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        assert!(
+            shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
+            "model_load_counter must be > 0 — the audit must run real inference"
+        );
+        assert!(
+            shared.rt_to_ui.cabsim_tail_samples.load(Ordering::Relaxed) > 0,
+            "cabsim tail must be armed — the tail-drain audit requires a loaded IR"
+        );
+
+        let mut bufs = StereoTestBuffers::new(512, 0.0, 0.0);
+        for i in 0..512 {
+            bufs.in_l[i] = (i as f32 * 0.05).sin() * 0.2;
+            bufs.in_r[i] = bufs.in_l[i];
+        }
+
+        // Wet warm-up: the conv tail budget re-arms on every active-audio
+        // block, so the last warm block leaves a full IR tail behind.
+        for _ in 0..8 {
+            let status = process_block(&mut started_processor, &mut bufs);
+            assert!(
+                matches!(status, ProcessStatus::Continue),
+                "wet warm-up must continue, got {status:?}"
+            );
+        }
+
+        // ── Arm the audit lane for the silence/draining sequence ──
+        let _audit_guard = AuditEnabledGuard::new();
+        shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
+
+        // Silence the input. The first held-open blocks still run inference
+        // (hold phase), then the fade completes and the closed blocks drain
+        // the ring-out. The witness is a gate-closed block with ring-out
+        // energy — the wet leg cannot produce it while the input is silent
+        // and the gate is closed.
+        let mut drained_witness = false;
+        let mut trailing_silent_blocks = 0usize;
+        const SILENCE_BLOCKS: usize = 12;
+        for _ in 0..SILENCE_BLOCKS {
+            bufs.in_l.fill(0.0);
+            bufs.in_r.fill(0.0);
+            let rms = audited_block(&mut started_processor, &mut bufs, shared, "gate tail drain");
+            let gate_closed = shared.cold.rt_status.check_flag(RT_STATUS_IS_SILENT);
+            if gate_closed && rms > 1e-6 {
+                drained_witness = true;
+                trailing_silent_blocks = 0;
+            } else if gate_closed {
+                trailing_silent_blocks += 1;
+            }
+        }
+        assert!(
+            drained_witness,
+            "no gate-closed block carried the convolution ring-out — the tail-drain path was not audited"
+        );
+        assert!(
+            trailing_silent_blocks >= 2,
+            "the tail drain must terminate into pure silencing (trailing silent blocks {trailing_silent_blocks})"
+        );
+    }
+
+    /// Architectural gate: oversampling engine rebuilds (Off → 2× → 4×) must
+    /// stay allocation-free on the audio thread, both at the instant the
+    /// pre-built engines install (SPSC structural apply inside the audited
+    /// callback) and in the steady-state inference blocks running under each
+    /// factor.
+    ///
+    /// Real-path pinning: the install is observed through the published
+    /// effective latency, which strictly increases with the half-band latency
+    /// table (Off: 0, 2×: 12, 4×: 24 host samples at 48 kHz), and every
+    /// steady-state block must carry processed signal under the new factor.
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_oversample_swap_zero_alloc() {
+        use crate::clap::plugin::ClapParamPayload;
+        use neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC;
+        use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
+        use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
+
+        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
+
+        const BLOCK: usize = 128;
+
+        let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
+        assert!(
+            model_path.exists(),
+            "wavenet_a1_standard.nam fixture missing — heap-audit gate requires a real model"
+        );
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let params = test_util::make_default_params(Some(model_path));
+        test_util::load_plugin_state(&mut plugin_instance, &params);
+        plugin_instance.call_on_main_thread_callback();
+
+        let audio_config = PluginAudioConfiguration {
+            sample_rate: 48000.0,
+            min_frames_count: BLOCK as u32,
+            max_frames_count: BLOCK as u32,
+        };
+        let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+
+        let shared_ptr = test_util::extract_shared(&mut plugin_instance);
+        let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+        let shared = unsafe { &*shared_ptr };
+        assert!(
+            shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
+            "model_load_counter must be > 0 — the audit must run real inference"
+        );
+
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.2, 0.2);
+
+        // Off-RT engine builders, before the audit lane arms — exactly like
+        // the DAW main thread pre-building swap payloads.
+        let build_os = |factor: OversampleFactor| -> ClapParamPayload {
+            ClapParamPayload::SetOversample {
+                os_l: Box::new(OversampleEngine::new(factor, MAX_RESAMP_BUF).expect("os L")),
+                os_r: Box::new(OversampleEngine::new(factor, MAX_RESAMP_BUF).expect("os R")),
+            }
+        };
+        let x2_payload = build_os(OversampleFactor::X2);
+        let x4_payload = build_os(OversampleFactor::X4);
+
+        // Warm-up under Off so the audited window starts from a pipeline the
+        // user could actually configure.
+        for _ in 0..8 {
+            let status = process_block(&mut started_processor, &mut bufs);
+            assert!(
+                matches!(status, ProcessStatus::Continue),
+                "warm-up must continue, got {status:?}"
+            );
+        }
+
+        // ── Arm the audit lane for the whole Off → 2× → 4× progression ──
+        let _audit_guard = AuditEnabledGuard::new();
+        shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
+
+        let latency_off = shared.rt_to_ui.current_latency.load(Ordering::Relaxed);
+        let rms = audited_block(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "oversample Off steady",
+        );
+        assert!(
+            rms > 0.01,
+            "Off steady state must carry audio (rms {rms:.6})"
+        );
+
+        // Install 2×: the structural apply lands inside this audited callback
+        // and the publish path reports the higher effective latency.
+        {
+            let mt = unsafe { &*main_thread_ptr };
+            mt.cmd_producer
+                .borrow_mut()
+                .push_command(x2_payload)
+                .expect("2× oversample push must succeed");
+        }
+        let rms = audited_block(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "oversample 2× install block",
+        );
+        assert!(
+            rms > 0.01,
+            "2× install block must carry audio (rms {rms:.6})"
+        );
+        let latency_x2 = shared.rt_to_ui.current_latency.load(Ordering::Relaxed);
+        assert!(
+            latency_x2 > latency_off,
+            "2× install must publish a higher effective latency (Off {latency_off} → X2 {latency_x2})"
+        );
+        let rms = audited_block(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "oversample 2× steady",
+        );
+        assert!(
+            rms > 0.01,
+            "2× steady state must carry audio (rms {rms:.6})"
+        );
+
+        // Install 4×: same contract under the deeper oversampling stage.
+        {
+            let mt = unsafe { &*main_thread_ptr };
+            mt.cmd_producer
+                .borrow_mut()
+                .push_command(x4_payload)
+                .expect("4× oversample push must succeed");
+        }
+        let rms = audited_block(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "oversample 4× install block",
+        );
+        assert!(
+            rms > 0.01,
+            "4× install block must carry audio (rms {rms:.6})"
+        );
+        let latency_x4 = shared.rt_to_ui.current_latency.load(Ordering::Relaxed);
+        assert!(
+            latency_x4 > latency_x2,
+            "4× install must publish a higher effective latency (X2 {latency_x2} → X4 {latency_x4})"
+        );
+        let rms = audited_block(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "oversample 4× steady",
+        );
+        assert!(
+            rms > 0.01,
+            "4× steady state must carry audio (rms {rms:.6})"
+        );
+    }
+
+    /// Architectural gate: poisoning containment must remain allocation-free
+    /// after the poison latch engages. An injected panic in `process()`
+    /// surfaces as `Err` with silenced outputs, and every subsequent
+    /// silenced block until the host restarts the plugin runs at exactly zero
+    /// heap allocations.
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_poison_containment_zero_alloc() {
+        use neural_amp_modeler_rs::common::spsc::{
+            RT_STATUS_HEAP_ALLOC, RT_STATUS_PROCESSOR_POISONED,
+        };
+
+        // The injection latch is a global one-shot: serialize against the
+        // panic-containment suite that shares it.
+        let _lock = super::super::processor_poisoning_test::TEST_MUTEX
+            .lock()
+            .expect("poisoning test mutex poisoned");
+        super::super::processor_poisoning_test::ensure_isolated_crash_dir();
+        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
+
+        const BLOCK: usize = 64;
+
+        let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
+        assert!(
+            model_path.exists(),
+            "wavenet_a1_standard.nam fixture missing — heap-audit gate requires a real model"
+        );
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let params = test_util::make_default_params(Some(model_path));
+        test_util::load_plugin_state(&mut plugin_instance, &params);
+        plugin_instance.call_on_main_thread_callback();
+
+        let audio_config = PluginAudioConfiguration {
+            sample_rate: 48000.0,
+            min_frames_count: BLOCK as u32,
+            max_frames_count: BLOCK as u32,
+        };
+        let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        assert!(
+            shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
+            "model_load_counter must be > 0 — the audit must run real inference"
+        );
+
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.2, 0.2);
+        for _ in 0..8 {
+            let status = process_block(&mut started_processor, &mut bufs);
+            assert!(
+                matches!(status, ProcessStatus::Continue),
+                "healthy warm-up must continue, got {status:?}"
+            );
+        }
+        let healthy_peak = bufs
+            .out_l
+            .iter()
+            .chain(bufs.out_r.iter())
+            .fold(0.0f32, |m, &x| m.max(x.abs()));
+        assert!(
+            healthy_peak > 0.01,
+            "the pipeline must be healthy before poisoning (peak {healthy_peak:.6})"
+        );
+
+        // Inject the one-shot panic. The panicking callback itself is NOT the
+        // audited contract (panic unwinding is not zero-alloc); the audited
+        // contract is the silenced containment afterwards.
+        super::super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+        let poisoned = {
+            let mut input_channels = [bufs.in_l.as_mut_slice(), bufs.in_r.as_mut_slice()];
+            let input_audio = bufs.input_ports.with_input_buffers([AudioPortBuffer {
+                latency: 0,
+                channels: AudioPortBufferType::f32_input_only(
+                    input_channels.iter_mut().map(InputChannel::constant),
+                ),
+            }]);
+            let output_channels = [bufs.out_l.as_mut_slice(), bufs.out_r.as_mut_slice()];
+            let mut output_audio = bufs.output_ports.with_output_buffers([AudioPortBuffer {
+                latency: 0,
+                channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+            }]);
+            let events = InputEvents::empty();
+            let mut output_events = OutputEvents::from_buffer(&mut bufs.output_events_buffer);
+            started_processor.process(
+                &input_audio,
+                &mut output_audio,
+                &events,
+                &mut output_events,
+                None,
+                None,
+            )
+        };
+        assert!(
+            poisoned.is_err(),
+            "the injected panic must surface as a processing error"
+        );
+        assert!(
+            shared
+                .cold
+                .rt_status
+                .check_flag(RT_STATUS_PROCESSOR_POISONED),
+            "RT_STATUS_PROCESSOR_POISONED must be set after the injected panic"
+        );
+        assert!(
+            bufs.out_l.iter().all(|&x| x == 0.0) && bufs.out_r.iter().all(|&x| x == 0.0),
+            "the panicking callback must silence the outputs"
+        );
+
+        // The unwinding telemetry may have touched the audit flag; the
+        // silenced containment path afterwards starts from a clean slate.
+        shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
+
+        // ── Arm the audit lane for the silenced containment path ──
+        let _audit_guard = AuditEnabledGuard::new();
+
+        for i in 0..10 {
+            let rms = audited_block(
+                &mut started_processor,
+                &mut bufs,
+                shared,
+                "poisoned silenced block",
+            );
+            assert_eq!(rms, 0.0, "block {i} after poisoning must stay silenced");
+            assert!(
+                shared
+                    .cold
+                    .rt_status
+                    .check_flag(RT_STATUS_PROCESSOR_POISONED),
+                "the poison latch must stay engaged while the host has not restarted the plugin"
+            );
+        }
+    }
+
+    /// Asserts that `got` deviates from `reference` on 4 or more samples with
+    /// an absolute error above 5e-4 — the observable signature that the wet
+    /// (model) leg mixed into the crossfade output instead of a pure copy of
+    /// the dry reference.
+    #[cfg(feature = "heap-audit")]
+    fn assert_deviation_from(got: &[f32], reference: &[f32], label: &str) {
+        assert_eq!(got.len(), reference.len(), "{label}: length mismatch");
+        let deviating = got
+            .iter()
+            .zip(reference.iter())
+            .filter(|(g, r)| (**g - **r).abs() > 5e-4)
+            .count();
+        assert!(
+            deviating >= 4,
+            "{label}: no wet blend signature (deviating samples {deviating} of {})",
+            reference.len()
+        );
+    }
+
+    /// Asserts that `got` keeps the dry reference intact (no significant
+    /// deviation). The right channel is dry passthrough by architecture —
+    /// the dual-mono inference chain is left-only — so during a crossfade its
+    /// signal must remain the latency-compensated dry capture.
+    #[cfg(feature = "heap-audit")]
+    fn assert_dry_continuity(got: &[f32], reference: &[f32], label: &str) {
+        assert_eq!(got.len(), reference.len(), "{label}: length mismatch");
+        let deviating = got
+            .iter()
+            .zip(reference.iter())
+            .filter(|(g, r)| (**g - **r).abs() > 5e-4)
+            .count();
+        assert_eq!(
+            deviating, 0,
+            "{label}: dry passthrough must remain intact ({deviating} deviating samples)"
         );
     }
 }

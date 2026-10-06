@@ -808,7 +808,7 @@ pub(crate) fn apply_iir_gain_ramp_sub_block(
     #[cfg(not(feature = "dual-mono"))]
     let _stereo = false;
     #[cfg(not(feature = "dual-mono"))]
-    let _ = process_mono;
+    let _ = (_stereo, process_mono);
     // Fast path: gain is stable — single SIMD multiply.
     if (start - target).abs() < 1e-9 {
         #[cfg(feature = "dual-mono")]
@@ -888,50 +888,58 @@ pub(crate) fn apply_iir_gain_ramp_sub_block(
     let mut bp = beta;
 
     let slice_l = &mut buf_l[offset..offset + n];
+    #[cfg(feature = "dual-mono")]
     let slice_r = &mut buf_r[offset..offset + n];
+    #[cfg(not(feature = "dual-mono"))]
+    let _ = buf_r;
 
     #[cfg(feature = "dual-mono")]
-    {
-        for i in 0..n {
+    if stereo {
+        for (p_l, p_r) in slice_l.iter_mut().zip(slice_r.iter_mut()) {
             let gain = target + bp * diff;
-            // SAFETY: i is bounded by 0..n where slice_l and slice_r have length n.
-            unsafe {
-                let p_l = slice_l.get_unchecked_mut(i);
-                *p_l *= gain;
-                if stereo {
-                    let p_r = slice_r.get_unchecked_mut(i);
-                    *p_r *= gain;
-                    if detect_clip && ((*p_l).abs() > 1.0 || (*p_r).abs() > 1.0) {
-                        *input_clipped = true;
-                    }
-                } else if detect_clip && (*p_l).abs() > 1.0 {
-                    *input_clipped = true;
-                }
-            }
+            *p_l *= gain;
+            *p_r *= gain;
+            bp *= beta;
+        }
+    } else {
+        for p_l in slice_l.iter_mut() {
+            let gain = target + bp * diff;
+            *p_l *= gain;
             bp *= beta;
         }
     }
     #[cfg(not(feature = "dual-mono"))]
-    {
-        let _ = &slice_r;
-        let _ = buf_r;
-        let _ = _stereo;
-        for i in 0..n {
-            let gain = target + bp * diff;
-            unsafe {
-                let p_l = slice_l.get_unchecked_mut(i);
-                *p_l *= gain;
-                if detect_clip && (*p_l).abs() > 1.0 {
-                    *input_clipped = true;
-                }
-            }
-            bp *= beta;
+    for p_l in slice_l.iter_mut() {
+        let gain = target + bp * diff;
+        *p_l *= gain;
+        bp *= beta;
+    }
+
+    if detect_clip {
+        let max_l = slice_l.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
+        #[cfg(feature = "dual-mono")]
+        let clipped = if stereo {
+            let max_r = slice_r.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
+            max_l > 1.0 || max_r > 1.0
+        } else {
+            max_l > 1.0
+        };
+        #[cfg(not(feature = "dual-mono"))]
+        let clipped = max_l > 1.0;
+
+        if clipped {
+            *input_clipped = true;
         }
     }
 
     // After n iterations, bp = beta^(n+1).
     // The last smoother state is y[n-1] = target + beta^n * diff = target + (bp / beta) * diff.
-    let final_val = target + (bp / beta) * diff;
+    // If beta <= 0.0 (instant jump / alpha >= 1.0), avoid 0/0 NaN division (F-NP-R3).
+    let final_val = if beta <= 0.0 {
+        target
+    } else {
+        target + (bp / beta) * diff
+    };
     smoother.set(final_val);
 }
 
@@ -1013,3 +1021,7 @@ pub(crate) fn copy_delayed_dry_to_output(
     }
     (peak_l, peak_r)
 }
+
+#[cfg(test)]
+#[path = "audio_loop_test.rs"]
+mod tests;

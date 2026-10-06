@@ -101,9 +101,10 @@ impl<'a> NamClapProcessor<'a> {
         // RT-safety: `host.request_callback()` is intentionally NOT called here
         // (it would write to eventfd/pipe, violating "Zero Blocking I/O").
         // The atomic store is sufficient — the main thread's housekeeping loop
-        // polls `current_latency` and calls `latency_ext.changed()` on its
-        // regular cycle. Worst case: one main-thread-period delay in reporting.
-        // This is a cold path (model activation/swap only), not the hot path.
+        // (driven autonomously by the 250 ms CLAP watchdog timer via
+        // `clap_plugin_timer_support`) polls `current_latency` and emits
+        // `HostLatency::changed()` without depending on sporadic GUI events or
+        // user interactions. Worst case: one timer period (250 ms) delay.
         //
         // The effective latency is cached (`cached_effective_latency`) and
         // recomputed only in the cold swap handlers — never on this hot path.
@@ -234,6 +235,7 @@ macro_rules! command_swap_parts {
                 mod_input_gain: &mut $s.mod_input_gain,
                 mod_output_gain: &mut $s.mod_output_gain,
                 gate_dirty: &mut $s.gate_dirty,
+                prewarm_pending: &mut $s.prewarm_pending,
                 shared: $s.shared,
                 rt_status: &$s.rt_status,
                 gain_lut: $s.gain_lut,
@@ -438,6 +440,11 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     pub(super) mod_output_gain: &'p mut f32,
     /// Gate coefficient invalidation flag (recomputed in the DSP block).
     pub(super) gate_dirty: &'p mut bool,
+    /// Two-phase reset latch (`prewarm_pending`): a model install ends the
+    /// amortization window — fresh models arrive converged from the off-RT
+    /// loader, so a model swapped in mid-window restarts converged (never
+    /// half-drained) and the next callback runs the normal wet path.
+    pub(super) prewarm_pending: &'p mut bool,
 
     // ── Ambient references (not owned by the swap domain) ──
     /// Shared main↔RT state (latency publications, ack atomic, restart state).
@@ -624,6 +631,11 @@ impl ClapCommandSwapHandler<'_, '_> {
         if let Some(old_l) = std::mem::replace(self.model_l, model_l) {
             gc.retire(GcItem::Model(old_l));
         }
+        // Swap clears the two-phase reset latch: a freshly installed model
+        // arrives converged from the off-RT loader, so a model swapped in
+        // mid-drain restarts converged (never half-drained) and the next
+        // callback runs the normal wet path.
+        *self.prewarm_pending = false;
         if let Some(model) = self.model_l.as_mut() {
             model.inject_rt_status(std::sync::Arc::clone(&self.shared.cold.rt_status));
             // Buffer sizing is guaranteed on the main thread before SPSC delivery

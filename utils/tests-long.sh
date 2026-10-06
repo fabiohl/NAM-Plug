@@ -9,6 +9,11 @@
 # Each phase runs in isolation, persists its log to target/logs/long-phaseN.log,
 # and appends a structured JSONL line to target/logs/long-audit-receipt.jsonl.
 #
+# Evidence hygiene: a --dry-run rehearsal must never destroy prior evidence.
+# It writes exclusively to target/logs/long-audit-receipt.dryrun.jsonl and
+# leaves any previous phase logs and receipts untouched; truncation of the
+# evidence paths happens solely in a real run.
+#
 # Build optimisation:
 #   Before any timed phase begins, a single `cargo test --no-run` pass pre-compiles
 #   all test binaries in release mode, ensuring 100 % artifact reuse by subsequent
@@ -321,7 +326,9 @@ phase "GC Stress — SPSC cascade, drain-on-destroy & property soak (Phase 1/3)"
 PHASE1_START=$(date +%s%N)
 PHASE1_STATUS="PASSED"
 PHASE1_LOG="target/logs/long-phase1.log"
-: > "$PHASE1_LOG" 2>/dev/null || true
+if [ "$DRY_RUN" != "1" ]; then
+    : > "$PHASE1_LOG" 2>/dev/null || true
+fi
 
 if [ "$DRY_RUN" = "1" ]; then
     PHASE1_DUR_MS=0
@@ -413,7 +420,9 @@ phase "Teardown — RT parking lot drain off-RT (Phase 2/3)"
 PHASE2_START=$(date +%s%N)
 PHASE2_STATUS="PASSED"
 PHASE2_LOG="target/logs/long-phase2.log"
-: > "$PHASE2_LOG" 2>/dev/null || true
+if [ "$DRY_RUN" != "1" ]; then
+    : > "$PHASE2_LOG" 2>/dev/null || true
+fi
 
 if [ "$DRY_RUN" = "1" ]; then
     PHASE2_DUR_MS=0
@@ -457,7 +466,9 @@ phase "RT Priority & Micro-Latency Certification — Pinned Core (Phase 3/3)"
 PHASE3_START=$(date +%s%N)
 PHASE3_STATUS="PASSED"
 PHASE3_LOG="target/logs/long-phase3.log"
-: > "$PHASE3_LOG" 2>/dev/null || true
+if [ "$DRY_RUN" != "1" ]; then
+    : > "$PHASE3_LOG" 2>/dev/null || true
+fi
 
 if [ "$DRY_RUN" = "1" ]; then
     PHASE3_DUR_MS=0
@@ -467,10 +478,12 @@ if [ "$DRY_RUN" = "1" ]; then
         echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
         echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
         echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --lib processor_drain_latency_test -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
+        echo -e "    taskset -c $BENCH_CORE cargo test --features testing --release --lib test_reset_wall_clock_time_within_contract -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
     else
         echo -e "    cargo test --features testing --release --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
         echo -e "    cargo test --features testing --release --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
         echo -e "    cargo test --features testing --release --lib processor_drain_latency_test -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
+        echo -e "    cargo test --features testing --release --lib test_reset_wall_clock_time_within_contract -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
     fi
 else
     set +e
@@ -519,7 +532,23 @@ else
         echo -e "  ${GREEN}✓ processor_drain_latency_test passed${NC}"
     fi
 
-    RC=$(( RC1 | RC2 | RC3 ))
+    echo -e "  ${BLUE}→ Running test_reset_wall_clock_time_within_contract under affinity core $BENCH_CORE...${NC}"
+    TMP_LOG="target/logs/long-phase3d.log"
+    if [ -n "$NOCAPTURE_FLAG" ]; then
+        run_cargo_test "$TMP_LOG" --affinity --lib test_reset_wall_clock_time_within_contract -- --ignored --test-threads=1 --nocapture
+    else
+        run_cargo_test "$TMP_LOG" --affinity --lib test_reset_wall_clock_time_within_contract -- --ignored --test-threads=1
+    fi
+    RC4=$?
+    cat "$TMP_LOG" >> "$PHASE3_LOG" 2>/dev/null || true
+    rm -f "$TMP_LOG"
+    if [ $RC4 -ne 0 ]; then
+        echo -e "  ${RED}✗ test_reset_wall_clock_time_within_contract failed (rc=$RC4)${NC}"
+    else
+        echo -e "  ${GREEN}✓ test_reset_wall_clock_time_within_contract passed${NC}"
+    fi
+
+    RC=$(( RC1 | RC2 | RC3 | RC4 ))
     set -e
     PHASE3_END=$(date +%s%N)
     PHASE3_DUR_MS=$(( (PHASE3_END - PHASE3_START) / 1000000 ))
@@ -549,7 +578,9 @@ PHASE4_START=$(date +%s%N)
 PHASE4_STATUS="SKIPPED"
 PHASE4_DUR_MS=0
 PHASE4_LOG="target/logs/long-phase4.log"
-: > "$PHASE4_LOG" 2>/dev/null || true
+if [ "$DRY_RUN" != "1" ]; then
+    : > "$PHASE4_LOG" 2>/dev/null || true
+fi
 
 if [ "$RUN_GUI" = "0" ]; then
     warn "GUI phase skipped (xvfb-run not found and --gui not requested)."

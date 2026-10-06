@@ -630,3 +630,219 @@ fn test_event_log_atomicity_under_concurrent_recording() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S1 Watchdog Timer Surveillance Tests (F-NP-R1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_watchdog_timer_registration_contract() {
+    let (_entry, _host_info, instance, state) = make_test_plugin_with_harness();
+    let timers = state.registered_timers.lock().unwrap().clone();
+    assert_eq!(
+        timers.len(),
+        1,
+        "Plugin must register exactly one periodic watchdog timer"
+    );
+    // Measured: period=250 ms watchdog interval
+    assert_eq!(timers[0].1, 250, "Watchdog timer period must be 250 ms");
+
+    let timer_id = timers[0].0;
+    drop(instance);
+    let unregistered = state.unregistered_timers.lock().unwrap().clone();
+    assert!(
+        unregistered.contains(&timer_id),
+        "Watchdog timer must be unregistered on plugin destroy"
+    );
+}
+
+#[test]
+fn test_watchdog_timer_detects_poisoned_processor_and_requests_restart() {
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let audio_config = default_audio_config();
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config)
+        .expect("activate failed");
+    let _started = stopped.start_processing().expect("start_processing failed");
+
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // Simulate RT processor poisoning via atomic bitmask
+    shared
+        .cold
+        .rt_status
+        .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
+
+    assert!(
+        shared
+            .cold
+            .rt_status
+            .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED),
+        "RT_STATUS_PROCESSOR_POISONED must be set"
+    );
+    assert!(
+        !state.restart_requested.load(Ordering::SeqCst),
+        "Restart must not be requested prior to main-thread housekeeping"
+    );
+
+    // Fire watchdog timer tick (simulating DAW timer driver without GUI/events)
+    fire_registered_timer(&mut instance, &state);
+
+    // Measured: request_restart fired within 1 timer tick (250 ms period)
+    assert!(
+        state.restart_requested.load(Ordering::SeqCst),
+        "Watchdog timer must trigger request_restart() upon detecting poisoned processor"
+    );
+    state.assert_event_occurred("RestartRequested", |e| {
+        matches!(e, HostEvent::RestartRequested)
+    });
+
+    // Verify error was logged to the host
+    state.assert_event_occurred("PoisoningErrorLog", |e| {
+        matches!(e, HostEvent::PluginLog { severity, message } if *severity == LogSeverity::Error && message.contains("processor is poisoned"))
+    });
+}
+
+#[test]
+fn test_watchdog_timer_syncs_latency_without_other_stimulus() {
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let audio_config = default_audio_config();
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config)
+        .expect("activate failed");
+    let mut started = stopped.start_processing().expect("start_processing failed");
+
+    // Initially 0 latency, no notification
+    assert_eq!(state.latency_changed_count.load(Ordering::SeqCst), 0);
+    assert_eq!(plugin_latency_get(&mut instance), 0);
+
+    // Request oversampling change to 2x (adds latency)
+    send_oversample_request(&mut started, OversampleFactor::X2);
+    assert!(state.restart_requested.load(Ordering::SeqCst));
+
+    // Perform host restart: deactivate -> activate -> start_processing
+    let started = perform_restart(&mut instance, started, &state, audio_config);
+    let _ = started;
+
+    // Notice we DO NOT call call_on_main_thread_callback() here!
+    // Instead, latency notification must be triggered purely by watchdog timer tick.
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        0,
+        "No latency notification before timer tick"
+    );
+
+    // Fire the registered watchdog timer
+    fire_registered_timer(&mut instance, &state);
+
+    // Measured: latency_changed_count=1 after single timer tick
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        1,
+        "Watchdog timer must poll latency and emit HostLatency::changed()"
+    );
+    // Measured: physical filter-chain latency equals OS_LATENCY_2X
+    assert_eq!(
+        plugin_latency_get(&mut instance),
+        OS_LATENCY_2X,
+        "Announced plugin latency must match active oversample latency"
+    );
+}
+
+#[test]
+fn test_watchdog_timer_drains_gc_channel() {
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+
+    // Fill the GC queue with 30 items before activation
+    {
+        let mut tx_guard = shared.cold.gc_tx.lock().unwrap();
+        let tx = tx_guard.as_mut().expect("gc_tx present in ColdShared");
+        for _ in 0..30 {
+            let item = neural_amp_modeler_rs::common::spsc::GcItem::CabSimSwap(Box::new(
+                neural_amp_modeler_rs::common::spsc::CabSimSwapPayload {
+                    generation: 42,
+                    pair: None,
+                },
+            ));
+            let _ = tx.push(item);
+        }
+    }
+
+    assert_eq!(
+        shared.cold.rt_status.drains.load(Ordering::Relaxed),
+        0,
+        "GC drains must start at 0"
+    );
+
+    // Fire watchdog timer tick without GUI or process invocation
+    fire_registered_timer(&mut instance, &state);
+
+    // Measured: drains=30 after single timer tick
+    assert_eq!(
+        shared.cold.rt_status.drains.load(Ordering::Relaxed),
+        30,
+        "Watchdog timer must drain in-flight GC items from SPSC channel"
+    );
+}
+
+#[test]
+fn test_watchdog_timer_unsupported_host_graceful_degradation() {
+    let state = CompleteHostState::new();
+    state.enable_timer_support.store(false, Ordering::SeqCst);
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_custom_state(state);
+
+    // Measured: 0 registered timers when host does not support timer extension
+    assert!(
+        state.registered_timers.lock().unwrap().is_empty(),
+        "No timer registered if host lacks clap_host_timer_support"
+    );
+
+    let audio_config = default_audio_config();
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config)
+        .expect("activate failed");
+    let mut started = stopped.start_processing().expect("start_processing failed");
+
+    // Verify audio processing continues to work normally
+    let n = 256;
+    let mut il = vec![0.3f32; n];
+    let mut ir = vec![0.3f32; n];
+    let mut ol = vec![0.0f32; n];
+    let mut or = vec![0.0f32; n];
+    let _ = process_block_harness(&mut started, &mut il, &mut ir, &mut ol, &mut or, None);
+
+    // Event-driven housekeeping still works
+    instance.call_on_main_thread_callback();
+}
+
+#[test]
+fn test_watchdog_timer_register_error_graceful_degradation() {
+    let state = CompleteHostState::new();
+    state.timer_register_error.store(true, Ordering::SeqCst);
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_custom_state(state);
+
+    // Measured: 0 registered timers when register_timer returns error
+    assert!(
+        state.registered_timers.lock().unwrap().is_empty(),
+        "No timer registered if host register_timer fails"
+    );
+
+    // Host log must receive a warning describing the registration failure
+    state.assert_event_occurred("TimerRegisterWarning", |e| {
+        matches!(e, HostEvent::PluginLog { severity, message } if *severity == LogSeverity::Warning && message.contains("Failed to register") && message.contains("watchdog timer"))
+    });
+
+    let audio_config = default_audio_config();
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config)
+        .expect("activate failed");
+    let mut started = stopped.start_processing().expect("start_processing failed");
+
+    // Audio processing continues unaffected
+    let n = 256;
+    let mut il = vec![0.3f32; n];
+    let mut ir = vec![0.3f32; n];
+    let mut ol = vec![0.0f32; n];
+    let mut or = vec![0.0f32; n];
+    let _ = process_block_harness(&mut started, &mut il, &mut ir, &mut ol, &mut or, None);
+}

@@ -207,6 +207,19 @@ TARGET_SPECS = [
         "max_tls": 0,
         "max_alloc": 0,
     },
+    {
+        "id": "process_dry_contained_block",
+        # Two-phase reset containment leg (S6-T1): the drained callback's
+        # bypass-leg dry passthrough + scheduled-event application, part of
+        # the audio callback path — same zero-alloc/TLS/div contract.
+        "pattern": r"^<nam_plug::clap::processor::state::NamClapProcessor>::process_dry_contained_block$",
+        "required": True,
+        "max_div": 2, # Same allowance as `process`: telemetry block budget
+                      # last_n_samples * 1e9 / sample_rate (64/32-bit pair),
+                      # inlined from `process_telemetry`.
+        "max_tls": 0,
+        "max_alloc": 0,
+    },
 ]
 
 resolved_targets = {}

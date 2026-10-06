@@ -20,6 +20,10 @@
 //!    (T-P0.2.4): real mono vs. stereo with L!=R content, bypass crossfade in flight,
 //!    gate-closed CabSim ring-out, and a 2-thread `process` alternation harness
 //!    (TLS/MXCSR re-priming cost — feeds T-P1.1.1).
+//! 5. `CLAP_Evidence/InferenceE2E`: e2e inference matrix model×block
+//!    (LSTM / WaveNet-A1 / WaveNet-A2 × 64/128/512 host samples), ns/sample via
+//!    `Throughput::Elements` — the block-size evidence anchor for regression
+//!    baselines.
 //!
 //! Only measures — no plugin semantics change. Deterministic fixtures (fixed seed,
 //! no wall-clock in the metric); heavy scenarios stay as normal Criterion benches
@@ -1476,7 +1480,105 @@ criterion_group! {
         bench_worstcase_small_blocks,
         bench_worstcase_dry_delay,
         bench_worstcase_event_flood,
-        bench_worstcase_remaining
+        bench_worstcase_remaining,
+        bench_evidence_inference_e2e_blocksize
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Evidence Matrix: End-to-End Inference per Model × Host Block Size
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Crosses the shipped neural models against the empty pipeline (no IR,
+/// oversample Off) over the host block sizes 64 / 128 / 512 samples, running
+/// the full `process()` round trip (event drain, routing, inference swallow
+/// and handling) per case.
+///
+// Measured: Criterion time per block ÷ `Throughput::Elements` = host block
+// size → ns/sample per (model, block size). Content is the deterministic
+// mono sine (L == R), 48 kHz, one fresh instance per case with a pre-warm
+// block outside the timer (shared `run_process_bench` runner); group config:
+// sample_size 30, noise_threshold 0.05. The plugin-side baseline registry
+// (engine-style `tests-performance-regression.sh` with
+// `.performance-baselines/`) does not exist yet for NAM-Plug: baseline
+// registration for this suite is deliberately left as a human-operator step;
+// until then this suite has no committed baseline to check against.
+fn bench_evidence_inference_e2e_blocksize(c: &mut Criterion) {
+    const BLOCK_SIZES: &[usize] = &[64, 128, 512];
+
+    let a1_path = common::model_path("wavenet_a1_standard.nam");
+    assert!(
+        a1_path.exists(),
+        "Mandatory fixture 'wavenet_a1_standard.nam' missing at {}",
+        a1_path.display()
+    );
+    let a2_path = common::model_path("a2_example.nam");
+    assert!(
+        a2_path.exists(),
+        "Mandatory fixture 'a2_example.nam' missing at {}",
+        a2_path.display()
+    );
+    let lstm_path = common::model_path("lstm.nam");
+    assert!(
+        lstm_path.exists(),
+        "Mandatory fixture 'lstm.nam' missing at {}",
+        lstm_path.display()
+    );
+
+    let mut group = c.benchmark_group("CLAP_Evidence/InferenceE2E");
+
+    for (model_name, model_file) in [
+        ("LSTM", &lstm_path),
+        ("WaveNet_A1_Standard", &a1_path),
+        ("WaveNet_A2_Slimmable", &a2_path),
+    ] {
+        for &block_size in BLOCK_SIZES {
+            let mut params = ProcessingParams::default();
+            params.model_path = Some(model_file.to_path_buf());
+            params.model_hash = asset_hash(model_file);
+
+            let (mut plugin_instance, stopped_processor) =
+                create_and_activate_bench_plugin(48000.0, block_size, &params, None);
+            let mut started_processor = stopped_processor
+                .start_processing()
+                .expect("Failed to start processing");
+
+            let sine = generate_sine_440hz(block_size);
+            let mut in_l = sine.clone();
+            let mut in_r = sine.clone();
+            let mut out_l = vec![0.0f32; block_size];
+            let mut out_r = vec![0.0f32; block_size];
+
+            let mut input_ports = AudioPorts::with_capacity(2, 1);
+            let mut output_ports = AudioPorts::with_capacity(2, 1);
+            let mut output_events_buffer = EventBuffer::with_capacity(10);
+            let empty_events = EventBuffer::new();
+
+            group.throughput(Throughput::Elements(block_size as u64));
+            group.bench_with_input(
+                BenchmarkId::new(model_name, format!("{block_size}_samp")),
+                &block_size,
+                |b, &bs| {
+                    run_process_bench(
+                        b,
+                        &mut started_processor,
+                        &mut in_l,
+                        &mut in_r,
+                        &mut out_l,
+                        &mut out_r,
+                        &mut input_ports,
+                        &mut output_ports,
+                        &mut output_events_buffer,
+                        &empty_events,
+                        bs,
+                    );
+                },
+            );
+
+            let stopped_processor = started_processor.stop_processing();
+            plugin_instance.deactivate(stopped_processor);
+        }
+    }
+    group.finish();
 }
 
 criterion_main!(clap_benches);

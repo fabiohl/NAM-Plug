@@ -27,6 +27,11 @@ use neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED;
 use std::sync::atomic::Ordering;
 
 const BLOCK: usize = 64;
+/// Serializes every panic-injection test in this binary. The injection latch
+/// is a one-shot global flag: two concurrent tests both arming it would let
+/// one callback consume the other's expectation. `pub(crate)` so sibling
+/// test modules that arm the same latch lock against this suite too.
+pub(crate) static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn audio_config() -> PluginAudioConfiguration {
     PluginAudioConfiguration {
@@ -69,7 +74,7 @@ fn process_block(
     )
 }
 
-fn ensure_isolated_crash_dir() {
+pub(crate) fn ensure_isolated_crash_dir() {
     if std::env::var_os("NAM_CRASH_DIR").is_none() {
         let temp_dir = std::env::temp_dir().join("nam_plug_test_crashes");
         let _ = std::fs::create_dir_all(&temp_dir);
@@ -107,6 +112,7 @@ fn test_crash_isolation_does_not_pollute_user_cache() {
 
 #[test]
 fn test_process_panic_poisons_processor_silences_audio_and_limits_panics() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     ensure_isolated_crash_dir();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let config = audio_config();
@@ -243,6 +249,7 @@ fn test_process_panic_poisons_processor_silences_audio_and_limits_panics() {
 
 #[test]
 fn test_reset_panic_poisons_processor_and_silences_subsequent_blocks() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     ensure_isolated_crash_dir();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let config = audio_config();
@@ -292,6 +299,7 @@ fn test_reset_panic_poisons_processor_and_silences_subsequent_blocks() {
 
 #[test]
 fn test_deactivate_discards_dsp_pipeline_when_poisoned() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     ensure_isolated_crash_dir();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let config = audio_config();
@@ -330,4 +338,73 @@ fn test_deactivate_discards_dsp_pipeline_when_poisoned() {
         saved_dsp.is_none(),
         "Deactivating a poisoned processor must discard the DSP pipeline (deactivated_dsp must be None)"
     );
+}
+
+#[test]
+fn test_f64_audio_ports_silenced_on_poisoning() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    ensure_isolated_crash_dir();
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let config = audio_config();
+    let state_ap = state.clone();
+
+    let stopped = instance
+        .activate(move |_, _| make_harness_audio_processor(&state_ap), config)
+        .expect("activate");
+    let mut started = stopped.start_processing().expect("start_processing");
+
+    // Poison processor via injected panic
+    super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+
+    let mut in_l = vec![0.0f32; BLOCK];
+    let mut in_r = vec![0.0f32; BLOCK];
+    let mut out_l = vec![0.0f32; BLOCK];
+    let mut out_r = vec![0.0f32; BLOCK];
+    let _ = process_block(&mut started, &mut in_l, &mut in_r, &mut out_l, &mut out_r);
+
+    // Setup an f64 output audio port filled with non-zero values (F-NP-R4 / S3-T3)
+    let mut out_l_f64 = vec![123.456f64; BLOCK];
+    let mut out_r_f64 = vec![789.012f64; BLOCK];
+
+    let mut input_ports = AudioPorts::with_capacity(2, 1);
+    let mut output_ports = AudioPorts::with_capacity(2, 1);
+    let mut in_ch = [&mut in_l[..], &mut in_r[..]];
+    let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+        latency: 0,
+        channels: AudioPortBufferType::f32_input_only(in_ch.iter_mut().map(InputChannel::constant)),
+    }]);
+    let mut out_ch = [&mut out_l_f64[..], &mut out_r_f64[..]];
+    let mut output_audio = output_ports.with_output_buffers([AudioPortBuffer {
+        latency: 0,
+        channels: AudioPortBufferType::f64_output_only(out_ch.iter_mut().map(|s| &mut **s)),
+    }]);
+    let mut output_events_buffer = EventBuffer::new();
+    let mut out_ev = OutputEvents::from_buffer(&mut output_events_buffer);
+
+    let res = started.process(
+        &input_audio,
+        &mut output_audio,
+        &InputEvents::empty(),
+        &mut out_ev,
+        None,
+        None,
+    );
+    assert!(
+        res.is_ok(),
+        "Process must succeed with Ok in poisoned state"
+    );
+
+    // S3-T3: verify f64 output buffers are completely silenced to 0.0f64
+    for (i, &s) in out_l_f64.iter().enumerate() {
+        assert_eq!(
+            s, 0.0f64,
+            "out_l_f64[{i}] must be silenced to 0.0f64 on poisoning"
+        );
+    }
+    for (i, &s) in out_r_f64.iter().enumerate() {
+        assert_eq!(
+            s, 0.0f64,
+            "out_r_f64[{i}] must be silenced to 0.0f64 on poisoning"
+        );
+    }
 }
