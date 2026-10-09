@@ -22,11 +22,18 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HAS_CLIPPED)
         {
-            let msg = CString::new("NAM-Plug: Output clipping detected!").unwrap_or_default();
+            let msg = CString::new(
+                "NAM-Plug: Output clipping detected! Consider reducing input/output gain, \
+                 or checking whether the model carries a large DC offset.",
+            )
+            .unwrap_or_default();
             if let Some(log) = log_ext {
                 log.log(&shared, LogSeverity::Warning, &msg);
             }
-            log::warn!("NAM-Plug: Output clipping detected!");
+            log::warn!(
+                "NAM-Plug: Output clipping detected! Consider reducing input/output gain, \
+                 or checking whether the model carries a large DC offset."
+            );
         }
 
         if self

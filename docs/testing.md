@@ -42,7 +42,7 @@ RT memory and machine code safety is enforced via a three-layer defense-in-depth
 
 - **Dynamic Interceptor ([`tests/common/alloc_audit.rs`](../tests/common/alloc_audit.rs)):** When compiled with `--features "testing heap-audit"`, `tests/clap.rs` registers `CountingAllocator` as the `#[global_allocator]`. The test harness captures allocation counters before and after calling `started_processor.process()`, enforcing **zero heap allocations** on the audio thread.
 - **Static AST-Light Scanner ([`utils/lib/verify_no_rt_alloc.sh`](../utils/lib/verify_no_rt_alloc.sh) / [`utils/lib/rt_alloc_scan.awk`](../utils/lib/rt_alloc_scan.awk)):** Runs during static analysis (`lints.sh`). Parses `src/clap/processor/` Rust sources, tracks brace depth while stripping comments and string literals, excludes whitelisted off-RT lifecycle hooks (`activate`, `deactivate`, panic handlers, test modules), and flags any illegal heap allocation or dynamic collection types (`Box::new`, `Vec::new`, `format!`, `Arc::new`, `HashMap`, etc.).
-- **Static Machine-Code Codegen Guard ([`utils/verify_rt_codegen.sh`](../utils/verify_rt_codegen.sh)):** Runs during static analysis (`lints.sh` Phase 9). Disassembles the compiled `.so` with `nm` and `objdump` to verify machine code invariants in hot-path DSP routines (`process`, `process_sub_block`, `process_sub_block_chunked`, `process_crossfade_sub_block`, `process_tail_drain`, `drain_tail_into`), enforcing zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls.
+- **Static Machine-Code Codegen Guard ([`utils/verify_rt_codegen.sh`](../utils/verify_rt_codegen.sh)):** Runs during release verification (`tests-quick.sh` Phase 2) and release packaging (`build-release.sh` Phase 4.5). Disassembles the compiled `.so` with `nm` and `objdump` to verify machine code invariants in hot-path DSP routines (`process`, `process_sub_block`, `process_sub_block_chunked`, `process_crossfade_sub_block`, `process_tail_drain`, `drain_tail_into`), enforcing zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls.
 
 ---
 
@@ -164,13 +164,21 @@ Top-level workflow entrypoints reside in `utils/`, while shared libraries and mo
 ./utils/tests-quick.sh
 ```
 
-`utils/lints.sh` executes a 9-phase static and quality audit matrix:
+`utils/lints.sh` executes an 8-phase static and quality audit matrix:
 
 - **Fmt & Matrix Compilation:** `cargo fmt`, multi-target `cargo check` and strict `cargo clippy -D warnings` across feature combinations (`--all-features`, `--no-default-features`).
 - **SPDX & Code Style Policies:** SPDX license header validation, anti-pattern checks, and documented `#[allow(clippy::)]` verification.
-- **Static RT Allocation Guard:** Invokes `utils/lib/verify_no_rt_alloc.sh` (backed by `utils/lib/rt_alloc_scan.awk`) to statically verify zero heap allocations in `src/clap/processor/`.
+- **Static RT Allocation Guard:** Invokes `utils/lib/verify_no_rt_alloc.sh` (backed by `utils/lib/rt_alloc_scan.awk`) to statically verify zero heap allocations in `src/clap/processor/` in ~0.2s without binary compilation.
 - **AppStream Metadata Sync:** Verifies the AppStream metainfo release version stays synchronized with `Cargo.toml`.
-- **Static RT Codegen Guard:** Invokes `utils/verify_rt_codegen.sh` to statically verify machine code invariants (zero heap calls, zero illegal divs, zero illegal TLS accesses) in compiled hot-path DSP routines.
+
+| Utility Script                                  | Scope & Operation                                                                 | Usage Context                                  |
+|:----------------------------------------------- |:--------------------------------------------------------------------------------- |:---------------------------------------------- |
+| **`utils/lints.sh`**                            | Static analysis (fmt, check, clippy, SPDX, static RT alloc, AppStream)            | Core continuous verification gate              |
+| **`utils/tests-quick.sh`**                      | 3-phase agile gate (debug structural, release parity + RT codegen, heap audit)    | First line of defense (local & pre-commit)     |
+| **`utils/tests-long.sh`**                       | 4-phase heavy stress suite (GC, teardown, RT priority/latency, Xvfb GUI)          | Nightly & release certification (operator)     |
+| **`utils/tests-gui.sh`**                        | Headless Xvfb lifecycle, XEmbed, clipboard testing                                | Invoked by Phase 4 of `tests-long.sh` / on demand|
+| **`utils/verify_rt_codegen.sh`**                | Disassembly inspection of `.so` (0 `malloc`, 0 `div`/`idiv`, bounded TLS)          | Integrated in `tests-quick.sh` & `build-release.sh` |
+| **`utils/build-release.sh`**                    | Multi-stage release builder with PGO, BOLT, RT codegen gate and packaging        | Official release pipeline                      |
 
 The x86-64-v3 (AVX2/FMA) engine baseline is contractual: `NAM-Plug` links against `NeuralAmpModeler-rs` without enabling opt-in EVEX features, so default and release builds contain no EVEX machine code by construction and the feature matrix above proves all configurations compile cleanly.
 
@@ -180,6 +188,7 @@ The x86-64-v3 (AVX2/FMA) engine baseline is contractual: `NAM-Plug` links agains
 2. **Release verification (release)** — the release-only surface: `ensure_clap_artifact release` builds the `.so` under release codegen, then:
    - **CLAP × NAMCore parity oracle** — `test_clap_parity_multi_rate` (ESR < 1e-8, SNR > 80 dB at 44.1 kHz, 48 kHz native, and 96 kHz) compares the release `.so` against the C++ render binary (`NAM_CORE_RENDER_BIN` or `build/namcore_render`) through the multi-rate resampling reference oracle (see §3.2.1), executing when the render binary, the release `.so` and the model fixture are all present. The Phase 1 targets are not re-run under `--release` — debug assertions ON already validate that logic, and release codegen of the `.so` is exactly what the oracle measures. Missing prerequisites are never masked — they are recorded as `GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")` and reported as a `WARN GAP`.
    - **CabSim IR artifact test** — `test_cabsim_ir_changes_audio_release_artifact` `dlopen`s the release `.so` to prove a loaded IR changes the audio output.
+   - **Static RT Codegen Guard** — invokes `utils/verify_rt_codegen.sh` on the newly verified release `.so` to verify machine-code invariants (0 `malloc`/`free`, 0 inner-loop divisions, bounded TLS) with zero additional compilation overhead.
 3. **RT-Safety heap-audit (debug)** — zero-allocation `process()` gate via `--features testing,heap-audit` (`processor_heap_audit_test`).
 
 The run closes with `OVERALL: PASSED` or `OVERALL: PASSED_WITH_GAPS` (with `NAM_QUICK_STRICT=1`, any GAP turns the run into a failure, and stale `.so` artifacts are rejected rather than rebuilt).

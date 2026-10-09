@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 [package]
 name = "nam-plug"
-version = "0.8.1"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.99.0"
 license = "GPL-3.0-or-later"
@@ -14,7 +14,7 @@ keywords = ["audio", "dsp", "nam", "neural-amp-modeler", "clap", "plugin"]
 categories = ["multimedia::audio", "multimedia"]
 
 [dependencies]
-NeuralAmpModeler-rs = { version = "0.8.1", default-features = false, features = [
+NeuralAmpModeler-rs = { version = "1.0.0", default-features = false, features = [
     "dual-mono",
 ] }
 clack-common = "0.2"
@@ -71,7 +71,7 @@ clap-sys = "0.5"
 slint-build = "1.18"
 
 [dev-dependencies]
-NeuralAmpModeler-rs = { version = "0.8.1", features = ["testing"] }
+NeuralAmpModeler-rs = { version = "1.0.0", features = ["testing"] }
 nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.2", features = ["clack-plugin"] }
 clap-sys = "0.5"

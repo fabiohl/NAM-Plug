@@ -12,10 +12,8 @@
 #
 # Phases:
 #   1. Structural (debug)   — unit + integration tests with debug assertions ON.
-#   2. Release verification — CLAP .so artifact build + CLAP × NAMCore float
-#      parity oracle (release-only scope) when the
-#      C++ render binary, release .so and model fixture exist; otherwise
-#      reported as an explicit GAP (or FAIL in NAM_QUICK_STRICT=1).
+#   2. Release verification — CLAP .so artifact build + static RT codegen guard (0 alloc,
+#      0 illegal divs, 0 illegal TLS) + CLAP × NAMCore float parity oracle (release-only scope).
 #   3. RT-Safety heap-audit — zero-alloc process() gate (--features heap-audit).
 #
 # Each phase persists its output to target/logs/quick-phaseN.log (phase 3:
@@ -378,6 +376,14 @@ else
     warn "Actionable: build the release artifact ('cargo build --release') to enable the cab-sim IR artifact test."
     emit "PHASE2: GAP reason=missing_release_artifact"
 fi
+
+if [ -f "$release_artifact" ] && [ -x "$SCRIPT_DIR/verify_rt_codegen.sh" ]; then
+    echo -e "  ${BLUE}→ Verifying real-time codegen invariants (static assembly scan)...${NC}"
+    "$SCRIPT_DIR/verify_rt_codegen.sh" "$release_artifact" 2>&1 | tee -a target/logs/quick-phase2.log
+    emit "RT_CODEGEN: PASS"
+    ok "RT codegen verification: PASS"
+fi
+
 P2_DUR_MS=$(( ($(date +%s%N) - P2_START) / 1000000 ))
 P2_DUR_STR=$(format_duration_ms "$P2_DUR_MS")
 ok "Phase 2 passed (${P2_DUR_STR})"

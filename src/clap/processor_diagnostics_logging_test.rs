@@ -65,7 +65,10 @@ fn test_emit_pending_logs_messages_reach_log_buffer() {
         .cold
         .rt_status
         .check_and_clear_flag(RT_STATUS_HAS_CLIPPED);
-    log::warn!("NAM-Plug: Output clipping detected!");
+    log::warn!(
+        "NAM-Plug: Output clipping detected! Consider reducing input/output gain, \
+         or checking whether the model carries a large DC offset."
+    );
 
     shared
         .cold
@@ -86,6 +89,7 @@ fn test_emit_pending_logs_messages_reach_log_buffer() {
     );
 
     test_util::assert_log_buffer_contains("Output clipping detected");
+    test_util::assert_log_buffer_contains("DC offset");
     test_util::assert_log_buffer_contains("GC channel overflow");
     test_util::assert_log_buffer_contains("Critical failure! No active model for processing");
 

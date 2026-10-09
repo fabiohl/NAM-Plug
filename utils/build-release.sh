@@ -824,6 +824,17 @@ PYEOF
     else
         echo -e "  ${YELLOW}Warning: Assembly disassembly failed or produced empty output.${NC}"
     fi
+
+    if [ -x "$SCRIPT_DIR/verify_rt_codegen.sh" ]; then
+        echo -e "  ${BLUE}→ Enforcing real-time codegen static invariants on $(basename "$ASM_BIN")...${NC}"
+        if ! "$SCRIPT_DIR/verify_rt_codegen.sh" "$ASM_BIN"; then
+            if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+                die "RT codegen static gate failed on release artifact ($ASM_BIN)!"
+            else
+                warn "RT codegen static gate reported violations (non-strict mode)."
+            fi
+        fi
+    fi
 else
     echo -e "  ${YELLOW}Warning: No optimized binary found for disassembly.${NC}"
 fi
