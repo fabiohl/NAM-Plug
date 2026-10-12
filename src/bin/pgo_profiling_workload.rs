@@ -103,7 +103,7 @@ fn main() {
     log::info!("  Processor capabilities verified. Mode: x86-64-v3 baseline.");
 
     // Setup SPSC channels to profile lock-free queue primitives
-    let _channels = spsc::setup_spsc(spsc::SPSC_CAPACITY);
+    let _channels = spsc::setup_spsc(spsc::SPSC_CAPACITY).expect("SPSC channels setup failed");
 
     // 3. Mandatory fixture discovery & verification (Fail-Closed)
     let fixture_map = match resolve_and_verify_fixtures() {

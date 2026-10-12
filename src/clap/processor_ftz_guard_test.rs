@@ -162,6 +162,9 @@ mod tests {
     fn test_process_preserves_host_mxcsr_every_block() {
         use std::sync::atomic::Ordering;
 
+        let _test_guard = crate::clap::processor::processor_poisoning_test::TEST_MUTEX
+            .lock()
+            .unwrap();
         let _ = Ordering::Relaxed;
         let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
         let stopped = instance
@@ -212,6 +215,9 @@ mod tests {
     fn test_process_restores_host_mxcsr_on_panic_path() {
         use std::sync::atomic::Ordering;
 
+        let _test_guard = crate::clap::processor::processor_poisoning_test::TEST_MUTEX
+            .lock()
+            .unwrap();
         ensure_isolated_crash_dir();
         let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
         let stopped = instance

@@ -168,7 +168,7 @@ ensure_clap_artifact() {
     if [ ! -f "$artifact_path" ]; then
         warn "CLAP plugin ($profile) artifact not found. Pre-building..."
         # shellcheck disable=SC2086
-        cargo build --locked $flag
+        CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-false}" cargo build --locked $flag
     elif [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
         verify_artifact_fresh "$artifact_path" "$profile" "$flag"
         return 0
@@ -180,7 +180,7 @@ ensure_clap_artifact() {
         if [ -n "$stale_input" ]; then
             warn "CLAP plugin ($profile) artifact is STALE ('$stale_input' newer). Rebuilding with --locked..."
             # shellcheck disable=SC2086
-            cargo build --locked $flag
+            CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-false}" cargo build --locked $flag
         fi
     fi
 

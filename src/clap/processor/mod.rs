@@ -22,10 +22,12 @@ mod gc;
 #[cfg(feature = "heap-audit")]
 mod heap_audit;
 mod params;
+pub(crate) mod prewarm_policy;
 mod rollback;
 mod state;
 
 pub(crate) use deactivated::DeactivatedDspState;
+pub(crate) use prewarm_policy::{ModelFamily, compute_prewarm_step};
 pub use state::BYPASS_XFADE_SAMPLES;
 pub use state::BypassCrossfader;
 pub(crate) use state::NamClapProcessor;
@@ -107,7 +109,8 @@ use std::sync::atomic::Ordering;
 ///
 /// Multiple of 64 by contract (matches the engine's `WAVENET_MAX_NUM_FRAMES`
 /// and LSTM 512-sample chunking with no straggler partial chunks).
-pub(crate) const PREWARM_STEP_SAMPLES_PER_CALLBACK: usize = 1024;
+#[cfg(test)]
+pub(crate) const PREWARM_STEP_SAMPLES_PER_CALLBACK: usize = prewarm_policy::PREWARM_STEP_MAX;
 
 /// Converts a panic payload into `PluginError` for `catch_unwind` guards.
 ///
@@ -1101,6 +1104,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 prewarm_pending: false,
                 last_seen_generation: 0,
                 max_frames_count: audio_config.max_frames_count as usize,
+                min_frames_count: audio_config.min_frames_count as usize,
+                sample_rate: audio_config.sample_rate,
                 last_render_mode: 0,
                 realtime_activation:
                     neural_amp_modeler_rs::common::params::ActivationPrecision::Standard,
@@ -1344,7 +1349,17 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // clears and takes the normal path.
             if self.prewarm_pending {
                 if let Some(model) = self.model_l.as_mut() {
-                    let _pending_after = model.prewarm_step(PREWARM_STEP_SAMPLES_PER_CALLBACK);
+                    let frames_count = audio.frames_count() as usize;
+                    let family = ModelFamily::from_model(model);
+                    let step = compute_prewarm_step(
+                        frames_count,
+                        self.min_frames_count,
+                        self.sample_rate,
+                        family,
+                    );
+                    if step > 0 {
+                        let _pending_after = model.prewarm_step(step);
+                    }
                     if !model.prewarm_complete() {
                         return self.process_dry_contained_block(
                             &mut audio,

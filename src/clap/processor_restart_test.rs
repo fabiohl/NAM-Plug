@@ -15,10 +15,10 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     /// Oversample engine group delay contribution, host-rate samples:
-    /// `OversampleEngine::latency_samples()` = HB_DELAY (12) per 2× half-band
-    /// stage. Off = 0, X2 = 12, X4 = 24.
+    /// `OversampleEngine::latency_samples()` = HB_DELAY (12) for 2×,
+    /// HB_DELAY + HB_DELAY / 2 (18) for 4×. Off = 0, X2 = 12, X4 = 18.
     const OS_LATENCY_2X: u32 = 12;
-    const OS_LATENCY_4X: u32 = 24;
+    const OS_LATENCY_4X: u32 = 18;
 
     fn oversample_event(value: f32) -> ParamValueEvent {
         ParamValueEvent::new(

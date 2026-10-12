@@ -331,6 +331,10 @@ pub struct NamClapProcessor<'a> {
     pub(crate) last_seen_generation: u32,
     /// Host audio buffer size, used for RT-safety contract validation.
     pub(crate) max_frames_count: usize,
+    /// Minimum frames count from host audio config, captured in activate().
+    pub(crate) min_frames_count: usize,
+    /// Host audio sample rate, captured in activate() for RT-budget scaling.
+    pub(crate) sample_rate: f64,
     /// Last seen render mode for transition detection (0 = Realtime, 1 = Offline).
     pub(crate) last_render_mode: u32,
     /// Immutable snapshot of activation precision captured when entering

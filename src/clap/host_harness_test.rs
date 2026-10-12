@@ -124,9 +124,9 @@ fn test_restart_cycle_clean() {
 }
 
 /// Oversample engine group-delay contribution (host-rate samples): Off = 0,
-/// X2 = 12 (one half-band stage), X4 = 24 (two cascaded stages).
+/// X2 = 12 (one half-band stage), X4 = 18 (two cascaded stages: 12 + 6 at host rate).
 const OS_LATENCY_2X: u32 = 12;
-const OS_LATENCY_4X: u32 = 24;
+const OS_LATENCY_4X: u32 = 18;
 
 /// Reads the latency the host would receive via `PluginLatency::get()`.
 fn plugin_latency_get(instance: &mut PluginInstance<CompleteHost>) -> u32 {

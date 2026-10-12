@@ -921,7 +921,7 @@ mod tests {
             // top). Both costs are engine-side (D6: no engine changes in
             // S6), so the 1.33 ms universal budget is enforced for the
             // LSTM/A1 families; the A2 family is gated by this test against
-            // its own measured envelope (RT_BUDGET_A2_NS).</think><tool_call>edit<arg_key>filePath</arg_key><arg_value>/home/fabio/NAM/NAM-Plug/src/clap/processor_reset_test.rs
+            // its own measured envelope (RT_BUDGET_A2_NS).
             let p50_total = p50(&total_times);
             let p99_total = p99(&total_times);
             let max_total = max_val(&total_times);

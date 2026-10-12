@@ -183,9 +183,10 @@ impl<'a> NamClapProcessor<'a> {
     /// the main thread tags the rebuilt delivery with the exact generation the
     /// audio thread was running when it asked for the rebuild.
     fn signal_slimmable_rebuild(&mut self) {
-        let Some(target_ch) = self.adaptive_compute.take_slimmable_rebuild() else {
+        let Some(targets) = self.adaptive_compute.take_slimmable_rebuild() else {
             return;
         };
+        let target_ch = targets.first().copied().unwrap_or(0);
         self.rt_status
             .requested_slimmable_ch
             .store(target_ch as u32, Ordering::Relaxed);
