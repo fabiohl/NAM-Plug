@@ -243,6 +243,20 @@ impl<'a> NamClapMainThread<'a> {
             ));
         }
 
+        // Off-RT cost calibration (U-02 / F-PR-10), mirroring the direct load
+        // path: size the first prewarm window from the real model cost.
+        let prewarm_cost_ns = if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
+            // Cap at the negotiated quantum so the calibration block never
+            // exceeds the model's `max_buffer_size` (composed models truncate).
+            let measure_frames = crate::clap::processor::prewarm_policy::PREWARM_MEASURE_FRAMES
+                .min(buffer_size.max(1));
+            model_l
+                .as_mut()
+                .map(|model| model.measure_cost_ns_per_sample(measure_frames))
+        } else {
+            None
+        };
+
         let push_result =
             self.cmd_producer
                 .borrow_mut()
@@ -253,6 +267,7 @@ impl<'a> NamClapMainThread<'a> {
                     new_stream,
                     input_mult_adj,
                     output_mult_adj,
+                    prewarm_cost_ns,
                 });
         match push_result {
             Ok(seq) => {
@@ -269,6 +284,7 @@ impl<'a> NamClapMainThread<'a> {
                     new_stream,
                     input_mult_adj,
                     output_mult_adj,
+                    prewarm_cost_ns: _,
                 } = payload
                 {
                     drop(new_resampler);

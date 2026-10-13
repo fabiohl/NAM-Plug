@@ -641,6 +641,7 @@ mod tests {
                             new_stream,
                             input_mult_adj,
                             output_mult_adj,
+                            prewarm_cost_ns: None,
                         })
                         .expect("model burst push must succeed");
                 }
@@ -689,6 +690,7 @@ mod tests {
                             new_stream,
                             input_mult_adj,
                             output_mult_adj,
+                            prewarm_cost_ns: None,
                         }),
                         ir: Some(Some(build_ir(4096))),
                         params: RtProcessingParams::default().with_oversample(OversampleFactor::X2),

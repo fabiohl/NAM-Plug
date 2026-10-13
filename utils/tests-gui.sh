@@ -15,6 +15,7 @@
 #   - gui_lifecycle_hide_after_show_with_real_window  (F1 defect regression)
 #   - test_headless_clipboard_works  (arboard X11 round-trip)
 #   - test_headless_gui_floating_window_lifecycle  (create → transient → destroy)
+#   - gui_lifecycle_x11_embedded_set_parent_honest  (X11 embedded set_parent cycle)
 #
 # Usage:
 #   ./utils/tests-gui.sh [--nocapture] [--dry-run] [--strict]
@@ -193,6 +194,7 @@ run_gui_test() {
     # xvfb-run -a: allocates the first free display port automatically.
     # --server-args: 24-bit colour depth matches Slint/Mesa expectations.
     LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
+    NAM_GUI_DEDICATED_X11=1 NAM_GUI_TIMEOUT_MS="${NAM_GUI_TIMEOUT_MS:-15000}" \
         xvfb-run -a --server-args="-screen 0 1280x800x24" \
         cargo test --features testing --release $cargo_target_flag "$filter" \
             -- --ignored --test-threads=1 $NOCAPTURE_FLAG \
@@ -228,6 +230,11 @@ run_gui_test \
     "test_headless_gui_floating_window_lifecycle" \
     ""
 
+run_gui_test \
+    "gui_lifecycle_x11_embedded_set_parent_honest" \
+    "gui_lifecycle_x11_embedded_set_parent_honest" \
+    ""
+
 # ── Receipt ─────────────────────────────────────────────────────────────────
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 GUI_STATUS="PASSED"
@@ -237,7 +244,7 @@ GUI_STATUS="PASSED"
 {
     echo "gui_test_suite status=$GUI_STATUS timestamp=$TIMESTAMP"
     echo "  log=$GUI_LOG"
-    echo "  tests=gui_embedded_x11_open_close_cycles_no_leak,gui_lifecycle_hide_after_show_with_real_window,test_headless_clipboard_works,test_headless_gui_floating_window_lifecycle"
+    echo "  tests=gui_embedded_x11_open_close_cycles_no_leak,gui_lifecycle_hide_after_show_with_real_window,test_headless_clipboard_works,test_headless_gui_floating_window_lifecycle,gui_lifecycle_x11_embedded_set_parent_honest"
 } | tee "$GUI_RECEIPT"
 
 echo -e "\n${BLUE}${BOLD}================== GUI TEST SUMMARY ==================${NC}"

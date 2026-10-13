@@ -16,6 +16,7 @@ use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::params::{ProcessingParams, RtProcessingParams};
 use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
+use neural_amp_modeler_rs::models::NamModel;
 use neural_amp_modeler_rs::models::StaticModel;
 use neural_amp_modeler_rs::models::slimmable::clone_wavenet_for_slimmable_storage;
 use std::path::{Path, PathBuf};
@@ -211,16 +212,29 @@ pub(crate) fn build_restore_package(
     let model_component = match model {
         Some(resources) => {
             let ModelResources {
-                model_l,
+                mut model_l,
                 new_resampler,
                 new_stream,
                 input_mult_adj,
                 output_mult_adj,
+                buffer_size,
                 model_rate: _,
                 model_metadata: _,
                 model_info: _,
                 model_hash: _,
             } = resources;
+            // Off-RT cost calibration for the restored model (U-02 / F-PR-10).
+            // Cap the block at the negotiated quantum so it never exceeds the
+            // model's `max_buffer_size` (composed models truncate the block).
+            let prewarm_cost_ns = if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
+                let measure_frames = crate::clap::processor::prewarm_policy::PREWARM_MEASURE_FRAMES
+                    .min((buffer_size as usize).max(1));
+                model_l
+                    .as_mut()
+                    .map(|model| model.measure_cost_ns_per_sample(measure_frames))
+            } else {
+                None
+            };
             Some(LoadModelPayload {
                 generation: cold.allocate_model_generation(),
                 model_l,
@@ -228,6 +242,7 @@ pub(crate) fn build_restore_package(
                 new_stream,
                 input_mult_adj,
                 output_mult_adj,
+                prewarm_cost_ns,
             })
         }
         None => match mode {
@@ -259,6 +274,7 @@ pub(crate) fn build_restore_package(
                     new_stream,
                     input_mult_adj: 1.0,
                     output_mult_adj: 1.0,
+                    prewarm_cost_ns: None,
                 })
             }
             RestoreMode::ForPreset => None,
@@ -600,6 +616,7 @@ fn local_commit(
             new_stream: _,
             input_mult_adj,
             output_mult_adj,
+            buffer_size: _,
             model_rate,
             model_metadata,
             model_info,

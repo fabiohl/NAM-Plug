@@ -22,11 +22,8 @@ fn test_integration_16_instances_log_and_diagnostic_isolation() {
     const CONCURRENT_INSTANCES: usize = 16;
     const LOGS_PER_THREAD: usize = 8;
 
-    let logger = NamLogger::init(LoggerConfig {
-        level_filter: log::LevelFilter::Debug,
-        emit_stderr: false,
-    })
-    .unwrap_or_else(|_| NamLogger::global().expect("NamLogger must be initialized"));
+    let logger = NamLogger::init(LoggerConfig::new(log::LevelFilter::Debug))
+        .unwrap_or_else(|_| NamLogger::global().expect("NamLogger must be initialized"));
 
     let mut instances = Vec::with_capacity(CONCURRENT_INSTANCES);
     let mut sink_logs: Vec<Arc<Mutex<Vec<String>>>> = Vec::with_capacity(CONCURRENT_INSTANCES);

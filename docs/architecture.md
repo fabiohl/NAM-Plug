@@ -708,7 +708,7 @@ Enforces zero heap allocation on the audio thread:
 
 - Global memory interceptor (`CountingAllocator`) active under `--features "testing,heap-audit"`.
 - Static AST-light scanner (`utils/lib/verify_no_rt_alloc.sh`) parsing `src/clap/processor/` to verify zero `Box`, `Vec`, or `format!` invocations on the audio thread.
-- Static machine-code codegen guard (`utils/verify_rt_codegen.sh`) disassembling the compiled `.so` with `nm` and `objdump` to verify zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls.
+- Static machine-code codegen guard (`utils/verify_rt_codegen.sh`) disassembling the compiled `.so` with `objdump` and running the unified NAM codegen filter (`utils/lib/dsp-hotpath-filter.py`) with the per-repo profile (`utils/codegen-profile.json`) to verify zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls.
 
 ### 9.5 Headless GUI Testing (Xvfb)
 

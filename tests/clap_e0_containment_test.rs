@@ -15,6 +15,7 @@ use clack_extensions::render::{PluginRender, RenderMode};
 use clack_host::prelude::*;
 use nam_plug::clap::test_util;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
+use neural_amp_modeler_rs::testing::metrics::max_abs_diff;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
@@ -31,13 +32,6 @@ fn make_synthetic_ir(len: usize) -> Vec<f32> {
     ir[2] = 0.3;
     ir[3] = 0.1;
     ir
-}
-
-fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0f32, f32::max)
 }
 
 fn process_block(

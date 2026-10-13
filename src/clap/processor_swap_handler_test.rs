@@ -151,6 +151,7 @@ mod tests {
             ),
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            prewarm_cost_ns: None,
         }
     }
 

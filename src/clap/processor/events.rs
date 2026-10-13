@@ -237,6 +237,7 @@ macro_rules! command_swap_parts {
                 mod_output_gain: &mut $s.mod_output_gain,
                 gate_dirty: &mut $s.gate_dirty,
                 prewarm_pending: &mut $s.prewarm_pending,
+                prewarm_cost_ns_per_sample: &mut $s.prewarm_cost_ns_per_sample,
                 shared: $s.shared,
                 rt_status: &$s.rt_status,
                 gain_lut: $s.gain_lut,
@@ -446,6 +447,9 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     /// loader, so a model swapped in mid-window restarts converged (never
     /// half-drained) and the next callback runs the normal wet path.
     pub(super) prewarm_pending: &'p mut bool,
+    /// Installed-model measured per-sample cost (ns) for the adaptive prewarm
+    /// budget; `None` = per-family table (F-PR-10 / U-02).
+    pub(super) prewarm_cost_ns_per_sample: &'p mut Option<f32>,
 
     // ── Ambient references (not owned by the swap domain) ──
     /// Shared main↔RT state (latency publications, ack atomic, restart state).
@@ -536,6 +540,7 @@ impl ClapCommandSwapHandler<'_, '_> {
                 new_stream,
                 input_mult_adj,
                 output_mult_adj,
+                prewarm_cost_ns,
             } => self.cold_load_model(
                 crate::clap::plugin::shared::LoadModelPayload {
                     generation,
@@ -544,6 +549,7 @@ impl ClapCommandSwapHandler<'_, '_> {
                     new_stream,
                     input_mult_adj,
                     output_mult_adj,
+                    prewarm_cost_ns,
                 },
                 gc,
             ),
@@ -622,6 +628,7 @@ impl ClapCommandSwapHandler<'_, '_> {
             new_stream,
             input_mult_adj,
             output_mult_adj,
+            prewarm_cost_ns,
         } = payload;
         // Bind the processor's active model generation to the generation
         // carried by the install payload. This is what the slimmable staleness
@@ -637,6 +644,10 @@ impl ClapCommandSwapHandler<'_, '_> {
         // mid-drain restarts converged (never half-drained) and the next
         // callback runs the normal wet path.
         *self.prewarm_pending = false;
+        // Adopt the measured per-sample cost carried with this model (U-02 /
+        // F-PR-10); `None` for a cleared model or a missing calibration, which
+        // falls back to the per-family table in the prewarm policy.
+        *self.prewarm_cost_ns_per_sample = prewarm_cost_ns;
         if let Some(model) = self.model_l.as_mut() {
             model.inject_rt_status(std::sync::Arc::clone(&self.shared.cold.rt_status));
             // Buffer sizing is guaranteed on the main thread before SPSC delivery

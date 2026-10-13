@@ -76,7 +76,7 @@ nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.2", features = ["clack-plugin"] }
 clap-sys = "0.5"
 criterion = { version = "0.8", default-features = false }
-proptest = "1.11"
+proptest = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 x11rb = "0.14"
@@ -97,6 +97,21 @@ required-features = ["testing"]
 [[bin]]
 name = "nam_perf_guard"
 path = "src/bin/nam_perf_guard.rs"
+required-features = ["testing"]
+
+# Fail-closed semantic verifier for the quick-suite receipt
+# (target/logs/quick-receipt.txt). Invoked by utils/build-release.sh instead of
+# a substring search. No `testing` feature required: it is pure receipt parsing.
+[[bin]]
+name = "quick_receipt_check"
+path = "src/bin/quick_receipt_check.rs"
+
+# Unified-schema (engine `testing::receipt`) emitter/verifier for the long-suite
+# receipt (target/logs/long-audit-receipt.jsonl). Testing-only because it reuses
+# the engine receipt schema, which lives behind the engine `testing` feature.
+[[bin]]
+name = "plug_long_receipt"
+path = "src/bin/plug_long_receipt.rs"
 required-features = ["testing"]
 
 [features]

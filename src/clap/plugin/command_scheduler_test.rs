@@ -34,6 +34,7 @@ fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
             new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
             input_mult_adj: mult_adj,
             output_mult_adj: mult_adj,
+            prewarm_cost_ns: None,
         }),
         ir: Some(None),
         params: rt_gain(gain),
@@ -635,6 +636,7 @@ fn structural_classification_light_vs_heavy() {
             new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            prewarm_cost_ns: None,
         },
         ClapParamPayload::LoadCabIr { adapter: None },
         ClapParamPayload::SetOversample {

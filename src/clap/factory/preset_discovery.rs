@@ -4,12 +4,14 @@
 //! Preset Discovery Factory: exposes `.nam`/`.namb` model files as CLAP presets.
 //!
 //! The host's preset browser can index model directories and show metadata
-//! extracted from the model files (name, author, gear).
+//! extracted from the model files (name, author, gear). Extraction itself is
+//! delegated to the engine's host-neutral `loader::peek_metadata`, which streams
+//! past the weight tensors without materializing them.
 
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::prelude::PluginError;
 use neural_amp_modeler_rs::loader::nam_json::NamMetadata;
-use neural_amp_modeler_rs::loader::namb::NambHeader;
+use neural_amp_modeler_rs::loader::{DEFAULT_METADATA_PEEK_BYTES, peek_metadata};
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -169,151 +171,23 @@ impl ProviderImpl<'_> for NamPresetProvider {
     }
 }
 
-/// Maximum bytes read from any model file for metadata-only extraction.
-const MAX_METADATA_BYTES: u64 = 1_048_576; // 1 MiB
-
-/// NAMB header size in bytes.
-const NAMB_HEADER_SIZE: usize = 80;
-
-/// Lightweight metadata extraction from `.nam` (JSON) and `.namb` (binary) files.
+/// Reads the metadata of a `.nam`/`.namb` model file, if it carries any useful
+/// field.
 ///
-/// For `.nam`: reads up to `MAX_METADATA_BYTES` to find and parse the `metadata` key.
-/// For `.namb`: reads the 80-byte header, extracts the JSON metadata section between
-/// the header and `weights_offset`, bounded by `MAX_METADATA_BYTES`.
+/// Thin wrapper over the engine's [`peek_metadata`]: the format dispatch, the
+/// streaming parse over the weight tensors and the `.namb` header handling all
+/// live in the engine. Any error (unsupported extension, missing file, malformed
+/// input, absent metadata) is surfaced as `None`, matching the preset browser's
+/// best-effort behavior.
 fn extract_model_metadata(path: &Path) -> Option<NamMetadata> {
-    let ext = path.extension()?.to_str()?;
-    match ext.to_lowercase().as_str() {
-        "nam" => extract_nam_json_metadata(path),
-        "namb" => extract_namb_metadata(path),
-        _ => None,
-    }
-}
-
-/// Reads up to `max_bytes` from a file. Returns empty vec if the file cannot be opened.
-fn read_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-    let file = std::fs::File::open(path)?;
-    let file_len = file.metadata()?.len();
-    let read_len = file_len.min(max_bytes) as usize;
-    let mut buf = Vec::with_capacity(read_len);
-    file.take(max_bytes).read_to_end(&mut buf)?;
-    Ok(buf)
-}
-
-/// Parses just the `metadata` field from a `.nam` JSON file.
-/// Only reads the first `MAX_METADATA_BYTES` to avoid loading weight tensors.
-fn extract_nam_json_metadata(path: &Path) -> Option<NamMetadata> {
-    let bytes = read_file_bounded(path, MAX_METADATA_BYTES).ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
-    let text = std::str::from_utf8(&bytes).ok()?;
-
-    // Locate the "metadata" key in the JSON.
-    let marker = "\"metadata\"";
-    let pos = text.find(marker)?;
-
-    // Find the opening brace after the marker.
-    let after_key = &text[pos + marker.len()..];
-    let brace_start = after_key.find('{')?;
-    let metadata_slice = &after_key[brace_start..];
-
-    // Extract the matching JSON object by counting braces.
-    let json_str = extract_balanced_json(metadata_slice)?;
-
-    // Parse just the metadata object.
-    parse_metadata(json_str)
-}
-
-/// Extracts metadata from a `.namb` binary container.
-///
-/// Reads the 80-byte NAMB header, determines `weights_offset`, then parses the
-/// JSON metadata section between the header and the weights block.  All I/O is
-/// bounded by `MAX_METADATA_BYTES`.
-fn extract_namb_metadata(path: &Path) -> Option<NamMetadata> {
-    let bytes = read_file_bounded(path, MAX_METADATA_BYTES).ok()?;
-    if bytes.len() < NAMB_HEADER_SIZE {
-        return None;
-    }
-
-    let header = NambHeader::from_slice(&bytes).ok()?;
-
-    let weights_offset = header.weights_offset as usize;
-    // The JSON metadata section is between the header and the weights block
-    if weights_offset <= NAMB_HEADER_SIZE || weights_offset > bytes.len() {
-        return None;
-    }
-
-    let json_bytes = &bytes[NAMB_HEADER_SIZE..weights_offset];
-    let text = std::str::from_utf8(json_bytes).ok()?;
-    let text = text.trim_end_matches('\0');
-
-    // The NAMB JSON section contains a full NamModelData serialization.
-    // Extract just the metadata sub-object.
-    let marker = "\"metadata\"";
-    let pos = text.find(marker)?;
-
-    let after_key = &text[pos + marker.len()..];
-    let brace_start = after_key.find('{')?;
-    let metadata_slice = &after_key[brace_start..];
-    let json_str = extract_balanced_json(metadata_slice)?;
-    parse_metadata(json_str)
-}
-
-/// Parses a JSON metadata object string into `NamMetadata`.
-/// Returns `None` if parsing fails or the metadata has no useful fields.
-fn parse_metadata(json_str: &str) -> Option<NamMetadata> {
-    let meta: NamMetadata = serde_json::from_str(json_str).ok()?;
-    let has_content = meta.name.is_some()
-        || meta.modeled_by.is_some()
-        || meta.gear_make.is_some()
-        || meta.gear_model.is_some();
-    has_content.then_some(meta)
-}
-
-/// Extracts a balanced JSON object/array from the start of the string.
-///
-/// Uses `char_indices()` to correctly track byte positions in the presence of
-/// multibyte UTF-8 characters.
-fn extract_balanced_json(s: &str) -> Option<&str> {
-    let mut iter = s.char_indices();
-    let (_, first) = iter.next()?;
-    let (open, close) = match first {
-        '{' => ('{', '}'),
-        '[' => ('[', ']'),
-        _ => return None,
-    };
-
-    let mut depth = 1u32;
-    let mut in_string = false;
-    let mut prev_was_backslash = false;
-
-    for (end_idx, ch) in iter {
-        let end_idx = end_idx + ch.len_utf8();
-        if in_string {
-            if prev_was_backslash {
-                prev_was_backslash = false;
-            } else if ch == '\\' {
-                prev_was_backslash = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-        } else {
-            match ch {
-                '"' => in_string = true,
-                c if c == open => depth += 1,
-                c if c == close => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(&s[..end_idx]);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    None
+    peek_metadata(path, DEFAULT_METADATA_PEEK_BYTES)
+        .ok()
+        .filter(|meta| {
+            meta.name.is_some()
+                || meta.modeled_by.is_some()
+                || meta.gear_make.is_some()
+                || meta.gear_model.is_some()
+        })
 }
 
 #[cfg(test)]

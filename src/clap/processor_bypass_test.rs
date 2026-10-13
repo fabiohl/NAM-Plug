@@ -9,6 +9,7 @@ mod tests {
     use clack_common::events::event_types::ParamValueEvent;
     use clack_common::utils::ClapId;
     use clack_host::prelude::*;
+    use neural_amp_modeler_rs::testing::metrics::max_abs_diff;
 
     struct ProcessedStereo {
         out_l: Vec<f32>,
@@ -69,13 +70,6 @@ mod tests {
             out_l: bufs.out_l.clone(),
             out_r: bufs.out_r.clone(),
         }
-    }
-
-    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0f32, f32::max)
     }
 
     #[test]

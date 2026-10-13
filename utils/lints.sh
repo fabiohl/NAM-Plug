@@ -68,23 +68,43 @@ phase "Validating SPDX license headers..."
 rs_dirs=( src tests )
 [ -d benches ] && rs_dirs+=( benches )
 
+# Enumeration is fail-closed: with `set -euo pipefail` and no `|| true`, any
+# failure in the find/test commands aborts the gate instead of silently
+# producing an empty (or partial) scope.
 spdx_scope=$(
     {
         find "${rs_dirs[@]}" -type f -name '*.rs'
-        find utils -type f -name '*.sh'
-        test -f build.rs && echo build.rs
-        test -f Cargo.toml && echo Cargo.toml
-    } || true
+        find utils tests -type f -name '*.sh'
+        if [ -f build.rs ]; then echo build.rs; fi
+        if [ -f Cargo.toml ]; then echo Cargo.toml; fi
+    }
 )
-missing=$(printf '%s\n' "$spdx_scope" | xargs grep -L "SPDX-License-Identifier" 2>/dev/null || true)
+
+# Missing SPDX header: scan file-by-file (no xargs, so grep errors are never
+# masked into an empty result) — an unreadable file counts as missing.
+missing=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if ! grep -q "SPDX-License-Identifier" "$f"; then
+        missing+="$f"$'\n'
+    fi
+done <<< "$spdx_scope"
 if [ -n "$missing" ]; then
     echo -e "  ${RED}${BOLD}Missing SPDX header in files:${NC}"
     echo "$missing" | sed 's/^/    /'
     exit 1
 fi
-invalid=$(printf '%s\n' "$spdx_scope" \
-    | xargs grep -l "SPDX-License-Identifier" 2>/dev/null \
-    | xargs grep -LE "SPDX-License-Identifier: (GPL-3\.0-or-later|MIT)" 2>/dev/null || true)
+
+# Invalid SPDX identifier (expected GPL-3.0-or-later or MIT): same file-by-file
+# scan — a grep error on one file is a hard failure, never a silent pass.
+invalid=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if grep -q "SPDX-License-Identifier" "$f" \
+        && ! grep -qE "SPDX-License-Identifier: (GPL-3\.0-or-later|MIT)" "$f"; then
+        invalid+="$f"$'\n'
+    fi
+done <<< "$spdx_scope"
 if [ -n "$invalid" ]; then
     echo -e "  ${RED}${BOLD}Invalid SPDX identifier (expected GPL-3.0-or-later or MIT):${NC}"
     echo "$invalid" | sed 's/^/    /'

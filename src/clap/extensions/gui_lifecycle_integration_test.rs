@@ -94,12 +94,20 @@ fn create_host_parent_window() -> Option<(x11rb::rust_connection::RustConnection
 
 /// Polls `query_tree(host)` until the host window has an X11 child (the
 /// embedded Slint window) or `timeout` elapses.
+///
+/// Respects `NAM_GUI_TIMEOUT_MS` (default 4000 ms, min 4000 ms).
 fn wait_for_embedded_child(
     conn: &x11rb::rust_connection::RustConnection,
     host: u32,
-    timeout: std::time::Duration,
+    base_timeout: std::time::Duration,
 ) -> Option<u32> {
-    let deadline = std::time::Instant::now() + timeout;
+    let configured_ms = std::env::var("NAM_GUI_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(4000)
+        .max(4000);
+    let effective_timeout = base_timeout.max(std::time::Duration::from_millis(configured_ms));
+    let deadline = std::time::Instant::now() + effective_timeout;
     loop {
         if let Ok(cookie) = conn.query_tree(host)
             && let Ok(reply) = cookie.reply()
@@ -147,6 +155,7 @@ fn wait_until_child_destroyed(
 /// cannot propagate a `set_parent` error to the host, so the negotiation must
 /// fail where it can be seen), and the FSM stays untouched.
 #[test]
+#[ignore = "requires dedicated Xvfb: run utils/tests-gui.sh"]
 fn gui_lifecycle_x11_embedded_set_parent_honest() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let gui_ext = plugin_instance
@@ -163,17 +172,23 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
         );
     }
 
-    let display_available = std::env::var_os("DISPLAY").is_some();
+    let display_set = std::env::var_os("DISPLAY").is_some();
     let handle = plugin_instance.plugin_handle();
-    if display_available {
+    if display_set {
+        let xdg_session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+        let dedicated_x11 = std::env::var_os("NAM_GUI_DEDICATED_X11").is_some();
+        let x11_connect_ok = x11rb::connect(None).is_ok();
+
+        if !x11_connect_ok || (xdg_session == "wayland" && !dedicated_x11) {
+            println!("TEST_RESULT[gui_x11_embed]=GAP:no_dedicated_x11");
+            return;
+        }
+
         // Real display: create + full embedded window cycle against the fake host.
         let (conn, parent) = match create_host_parent_window() {
             Some(pair) => pair,
             None => {
-                eprintln!(
-                    "[WARN GAP] gui_lifecycle_x11_embedded_set_parent_honest: DISPLAY is set but \
-                     no reachable X11 display server; run with xvfb-run or unset DISPLAY for headless validation. Skipping."
-                );
+                println!("TEST_RESULT[gui_x11_embed]=GAP:no_dedicated_x11");
                 return;
             }
         };
@@ -192,7 +207,15 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
         gui_ext.show(&handle).expect("show() must succeed");
 
         let child = wait_for_embedded_child(&conn, parent, std::time::Duration::from_secs(4))
-            .expect("the host window must acquire the embedded child within the timeout");
+            .unwrap_or_else(|| {
+                let xdg =
+                    std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".to_string());
+                let backend = crate::clap::gui::x11_embed::backend_kind_for_diag();
+                panic!(
+                    "the host window must acquire the embedded child within the timeout \
+                     (XDG_SESSION_TYPE={xdg}, BACKEND_KIND={backend})"
+                )
+            });
         let tree = conn
             .query_tree(child)
             .ok()

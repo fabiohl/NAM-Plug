@@ -42,7 +42,7 @@ RT memory and machine code safety is enforced via a three-layer defense-in-depth
 
 - **Dynamic Interceptor ([`tests/common/alloc_audit.rs`](../tests/common/alloc_audit.rs)):** When compiled with `--features "testing heap-audit"`, `tests/clap.rs` registers `CountingAllocator` as the `#[global_allocator]`. The test harness captures allocation counters before and after calling `started_processor.process()`, enforcing **zero heap allocations** on the audio thread.
 - **Static AST-Light Scanner ([`utils/lib/verify_no_rt_alloc.sh`](../utils/lib/verify_no_rt_alloc.sh) / [`utils/lib/rt_alloc_scan.awk`](../utils/lib/rt_alloc_scan.awk)):** Runs during static analysis (`lints.sh`). Parses `src/clap/processor/` Rust sources, tracks brace depth while stripping comments and string literals, excludes whitelisted off-RT lifecycle hooks (`activate`, `deactivate`, panic handlers, test modules), and flags any illegal heap allocation or dynamic collection types (`Box::new`, `Vec::new`, `format!`, `Arc::new`, `HashMap`, etc.).
-- **Static Machine-Code Codegen Guard ([`utils/verify_rt_codegen.sh`](../utils/verify_rt_codegen.sh)):** Runs during release verification (`tests-quick.sh` Phase 2) and release packaging (`build-release.sh` Phase 4.5). Disassembles the compiled `.so` with `nm` and `objdump` to verify machine code invariants in hot-path DSP routines (`process`, `process_sub_block`, `process_sub_block_chunked`, `process_crossfade_sub_block`, `process_tail_drain`, `drain_tail_into`), enforcing zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls.
+- **Static Machine-Code Codegen Guard ([`utils/verify_rt_codegen.sh`](../utils/verify_rt_codegen.sh)):** Runs during release verification (`tests-quick.sh` Phase 2) and release packaging (`build-release.sh` Phase 4.5). Disassembles the compiled `.so` with `objdump` and runs the unified NAM codegen filter ([`utils/lib/dsp-hotpath-filter.py`](../utils/lib/dsp-hotpath-filter.py)) with the per-repo symbol profile ([`utils/codegen-profile.json`](../utils/codegen-profile.json)) to verify machine code invariants in hot-path DSP routines (`process`, `process_sub_block`, `process_sub_block_chunked`, `process_crossfade_sub_block`, `process_tail_drain`, `drain_tail_into`, `process_dry_contained_block`), enforcing zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls. The filter/profile pair is byte-identical (filter) or per-repo (profile) with the engine's `verify-kernel-codegen.sh` and the Pipe's `build-release.sh` Phase 4.5.
 
 ---
 
@@ -146,6 +146,17 @@ The benchmark suite under [`../benches/`](../benches/) uses [Criterion.rs](https
 - **Zero Audio-Thread Heap Allocation**: Inner iteration closures strictly operate on pre-allocated, 64-byte aligned buffers (`AlignedVec<f32>`).
 - **Deterministic Execution Environment**: Inner loops and Criterion measurements require isolated CPU core execution (via `isolcpus` and `taskset`) to avoid scheduler jitter; see [Section 5.5](#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset).
 
+### 4.3 Performance Regression Gate & Baseline Discipline
+
+[`utils/tests-performance-regression.sh`](../utils/tests-performance-regression.sh) is the unified performance gate. It runs the Criterion `clap_bench` suite pinned to a dedicated core and delegates every interpretation to the engine binary `nam_perf_gate` — the single statistical authority shared with `NeuralAmpModeler-rs` and `NAM-Audio-Pipe` — for the environment fingerprint, baseline persistence, per-benchmark coverage and the machine regression verdict over Criterion `change/estimates.json`.
+
+- **Expected coverage:** [`benches/clap_bench.manifest`](../benches/clap_bench.manifest) declares the mandatory Criterion groups (trailing-`*` patterns). A group that did not run, or an executed benchmark without a saved baseline series, fails closed (`BASELINE_COVERAGE_GAP`).
+- **Modes:** `--check` (default, read-only) and `--bootstrap-baseline` (**human operator only**, on a calibrated host). `--legacy` delegates to [`utils/tests-performance-regression-legacy.sh`](../utils/tests-performance-regression-legacy.sh), the pre-unification gate preserved for rollback.
+- **Gate resolution:** `NAM_PERF_GATE` (prebuilt binary) → `nam_perf_gate` on `PATH` (`cargo install NeuralAmpModeler-rs --features testing --bin nam_perf_gate`) → a sibling engine checkout (`NAM_ENGINE_DIR`, default `../NeuralAmpModeler-rs`). A gate that cannot be resolved fails closed.
+- **Environment:** `NAM_BENCH_CORE`, `NAM_BASELINE_NAME` (default `ci-baseline`), `NAM_BENCH_MANIFEST`, `NAM_THERMAL_COOLDOWN_S` (default 180 s).
+
+Baselines live in `.performance-baselines/` (gitignored). A missing baseline is `MISSING_BASELINE`; a fingerprint drift (CPU model, ISA, toolchain, governor, pinned core, producing commit) is `INCOMPARABLE_ENVIRONMENT`. Both fail closed — baselines are **never** silently re-created; renewal is an explicit human operation under a calibrated environment (see the engine's `docs/benchmarks.md` §4).
+
 ---
 
 ## 5. Execution Commands & Developer Workflow
@@ -178,6 +189,7 @@ Top-level workflow entrypoints reside in `utils/`, while shared libraries and mo
 | **`utils/tests-long.sh`**                       | 4-phase heavy stress suite (GC, teardown, RT priority/latency, Xvfb GUI)          | Nightly & release certification (operator)     |
 | **`utils/tests-gui.sh`**                        | Headless Xvfb lifecycle, XEmbed, clipboard testing                                | Invoked by Phase 4 of `tests-long.sh` / on demand|
 | **`utils/verify_rt_codegen.sh`**                | Disassembly inspection of `.so` (0 `malloc`, 0 `div`/`idiv`, bounded TLS)          | Integrated in `tests-quick.sh` & `build-release.sh` |
+| **`utils/tests-performance-regression.sh`**     | Criterion `clap_bench` regression gate over the engine `nam_perf_gate` (coverage + machine verdict) | Operator baseline renewal; on-demand regression check (`--legacy` rollback) |
 | **`utils/build-release.sh`**                    | Multi-stage release builder with PGO, BOLT, RT codegen gate and packaging        | Official release pipeline                      |
 
 The x86-64-v3 (AVX2/FMA) engine baseline is contractual: `NAM-Plug` links against `NeuralAmpModeler-rs` without enabling opt-in EVEX features, so default and release builds contain no EVEX machine code by construction and the feature matrix above proves all configurations compile cleanly.
@@ -282,6 +294,27 @@ receipt is written), any external `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` is
 rejected, and a gate skip or missing prerequisite aborts with exit ≠ 0 — so a
 `CERTIFIED` receipt can only ever exist for a clean-tree, all-gates-green
 build of the exact artifact that is distributed.
+
+#### 5.4.1 BOLT Win-Proof Ceremony — Opt-Out Decision (T5.3)
+
+Unlike `NAM-Audio-Pipe`, `NAM-Plug` ships **no `ab-opt-ceremony` producer**:
+there is no `utils/ab-opt-ceremony.sh` harness and no dedicated `ab_opt_bench`
+binary. This is a recorded, deliberate decision (the cost of maintaining a
+PMU-driven A/B ceremony inside the CLAP plugin outweighs its benefit):
+**LLVM-BOLT is opt-out in `NAM-Plug`.**
+
+Consequently:
+
+* The canonical `target/logs/ab-opt-ceremony-receipt.json` is **not required**
+  and is not generated by this repository.
+* The only accepted independent proof that a BOLT transform actually won is
+  this build's own **measured performance gate** (`PERF_GATE_STATUS=PASSED`),
+  which promotes the claim to `perf-gate:<sha>` in the receipt.
+* When BOLT is applied without any proof, the build records the typed gap
+  `bolt_proof:missing_ceremony` in **every mode** (not only `--strict`), and the
+  receipt status becomes `INCOMPLETE`. A `bolt_proof: MISSING` sentinel sitting
+  next to a `CERTIFIED` status is therefore impossible, and a missing proof is
+  never a silent, acceptable state.
 
 ### 5.5 Deterministic Benchmark Execution & CPU Core Isolation (`isolcpus` + `taskset`)
 

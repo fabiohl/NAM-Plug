@@ -281,3 +281,29 @@ fn test_gui_event_backpressure_warning_emitted() {
         "NAM-Plug: GUI event queue backpressure - host output full; gesture events retained for retry",
     );
 }
+
+#[test]
+fn test_host_library_version_registered_in_diagnostics() {
+    // Driving the plugin init path (`new_main_thread`) registers the host
+    // identity in the engine's process-wide `OnceLock` (first writer wins).
+    // `make_test_plugin` exercises that path with the mock host.
+    let (_entry, _host_info, plugin_instance) = crate::clap::test_util::make_test_plugin();
+
+    let snapshot = SystemSnapshot::capture();
+    let host_library = snapshot
+        .host_library_version
+        .as_deref()
+        .expect("plugin init must register the host identity");
+    assert!(
+        host_library.contains("(CLAP "),
+        "registered host identity must carry the negotiated CLAP version; got: {host_library}"
+    );
+
+    let rendered = neural_amp_modeler_rs::common::diagnostics::DiagnosticBundle::capture().render();
+    assert!(
+        rendered.contains(&format!("host_library={host_library}")),
+        "DiagnosticBundle must render host_library_version; got:\n{rendered}"
+    );
+
+    drop(plugin_instance);
+}

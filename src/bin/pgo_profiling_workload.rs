@@ -88,11 +88,8 @@ fn main() {
 
     // 1. Initialize panic hook and logger backend
     neural_amp_modeler_rs::common::panic_hook::install_panic_hook("pgo_profiler");
-    NamLogger::init(LoggerConfig {
-        level_filter: log::LevelFilter::Info,
-        emit_stderr: true,
-    })
-    .expect("Failed to initialize NamLogger backend");
+    NamLogger::init(LoggerConfig::new(log::LevelFilter::Info).with_stderr(true))
+        .expect("Failed to initialize NamLogger backend");
 
     log::info!(
         "🎸 Starting real-world fail-closed PGO/BOLT profiling workload (Manifest v{MANIFEST_VERSION})..."

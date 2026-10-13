@@ -149,14 +149,10 @@ fn activate_plugin(
     (started, shared_ptr, main_thread_ptr)
 }
 
-/// Percentile of a sample set, index `(len - 1) * pct / 100` (the top
-/// `len - 1 - idx` samples — OS preemption spikes among them — stay above
-/// the reported percentile).
+/// Percentile of a sample set, delegated to the engine's exact percentile
+/// (`testing::metrics::percentile_exact_copy`).
 fn percentile(samples: &[u64], pct: usize) -> u64 {
-    let mut sorted = samples.to_vec();
-    sorted.sort_unstable();
-    let idx = (sorted.len().saturating_sub(1) * pct) / 100;
-    sorted[idx]
+    neural_amp_modeler_rs::testing::metrics::percentile_exact_copy(samples, pct as f64 / 100.0)
 }
 
 fn print_stats(label: &str, samples: &[u64]) {

@@ -649,8 +649,15 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 model_input_mult_adj,
                 model_output_mult_adj,
             ) = if staged_restore_valid {
-                let StagedRestore { txn, publish } =
-                    staged_restore.expect("staged_restore_valid is true");
+                // `staged_restore_valid` is `staged_restore.as_ref().is_some_and(..)`,
+                // so the flag implies a staged value; a `None` here is an internal
+                // invariant violation and must not panic on the activation path.
+                let Some(StagedRestore { txn, publish }) = staged_restore else {
+                    debug_assert!(false, "staged_restore_valid implies a staged restore");
+                    return Err(PluginError::Message(
+                        errors::activation::STAGED_RESTORE_UNAVAILABLE,
+                    ));
+                };
                 crate::clap::extensions::state_transaction::publish_restore(publish, main_thread);
                 shared
                     .cold
@@ -777,7 +784,16 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     model_input_mult_adj,
                     model_output_mult_adj,
                 ) = if staged_model_ok {
-                    let m = staged_model.expect("staged_model_ok implies a staged model");
+                    // `staged_model_ok` is derived from
+                    // `staged_swap.model.as_ref().is_some_and(..)`, so the flag
+                    // implies a staged model; a `None` here is an internal
+                    // invariant violation and must not panic on the activation path.
+                    let Some(m) = staged_model else {
+                        debug_assert!(false, "staged_model_ok implies a staged model");
+                        return Err(PluginError::Message(
+                            errors::activation::STAGED_MODEL_UNAVAILABLE,
+                        ));
+                    };
                     (
                         m.model_l,
                         m.generation,
@@ -828,7 +844,16 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     model_input_mult_adj,
                     model_output_mult_adj,
                 ) = if staged_model_ok {
-                    let m = staged_model.expect("staged_model_ok implies a staged model");
+                    // `staged_model_ok` is derived from
+                    // `staged_swap.model.as_ref().is_some_and(..)`, so the flag
+                    // implies a staged model; a `None` here is an internal
+                    // invariant violation and must not panic on the activation path.
+                    let Some(m) = staged_model else {
+                        debug_assert!(false, "staged_model_ok implies a staged model");
+                        return Err(PluginError::Message(
+                            errors::activation::STAGED_MODEL_UNAVAILABLE,
+                        ));
+                    };
                     (
                         m.model_l,
                         m.generation,
@@ -923,6 +948,30 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
             let silence_hyst = DynamicHysteresis::new();
             let mono_hyst = DynamicHysteresis::new();
+
+            // Adaptive prewarm seed (U-02 / F-PR-10): measure the installed
+            // model's per-sample inference cost here, off the audio thread
+            // (allocations allowed) so the first amortization window after
+            // activation is sized from real hardware instead of the conservative
+            // family table. The frozen-table latch is set in debug builds (the
+            // measured cost there is not release-representative) and by the
+            // diagnostic rollback `NAM_PREWARM_STATIC=1`. Continuous model swaps
+            // update this scalar from the load payload.
+            let prewarm_static = !prewarm_policy::ADAPTIVE_COST_ENABLED
+                || std::env::var("NAM_PREWARM_STATIC").is_ok();
+            let prewarm_cost_ns_per_sample = if prewarm_static {
+                None
+            } else {
+                // Cap the calibration block at the negotiated host quantum so
+                // it never exceeds the model's `max_buffer_size` (a smaller
+                // block is otherwise silently truncated by composed models and
+                // under-measures the per-sample cost).
+                let measure_frames =
+                    prewarm_policy::PREWARM_MEASURE_FRAMES.min((host_buffer as usize).max(1));
+                model_l
+                    .as_mut()
+                    .map(|m| m.measure_cost_ns_per_sample(measure_frames))
+            };
 
             // 4. Smoother initialization (Sample-Accurate)
             // Warm reset from shared atomics to avoid transient jump on reactivation
@@ -1102,6 +1151,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 // eager drain above finishes any deactivate-interrupted pass,
                 // so activation never arms the amortization window.
                 prewarm_pending: false,
+                prewarm_cost_ns_per_sample,
+                prewarm_static,
                 last_seen_generation: 0,
                 max_frames_count: audio_config.max_frames_count as usize,
                 min_frames_count: audio_config.min_frames_count as usize,
@@ -1351,14 +1402,59 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 if let Some(model) = self.model_l.as_mut() {
                     let frames_count = audio.frames_count() as usize;
                     let family = ModelFamily::from_model(model);
+                    // `NAM_PREWARM_STATIC=1` forces the frozen family table and
+                    // disables the runtime EWMA (diagnostic rollback).
+                    let measured_cost = if self.prewarm_static {
+                        None
+                    } else {
+                        self.prewarm_cost_ns_per_sample
+                    };
                     let step = compute_prewarm_step(
                         frames_count,
                         self.min_frames_count,
                         self.sample_rate,
                         family,
+                        measured_cost,
                     );
                     if step > 0 {
-                        let _pending_after = model.prewarm_step(step);
+                        #[cfg(target_arch = "x86_64")]
+                        let step_start = rdtsc_nanos();
+                        let _ = model.prewarm_step(step);
+                        // Refine the per-sample cost estimate from the real
+                        // drain elapsed time (U-02 / F-PR-10). A step that
+                        // overran half the callback period folds in the worst
+                        // observed cost immediately so the next callback's
+                        // budget shrinks before it can breach the deadline.
+                        #[cfg(target_arch = "x86_64")]
+                        {
+                            if !self.prewarm_static {
+                                let elapsed = rdtsc_nanos().wrapping_sub(step_start);
+                                let effective_frames = if frames_count > 0 {
+                                    frames_count
+                                } else {
+                                    self.min_frames_count.max(1)
+                                };
+                                let effective_rate = if self.sample_rate > 0.0 {
+                                    self.sample_rate
+                                } else {
+                                    48000.0
+                                };
+                                let period_ns = (effective_frames as f64 / effective_rate) * 1e9;
+                                let sample_cost = elapsed as f64 / step as f64;
+                                const EWMA_ALPHA: f64 = 0.25;
+                                let mut ewma = match self.prewarm_cost_ns_per_sample {
+                                    Some(prev) if prev.is_finite() && prev > 0.0 => {
+                                        f64::from(prev) * (1.0 - EWMA_ALPHA)
+                                            + sample_cost * EWMA_ALPHA
+                                    }
+                                    _ => sample_cost,
+                                };
+                                if elapsed as f64 > 0.5 * period_ns {
+                                    ewma = ewma.max(sample_cost);
+                                }
+                                self.prewarm_cost_ns_per_sample = Some(ewma as f32);
+                            }
+                        }
                     }
                     if !model.prewarm_complete() {
                         return self.process_dry_contained_block(

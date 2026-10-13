@@ -4,6 +4,12 @@
 //! Slint View-Model: connects Slint UI callbacks and telemetry to `GuiSharedState`
 //! and CLAP host parameter flush.
 
+// `slint::include_modules!` materializes machine-generated UI code whose own
+// `unwrap()` calls are out of scope for the hand-written production unwrap
+// hygiene enforced crate-wide (F-PR-13). Hand-written `expect()` in this file
+// remains subject to the `expect_used` lint.
+#![expect(clippy::unwrap_used)]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;

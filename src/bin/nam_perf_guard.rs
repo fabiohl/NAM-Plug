@@ -97,19 +97,25 @@ fn sha256_of(path: &Path) -> Result<String, String> {
         .collect())
 }
 
-fn resolve_model_fixture(filename: &str) -> Option<PathBuf> {
-    let candidate_paths = [
-        format!("tests/fixtures/models/{filename}"),
-        format!("../NeuralAmpModeler-rs/tests/fixtures/models/{filename}"),
-        format!("NeuralAmpModeler-rs/tests/fixtures/models/{filename}"),
-    ];
-    for p in &candidate_paths {
-        let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
-        }
+/// Fixture root for the model assets the gate needs.
+///
+/// Anchored to this crate's manifest directory so resolution is independent of
+/// the process working directory (a plain `tests/...` relative path silently
+/// depended on being launched from the crate root). `NAM_FIXTURES_DIR` overrides
+/// the root for operators running the gate from an out-of-tree checkout; no
+/// sibling-repository path is ever consulted, keeping the gate self-contained.
+fn fixtures_dir() -> PathBuf {
+    if let Ok(dir) = env::var("NAM_FIXTURES_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
     }
-    None
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models")
+}
+
+fn resolve_model_fixture(filename: &str) -> Option<PathBuf> {
+    let path = fixtures_dir().join(filename);
+    path.exists().then_some(path)
 }
 
 struct ScenarioConfig {
@@ -331,11 +337,7 @@ fn usage() -> ! {
 }
 
 fn main() -> ExitCode {
-    NamLogger::init(LoggerConfig {
-        level_filter: log::LevelFilter::Info,
-        emit_stderr: false,
-    })
-    .ok();
+    NamLogger::init(LoggerConfig::new(log::LevelFilter::Info)).ok();
 
     let args: Vec<String> = env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("certify") {

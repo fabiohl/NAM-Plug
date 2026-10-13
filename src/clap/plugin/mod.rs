@@ -158,10 +158,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                 HostLogFn, LoggerConfig, NamLogger,
             };
 
-            let _logger = NamLogger::init(LoggerConfig {
-                level_filter: log::LevelFilter::Info,
-                emit_stderr: false,
-            });
+            let _logger = NamLogger::init(LoggerConfig::new(log::LevelFilter::Info));
 
             if let Some(host_log) = host.get_extension::<HostLog>() {
                 let quiescence = Arc::clone(&shared.cold.host_log_quiescence);
@@ -204,6 +201,24 @@ impl DefaultPluginFactory for NamClapPlugin {
             &shared.cold.cmd_next_seq,
             &shared.cold.cmd_last_ack,
         );
+
+        // Register the host identity once per process for diagnostic bundles,
+        // *before* the stored `SystemSnapshot` is captured so that error support
+        // blocks (`NamDiagnostic`) include it. `set_host_library_version` is
+        // backed by a `OnceLock`: with multiple plugin instances, the first host
+        // to initialize wins and later calls are ignored (one host per process).
+        let host_name = host
+            .name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("Unknown"));
+        let host_version = host
+            .version()
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("unknown"));
+        let negotiated_clap = host.clap_version();
+        neural_amp_modeler_rs::common::diagnostics::set_host_library_version(format!(
+            "{host_name} {host_version} (CLAP {negotiated_clap})"
+        ));
 
         #[cfg_attr(test, allow(unused_mut, clippy::allow_attributes))]
         let main_thread = NamClapMainThread {
@@ -258,12 +273,6 @@ impl DefaultPluginFactory for NamClapPlugin {
             }
         }
 
-        let host_name = main_thread
-            .host
-            .name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("Unknown"));
-        let negotiated_clap = main_thread.host.clap_version();
         log::info!(
             "NAM-Plug plugin instance created in host \"{host_name}\" (negotiated CLAP API {negotiated_clap})",
         );

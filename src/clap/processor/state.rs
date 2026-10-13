@@ -376,6 +376,20 @@ pub struct NamClapProcessor<'a> {
     /// persisted in `DeactivatedDspState` (a re-activated model completes any
     /// outstanding pass eagerly in `activate()`, off the audio thread).
     pub(crate) prewarm_pending: bool,
+    /// Measured per-sample inference cost of the installed model in
+    /// nanoseconds, produced off-RT by the engine's
+    /// [`measure_cost_ns_per_sample`](neural_amp_modeler_rs::models::NamModel::measure_cost_ns_per_sample).
+    ///
+    /// Seeds the adaptive prewarm budget (`None` = use the per-family table).
+    /// Refined in place every amortization callback by an EWMA of the real
+    /// `prewarm_step` elapsed time (U-02 / F-PR-10). A plain scalar: written and
+    /// read on the audio thread with no allocation or lock.
+    pub(crate) prewarm_cost_ns_per_sample: Option<f32>,
+    /// Diagnostic rollback latch (`NAM_PREWARM_STATIC=1`): when set, the
+    /// adaptive prewarm policy ignores the measured cost (and the EWMA) and
+    /// falls back to the frozen per-family table. Read once from the
+    /// environment in `activate()`.
+    pub(crate) prewarm_static: bool,
 }
 
 #[cfg(test)]

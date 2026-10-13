@@ -1,0 +1,26 @@
+# Fixture freshness manifest — NAM-Plug
+#
+# Schema shared with NeuralAmpModeler-rs `testing::freshness`:
+#   * `# FIXTURES` section lines are `<sha256>  <path relative to tests/fixtures>`
+#   * `# MODEL-REGISTRY: <file>` registers each committed `.nam` so the
+#     reverse orphan scan finds nothing unaccounted for.
+#
+# Provenance (origin / license) is recorded per fixture below as comments; the
+# parser ignores every `#` line, so these annotations never affect the gate.
+
+# FIXTURES
+663941a10d36587418451d99498af1bba181e5da677c548591a7b1e4fabb1837  logs/parity_missing_fail.log
+f6950250ede1303eadf416e03de53f7e9a0061b6d8417116f8813644021e75a5  logs/parity_wrapped_nocapture_pass.log
+2d2d744516dc0197737a2c5001010429692d4cb20d72b08264781de626fcf4ca  models/a2_example.nam
+df9f78c49f49c2bb32411df47e3f53746075adb206b92d017e06379d1e56234a  models/lstm.nam
+ceb53469a19ce278e2235da982ae676cb8d5451a8de22a7ecc7a2617d07224d1  models/wavenet_a1_standard.nam
+
+# MODEL-REGISTRY: a2_example.nam
+# MODEL-REGISTRY: lstm.nam
+# MODEL-REGISTRY: wavenet_a1_standard.nam
+
+# Provenance:
+#   models/wavenet_a1_standard.nam — Official Real; WaveNet A1 (CH=16) CC0 / S. Atkinson.
+#   models/a2_example.nam          — Synthetic; SlimmableContainer A2, Apache-2.0 / generate_a2_fixtures.py.
+#   models/lstm.nam                — Official Real; LSTM (1 layer, H=3) CC0 / S. Atkinson.
+#   logs/*.log                     — Project-owned synthetic negative/adversarial fixtures.

@@ -74,6 +74,18 @@ pub(crate) fn is_embedded_supported() -> bool {
     BACKEND_KIND.load(Ordering::Acquire) != KIND_NON_X11
 }
 
+/// Returns the human-readable backend kind currently pinned, for diagnostic purposes.
+#[inline]
+#[cfg(test)]
+pub(crate) fn backend_kind_for_diag() -> &'static str {
+    match BACKEND_KIND.load(Ordering::Acquire) {
+        KIND_UNDECIDED => "Undecided",
+        KIND_X11 => "X11",
+        KIND_NON_X11 => "NonX11",
+        _ => "Unknown",
+    }
+}
+
 /// Prepares the process for a floating window of the given negotiated API.
 ///
 /// Only clears the embed target (the dynamic hook becomes a no-op). The

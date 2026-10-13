@@ -1497,11 +1497,12 @@ criterion_group! {
 // size → ns/sample per (model, block size). Content is the deterministic
 // mono sine (L == R), 48 kHz, one fresh instance per case with a pre-warm
 // block outside the timer (shared `run_process_bench` runner); group config:
-// sample_size 30, noise_threshold 0.05. The plugin-side baseline registry
-// (engine-style `tests-performance-regression.sh` with
-// `.performance-baselines/`) does not exist yet for NAM-Plug: baseline
-// registration for this suite is deliberately left as a human-operator step;
-// until then this suite has no committed baseline to check against.
+// sample_size 30, noise_threshold 0.05. The plugin-side baseline registry is
+// the engine gate (`utils/tests-performance-regression.sh` →
+// `nam_perf_gate`, `.performance-baselines/`, expected groups declared in
+// `benches/clap_bench.manifest`); creating the baseline remains a
+// human-operator step, so a checkout without one fails closed
+// (`MISSING_BASELINE`).
 fn bench_evidence_inference_e2e_blocksize(c: &mut Criterion) {
     const BLOCK_SIZES: &[usize] = &[64, 128, 512];
 

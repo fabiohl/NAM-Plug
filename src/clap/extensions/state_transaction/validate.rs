@@ -36,6 +36,10 @@ pub(crate) struct ModelResources {
     pub(crate) input_mult_adj: f32,
     /// Pre-computed output level multiplier adjustment (calibration).
     pub(crate) output_mult_adj: f32,
+    /// Negotiated host block size (frames) at validation time. Carried so the
+    /// restore path can size the off-RT prewarm-cost calibration block without
+    /// exceeding the model's `max_buffer_size` (S6-T2/T3 review fix).
+    pub(crate) buffer_size: u32,
     /// Native sample rate expected by the model architecture.
     pub(crate) model_rate: u32,
     /// Model metadata extracted from the file header (name, author, architecture).
@@ -391,6 +395,7 @@ pub(crate) fn build_model_resources(
         new_stream,
         input_mult_adj,
         output_mult_adj,
+        buffer_size,
         model_rate,
         model_metadata,
         model_info,

@@ -489,12 +489,19 @@ HEAP_AUDIT_PASSED=false
 QUICK_RECEIPT_SHA=""
 HEAP_AUDIT_LOG_SHA=""
 
-if [ -f "$QUICK_RECEIPT" ] && grep -q -E "OVERALL: (PASSED|COMPLETED_WITH_GAPS)" "$QUICK_RECEIPT"; then
+# Semantic verification of the quick receipt — never a substring search. The
+# declared OVERALL verdict must be consistent with the phase/gap evidence in the
+# same receipt; a green token pasted into a comment is rejected (fail-closed).
+quick_receipt_ok() {
+    cargo run --quiet --locked --bin quick_receipt_check -- "$@" >/dev/null 2>&1
+}
+
+if [ -f "$QUICK_RECEIPT" ] && quick_receipt_ok "$QUICK_RECEIPT"; then
     QUICK_QA_PASSED=true
     QUICK_RECEIPT_SHA=$(sha256sum "$QUICK_RECEIPT" | cut -d' ' -f1)
 fi
 
-if [ -f "$HEAP_LOG" ] && [ -f "$QUICK_RECEIPT" ] && grep -q "HEAP_AUDIT=RAN" "$QUICK_RECEIPT"; then
+if [ -f "$HEAP_LOG" ] && [ -f "$QUICK_RECEIPT" ] && quick_receipt_ok --require-heap-audit "$QUICK_RECEIPT"; then
     HEAP_AUDIT_PASSED=true
     HEAP_AUDIT_LOG_SHA=$(sha256sum "$HEAP_LOG" | cut -d' ' -f1)
 fi
@@ -509,6 +516,23 @@ else
     fi
     warn "Quick QA preflight or heap audit not fully verified."
     GATE_SKIPS+=("quick_qa:unverified")
+fi
+
+# -----------------------------------------------------------------------------
+# Release-ceremony gate: a REAL, strict, consistent LONG receipt is mandatory.
+# The historical gate read only the quick receipt via a substring grep — not
+# proof of a full audit. A simulated/gapped/failed/forged long receipt is
+# rejected by the unified-schema semantic verifier (never a substring search).
+# -----------------------------------------------------------------------------
+if [ "$RELEASE_CEREMONY" = "true" ]; then
+    LONG_RECEIPT="$PROJECT_DIR/target/logs/long-audit-receipt.jsonl"
+    if [ ! -f "$LONG_RECEIPT" ]; then
+        die "Release ceremony requires a real long-audit receipt on disk (target/logs/long-audit-receipt.jsonl is missing).\nAsk the human operator to execute:\n  ./utils/tests-long.sh --strict-pre-release\n(AI agents MUST NEVER execute the long suite)."
+    fi
+    if ! cargo run --quiet --locked --features testing --bin plug_long_receipt -- validate --strict --out "$LONG_RECEIPT"; then
+        die "Release ceremony rejected the long-audit receipt (target/logs/long-audit-receipt.jsonl): strict semantic verification failed — SIMULATED, declared gaps, failures or a forged OVERALL verdict are rejected fail-closed."
+    fi
+    echo -e "  ${GREEN}✓${NC} Real strict long-audit receipt verified (unified engine schema, semantic verification)."
 fi
 
 # -----------------------------------------------------------------------------
@@ -710,6 +734,54 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
     fi
 else
     echo -e "\n${YELLOW}[Phase 4/7] Skipping BOLT optimization.${NC}"
+fi
+
+# -----------------------------------------------------------------------------
+# PHASE 4.1: BOLT ceremony proof (S6-T3)
+# -----------------------------------------------------------------------------
+# A `PGO+BOLT` claim must be independently proven. Two accepted proofs:
+#   * the canonical `ab-opt-ceremony-receipt.json` with verdict `PGO+BOLT` over
+#     >= 3 runs (shared ceremony format), verified here;
+#   * this build's own measured performance gate (`PERF_GATE_STATUS=PASSED`),
+#     applied as a fallback after the perf phase.
+# `bolt_profile_sha256` alone only proves a profile existed, not that the
+# transform won. Per-variant or stale `ab-opt-*.json` files are never accepted.
+BOLT_PROOF="MISSING"
+BOLT_LBR_SAMPLES=""
+BOLT_LBR_FDATA_SHA256=""
+CEREMONY_RECEIPT="$PROJECT_DIR/target/logs/ab-opt-ceremony-receipt.json"
+if [ -f "$CEREMONY_RECEIPT" ]; then
+    read -r proof_id ceremony_lbr ceremony_sha <<<"$(python3 -c '
+import hashlib, json, sys
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        doc = json.load(fh)
+except Exception:
+    sys.exit(0)
+if doc.get("verdict") != "PGO+BOLT":
+    sys.exit(0)
+try:
+    runs = int(doc.get("runs") or 0)
+except (TypeError, ValueError):
+    runs = 0
+if runs < 3:
+    sys.exit(0)
+with open(path, "rb") as fh:
+    digest = hashlib.sha256(fh.read()).hexdigest()
+lbr = doc.get("bolt_lbr") or {}
+print(digest[:16], lbr.get("samples") or "", lbr.get("fdata_sha256") or "")
+' "$CEREMONY_RECEIPT" 2>/dev/null || true)"
+    if [ -n "$proof_id" ]; then
+        BOLT_PROOF="ab-opt-ceremony:$proof_id"
+        BOLT_LBR_SAMPLES="$ceremony_lbr"
+        BOLT_LBR_FDATA_SHA256="$ceremony_sha"
+        echo -e "  ${GREEN}✓${NC} BOLT ceremony proof: $BOLT_PROOF (verdict PGO+BOLT, >=3 runs)"
+    else
+        warn "Ceremony receipt present but does not prove a BOLT win; BOLT proof MISSING."
+    fi
+else
+    warn "No canonical ceremony receipt at $CEREMONY_RECEIPT; BOLT proof MISSING (perf-gate fallback may apply)."
 fi
 
 # -----------------------------------------------------------------------------
@@ -1086,6 +1158,27 @@ if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
     GIT_DIRTY=true
 fi
 
+# -----------------------------------------------------------------------------
+# PHASE 4.2: BOLT proof fallback via the measured performance gate (S6-T3)
+# -----------------------------------------------------------------------------
+# The Plug ships no ab-opt ceremony producer, so its own measured performance
+# gate is the independent BOLT-win evidence: a PASSED gate promotes the claim to
+# proven (`perf-gate:<sha>`). Without any proof, an applied BOLT is recorded as a
+# typed skipped gate under --strict instead of a silent PGO+BOLT assertion.
+if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ "$BOLT_PROOF" = "MISSING" ] && [ "$PERF_GATE_STATUS" = "PASSED" ]; then
+    BOLT_PROOF="perf-gate:${PERF_REPORT_SHA:0:16}"
+    echo -e "  ${GREEN}✓${NC} BOLT proof from measured performance gate: $BOLT_PROOF"
+fi
+if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ "$BOLT_PROOF" = "MISSING" ]; then
+    # T5.3 fail-closed decision: NAM-Plug ships no `ab-opt-ceremony` producer, so
+    # BOLT is opt-out here and the only accepted independent win proof is this
+    # build's measured performance gate (promoted above). An applied-but-unproven
+    # BOLT is a typed gap in EVERY mode — never a silently acceptable
+    # `BOLT proof: MISSING` — so it can never yield a CERTIFIED receipt.
+    GATE_SKIPS+=("bolt_proof:missing_ceremony")
+    warn "BOLT applied but unproven (no ab-opt-ceremony receipt; perf gate not PASSED): typed gap bolt_proof:missing_ceremony."
+fi
+
 # Determine typed certification status (CERTIFIED, FUNCTIONALLY_CERTIFIED, INCOMPLETE)
 RECEIPT_STATUS="CERTIFIED"
 if [ "$GIT_DIRTY" = "true" ] || [ "${CORE_GIT_DIRTY:-false}" = "true" ]; then
@@ -1110,8 +1203,12 @@ RUSTC_VER=$(rustc --version 2>/dev/null || echo "unknown")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 RECEIPT_TMP="$(mktemp -t nam-plug-receipt.XXXXXX)"
+# S6-T3: pass the proof fields through the environment (not shell-interpolated
+# into the Python literal) so a filename/JSON-derived value can never break the
+# single-quoted literal or inject Python.
+export BOLT_PROOF BOLT_LBR_SAMPLES BOLT_LBR_FDATA_SHA256
 python3 -c "
-import json, sys
+import json, os, sys
 
 skipped_gates = [g for g in sys.argv[1].split('|') if g]
 
@@ -1152,7 +1249,13 @@ receipt = {
         'pgo_applied': bool('$USE_PGO' == 'true'),
         'bolt_applied': bool('$CLAP_BOLT_APPLIED' == 'true'),
         'bolt_profile_sha256': '$BOLT_PROFILE_SHA' or None,
-        'bolt_version': '$BOLT_VERSION' or None
+        'bolt_version': '$BOLT_VERSION' or None,
+        # S6-T3: independent proof that the BOLT transform actually won
+        # (`ab-opt-ceremony:<id>` | `perf-gate:<id>`), or the explicit MISSING
+        # sentinel. Read from the environment to avoid literal injection.
+        'bolt_proof': os.environ.get('BOLT_PROOF', 'MISSING') or 'MISSING',
+        'bolt_lbr_samples': os.environ.get('BOLT_LBR_SAMPLES') or None,
+        'bolt_lbr_fdata_sha256': os.environ.get('BOLT_LBR_FDATA_SHA256') or None
     },
     'performance_certification': {
         'gate_status': '$PERF_GATE_STATUS',

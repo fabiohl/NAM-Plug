@@ -156,6 +156,10 @@ pub enum ClapParamPayload {
         input_mult_adj: f32,
         /// Model output gain calibration multiplier (from loudness metadata).
         output_mult_adj: f32,
+        /// Off-RT measured per-sample inference cost (ns) of `model_l`, seeded
+        /// by the loader from the engine's cost calibration (U-02). `None`
+        /// selects the conservative per-family prewarm table.
+        prewarm_cost_ns: Option<f32>,
     },
     /// Loading of a new cab-sim convolution adapter via SPSC.
     /// Follows the same pattern as `LoadModel`: the adapter is boxed and
@@ -253,6 +257,10 @@ pub struct LoadModelPayload {
     pub input_mult_adj: f32,
     /// Model output gain calibration multiplier.
     pub output_mult_adj: f32,
+    /// Off-RT measured per-sample inference cost (ns) of `model_l`, produced by
+    /// the engine's [`measure_cost_ns_per_sample`](neural_amp_modeler_rs::models::NamModel::measure_cost_ns_per_sample)
+    /// (U-02 / F-PR-10). `None` selects the conservative per-family prewarm table.
+    pub prewarm_cost_ns: Option<f32>,
 }
 
 /// A latency-affecting resource swap staged to land only on the next host

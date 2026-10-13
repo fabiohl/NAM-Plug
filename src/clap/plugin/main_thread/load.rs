@@ -248,6 +248,23 @@ impl<'a> NamClapMainThread<'a> {
                 ));
             }
 
+            // Off-RT cost calibration (U-02 / F-PR-10): measure the freshly
+            // loaded, stabilized model so the audio thread sizes its first
+            // prewarm window from real hardware. `None` (no model) falls back
+            // to the per-family table.
+            let prewarm_cost_ns = if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
+                // Cap the calibration block at the negotiated host quantum so
+                // it never exceeds the model's `max_buffer_size` (a smaller
+                // block would otherwise be silently truncated by composed
+                // models and under-measure the cost).
+                let measure_frames =
+                    crate::clap::processor::prewarm_policy::PREWARM_MEASURE_FRAMES.min(buffer_size);
+                model_l
+                    .as_mut()
+                    .map(|model| model.measure_cost_ns_per_sample(measure_frames))
+            } else {
+                None
+            };
             // Streaming resample adapter, sized for the
             // worst-case host block — built off-RT like the resampler.
             let new_stream =
@@ -298,6 +315,7 @@ impl<'a> NamClapMainThread<'a> {
                             new_stream,
                             input_mult_adj,
                             output_mult_adj,
+                            prewarm_cost_ns,
                         });
                 match push_result {
                     Ok(_seq) => {}
@@ -313,6 +331,7 @@ impl<'a> NamClapMainThread<'a> {
                             new_stream,
                             input_mult_adj,
                             output_mult_adj,
+                            prewarm_cost_ns: _,
                         } = payload
                         {
                             drop(new_resampler); // rebuilt by flush_pending_model()
@@ -347,6 +366,7 @@ impl<'a> NamClapMainThread<'a> {
                         new_stream,
                         input_mult_adj,
                         output_mult_adj,
+                        prewarm_cost_ns,
                     });
                 }
                 self.host.request_restart();
@@ -646,6 +666,7 @@ impl<'a> NamClapMainThread<'a> {
                             new_stream,
                             input_mult_adj: 1.0,
                             output_mult_adj: 1.0,
+                            prewarm_cost_ns: None,
                         });
                 match push_result {
                     Ok(_seq) => {}
@@ -680,6 +701,7 @@ impl<'a> NamClapMainThread<'a> {
                         new_stream,
                         input_mult_adj: 1.0,
                         output_mult_adj: 1.0,
+                        prewarm_cost_ns: None,
                     });
                 }
                 self.host.request_restart();

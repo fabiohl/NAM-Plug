@@ -6,120 +6,6 @@ mod tests {
     use crate::clap::factory::preset_discovery::*;
 
     #[test]
-    fn test_extract_balanced_json_object() {
-        let s = r#"{"name": "test", "nested": {"a": 1}}"#;
-        let result = extract_balanced_json(s).unwrap();
-        assert_eq!(result, s);
-    }
-
-    #[test]
-    fn test_extract_balanced_json_nested_braces_in_strings() {
-        let s = r#"{"data": "{\"key\": \"val\"}", "x": 1}extra"#;
-        let result = extract_balanced_json(s).unwrap();
-        assert_eq!(result, r#"{"data": "{\"key\": \"val\"}", "x": 1}"#);
-    }
-
-    #[test]
-    fn test_extract_balanced_json_array() {
-        let s = r#"[1, 2, {"a": 3}, [4, 5]]trailing"#;
-        let result = extract_balanced_json(s).unwrap();
-        assert_eq!(result, r#"[1, 2, {"a": 3}, [4, 5]]"#);
-    }
-
-    // ── Unicode tests ──
-
-    #[test]
-    fn test_extract_balanced_json_with_unicode_in_strings() {
-        let s = r#"{"name": "café", "modeled_by": "田中太郎"}"#;
-        let result = extract_balanced_json(s).unwrap();
-        assert_eq!(result, s);
-    }
-
-    #[test]
-    fn test_extract_balanced_json_with_japanese_metadata() {
-        let s = r#"{"name": "チューブスクリーマー", "make": "BOSS", "model": "SD-1"}"#;
-        let result = extract_balanced_json(s).unwrap();
-        assert_eq!(result, s);
-    }
-
-    #[test]
-    fn test_extract_balanced_json_with_emoji_in_strings() {
-        let s = r#"{"tone": "🔥🔥🔥", "genre": "rock 🎸"}"#;
-        let result = extract_balanced_json(s).unwrap();
-        assert_eq!(result, s);
-    }
-
-    #[test]
-    fn test_extract_balanced_json_with_escaped_unicode() {
-        let s = r#"{"name": "caf\u00e9", "x": 1}"#;
-        let result = extract_balanced_json(s).unwrap();
-        assert_eq!(result, r#"{"name": "caf\u00e9", "x": 1}"#);
-    }
-
-    #[test]
-    fn test_extract_balanced_json_unicode_byte_index_correct() {
-        // This previously would panic or produce wrong results because the
-        // byte-index counter in (1usize..) would mismatch char_indices().
-        // Now with char_indices() the byte index is always valid.
-        let s = r#"{"名前": "value"}"#; // "名" = 3 bytes U+540D
-        let result = extract_balanced_json(s).unwrap();
-        assert_eq!(result, s);
-    }
-
-    // ── Malformed/corrupted input tests ──
-
-    #[test]
-    fn test_extract_balanced_json_empty_string() {
-        assert!(extract_balanced_json("").is_none());
-    }
-
-    #[test]
-    fn test_extract_balanced_json_plain_value() {
-        assert!(extract_balanced_json("\"hello\"").is_none());
-    }
-
-    #[test]
-    fn test_extract_balanced_json_unclosed_object() {
-        assert!(extract_balanced_json("{\"a\": 1").is_none());
-    }
-
-    #[test]
-    fn test_extract_balanced_json_unclosed_string() {
-        assert!(extract_balanced_json("{\"a\": \"unclosed}").is_none());
-    }
-
-    // ── parse_metadata tests ──
-
-    #[test]
-    fn test_parse_metadata_with_unicode_name() {
-        let json = r#"{"name": "café modèl", "modeled_by": "José García"}"#;
-        let meta = parse_metadata(json).expect("should parse unicode metadata");
-        assert_eq!(meta.name.as_deref(), Some("café modèl"));
-        assert_eq!(meta.modeled_by.as_deref(), Some("José García"));
-    }
-
-    #[test]
-    fn test_parse_metadata_empty_object() {
-        // Empty metadata object (no useful fields) returns None
-        let meta = parse_metadata("{}");
-        assert!(meta.is_none());
-    }
-
-    #[test]
-    fn test_parse_metadata_malformed_json() {
-        assert!(parse_metadata("{broken").is_none());
-    }
-
-    #[test]
-    fn test_parse_metadata_truncated_utf8() {
-        // Incomplete UTF-8 byte sequence at the end
-        let truncated = unsafe { std::str::from_utf8_unchecked(b"{\"name\": \"t\xC3\xA9") };
-        assert!(extract_balanced_json(truncated).is_none());
-    }
-
-    // ── Existing integration tests ──
-
-    #[test]
     fn test_metadata_extraction_from_nam_file() {
         let model_path = crate::clap::test_util::model_path("lstm.nam");
 
@@ -144,6 +30,30 @@ mod tests {
     fn test_extract_model_metadata_missing_file() {
         let meta = extract_model_metadata(std::path::Path::new("/nonexistent/model.nam"));
         assert!(meta.is_none());
+    }
+
+    /// A `"metadata"` literal embedded in a string value must not be mistaken
+    /// for the real metadata object (the engine's streaming peer resolves the
+    /// top-level key structurally).
+    #[test]
+    fn test_extract_model_metadata_ignores_metadata_literal_in_string() {
+        let dir = std::env::temp_dir().join(format!(
+            "nam-plug-preset-discovery-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("trap.nam");
+        let json = r#"{"version":"0.6.0","config":{"note":"\"metadata\":{\"name\":\"WRONG\"}"},"metadata":{"name":"RIGHT"}}"#;
+        std::fs::write(&path, json).expect("write model");
+
+        let meta = extract_model_metadata(&path).expect("metadata resolved");
+        assert_eq!(meta.name.as_deref(), Some("RIGHT"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -187,30 +187,49 @@ fi
 
 : > "$RECEIPT_FILE"
 
+# ── Unified engine receipt schema (testing::receipt) ─────────────────────────
+# The long receipt is emitted through the Rust `plug_long_receipt` binary — the
+# same schema the engine and NAM-Audio-Pipe emit — so a single semantic verifier
+# (plug_long_receipt validate) can certify it without a substring search. The
+# shell never hand-serializes JSON.
+LONG_RECEIPT_FAILED=0
+PLUG_RECEIPT_BIN=""
+ensure_plug_receipt_bin() {
+    if [ -n "$PLUG_RECEIPT_BIN" ] && [ -x "$PLUG_RECEIPT_BIN" ]; then
+        return 0
+    fi
+    if ! cargo build --quiet --features testing --bin plug_long_receipt >/dev/null 2>&1; then
+        return 1
+    fi
+    PLUG_RECEIPT_BIN="target/debug/plug_long_receipt"
+    [ -x "$PLUG_RECEIPT_BIN" ]
+}
+
 emit_receipt() {
     local phase_id="$1"
     local name="$2"
     local status="$3"
     local duration_ms="$4"
     local log_file="${5:-}"
-    local timestamp
-    timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    python3 -c "
-import json
-rec = {
-    'phase_id': '''$phase_id''',
-    'name': '''$name''',
-    'status': '''$status''',
-    'duration_ms': $duration_ms,
-    'timestamp_utc': '''$timestamp''',
-    'strict_pre_release': bool($STRICT_PRE_RELEASE),
-    'bench_core': '''$BENCH_CORE''',
-    'log': '''$log_file''' or None
-}
-with open('''$RECEIPT_FILE''', 'a') as f:
-    json.dump(rec, f)
-    f.write('\n')
-"
+    local mapped="$status"
+    local gaps_arg=""
+    # The engine vocabulary has no GAP phase status: a declared gap is a
+    # SKIPPED phase carrying a typed gap reason.
+    if [ "$status" = "GAP" ]; then
+        mapped="SKIPPED"
+        gaps_arg="$phase_id:declared_gap"
+    fi
+    if ! ensure_plug_receipt_bin; then
+        LONG_RECEIPT_FAILED=1
+        return 0
+    fi
+    local -a args=(append --phase-id "$phase_id" --name "$name" --status "$mapped"
+                   --duration-ms "$duration_ms" --out "$RECEIPT_FILE")
+    [ -n "$log_file" ] && [ -f "$log_file" ] && args+=(--log "$log_file")
+    [ -n "$gaps_arg" ] && args+=(--gaps "$gaps_arg")
+    if ! "$PLUG_RECEIPT_BIN" "${args[@]}"; then
+        LONG_RECEIPT_FAILED=1
+    fi
 }
 
 maybe_taskset() {
@@ -623,36 +642,19 @@ emit_receipt "phase4" "GUI/X11 Headless — Xvfb lifecycle, XEmbed cycles, clipb
 PHASE_STATUS+=("$PHASE4_STATUS")
 PHASE_DURATIONS+=("$PHASE4_DUR_MS")
 
-# ── Overall receipt ─────────────────────────────────────────────────────────
-OVERALL_STATUS="PASSED"
-if [ "$OVERALL_FAILED" -ne 0 ]; then
-    OVERALL_STATUS="FAILED"
-fi
-if [ "$DRY_RUN" = "1" ]; then
-    OVERALL_STATUS="SIMULATED"
-fi
+# ── Overall receipt (derived in Rust by plug_long_receipt) ──────────────────
 TOTAL_DUR_MS=$(( PHASE1_DUR_MS + PHASE2_DUR_MS + PHASE3_DUR_MS + PHASE4_DUR_MS ))
-TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-python3 -c "
-import json
-rec = {
-    'phase_id': 'overall',
-    'name': 'Overall long audit',
-    'status': '''$OVERALL_STATUS''',
-    'duration_ms': $TOTAL_DUR_MS,
-    'timestamp_utc': '''$TIMESTAMP''',
-    'strict_pre_release': bool($STRICT_PRE_RELEASE),
-    'phases': [
-        {'id': 'phase1', 'status': '''${PHASE_STATUS[0]}''', 'duration_ms': ${PHASE_DURATIONS[0]}},
-        {'id': 'phase2', 'status': '''${PHASE_STATUS[1]}''', 'duration_ms': ${PHASE_DURATIONS[1]}},
-        {'id': 'phase3', 'status': '''${PHASE_STATUS[2]}''', 'duration_ms': ${PHASE_DURATIONS[2]}},
-        {'id': 'phase4', 'status': '''${PHASE_STATUS[3]}''', 'duration_ms': ${PHASE_DURATIONS[3]}}
-    ]
-}
-with open('''$RECEIPT_FILE''', 'a') as f:
-    json.dump(rec, f)
-    f.write('\n')
-"
+OVERALL_STATUS="FAILED"
+if ensure_plug_receipt_bin && SUMMARY_LINE="$("$PLUG_RECEIPT_BIN" summary --out "$RECEIPT_FILE" 2>/dev/null)"; then
+    OVERALL_STATUS="${SUMMARY_LINE#OVERALL: }"
+else
+    LONG_RECEIPT_FAILED=1
+fi
+
+if [ "$LONG_RECEIPT_FAILED" -ne 0 ]; then
+    echo -e "${RED}${BOLD}❌ Long-audit receipt emission failed — $RECEIPT_FILE is missing or incomplete.${NC}" >&2
+    exit 1
+fi
 
 echo -e "\n${BLUE}${BOLD}================ AUDIT SUMMARY ================${NC}"
 for i in 0 1 2 3; do
@@ -685,6 +687,20 @@ fi
 
 if [ "$OVERALL_STATUS" = "FAILED" ]; then
     echo -e "${RED}${BOLD}❌ Long audit FAILED — see $RECEIPT_FILE and target/logs/long-phase*.log${NC}"
+    exit 1
+fi
+
+if [ "$OVERALL_STATUS" = "COMPLETED_WITH_GAPS" ]; then
+    echo -e "${YELLOW}${BOLD}⚠ Long audit completed with declared gaps (skipped/inconclusive phases).${NC}"
+    if [ "$STRICT_PRE_RELEASE" = "1" ]; then
+        echo -e "${RED}${BOLD}❌ --strict-pre-release rejects declared gaps.${NC}"
+        exit 1
+    fi
+    exit 0
+fi
+
+if [ "$OVERALL_STATUS" != "PASSED" ]; then
+    echo -e "${RED}${BOLD}❌ Long audit has an unexpected verdict '$OVERALL_STATUS' — failing closed.${NC}"
     exit 1
 fi
 

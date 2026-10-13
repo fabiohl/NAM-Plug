@@ -1,0 +1,47 @@
+{
+  "sections": [".text", ".text.cold"],
+  "targets": [
+    {
+      "id": "process",
+      "pattern": "^<.*NamClapProcessor as clack_plugin::plugin::PluginAudioProcessor<.*>>::process$",
+      "required": true,
+      "gates": { "alloc": 0, "div": 2, "tls": 5 }
+    },
+    {
+      "id": "process_sub_block",
+      "pattern": "^nam_plug::clap::processor::dsp::orchestrator::audio_loop::process_sub_block$",
+      "required": true,
+      "gates": { "alloc": 0, "div": 0, "tls": 0 }
+    },
+    {
+      "id": "process_sub_block_chunked",
+      "pattern": "^nam_plug::clap::processor::dsp::orchestrator::audio_loop::process_sub_block_chunked$",
+      "required": false,
+      "gates": { "alloc": 0, "div": 0, "tls": 0 }
+    },
+    {
+      "id": "process_crossfade_sub_block",
+      "pattern": "^nam_plug::clap::processor::dsp::orchestrator::audio_loop::process_crossfade_sub_block$",
+      "required": false,
+      "gates": { "alloc": 0, "div": 0, "tls": 0 }
+    },
+    {
+      "id": "process_tail_drain",
+      "pattern": "^nam_plug::clap::processor::dsp::orchestrator::audio_loop::process_tail_drain$",
+      "required": false,
+      "gates": { "alloc": 0, "div": 0, "tls": 0 }
+    },
+    {
+      "id": "drain_tail_into",
+      "pattern": "^nam_plug::clap::processor::dsp::orchestrator::audio_loop::drain_tail_into$",
+      "required": false,
+      "gates": { "alloc": 0, "div": 0, "tls": 0 }
+    },
+    {
+      "id": "process_dry_contained_block",
+      "pattern": "^<nam_plug::clap::processor::state::NamClapProcessor>::process_dry_contained_block$",
+      "required": true,
+      "gates": { "alloc": 0, "div": 2, "tls": 0 }
+    }
+  ]
+}

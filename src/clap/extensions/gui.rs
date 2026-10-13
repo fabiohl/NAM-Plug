@@ -291,10 +291,9 @@ impl<'a> NamClapMainThread<'a> {
         // Ensure the persistent per-instance GUI worker exists.
         if self.gui_worker.borrow().is_none() {
             let (host_static, shared_arc) = self.host_static_and_shared();
-            *self.gui_worker.borrow_mut() = Some(crate::clap::gui::worker::GuiWorker::spawn(
-                shared_arc,
-                host_static,
-            ));
+            let worker = crate::clap::gui::worker::GuiWorker::spawn(shared_arc, host_static)
+                .map_err(PluginError::Message)?;
+            *self.gui_worker.borrow_mut() = Some(worker);
         }
 
         // Open the window on the worker (bounded wait for creation feedback).
@@ -303,12 +302,15 @@ impl<'a> NamClapMainThread<'a> {
         // access can collide with it.
         let open_result = {
             let worker = self.gui_worker.borrow();
-            worker.as_ref().expect("worker just ensured").open_window(
-                crate::clap::gui::worker::GuiWindowJob {
+            match worker.as_ref() {
+                Some(worker) => worker.open_window(crate::clap::gui::worker::GuiWindowJob {
                     force_x11,
                     backend_text,
-                },
-            )
+                }),
+                // The worker is spawned immediately above; this arm is a
+                // defensive fallback that never panics.
+                None => Err("the GUI worker is unavailable"),
+            }
         };
         match open_result {
             Ok(weak) => {

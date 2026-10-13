@@ -36,6 +36,7 @@ mod tests {
     use clack_common::utils::ClapId;
     use clack_host::prelude::*;
     use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
+    use neural_amp_modeler_rs::testing::metrics::max_abs_diff;
     use std::f32::consts::PI;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
@@ -125,12 +126,6 @@ mod tests {
         buf.iter()
             .position(|&s| s.abs() >= min)
             .unwrap_or(usize::MAX)
-    }
-
-    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b.iter())
-            .fold(0.0f32, |acc, (&x, &y)| acc.max((x - y).abs()))
     }
 
     fn block_max_abs(buf: &[f32]) -> f32 {

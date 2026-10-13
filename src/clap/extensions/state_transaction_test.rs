@@ -16,6 +16,7 @@ fn make_model_resources(mult_adj: f32) -> ModelResources {
         new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
         input_mult_adj: mult_adj,
         output_mult_adj: mult_adj,
+        buffer_size: 64,
         model_rate: 48000,
         model_metadata: NamModelMetadata::default(),
         model_info: neural_amp_modeler_rs::common::diagnostics::ModelInfo::default(),

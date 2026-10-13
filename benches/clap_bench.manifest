@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+#
+# Expected Criterion benchmark groups of benches/clap_bench.rs.
+# Consumed by `nam_perf_gate coverage|verdict --suite clap_bench --manifest`.
+# A trailing '*' matches any executed id with that prefix; a group that did not
+# run makes the coverage cross-check fail closed (partial/filtered runs cannot
+# certify). `CLAP_Evidence` is the end-to-end inference anchor matrix.
+CLAP_Infrastructure/*
+CLAP_Inference/*
+CLAP_WorstCase/*
+CLAP_Evidence/*

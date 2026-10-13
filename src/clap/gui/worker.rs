@@ -83,16 +83,16 @@ impl GuiWorker {
     pub(crate) fn spawn(
         shared_arc: Arc<GuiSharedState>,
         host_static: HostSharedHandle<'static>,
-    ) -> Self {
+    ) -> Result<Self, &'static str> {
         let (tx, rx) = mpsc::channel::<GuiWorkerJob>();
         let handle = std::thread::Builder::new()
             .name("nam-slint-gui".to_string())
             .spawn(move || worker_main(rx, shared_arc, host_static))
-            .expect("failed to spawn the persistent GUI worker thread");
-        Self {
+            .map_err(|_| "failed to spawn the persistent GUI worker thread")?;
+        Ok(Self {
             tx,
             handle: Some(handle),
-        }
+        })
     }
 
     /// Queues a window generation and waits (bounded) for the backend to

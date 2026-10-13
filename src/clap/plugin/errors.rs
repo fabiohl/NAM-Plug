@@ -71,6 +71,14 @@ pub mod activation {
         "Fresh oversamplers unavailable during activate (fresh path)";
     /// Model buffer resizing failed during deferred activation.
     pub const MODEL_RESIZE_FAILED: &str = "Failed to resize model buffers for host buffer size";
+    /// The staged restore expected by the staged-restore activation path is
+    /// unavailable (internal invariant: the validity flag implied `Some`).
+    pub const STAGED_RESTORE_UNAVAILABLE: &str =
+        "Staged restore unavailable during activate (staged-restore invariant)";
+    /// The staged model expected by the staged-swap activation path is
+    /// unavailable (internal invariant: the validity flag implied `Some`).
+    pub const STAGED_MODEL_UNAVAILABLE: &str =
+        "Staged model unavailable during activate (staged-swap invariant)";
 }
 
 /// GUI lifecycle errors.
