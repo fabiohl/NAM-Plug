@@ -109,15 +109,15 @@ fn test_integration_16_instances_log_and_diagnostic_isolation() {
         let model_basename = format!("Test_Profile_{:02}.nam", idx);
 
         if let Ok(mut info_guard) = shared.cold.ui_model_info.lock() {
-            *info_guard = Some(ModelInfo {
-                arch_label: "WaveNet".to_string(),
-                topology: "Standard".to_string(),
-                channels: 16,
-                receptive_field: 2048,
-                model_sample_rate: 48000,
-                weights_layout: "Interleaved4WaveNet".to_string(),
-                path_basename: model_basename.clone(),
-            });
+            *info_guard = Some(ModelInfo::new(
+                "WaveNet",
+                "Standard",
+                16,
+                2048,
+                48000,
+                "Interleaved4WaveNet",
+                model_basename.clone(),
+            ));
         }
 
         let meta = AudioMetadata::new(2, format!("Integration_Host_{}", inst_id));

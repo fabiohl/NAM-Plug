@@ -133,15 +133,15 @@ fn test_sixteen_concurrent_instances_diagnostic_bundle_isolation() {
             // Set instance-specific model info
             let model_name = format!("Custom_Amp_Profile_{}.nam", inst_id);
             if let Ok(mut info_guard) = shared.cold.ui_model_info.lock() {
-                *info_guard = Some(neural_amp_modeler_rs::common::diagnostics::ModelInfo {
-                    arch_label: "WaveNet".to_string(),
-                    topology: "Standard".to_string(),
-                    channels: 16,
-                    receptive_field: 2048,
-                    model_sample_rate: 48000,
-                    weights_layout: "Interleaved4WaveNet".to_string(),
-                    path_basename: model_name.clone(),
-                });
+                *info_guard = Some(neural_amp_modeler_rs::common::diagnostics::ModelInfo::new(
+                    "WaveNet",
+                    "Standard",
+                    16,
+                    2048,
+                    48000,
+                    "Interleaved4WaveNet",
+                    model_name.clone(),
+                ));
             }
 
             // Emit instance-scoped log

@@ -88,7 +88,7 @@ find_stale_artifact_input() {
             return 0
         fi
     fi
-    if [ -d "../NeuralAmpModeler-rs" ]; then
+    if [ -d "../NeuralAmpModeler-rs" ] && grep -q 'NeuralAmpModeler-rs.*path.*=.*"\.\./NeuralAmpModeler-rs"' Cargo.toml 2>/dev/null; then
         if [ -f "../NeuralAmpModeler-rs/Cargo.toml" ] && [ "../NeuralAmpModeler-rs/Cargo.toml" -nt "$artifact" ]; then
             printf '%s\n' "../NeuralAmpModeler-rs/Cargo.toml"
             return 0

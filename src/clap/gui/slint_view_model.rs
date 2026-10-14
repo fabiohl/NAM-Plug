@@ -96,6 +96,7 @@ fn simd_badge_text(isa: InstructionSet) -> &'static str {
         InstructionSet::Avx2 => "AVX2+FMA",
         InstructionSet::Avx512 => "AVX-512",
         InstructionSet::Avx512VnniBf16 => "AVX-512 VNNI+BF16",
+        _ => "UNKNOWN",
     }
 }
 

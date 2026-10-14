@@ -37,25 +37,21 @@ pub fn generate_sine_440hz(num_samples: usize) -> Vec<f32> {
 /// paths without external fixture files.
 pub fn make_lstm_data(num_layers: usize, hidden_size: usize) -> NamModelData {
     let total_weights = lstm_weight_count(num_layers, hidden_size);
-    NamModelData {
-        version: Some("0.5.4".to_string()),
-        architecture: "LSTM".to_string(),
-        config: NamConfig {
-            layers: vec![],
-            head: None,
-            head_scale: None,
-            num_layers: Some(num_layers),
-            hidden_size: Some(hidden_size),
-            receptive_field: None,
-            bias: None,
-            submodels: None,
-            ..Default::default()
-        },
-        weights: vec![0.01; total_weights],
-        weights_layout: neural_amp_modeler_rs::loader::nam_json::WeightsLayout::Original,
-        sample_rate: Some(48000.0),
-        metadata: None,
-    }
+    let config = {
+        let mut config = NamConfig::new(vec![]);
+        config.num_layers = Some(num_layers);
+        config.hidden_size = Some(hidden_size);
+        config
+    };
+    NamModelData::new(
+        Some("0.5.4".to_string()),
+        "LSTM",
+        config,
+        vec![0.01; total_weights],
+        Some(48000.0),
+        None,
+        neural_amp_modeler_rs::loader::nam_json::WeightsLayout::Original,
+    )
 }
 
 /// Builds synthetic `NamModelData` for a free-geometry WaveNet Dynamic model
@@ -87,45 +83,45 @@ pub fn make_wavenet_dyn_data() -> NamModelData {
         + array2_head
         + 1;
 
-    NamModelData {
-        version: Some("0.5.4".to_string()),
-        architecture: "WaveNet".to_string(),
-        config: NamConfig {
-            layers: vec![
-                NamLayerConfig {
-                    input_size: Some(1),
-                    condition_size: Some(condition_size),
-                    head_size: Some(head_1),
-                    channels: Some(channels),
-                    kernel_size: Some(kernel_size),
-                    dilations: Some(dilations[0].clone()),
-                    activation: Some("Tanh".to_string()),
-                    gated: Some(false),
-                    head_bias: Some(false),
-                    ..Default::default()
-                },
-                NamLayerConfig {
-                    input_size: Some(channels),
-                    condition_size: Some(condition_size),
-                    head_size: Some(head_2),
-                    channels: Some(channels),
-                    kernel_size: Some(kernel_size),
-                    dilations: Some(dilations[1].clone()),
-                    activation: Some("Tanh".to_string()),
-                    gated: Some(false),
-                    head_bias: Some(true),
-                    ..Default::default()
-                },
-            ],
-            head: None,
-            head_scale: Some(0.02),
-            ..Default::default()
-        },
-        weights: vec![0.01; total_weights],
-        weights_layout: neural_amp_modeler_rs::loader::nam_json::WeightsLayout::Original,
-        sample_rate: Some(48000.0),
-        metadata: None,
-    }
+    let config = {
+        let mut config = NamConfig::new(vec![
+            NamLayerConfig {
+                input_size: Some(1),
+                condition_size: Some(condition_size),
+                head_size: Some(head_1),
+                channels: Some(channels),
+                kernel_size: Some(kernel_size),
+                dilations: Some(dilations[0].clone()),
+                activation: Some("Tanh".to_string()),
+                gated: Some(false),
+                head_bias: Some(false),
+                ..Default::default()
+            },
+            NamLayerConfig {
+                input_size: Some(channels),
+                condition_size: Some(condition_size),
+                head_size: Some(head_2),
+                channels: Some(channels),
+                kernel_size: Some(kernel_size),
+                dilations: Some(dilations[1].clone()),
+                activation: Some("Tanh".to_string()),
+                gated: Some(false),
+                head_bias: Some(true),
+                ..Default::default()
+            },
+        ]);
+        config.head_scale = Some(0.02);
+        config
+    };
+    NamModelData::new(
+        Some("0.5.4".to_string()),
+        "WaveNet",
+        config,
+        vec![0.01; total_weights],
+        Some(48000.0),
+        None,
+        neural_amp_modeler_rs::loader::nam_json::WeightsLayout::Original,
+    )
 }
 
 /// Builds synthetic `NamModelData` for a WaveNet A2 Dynamic model (CH=4, gated)
@@ -149,31 +145,31 @@ pub fn make_wavenet_a2_dyn_data() -> NamModelData {
     total_weights += 1;
     total_weights += 1;
 
-    NamModelData {
-        version: Some("0.5.4".to_string()),
-        architecture: "WaveNet".to_string(),
-        config: NamConfig {
-            layers: vec![NamLayerConfig {
-                input_size: Some(1),
-                condition_size: Some(1),
-                channels: Some(channels),
-                bottleneck: Some(bottleneck),
-                kernel_sizes: Some(A2_KERNEL_SIZES.to_vec()),
-                dilations: Some(A2_DILATIONS.to_vec()),
-                activation: Some("LeakyReLU".to_string()),
-                gated: Some(true),
-                head_bias: Some(true),
-                ..Default::default()
-            }],
-            head: None,
-            head_scale: Some(0.02),
+    let config = {
+        let mut config = NamConfig::new(vec![NamLayerConfig {
+            input_size: Some(1),
+            condition_size: Some(1),
+            channels: Some(channels),
+            bottleneck: Some(bottleneck),
+            kernel_sizes: Some(A2_KERNEL_SIZES.to_vec()),
+            dilations: Some(A2_DILATIONS.to_vec()),
+            activation: Some("LeakyReLU".to_string()),
+            gated: Some(true),
+            head_bias: Some(true),
             ..Default::default()
-        },
-        weights: vec![0.01; total_weights],
-        weights_layout: neural_amp_modeler_rs::loader::nam_json::WeightsLayout::Original,
-        sample_rate: Some(48000.0),
-        metadata: None,
-    }
+        }]);
+        config.head_scale = Some(0.02);
+        config
+    };
+    NamModelData::new(
+        Some("0.5.4".to_string()),
+        "WaveNet",
+        config,
+        vec![0.01; total_weights],
+        Some(48000.0),
+        None,
+        neural_amp_modeler_rs::loader::nam_json::WeightsLayout::Original,
+    )
 }
 
 /// Resolves the path to a model fixture under NAM-Plug `tests/fixtures/models/`.

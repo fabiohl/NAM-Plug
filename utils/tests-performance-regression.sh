@@ -14,7 +14,7 @@
 # statistical authority across the ecosystem. The shared orchestration body lives
 # in the canonical `lib/_lib_core.sh` (`run_perf_regression_gate`), drift-pinned
 # by `utils/test-lib-drift.sh`; this file only carries the repository-specific
-# configuration (bench suite + expected-id manifest) and the `--legacy` delegate.
+# configuration (bench suite + expected-id manifest).
 #
 # The expected benchmark set is declared in `benches/clap_bench.manifest`
 # (trailing-`*` group patterns), so a group that did not run at all — or any
@@ -24,8 +24,6 @@
 #   --check (default)     Compare the current build against the saved baseline.
 #   --bootstrap-baseline  Create a new baseline + environment fingerprint
 #                         (human operator only).
-#   --legacy              Delegate to utils/tests-performance-regression-legacy.sh
-#                         (rollback window: the pre-unification gate).
 #
 # Environment
 #   NAM_PERF_GATE          Path to a prebuilt engine `nam_perf_gate` (else a
@@ -38,7 +36,7 @@
 #   NAM_THERMAL_COOLDOWN_S Cooldown before benchmarking (default 180, 0 to skip).
 #
 # Usage
-#   utils/tests-performance-regression.sh [--check|--bootstrap-baseline|--legacy]
+#   utils/tests-performance-regression.sh [--check|--bootstrap-baseline]
 # =============================================================================
 
 set -euo pipefail

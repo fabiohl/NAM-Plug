@@ -1195,12 +1195,12 @@ impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for GuiShare
     ) -> neural_amp_modeler_rs::common::diagnostics::AudioInfo {
         let sr = self.cold.sample_rate.load(Ordering::Relaxed);
         let buffer_size = self.cold.buffer_size.load(Ordering::Relaxed) as usize;
-        neural_amp_modeler_rs::common::diagnostics::AudioInfo {
-            sample_rate: sr,
+        neural_amp_modeler_rs::common::diagnostics::AudioInfo::new(
+            sr,
             buffer_size,
-            channel_count: consumer.channel_count,
-            host_name: consumer.host_name.clone(),
-        }
+            consumer.channel_count,
+            consumer.host_name.clone(),
+        )
     }
 
     fn rt_info(&self) -> neural_amp_modeler_rs::common::diagnostics::RtInfo {
