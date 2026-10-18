@@ -19,7 +19,11 @@
 //!
 //! # Lifetime protocol
 //!
-//! - [`GuiWorker::spawn`] starts the thread lazily at the first GUI open.
+//! - [`GuiWorker::spawn`] starts the thread (eagerly, from `gui.create()`, so
+//!   the platform can be pre-warmed before the first window — F-UX-05).
+//! - [`GuiWorker::warm_up`] asks the worker to initialize the Slint/winit
+//!   platform **without creating a window** (fire-and-forget), moving backend
+//!   startup off the host main thread's critical path.
 //! - [`GuiWorker::open_window`] queues a window generation and waits (bounded)
 //!   for the backend to confirm creation — same protocol as the old
 //!   per-generation thread, now routed through the persistent worker.
@@ -46,6 +50,12 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 /// Bounded wait for the backend to confirm window creation.
+///
+/// Kept at 2 s: F-UX-05 permits lowering it to ~500 ms only once T5.2's
+/// operator-side measurement confirms the pre-warmed p95 main-thread block is
+/// comfortably below the 50 ms criterion documented in `docs/testing.md`. With
+/// the platform pre-warmed (`warm_up`), this timeout is a safety net, not the
+/// expected wait.
 const OPEN_WINDOW_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Job sent from the host main thread to the persistent GUI worker.
@@ -62,6 +72,10 @@ pub(crate) struct GuiWindowJob {
 
 /// Job sent from the host main thread to the persistent GUI worker.
 pub(crate) enum GuiWorkerJob {
+    /// Pre-warm the Slint/winit platform on the worker thread without creating
+    /// a window (F-UX-05 / T5.1). Fire-and-forget: no reply channel — the
+    /// worker logs the elapsed time.
+    WarmUp { force_x11: bool },
     OpenWindow {
         job: GuiWindowJob,
         reply: mpsc::Sender<Result<slint::Weak<MainWindow>, &'static str>>,
@@ -95,19 +109,51 @@ impl GuiWorker {
         })
     }
 
+    /// Pre-warms the Slint/winit platform on the worker thread (F-UX-05 /
+    /// T5.1).
+    ///
+    /// Fire-and-forget: the platform initializes before the first window
+    /// generation, so the host's `set_parent`/`set_transient`/`show` no longer
+    /// pay backend startup while the main thread is blocked in `open_window`.
+    /// Jobs are processed in order, so an `open_window` queued afterwards
+    /// simply waits behind the (already running) warm-up.
+    pub(crate) fn warm_up(&self, force_x11: bool) {
+        // A closed channel means the worker is shutting down; the subsequent
+        // `open_window` reports the failure, so the send result is irrelevant.
+        let _ = self.tx.send(GuiWorkerJob::WarmUp { force_x11 });
+    }
+
     /// Queues a window generation and waits (bounded) for the backend to
     /// confirm creation. The window is created on this instance's persistent
     /// worker thread, which owns the Slint platform and event loop.
+    ///
+    /// The wait is measured and logged at `info` level: this is the exact
+    /// host-main-thread block time that F-UX-05/T5.2 budgets at p95 < 50 ms
+    /// once the platform is pre-warmed.
     pub(crate) fn open_window(
         &self,
         job: GuiWindowJob,
     ) -> Result<slint::Weak<MainWindow>, &'static str> {
+        let started = std::time::Instant::now();
         let (reply, rx) = mpsc::channel();
         self.tx
             .send(GuiWorkerJob::OpenWindow { job, reply })
             .map_err(|_| "the GUI worker is shutting down")?;
-        rx.recv_timeout(OPEN_WINDOW_TIMEOUT)
-            .map_err(|_| "GUI window creation timed out")?
+        let outcome = rx.recv_timeout(OPEN_WINDOW_TIMEOUT);
+        let elapsed_ms = started.elapsed().as_millis();
+        match outcome {
+            Ok(result) => {
+                log::info!("NAM-Plug: GUI open_window completed in {elapsed_ms} ms");
+                result
+            }
+            Err(_) => {
+                log::warn!(
+                    "NAM-Plug: GUI open_window timed out after {elapsed_ms} ms \
+                     (host main thread was blocked for this long)"
+                );
+                Err("GUI window creation timed out")
+            }
+        }
     }
 
     /// Stops the worker: the channel is closed so the thread exits as soon as
@@ -140,12 +186,37 @@ fn worker_main(
 ) {
     while let Ok(job) = rx.recv() {
         match job {
+            GuiWorkerJob::WarmUp { force_x11 } => {
+                warm_up_backend(force_x11);
+            }
             GuiWorkerJob::OpenWindow { job, reply } => {
                 run_window_generation(job, reply, Arc::clone(&shared_arc), host_static);
             }
         }
     }
     log::debug!("NAM-Plug: persistent GUI worker exiting");
+}
+
+/// Initializes the Slint/winit platform on the worker thread **without**
+/// creating a window (F-UX-05 / T5.1) and logs how long the startup took.
+///
+/// The backend selection is process-global and pinned to the thread that
+/// initializes it; the actual `MainWindow` is created later by
+/// `run_window_generation` on this same thread. A failed selection is cached
+/// process-wide, so a headless run fails fast here instead of blocking the
+/// host's first `open_window`.
+fn warm_up_backend(force_x11: bool) {
+    let started = std::time::Instant::now();
+    match x11_embed::ensure_backend_on_gui_thread(force_x11) {
+        Ok(()) => log::info!(
+            "NAM-Plug: Slint platform pre-warmed in {} ms (force_x11={force_x11})",
+            started.elapsed().as_millis()
+        ),
+        Err(msg) => log::debug!(
+            "NAM-Plug: Slint platform pre-warm unavailable after {} ms: {msg}",
+            started.elapsed().as_millis()
+        ),
+    }
 }
 
 /// Creates, shows, and runs one window generation on the worker thread.
@@ -159,7 +230,9 @@ fn run_window_generation(
     // the winit backend here (with the X11 event loop + dynamic embed hook),
     // before the first window of the process is created. Floating generations
     // pin the backend too (force_x11 per the negotiated API) so the process
-    // event-loop kind is known deterministically.
+    // event-loop kind is known deterministically. When `warm_up` already
+    // initialized the platform, this call is a cached no-op (`OnceLock`) — the
+    // backend was pinned on this same thread.
     if let Err(msg) = x11_embed::ensure_backend_on_gui_thread(job.force_x11) {
         log::warn!("NAM-Plug: GUI backend unavailable: {msg}");
         let _ = reply.send(Err(msg));

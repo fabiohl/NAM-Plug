@@ -131,6 +131,18 @@ opt-level = 3
 codegen-units = 1
 panic = "unwind"
 
+# Criterion builds (`cargo bench`, `cargo bench --no-run`) inherit the release
+# profile by default. Fat LTO over the whole graph at a single codegen unit is
+# the single largest peak-memory operation in this repository and could OOM a
+# 16 GiB host. Thin LTO keeps cross-crate inlining while bounding memory.
+# Consequence: codegen differs from the shipped fat-LTO `release`/`dist`
+# binaries, so the operator must re-bootstrap the Criterion baseline
+# (`utils/tests-performance-regression.sh --bootstrap-baseline`) before treating
+# `--check` as a regression signal.
+[profile.bench]
+lto = "thin"
+codegen-units = 16
+
 [profile.dist]
 inherits = "release"
 panic = "unwind"
@@ -150,3 +162,7 @@ allow_attributes = "warn"
 [package.metadata.docs.rs]
 features = ["testing"]
 rustdoc-args = ["--cfg", "docsrs"]
+
+[patch.crates-io]
+NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs" }
+

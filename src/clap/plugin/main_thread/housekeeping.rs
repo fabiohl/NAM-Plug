@@ -6,13 +6,16 @@
 use super::NamClapMainThread;
 use crate::clap::gui::dialog_state;
 use crate::clap::plugin::shared::{
-    ModelRequestOrigin, PendingModelRequest, SlimmableRebuild, StagedSwap,
+    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, RENDER_MODE_OFFLINE,
+    SlimmableRebuild, StagedSwap,
 };
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::host::HostMainThreadHandle;
+use clack_plugin::plugin::PluginError;
 use neural_amp_modeler_rs::common::spsc::{self, GcItem, drain_gc_channels};
 use neural_amp_modeler_rs::models::slimmable::slice_wavenet_model;
 use neural_amp_modeler_rs::models::{NamModel, StaticModel};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 impl<'a> NamClapMainThread<'a> {
@@ -50,7 +53,9 @@ impl<'a> NamClapMainThread<'a> {
         self.drain_gc_and_sync_flags();
         self.handle_slimmable_rebuild();
         self.handle_oversample_rebuild();
+        self.sync_watchdog_cadence();
         self.handle_pending_model_load();
+        self.handle_pending_async_restore();
         self.handle_pending_ir_and_clear();
         self.sync_latency_and_telemetry();
     }
@@ -132,9 +137,148 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
+    /// Adaptive-rebuild watchdog fallback (S6-T2 / F-UX-02).
+    ///
+    /// While a structural rebuild flag is still pending at the end of the tick
+    /// (the worker-retained / full-ring retry case), the host watchdog is
+    /// re-armed at [`WATCHDOG_FAST_PERIOD_MS`] so the retry cadence shortens even
+    /// when `request_callback` is ineffective. The nominal
+    /// [`WATCHDOG_PERIOD_MS`] is restored as soon as no flag is pending, so idle
+    /// CPU is unchanged.
+    pub(crate) fn sync_watchdog_cadence(&self) {
+        let rt = &self.shared.cold.rt_status;
+        let pending = rt.check_flag(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
+            || rt.check_flag(spsc::RT_STATUS_NEEDS_OS_REBUILD);
+        let want = if pending {
+            super::WATCHDOG_FAST_PERIOD_MS
+        } else {
+            super::WATCHDOG_PERIOD_MS
+        };
+        if self.watchdog_period_ms.get() != want {
+            self.reprogram_watchdog(want);
+        }
+    }
+
+    /// Re-arms the host watchdog timer at `period_ms`, registering the new timer
+    /// before releasing the old one so a registration failure keeps a live timer.
+    /// Hosts without `clap_plugin_timer_support` simply track the logical cadence.
+    fn reprogram_watchdog(&self, period_ms: u32) {
+        let Some(timer_ext) = self
+            .host
+            .get_extension::<clack_extensions::timer::HostTimer>()
+        else {
+            self.watchdog_period_ms.set(period_ms);
+            return;
+        };
+        match timer_ext.register_timer(&self.host, period_ms) {
+            Ok(new_id) => {
+                if let Some(old_id) = self.watchdog_timer.replace(Some(new_id)) {
+                    let _ = timer_ext.unregister_timer(&self.host, old_id);
+                }
+                self.watchdog_period_ms.set(period_ms);
+                log::debug!("NAM-Plug: watchdog timer re-armed at {period_ms} ms");
+            }
+            Err(err) => {
+                log::warn!(
+                    "NAM-Plug: failed to re-arm watchdog timer at {period_ms} ms ({err}); \
+                     keeping the previous cadence"
+                );
+            }
+        }
+    }
+
+    /// WaveNet slimmable rebuild (S6-T1 / F-UX-02).
+    ///
+    /// When the adaptive offload is enabled the loader worker performs the
+    /// allocation-heavy `slice` + `prewarm` + `set_max_buffer_size` off the main
+    /// thread and publishes the built payload; this tick only consumes it, pushes
+    /// it onto the slimmable SPSC and clears the flag — the flag→swap latency no
+    /// longer waits for the 250 ms watchdog. If the worker is unavailable (sync
+    /// rollback or spawn failure) the historical inline path runs instead.
+    fn handle_slimmable_rebuild(&self) {
+        if !self
+            .shared
+            .cold
+            .rt_status
+            .check_flag_acquire(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
+        {
+            return;
+        }
+
+        if self.async_adaptive_rebuild && !self.sync_model_load && self.ensure_rebuild_worker() {
+            self.drain_slimmable_rebuild();
+            return;
+        }
+
+        self.handle_slimmable_rebuild_inline();
+    }
+
+    /// Consumes a worker-built slimmable payload (when ready), pushes it onto the
+    /// SPSC and clears the flag on success. A full ring retains **both** the
+    /// payload and the flag so the next tick retries — preserving the legacy
+    /// fail-closed semantics.
+    fn drain_slimmable_rebuild(&self) {
+        let outcome = {
+            let mut slot = self
+                .rebuild_slots
+                .slimmable
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+        let Some(outcome) = outcome else {
+            // The worker is still building; its `request_callback` resumes us.
+            return;
+        };
+
+        match outcome {
+            super::model_loader::SlimmableRebuildOutcome::Ready(boxed) => {
+                match self.slimmable_tx.borrow_mut().push(boxed) {
+                    Ok(()) => self
+                        .shared
+                        .cold
+                        .rt_status
+                        .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD),
+                    Err(rtrb::PushError::Full(retained)) => {
+                        // Keep the payload and the flag so the FSM retries on
+                        // the next cycle instead of silently dropping the
+                        // slimmed model and locking quality.
+                        *self
+                            .rebuild_slots
+                            .slimmable
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = Some(
+                            super::model_loader::SlimmableRebuildOutcome::Ready(retained),
+                        );
+                        log::warn!("NAM-Plug: slimmable channel full — rebuild will retry");
+                        self.host.request_callback();
+                    }
+                }
+            }
+            super::model_loader::SlimmableRebuildOutcome::Failed => {
+                self.shared
+                    .cold
+                    .rt_status
+                    .set_flag(spsc::RT_STATUS_SLIMMABLE_SLICE_FAILED);
+                self.shared
+                    .cold
+                    .rt_status
+                    .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+            }
+            super::model_loader::SlimmableRebuildOutcome::Skipped => {
+                // target_ch < 4 or no WaveNet: no-op, clear so the FSM does not
+                // retry.
+                self.shared
+                    .cold
+                    .rt_status
+                    .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+            }
+        }
+    }
+
     /// WaveNet slimmable rebuild: main thread performs all allocation,
     /// prewarm, and mmap outside the audio-thread callback.
-    fn handle_slimmable_rebuild(&self) {
+    fn handle_slimmable_rebuild_inline(&self) {
         if !self
             .shared
             .cold
@@ -227,9 +371,95 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
+    /// Oversampling engine rebuild (S6-T1 / F-UX-02).
+    ///
+    /// When the adaptive offload is enabled the loader worker creates the two
+    /// `OversampleEngine`s (filters + buffers) off the main thread; this tick
+    /// pushes them onto the command ring and clears the flag. The inline path is
+    /// kept as the sync-rollback fallback.
+    fn handle_oversample_rebuild(&self) {
+        if !self
+            .shared
+            .cold
+            .rt_status
+            .check_flag_acquire(spsc::RT_STATUS_NEEDS_OS_REBUILD)
+        {
+            return;
+        }
+
+        if self.async_adaptive_rebuild && !self.sync_model_load && self.ensure_rebuild_worker() {
+            self.drain_oversample_rebuild();
+            return;
+        }
+
+        self.handle_oversample_rebuild_inline();
+    }
+
+    /// Consumes a worker-built oversampling payload (when ready), pushes it onto
+    /// the command ring and clears the flag on success. A full ring retains both
+    /// the payload and the flag for a retry on the next tick.
+    fn drain_oversample_rebuild(&self) {
+        let outcome = {
+            let mut slot = self
+                .rebuild_slots
+                .oversample
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+
+        match outcome {
+            super::model_loader::OversampleRebuildOutcome::Ready(os_l, os_r) => {
+                let push = self.cmd_producer.borrow_mut().try_push_command(
+                    crate::clap::plugin::ClapParamPayload::SetOversample { os_l, os_r },
+                );
+                match push {
+                    Ok(_) => self
+                        .shared
+                        .cold
+                        .rt_status
+                        .clear_flag_release(spsc::RT_STATUS_NEEDS_OS_REBUILD),
+                    Err((crate::clap::plugin::command_scheduler::PushError::Full, payload)) => {
+                        if let crate::clap::plugin::ClapParamPayload::SetOversample { os_l, os_r } =
+                            payload
+                        {
+                            *self
+                                .rebuild_slots
+                                .oversample
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(
+                                super::model_loader::OversampleRebuildOutcome::Ready(os_l, os_r),
+                            );
+                        }
+                        log::warn!(
+                            "NAM-Plug: Command ring full during SetOversample; retaining flag for retry"
+                        );
+                        self.host.request_callback();
+                    }
+                }
+            }
+            super::model_loader::OversampleRebuildOutcome::Failed => {
+                neural_amp_modeler_rs::common::diagnostics::NamDiagnostic::new(
+                    neural_amp_modeler_rs::common::diagnostics::NamErrorCode::OutOfMemory,
+                    &self.sys,
+                )
+                .message("Failed to rebuild oversample engine (OOM).")
+                .hint("The current oversampling state will be preserved.")
+                .emit_warning();
+                self.shared
+                    .cold
+                    .rt_status
+                    .clear_flag_release(spsc::RT_STATUS_NEEDS_OS_REBUILD);
+            }
+        }
+    }
+
     /// Oversampling engine rebuild: main thread performs all allocation
     /// (OversampleEngine::new creates filters and buffers) off the audio-thread.
-    fn handle_oversample_rebuild(&self) {
+    fn handle_oversample_rebuild_inline(&self) {
         if !self
             .shared
             .cold
@@ -299,6 +529,12 @@ impl<'a> NamClapMainThread<'a> {
                 e.into_inner()
             });
             if let Some(path) = dialog_guard.take() {
+                // The picker has completed (selected, cancelled, or timed out):
+                // the dialog is closed from here on (F-UX-06).
+                self.shared
+                    .cold
+                    .ui_dialog_open
+                    .store(false, Ordering::Relaxed);
                 let mut queue_guard = self
                     .shared
                     .cold
@@ -322,6 +558,20 @@ impl<'a> NamClapMainThread<'a> {
         }
 
         // Pop at most one request per housekeeping cycle.
+        // 1. Accept at most one queued request (updates the load target, so a
+        //    request accepted now supersedes an in-flight/queued earlier one).
+        self.accept_queued_model_request();
+        // 2. Drain a result published by the loader worker (if any) — a result
+        //    whose generation was superseded is discarded here.
+        self.poll_model_loader_result();
+        // 3. Dispatch the next accepted job when the worker is idle.
+        self.dispatch_pending_model_load();
+    }
+
+    /// Pops at most one request from the queue and hands it to the load
+    /// pipeline. Keeps each housekeeping tick bounded (the async path never
+    /// blocks; the synchronous fallback preserves the legacy behaviour).
+    fn accept_queued_model_request(&self) {
         let (request, remaining_count) = {
             let mut queue_guard = self
                 .shared
@@ -338,68 +588,462 @@ impl<'a> NamClapMainThread<'a> {
         };
 
         if let Some(req) = request {
-            let cancelled_sentinel = dialog_state::dialog_cancelled_sentinel();
-            let timedout_sentinel = dialog_state::dialog_timedout_sentinel();
-
-            if req.path == cancelled_sentinel {
-                log::info!("NAM-Plug: model file dialog cancelled by user");
-                self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
-            } else if req.path == timedout_sentinel {
-                log::info!("NAM-Plug: model file dialog timed out");
-                self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
-            } else {
-                let res = self.load_model(&req.path);
-                self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
-
-                match res {
-                    Ok(_) => {
-                        if let ModelRequestOrigin::Preset { location, load_key } = req.origin {
-                            notify_preset_loaded(&self.host, &location, load_key.as_deref());
-                        }
-                    }
-                    Err(e) => {
-                        let err_msg = if !e.user_hint().is_empty() {
-                            format!("{}: {}", e.user_message(), e.user_hint())
-                        } else if !e.user_message().is_empty() {
-                            e.user_message().to_string()
-                        } else {
-                            e.error_code().message().to_string()
-                        };
-                        let mut msg_guard = self
-                            .shared
-                            .cold
-                            .ui_load_error_msg
-                            .lock()
-                            .unwrap_or_else(|e| {
-                                log::error!("PoisonError in ui_load_error_msg lock: {e:?}");
-                                e.into_inner()
-                            });
-                        *msg_guard = err_msg.clone();
-                        self.shared
-                            .cold
-                            .ui_load_error
-                            .store(true, Ordering::Relaxed);
-
-                        if let ModelRequestOrigin::Preset { location, load_key } = req.origin {
-                            notify_preset_error(
-                                &self.host,
-                                &location,
-                                load_key.as_deref(),
-                                e.error_code() as i32,
-                                &err_msg,
-                            );
-                        }
-
-                        log::error!("Failed to load model: {e:?}");
-                    }
-                }
-            }
+            self.accept_model_request(req);
 
             // If there are more requests pending in the queue, schedule the next
             // housekeeping cycle to drain sequentially across main thread ticks.
             if remaining_count > 0 {
                 self.host.request_callback();
             }
+        }
+    }
+
+    /// Accepts one already-popped request. Sentinels terminate the dialog idle;
+    /// a real path either runs synchronously (rollback mode / worker
+    /// unavailable) or is queued for the asynchronous loader.
+    fn accept_model_request(&self, req: PendingModelRequest) {
+        let cancelled_sentinel = dialog_state::dialog_cancelled_sentinel();
+        let timedout_sentinel = dialog_state::dialog_timedout_sentinel();
+
+        if req.path == cancelled_sentinel {
+            log::info!("NAM-Plug: model file dialog cancelled by user");
+            // F-UX-06: cancelled/timed out dialogs end idle — clear both the
+            // dialog-open and the loading flag (unless a load is still active).
+            self.shared
+                .cold
+                .ui_dialog_open
+                .store(false, Ordering::Relaxed);
+            self.maybe_finish_loading_ui();
+            return;
+        }
+        if req.path == timedout_sentinel {
+            log::info!("NAM-Plug: model file dialog timed out");
+            self.shared
+                .cold
+                .ui_dialog_open
+                .store(false, Ordering::Relaxed);
+            self.maybe_finish_loading_ui();
+            return;
+        }
+
+        // Real load: the picker is done and the loader takes over (F-UX-06).
+        self.shared
+            .cold
+            .ui_dialog_open
+            .store(false, Ordering::Relaxed);
+
+        if self.sync_model_load {
+            self.run_sync_model_load(req);
+            return;
+        }
+
+        // Allocate the model identity generation now (before dispatch) so a
+        // newer request bumps the target and this result can be discarded when
+        // it arrives late. `ui_loading` is raised here and cleared on commit or
+        // error.
+        let generation = self.shared.cold.allocate_model_generation();
+        self.shared.cold.ui_loading.store(true, Ordering::Relaxed);
+
+        let is_gui = matches!(req.origin, ModelRequestOrigin::Gui);
+        let job = super::model_loader::ModelLoaderJob {
+            path: req.path,
+            origin: req.origin,
+            generation,
+            host_rate: 0,
+            buffer_size: 0,
+        };
+
+        let mut pending = self.pending_async_loads.borrow_mut();
+        if is_gui {
+            // Last-wins: a GUI request supersedes every pending GUI request
+            // (the user's newest pick wins) and invalidates an in-flight GUI
+            // load. Preset requests keep their FIFO order and are never
+            // cancelled here.
+            pending.retain(|j| !matches!(j.origin, ModelRequestOrigin::Gui));
+            if self.model_worker_busy.get() && self.dispatched_model_is_gui.get() {
+                self.dispatched_model_generation.set(0);
+            }
+        }
+        // Keep the secondary queue bounded like the ingress queue
+        // (`MAX_PENDING_MODEL_REQUESTS`): while the serial worker chews on one
+        // heavy `prepare_model`, ticks draining the ingress must not grow this
+        // queue without limit. Evict the oldest job (latest intent wins) and let
+        // an evicted preset be reported to the host so it is never left waiting.
+        let evicted = if pending.len() >= MAX_PENDING_MODEL_REQUESTS {
+            pending.pop_front()
+        } else {
+            None
+        };
+        pending.push_back(job);
+        drop(pending);
+
+        if let Some(evicted) = evicted
+            && let ModelRequestOrigin::Preset { location, load_key } = evicted.origin
+        {
+            log::warn!(
+                "NAM-Plug: superseded a queued preset model load (queue full at {MAX_PENDING_MODEL_REQUESTS})"
+            );
+            notify_preset_error(
+                &self.host,
+                &location,
+                load_key.as_deref(),
+                0,
+                "Preset model load superseded before it could start",
+            );
+        }
+    }
+
+    /// Clears `ui_loading` only when no load is in flight or pending.
+    fn maybe_finish_loading_ui(&self) {
+        if !self.model_worker_busy.get() && self.pending_async_loads.borrow().is_empty() {
+            self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Historical synchronous load path: used in rollback mode
+    /// (`NAM_SYNC_MODEL_LOAD`), and as the fail-closed fallback when the loader
+    /// worker cannot be spawned or dispatched.
+    fn run_sync_model_load(&self, req: PendingModelRequest) {
+        self.shared.cold.ui_loading.store(true, Ordering::Relaxed);
+        let res = self.load_model(&req.path);
+        self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
+
+        match res {
+            Ok(_) => {
+                if let ModelRequestOrigin::Preset { location, load_key } = req.origin {
+                    notify_preset_loaded(&self.host, &location, load_key.as_deref());
+                }
+            }
+            Err(e) => self.report_model_load_error(&req.origin, &e),
+        }
+    }
+
+    /// Surfaces a load error to the GUI (persistent message, F-UX-06) and,
+    /// when the request came from a preset, reports it to the host.
+    fn report_model_load_error(
+        &self,
+        origin: &ModelRequestOrigin,
+        e: &neural_amp_modeler_rs::common::diagnostics::NamDiagnostic,
+    ) {
+        let err_msg = if !e.user_hint().is_empty() {
+            format!("{}: {}", e.user_message(), e.user_hint())
+        } else if !e.user_message().is_empty() {
+            e.user_message().to_string()
+        } else {
+            e.error_code().message().to_string()
+        };
+        let mut msg_guard = self
+            .shared
+            .cold
+            .ui_load_error_msg
+            .lock()
+            .unwrap_or_else(|e| {
+                log::error!("PoisonError in ui_load_error_msg lock: {e:?}");
+                e.into_inner()
+            });
+        *msg_guard = err_msg.clone();
+        self.shared
+            .cold
+            .ui_load_error
+            .store(true, Ordering::Relaxed);
+
+        if let ModelRequestOrigin::Preset { location, load_key } = origin {
+            notify_preset_error(
+                &self.host,
+                location,
+                load_key.as_deref(),
+                e.error_code() as i32,
+                &err_msg,
+            );
+        }
+
+        log::error!("Failed to load model: {e:?}");
+    }
+
+    /// Consumes a result published by the loader worker. A result whose
+    /// generation does not match the newest accepted request was superseded and
+    /// is discarded — it neither commits nor notifies the host.
+    fn poll_model_loader_result(&self) {
+        let result = {
+            let mut slot = self
+                .model_result_slot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+        let Some(result) = result else {
+            return;
+        };
+        self.model_worker_busy.set(false);
+
+        if result.generation == 0 || result.generation != self.dispatched_model_generation.get() {
+            log::debug!(
+                "NAM-Plug: discarding superseded async model load (generation {})",
+                result.generation
+            );
+            self.dispatched_model_generation.set(0);
+            self.dispatched_model_is_gui.set(false);
+            return;
+        }
+        self.dispatched_model_generation.set(0);
+        self.dispatched_model_is_gui.set(false);
+
+        // Keep `ui_loading` raised while another load is still queued (the next
+        // one is dispatched right after this poll in the same tick).
+        let still_loading = !self.pending_async_loads.borrow().is_empty();
+        self.shared
+            .cold
+            .ui_loading
+            .store(still_loading, Ordering::Relaxed);
+        match result.outcome {
+            Ok(prepared) => {
+                self.commit_prepared_model_with_generation(prepared, result.generation);
+                if let ModelRequestOrigin::Preset { location, load_key } = result.origin {
+                    notify_preset_loaded(&self.host, &location, load_key.as_deref());
+                }
+            }
+            Err(e) => self.report_model_load_error(&result.origin, &e),
+        }
+    }
+
+    /// Dispatches the next accepted job when the worker is idle, spawning the
+    /// loader lazily on first use. Any failure falls back to the synchronous
+    /// path (fail-closed).
+    fn dispatch_pending_model_load(&self) {
+        if self.model_worker_busy.get() {
+            return;
+        }
+        let Some(mut job) = self.pending_async_loads.borrow_mut().pop_front() else {
+            return;
+        };
+
+        // Capture the current host rates at dispatch time (they are stable
+        // while the job runs; a mismatch is handled by the generation check).
+        job.host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
+        job.buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
+
+        let have_loader = self.model_loader.borrow().is_some();
+        if !have_loader && let Err(msg) = self.spawn_model_loader() {
+            log::warn!(
+                "NAM-Plug: model loader worker unavailable ({msg}); \
+                 falling back to synchronous load"
+            );
+            self.run_sync_model_load(PendingModelRequest {
+                path: job.path,
+                origin: job.origin,
+            });
+            return;
+        }
+
+        let job_generation = job.generation;
+        let job_is_gui = matches!(job.origin, ModelRequestOrigin::Gui);
+
+        let dispatch_result = {
+            let loader = self.model_loader.borrow();
+            loader.as_ref().map(|loader| loader.dispatch(job))
+        };
+
+        match dispatch_result {
+            Some(Ok(())) => {
+                self.model_worker_busy.set(true);
+                self.dispatched_model_generation.set(job_generation);
+                self.dispatched_model_is_gui.set(job_is_gui);
+            }
+            Some(Err(job)) => {
+                log::warn!(
+                    "NAM-Plug: model loader dispatch failed; falling back to synchronous load"
+                );
+                self.run_sync_model_load(PendingModelRequest {
+                    path: job.path,
+                    origin: job.origin,
+                });
+            }
+            None => {
+                // The loader was just spawned; `is_none` is unreachable here.
+                log::error!("NAM-Plug: model loader missing after spawn");
+            }
+        }
+    }
+
+    /// Lazily spawns the per-instance asynchronous model loader.
+    ///
+    /// When the adaptive-rebuild offload is enabled the worker also receives the
+    /// rebuild delivery slots and polls the `RT_STATUS_NEEDS_*` flags (S6-T1);
+    /// under the `NAM_SYNC_ADAPTIVE_REBUILD` rollback it is spawned with `None`
+    /// and the main thread keeps the legacy inline rebuild path.
+    fn spawn_model_loader(&self) -> Result<(), &'static str> {
+        let (host_static, shared_arc) = self.host_static_and_shared();
+        let rebuilds = if self.async_adaptive_rebuild {
+            Some(self.rebuild_slots.clone())
+        } else {
+            None
+        };
+        let loader = super::model_loader::ModelLoader::spawn(
+            self.shared.cold.instance_id,
+            self.sys.clone(),
+            shared_arc,
+            host_static,
+            Arc::clone(&self.model_result_slot),
+            rebuilds,
+        )?;
+        *self.model_loader.borrow_mut() = Some(loader);
+        Ok(())
+    }
+
+    /// Ensures the asynchronous loader worker exists, spawning it lazily.
+    ///
+    /// Returns `true` when a worker able to drive the adaptive rebuilds is
+    /// available; `false` (sync rollback, or spawn failure) makes the caller fall
+    /// back to the inline main-thread path (fail-closed).
+    fn ensure_rebuild_worker(&self) -> bool {
+        if self.model_loader.borrow().is_some() {
+            return true;
+        }
+        if let Err(msg) = self.spawn_model_loader() {
+            log::warn!(
+                "NAM-Plug: adaptive rebuild worker unavailable ({msg}); \
+                 rebuilding on the main thread"
+            );
+            return false;
+        }
+        true
+    }
+
+    // ── Asynchronous state restore (T4.3, opt-in) ──────────────────────────
+
+    /// Whether an interactive, active restore should be offloaded to the
+    /// restore worker instead of blocking the host's `state.load` callback.
+    pub(crate) fn should_use_async_restore(&self) -> bool {
+        self.async_restore_enabled.get()
+            && self.shared.cold.render_mode.load(Ordering::Relaxed) != RENDER_MODE_OFFLINE
+            && self.shared.cold.buffer_size.load(Ordering::Relaxed) > 0
+    }
+
+    /// Enqueues a restore for off-RT validation. Returns `Ok(())` as soon as the
+    /// job is accepted; the atomic commit runs later on the main thread.
+    pub(crate) fn enqueue_async_restore(
+        &self,
+        buffer: Vec<u8>,
+        mode: crate::clap::extensions::state_transaction::RestoreMode,
+    ) -> Result<(), PluginError> {
+        let host_rate = {
+            let rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
+            if rate == 0 { 48000 } else { rate }
+        };
+        let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
+        let job = super::restore_loader::RestoreJob {
+            buffer,
+            mode,
+            host_rate,
+            buffer_size,
+        };
+
+        if self.restore_worker_busy.get() {
+            // Last-wins: a newer restore supersedes an accepted-but-undispatched one.
+            *self.pending_async_restore.borrow_mut() = Some(job);
+            return Ok(());
+        }
+        self.dispatch_restore_job(job)
+    }
+
+    /// Spawns the worker lazily and dispatches `job`, falling back to the
+    /// synchronous path on any failure (fail-closed).
+    fn dispatch_restore_job(
+        &self,
+        job: super::restore_loader::RestoreJob,
+    ) -> Result<(), PluginError> {
+        let have_loader = self.restore_loader.borrow().is_some();
+        if !have_loader && let Err(msg) = self.spawn_restore_loader() {
+            log::warn!(
+                "NAM-Plug: restore loader worker unavailable ({msg}); \
+                 falling back to synchronous restore"
+            );
+            return self.run_sync_restore(job);
+        }
+
+        let dispatch_result = {
+            let loader = self.restore_loader.borrow();
+            loader.as_ref().map(|loader| loader.dispatch(job))
+        };
+
+        match dispatch_result {
+            Some(Ok(())) => {
+                self.restore_worker_busy.set(true);
+                Ok(())
+            }
+            Some(Err(job)) => {
+                log::warn!(
+                    "NAM-Plug: restore loader dispatch failed; falling back to synchronous restore"
+                );
+                self.run_sync_restore(job)
+            }
+            None => Err(PluginError::Message("restore loader missing after spawn")),
+        }
+    }
+
+    /// Historical blocking restore used as the fail-closed fallback.
+    fn run_sync_restore(&self, job: super::restore_loader::RestoreJob) -> Result<(), PluginError> {
+        let params = crate::clap::extensions::state::load_state(&job.buffer)?;
+        let validated = crate::clap::extensions::state_transaction::validate::validate_and_build(
+            &params,
+            job.host_rate,
+            job.buffer_size,
+            &self.sys,
+            &job.mode,
+        )?;
+        crate::clap::extensions::state_transaction::commit::commit(validated, self, &job.mode)
+    }
+
+    fn spawn_restore_loader(&self) -> Result<(), &'static str> {
+        let (host_static, shared_arc) = self.host_static_and_shared();
+        let loader = super::restore_loader::RestoreLoader::spawn(
+            self.shared.cold.instance_id,
+            self.sys.clone(),
+            shared_arc,
+            host_static,
+            Arc::clone(&self.restore_result_slot),
+        )?;
+        *self.restore_loader.borrow_mut() = Some(loader);
+        Ok(())
+    }
+
+    /// Consumes a completed async restore and commits it on the main thread, then
+    /// dispatches any superseding job. Runs on each housekeeping tick.
+    fn handle_pending_async_restore(&self) {
+        let result = {
+            let mut slot = self
+                .restore_result_slot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+
+        if let Some(result) = result {
+            self.restore_worker_busy.set(false);
+            match result.outcome {
+                Ok(validated) => {
+                    if let Err(e) = crate::clap::extensions::state_transaction::commit::commit(
+                        validated,
+                        self,
+                        &result.mode,
+                    ) {
+                        // Fail-closed: the previous DSP state stays intact.
+                        log::error!("NAM-Plug: async state restore commit failed: {e}");
+                    } else {
+                        log::info!("NAM-Plug: async state restore committed");
+                    }
+                }
+                Err(msg) => {
+                    log::error!("NAM-Plug: async state restore validation failed: {msg}")
+                }
+            }
+        }
+
+        if !self.restore_worker_busy.get()
+            && let Some(job) = self.pending_async_restore.borrow_mut().take()
+            && let Err(e) = self.dispatch_restore_job(job)
+        {
+            log::error!("NAM-Plug: async state restore dispatch failed: {e}");
         }
     }
 

@@ -140,3 +140,104 @@ fn test_state_save_emits_confirmation_log() {
     log::set_max_level(original_level);
     logger.set_max_level(original_level);
 }
+
+// T-R2.3: Verify rate-limit and aggregation of xrun/overload warnings (<= 1 warning / 5 s)
+#[test]
+fn test_emit_pending_logs_overload_rate_limiting() {
+    let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    use crate::clap::host_harness::{self, HostEvent};
+    use clack_extensions::log::LogSeverity;
+    use clack_extensions::timer::TimerId;
+
+    let (_entry, _host_info, mut instance, host_state) =
+        host_harness::make_test_plugin_with_harness();
+    let shared = unsafe { &*test_util::extract_shared(&mut instance) };
+
+    // 1. Initial state: 0 overloads -> timer fires -> 0 warnings
+    host_harness::fire_timer(&mut instance, TimerId(1));
+    let logs = host_state
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Warning,
+                message,
+            } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        logs.is_empty(),
+        "No warnings should be emitted when there are no overloads"
+    );
+
+    // 2. Phase 1: 1 isolated stall -> exactly 1 warning cycle emitted
+    // Note: emit_pending_logs emits via both HostLog and log::warn! (which NamLogger forwards to HostLog),
+    // yielding 2 HostEvent::PluginLog entries for the single logical warning.
+    shared
+        .cold
+        .rt_status
+        .dsp_overloads
+        .store(1, Ordering::Relaxed);
+    shared
+        .rt_to_ui
+        .dsp_load_permille
+        .store(850, Ordering::Relaxed); // 85%
+
+    host_harness::fire_timer(&mut instance, TimerId(1));
+
+    let logs = host_state
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Warning,
+                message,
+            } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        logs.len(),
+        2,
+        "1 isolated stall must emit warning via HostLog and log::warn!"
+    );
+    assert!(
+        logs[0].contains("NAM-Plug: 1 blocks exceeded 85% of the callback budget (load 85%)"),
+        "Warning message must match expected template: {}",
+        logs[0]
+    );
+
+    // 3. Phase 2: 100 stalls in burst in the same 5-second window -> suppressed by rate limiter
+    shared
+        .cold
+        .rt_status
+        .dsp_overloads
+        .store(101, Ordering::Relaxed); // +100 overloads
+    shared
+        .rt_to_ui
+        .dsp_load_permille
+        .store(920, Ordering::Relaxed); // 92%
+
+    for _ in 0..10 {
+        host_harness::fire_timer(&mut instance, TimerId(1));
+    }
+
+    let logs_after_burst = host_state
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Warning,
+                message,
+            } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        logs_after_burst.len(),
+        2,
+        "100 stalls in burst must be suppressed by the 5-second rate limiter (no new warnings in window)"
+    );
+}

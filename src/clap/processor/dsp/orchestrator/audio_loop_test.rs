@@ -248,3 +248,149 @@ fn test_apply_iir_gain_ramp_bit_identity_equivalence() {
         }
     }
 }
+
+// ── T7.1 (S7 / F-UX-03): piecewise fused ramp ≡ legacy per-event split ──────
+
+use proptest::prelude::*;
+
+/// Reference "legacy" path: the pre-S7 scheduler ended the sub-block at every
+/// gain event and applied `apply_iir_gain_ramp_sub_block` once per piece with
+/// the target updated at each event boundary. Reproduced here verbatim so the
+/// fused helper can be proven numerically identical to it.
+fn legacy_split_ramp(
+    smoother: &mut ParamSmoother,
+    buf_l: &mut [f32],
+    buf_r: &mut [f32],
+    sorted_steps: &[(usize, f32)],
+    process_mono: bool,
+) {
+    let n = buf_l.len();
+    let mut pos = 0usize;
+    for &(off, target) in sorted_steps {
+        let off = off.min(n);
+        if off > pos {
+            apply_iir_gain_ramp_sub_block(
+                smoother,
+                buf_l,
+                buf_r,
+                pos,
+                off - pos,
+                false,
+                &mut false,
+                process_mono,
+            );
+            pos = off;
+        }
+        smoother.set_target(target);
+    }
+    if pos < n {
+        apply_iir_gain_ramp_sub_block(
+            smoother,
+            buf_l,
+            buf_r,
+            pos,
+            n - pos,
+            false,
+            &mut false,
+            process_mono,
+        );
+    }
+}
+
+fn smoother_for_alpha(alpha: f32) -> ParamSmoother {
+    // ParamSmoother derives alpha = 1 - exp(-2π fc / fs); invert to hit `alpha`.
+    // (called offline in tests, so a libm-free f32 computation is fine)
+    let fs = 48000.0f32;
+    let fc = -(fs / (2.0 * std::f32::consts::PI)) * (1.0 - alpha).ln();
+    ParamSmoother::new(1.0, fs, fc)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    #[test]
+    fn prop_fused_ramp_bit_identical_to_legacy_split(
+        n in 1usize..=512,
+        alpha in 0.0002f32..0.4,
+        initial in 0.01f32..4.0,
+        mut steps in prop::collection::vec((0usize..1024, 0.001f32..8.0f32), 0..=8),
+        process_mono in any::<bool>(),
+    ) {
+        steps.iter_mut().for_each(|s| s.0 = s.0.min(n.saturating_sub(1)));
+        steps.sort_by_key(|s| s.0);
+
+        let mut ref_l: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.013).sin()).collect();
+        let mut ref_r: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.017).cos()).collect();
+        let mut cand_l = ref_l.clone();
+        let mut cand_r = ref_r.clone();
+
+        let mut s_ref = smoother_for_alpha(alpha);
+        s_ref.set(initial);
+        s_ref.set_target(initial);
+
+        let mut s_cand = smoother_for_alpha(alpha);
+        s_cand.set(initial);
+        s_cand.set_target(initial);
+
+        legacy_split_ramp(&mut s_ref, &mut ref_l, &mut ref_r, &steps, process_mono);
+
+        let gain_steps: Vec<GainStep> = steps
+            .iter()
+            .map(|&(off, target)| GainStep {
+                offset: off as u32,
+                target,
+                is_input: true,
+            })
+            .collect();
+        apply_gain_ramp_with_steps(
+            &mut s_cand,
+            &mut cand_l,
+            &mut cand_r,
+            0,
+            n,
+            &gain_steps,
+            true,
+            false,
+            &mut false,
+            process_mono,
+        );
+
+        prop_assert_eq!(s_cand.current_value().to_bits(), s_ref.current_value().to_bits());
+        for i in 0..n {
+            prop_assert_eq!(cand_l[i].to_bits(), ref_l[i].to_bits());
+            if !process_mono {
+                prop_assert_eq!(cand_r[i].to_bits(), ref_r[i].to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn prop_empty_steps_equals_single_ramp(
+        n in 1usize..=512,
+        alpha in 0.0002f32..0.4,
+        initial in 0.01f32..4.0,
+        target in 0.01f32..8.0f32,
+    ) {
+        let mut a: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.011).sin()).collect();
+        let mut ar: Vec<f32> = vec![0.5; n];
+        let mut b = a.clone();
+        let mut br: Vec<f32> = vec![0.5; n];
+
+        let mut s_a = smoother_for_alpha(alpha);
+        s_a.set(initial);
+        s_a.set_target(target);
+        apply_iir_gain_ramp_sub_block(&mut s_a, &mut a, &mut ar, 0, n, false, &mut false, true);
+
+        let mut s_b = smoother_for_alpha(alpha);
+        s_b.set(initial);
+        s_b.set_target(target);
+        apply_gain_ramp_with_steps(
+            &mut s_b, &mut b, &mut br, 0, n, &[], true, false, &mut false, true,
+        );
+
+        prop_assert_eq!(s_b.current_value().to_bits(), s_a.current_value().to_bits());
+        for i in 0..n {
+            prop_assert_eq!(b[i].to_bits(), a[i].to_bits());
+        }
+    }
+}

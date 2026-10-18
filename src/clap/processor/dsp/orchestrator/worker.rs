@@ -21,6 +21,42 @@ pub(crate) struct ScheduledEvent {
     pub(crate) is_mod: bool,
 }
 
+/// One intra-sub-block gain targeting step produced while fusing a run of
+/// gain events into a single inference sub-block.
+///
+/// `offset` is relative to the sub-block start. Applying the smoother's IIR
+/// ramp piecewise at these exact offsets reproduces, bit-for-bit, the ramp the
+/// legacy per-event sub-block split produced — because the ramp is evaluated
+/// analytically from `(start, target, n)` and the smoother state converges to
+/// the same value. The neural model itself is block-invariant (see
+/// `clap_e2_proptest`), so fusing the inference call over the span is
+/// numerically transparent.
+#[derive(Clone, Copy)]
+pub(crate) struct GainStep {
+    pub(crate) offset: u32,
+    pub(crate) target: f32,
+    pub(crate) is_input: bool,
+}
+
+/// Gain target resolved from one gain event, returned by
+/// [`apply_scheduled_event`] so callers can stage a piecewise ramp instead of
+/// jumping the smoother immediately.
+#[derive(Clone, Copy)]
+pub(crate) struct GainTarget {
+    pub(crate) is_input: bool,
+    pub(crate) target: f32,
+}
+
+/// Single source of truth for "smoothed gain" parameters whose events may be
+/// fused into one inference sub-block: they are continuously smoothed, so they
+/// do not require an exact sample boundary. [`apply_scheduled_event`] returns
+/// `Some(GainTarget)` for exactly these parameters, and the scheduler's
+/// boundary classification delegates here, so the two can never drift.
+#[inline(always)]
+pub(crate) fn is_fusable_gain_param(param_id: u32) -> bool {
+    param_id == PARAM_INPUT_GAIN || param_id == PARAM_OUTPUT_GAIN
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(crate) fn apply_scheduled_event(
     param_id: u32,
@@ -39,7 +75,8 @@ pub(crate) fn apply_scheduled_event(
     gain_lut: &GainLUT,
     buffer_size: u32,
     pending_restart_os_factor: &AtomicU32,
-) {
+    apply_smoother: bool,
+) -> Option<GainTarget> {
     use crate::clap::extensions::params::{
         bypass_bool_to_u32, bypass_f32_to_bool, sanitize_param_value,
     };
@@ -50,11 +87,25 @@ pub(crate) fn apply_scheduled_event(
         match param_id {
             PARAM_INPUT_GAIN => {
                 *mod_input_gain = amount;
-                smoother_in.set_target(gain_lut.db_to_linear(params.input_gain_db + amount));
+                let target = gain_lut.db_to_linear(params.input_gain_db + amount);
+                if apply_smoother {
+                    smoother_in.set_target(target);
+                }
+                return Some(GainTarget {
+                    is_input: true,
+                    target,
+                });
             }
             PARAM_OUTPUT_GAIN => {
                 *mod_output_gain = amount;
-                smoother_out.set_target(gain_lut.db_to_linear(params.output_gain_db + amount));
+                let target = gain_lut.db_to_linear(params.output_gain_db + amount);
+                if apply_smoother {
+                    smoother_out.set_target(target);
+                }
+                return Some(GainTarget {
+                    is_input: false,
+                    target,
+                });
             }
             PARAM_GATE_THRESH => {
                 *mod_gate_thresh = amount;
@@ -70,14 +121,28 @@ pub(crate) fn apply_scheduled_event(
                 ui_to_rt
                     .param_input_gain
                     .store(val.to_bits(), Ordering::Relaxed);
-                smoother_in.set_target(gain_lut.db_to_linear(val + *mod_input_gain));
+                let target = gain_lut.db_to_linear(val + *mod_input_gain);
+                if apply_smoother {
+                    smoother_in.set_target(target);
+                }
+                return Some(GainTarget {
+                    is_input: true,
+                    target,
+                });
             }
             PARAM_OUTPUT_GAIN => {
                 params.output_gain_db = val;
                 ui_to_rt
                     .param_output_gain
                     .store(val.to_bits(), Ordering::Relaxed);
-                smoother_out.set_target(gain_lut.db_to_linear(val + *mod_output_gain));
+                let target = gain_lut.db_to_linear(val + *mod_output_gain);
+                if apply_smoother {
+                    smoother_out.set_target(target);
+                }
+                return Some(GainTarget {
+                    is_input: false,
+                    target,
+                });
             }
             PARAM_GATE_THRESH => {
                 params.gate_threshold_db = val;
@@ -150,4 +215,5 @@ pub(crate) fn apply_scheduled_event(
             _ => {}
         }
     }
+    None
 }

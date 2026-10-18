@@ -31,6 +31,40 @@ use std::sync::atomic::Ordering;
 /// drops a partial automation envelope in release without a flag.
 const MAX_SCHEDULED_EVENTS: usize = 4096;
 
+/// Minimum sub-block length retained when fusing gain-only event boundaries
+/// (F-UX-03 / S7-T7.2, Épico D).
+///
+/// Gain parameters (`PARAM_INPUT_GAIN`/`PARAM_OUTPUT_GAIN`, value or
+/// modulation) are already continuously smoothed by [`ParamSmoother`], so a
+/// gain event does **not** need to end the inference sub-block. When this
+/// constant is `> 1`, consecutive gain events inside a window are fused into
+/// one inference call and applied at their exact sample offsets through the
+/// piecewise IIR ramp ([`worker::GainStep`]) — numerically identical to the
+/// legacy per-event split (the neural model is block-invariant). Boundaries
+/// that must stay sample-accurate (`gate`, `bypass`, `oversample`, `slim`,
+/// adaptive/activation) are unaffected.
+///
+/// A value of `1` disables fusion entirely and reproduces the pre-S7 behavior
+/// exactly (rollback switch). The window is additionally capped by
+/// [`MAX_GAIN_STEPS`]; exceeding it forces a boundary so the fused window can
+/// never grow unbounded.
+const MIN_SPLIT_SAMPLES: usize = 16;
+
+/// Upper bound on gain targeting steps staged per fused sub-block. Sized to
+/// cover a dense 64-sample automation flood without forcing extra boundaries;
+/// larger windows fall back to a boundary (never a correctness issue, only a
+/// smaller optimization). Bounded so the on-stack step buffer stays tiny.
+const MAX_GAIN_STEPS: usize = 64;
+
+/// Whether an event is allowed to end the current inference sub-block.
+/// Only the smoothed gain parameters are boundary-free; everything else
+/// (gate threshold, bypass, oversample, slim override, adaptive compute,
+/// activation precision) keeps an exact sample-accurate boundary.
+#[inline(always)]
+fn event_requires_boundary(param_id: u32) -> bool {
+    !worker::is_fusable_gain_param(param_id)
+}
+
 impl<'a> NamClapProcessor<'a> {
     #[inline(always)]
     pub(crate) fn process_dsp_audio(
@@ -43,10 +77,58 @@ impl<'a> NamClapProcessor<'a> {
         // caller (`process()` above) drains the amortization window and
         // contains the block (dry via `dry_delay`, crossfade/gate/FSM held)
         // in `process_dry_contained_block` — this function is not reached
-        // while the non-converged model is outstanding. The non-finite
-        // containment path below stays integral (cold, correctness-first):
-        // its `model.reset` serves the corruption-containment scope, not the
-        // seek/loop relocation scope, and keeps its full synchronous prewarm.
+        // while the non-converged model is outstanding.
+        //
+        // S6-T3 (F-UX-04): a non-finite input sample poisons the model. The
+        // engine's input stage raises `RT_STATUS_NON_FINITE_INPUT_DETECTED`
+        // (and sanitizes only its own slices — never the downstream scratch
+        // buffers); the containment here restores the model to the
+        // freshly-built state in O(1) (`prewarm_reset`, no stabilization feed)
+        // and arms the *same* amortization window used by `reset()`, holding
+        // this and the following callbacks on the latency-compensated dry path
+        // until the model reconverges. This keeps the poisoning callback free
+        // of the multi-millisecond synchronous reset (measured 1.81 ms p99 LSTM
+        // / 4.18 ms p99 WaveNet A2) and guarantees the first post-convergence
+        // wet block equals a fresh instance's first block. The flag is cleared
+        // here so the containment runs once per poisoning — never once per
+        // block.
+        if self
+            .rt_status
+            .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED)
+        {
+            self.rt_status.clear_flag(
+                neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED,
+            );
+            if let Some(model) = self.model_l.as_mut() {
+                model.prewarm_reset();
+                self.prewarm_pending = true;
+            }
+            // The dry delay line must not replay pre-fault history (which would
+            // leak pre-containment audio through the bypass/crossfade path), and
+            // the parameter ramps must not originate in pre-fault state.
+            self.dry_delay.reset();
+            self.smoother_in.snap_to_target();
+            self.smoother_out.snap_to_target();
+            // Scratch hygiene identical to `reset()`: no pre-fault sample
+            // survives in a slot the wet path could read before rewriting after
+            // reconvergence.
+            self.buf_host_l.fill(0.0);
+            self.buf_host_r.fill(0.0);
+            self.buf_mid_l.fill(0.0);
+            self.buf_mid_r.fill(0.0);
+            self.buf_out_l.fill(0.0);
+            self.buf_out_r.fill(0.0);
+            self.buf_os_in_l.fill(0.0);
+            self.buf_os_in_r.fill(0.0);
+            self.buf_os_model_l.fill(0.0);
+            self.buf_os_model_r.fill(0.0);
+            self.buf_xfade_dry_l.fill(0.0);
+            self.buf_xfade_dry_r.fill(0.0);
+            self.buf_xfd_scratch_l.fill(0.0);
+            self.buf_xfd_scratch_r.fill(0.0);
+            return self.process_dry_contained_block(audio, input_events, start_nanos);
+        }
+
         // Track pending restart factor for latency-policy enforcement.
         // Decode via `PendingRestartOs` so a pending
         // transition *to Off* is observable (raw 0 == "no pending").
@@ -103,53 +185,10 @@ impl<'a> NamClapProcessor<'a> {
                 continue;
             };
 
-            // T8.4 containment (F-PERF-16): the engine input stage
-            // (`apply_input_stage_inner`, legs T8.1/T8.4 of the engine
-            // Sprint-3 equivalents) fuses non-finite detection into the
-            // already-loaded energy pass (`compute_energy_stereo` returns the
-            // `non_finite` flag at ~zero cost; `apply_output_stage` does the
-            // same) and raises `RT_STATUS_NON_FINITE_INPUT_DETECTED` itself.
-            // A pre-stage scan here is intentionally NOT (re)introduced: it
-            // would pay a second full-buffer pass (~16 KiB/frame @512) on
-            // every block, while the post-stage gate below observes the
-            // engine flag and performs the plugin-level containment (buffer
-            // zeroing + state reset) the engine stage alone cannot do — it
-            // only sanitizes its input slices, not the downstream scratch
-            // buffers. A host buffer already sanitized by the engine stage
-            // reports finite here by design; the flag/zero path reads the
-            // ENGINE flag after `apply_input_stage` runs, not a pre-scan.
-
-            if self.rt_status.check_flag(
-                neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED,
-            ) {
-                self.buf_host_l[..n_samples].fill(0.0);
-                self.buf_host_r[..n_samples].fill(0.0);
-                if let Some(model) = &mut self.model_l {
-                    // Reset the model at the effective rate of the active chain
-                    // (post-resample model rate), never a hard-coded 48 kHz —
-                    // models may be native 44.1/48 kHz and the host may run at
-                    // 44.1/48/96 kHz.
-                    let _ = model.reset(self.resampler.nam_rate(), n_samples);
-                }
-                self.buf_mid_l.fill(0.0);
-                self.buf_mid_r.fill(0.0);
-                self.buf_out_l.fill(0.0);
-                self.buf_out_r.fill(0.0);
-                self.buf_os_in_l.fill(0.0);
-                self.buf_os_in_r.fill(0.0);
-                self.buf_os_model_l.fill(0.0);
-                self.buf_os_model_r.fill(0.0);
-                self.buf_xfade_dry_l.fill(0.0);
-                self.buf_xfade_dry_r.fill(0.0);
-                self.buf_xfd_scratch_l.fill(0.0);
-                self.buf_xfd_scratch_r.fill(0.0);
-                // The dry delay line must not replay pre-fault
-                // history (which would leak the pre-containment audio through
-                // the bypass/crossfade path); reset it to a zeroed ring.
-                self.dry_delay.reset();
-                self.smoother_in.snap_to_target();
-                self.smoother_out.snap_to_target();
-            };
+            // S6-T3 (F-UX-04): non-finite containment is handled *before* this
+            // loop by the two-phase window at the top of the function, so a
+            // poisoning block never reaches the wet pipeline and the flag is
+            // consumed exactly once per occurrence.
 
             if self
                 .shared
@@ -203,6 +242,12 @@ impl<'a> NamClapProcessor<'a> {
             // the crossfade to avoid click artifacts.
             self.bypass_xfade.trigger(self.params.bypass);
 
+            let mut gain_steps = [worker::GainStep {
+                offset: 0,
+                target: 0.0,
+                is_input: true,
+            }; MAX_GAIN_STEPS];
+
             while block_offset < n_samples {
                 let mut out_of_order_applied = false;
                 while event_idx < event_count
@@ -232,6 +277,7 @@ impl<'a> NamClapProcessor<'a> {
                         self.gain_lut,
                         self.shared.cold.buffer_size.load(Ordering::Relaxed),
                         &self.shared.cold.pending_restart_os_factor,
+                        true,
                     );
                     event_idx += 1;
                     out_of_order_applied = true;
@@ -253,14 +299,101 @@ impl<'a> NamClapProcessor<'a> {
                     self.bypass_xfade.trigger(self.params.bypass);
                 }
 
-                let sub_end = if event_idx < event_count {
-                    let et = self.scheduled_events[event_idx].time;
-                    if et < n_samples { et } else { n_samples }
-                } else {
-                    n_samples
-                };
+                // Resolve the next sub-block boundary: the first event that
+                // requires an exact split (any non-gain param), or the
+                // gain-step cap. Gain events in `[block_offset, sub_end)` are
+                // fused into this sub-block and applied at their exact sample
+                // offsets through the piecewise IIR ramp, so the inference
+                // call is not fragmented by automation of smoothed gains.
+                let fuse = MIN_SPLIT_SAMPLES > 1
+                    && self.scheduled_events_sorted
+                    && n_samples <= neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF
+                    && !self.bypass_xfade.active
+                    && !self.params.bypass;
+                let mut sub_end = n_samples;
+                {
+                    let mut i = event_idx;
+                    let mut gains = 0usize;
+                    while i < event_count {
+                        let t = self.scheduled_events[i].time;
+                        if t < block_offset {
+                            i += 1;
+                            continue;
+                        }
+                        if t >= n_samples {
+                            break;
+                        }
+                        if !fuse || event_requires_boundary(self.scheduled_events[i].param_id) {
+                            sub_end = t;
+                            break;
+                        }
+                        gains += 1;
+                        if gains > MAX_GAIN_STEPS {
+                            sub_end = t;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
 
+                let mut n_steps = 0usize;
                 let sub_n = sub_end - block_offset;
+
+                // Stage the fused gain events without jumping the smoother:
+                // the target for each offset is replayed inside the ramp.
+                if fuse && sub_n > 0 {
+                    while event_idx < event_count {
+                        let t = self.scheduled_events[event_idx].time;
+                        if t >= sub_end {
+                            break;
+                        }
+                        let param_id = self.scheduled_events[event_idx].param_id;
+                        if event_requires_boundary(param_id) {
+                            break;
+                        }
+                        let value = self.scheduled_events[event_idx].value;
+                        let is_mod = self.scheduled_events[event_idx].is_mod;
+                        let gain_target = worker::apply_scheduled_event(
+                            param_id,
+                            value,
+                            is_mod,
+                            &mut self.params,
+                            &mut self.smoother_in,
+                            &mut self.smoother_out,
+                            &mut self.gate_dirty,
+                            &mut self.mod_input_gain,
+                            &mut self.mod_output_gain,
+                            &mut self.mod_gate_thresh,
+                            &mut self.adaptive_compute,
+                            &self.rt_status,
+                            &self.shared.ui_to_rt,
+                            self.gain_lut,
+                            self.shared.cold.buffer_size.load(Ordering::Relaxed),
+                            &self.shared.cold.pending_restart_os_factor,
+                            false,
+                        );
+                        // `is_fusable_gain_param` is the single source of truth
+                        // for both this loop and the `Some(GainTarget)` arms of
+                        // `apply_scheduled_event`; a `None` here means the two
+                        // drifted and an event would be silently dropped.
+                        debug_assert!(
+                            gain_target.is_some(),
+                            "fusable gain param returned no target (classification drift)"
+                        );
+                        if let Some(gt) = gain_target
+                            && n_steps < MAX_GAIN_STEPS
+                        {
+                            gain_steps[n_steps] = worker::GainStep {
+                                offset: (t - block_offset) as u32,
+                                target: gt.target,
+                                is_input: gt.is_input,
+                            };
+                            n_steps += 1;
+                        }
+                        event_idx += 1;
+                    }
+                }
+
                 if sub_n > 0 {
                     let bypass = self.params.bypass;
                     let process_mono = self.process_mono;
@@ -320,6 +453,7 @@ impl<'a> NamClapProcessor<'a> {
                             &mut self.smoother_out,
                             model_output_mult_adj,
                             shared_sample_rate,
+                            &gain_steps[..n_steps],
                         )
                     };
 
@@ -369,6 +503,7 @@ impl<'a> NamClapProcessor<'a> {
                         self.gain_lut,
                         self.shared.cold.buffer_size.load(Ordering::Relaxed),
                         &self.shared.cold.pending_restart_os_factor,
+                        true,
                     );
                     event_idx += 1;
                 }
@@ -418,6 +553,7 @@ impl<'a> NamClapProcessor<'a> {
                     self.gain_lut,
                     self.shared.cold.buffer_size.load(Ordering::Relaxed),
                     &self.shared.cold.pending_restart_os_factor,
+                    true,
                 );
                 event_idx += 1;
                 remaining_applied = true;
@@ -480,6 +616,7 @@ impl<'a> NamClapProcessor<'a> {
                     self.gain_lut,
                     self.shared.cold.buffer_size.load(Ordering::Relaxed),
                     &self.shared.cold.pending_restart_os_factor,
+                    true,
                 );
                 event_idx += 1;
                 remaining_applied = true;
@@ -534,50 +671,62 @@ impl<'a> NamClapProcessor<'a> {
     /// same event set — zero event loss in either path.
     #[inline(always)]
     fn schedule_input_events(&mut self, input_events: &InputEvents) {
-        let events = &mut self.scheduled_events;
-        events.clear();
+        let mut sorted = true;
+        let mut last_time = 0usize;
+        {
+            let events = &mut self.scheduled_events;
+            events.clear();
 
-        for event in input_events {
-            if events.len() >= MAX_SCHEDULED_EVENTS {
-                core::hint::cold_path();
-                // Explicit saturation: the flag is the observable signal
-                // (logged by emit_pending_logs off-RT). Never suppress it.
-                self.rt_status
-                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_SPSC_DRAIN_TRUNCATED);
-                debug_assert!(
-                    false,
-                    "Event flood > {MAX_SCHEDULED_EVENTS} in one block; truncating"
-                );
-                break;
-            }
-            let time = event.header().time();
-            if let Some(param_event) = event.as_event::<ParamValueEvent>() {
-                let Some(clap_id) = param_event.param_id() else {
+            for event in input_events {
+                if events.len() >= MAX_SCHEDULED_EVENTS {
                     core::hint::cold_path();
-                    continue;
-                };
-                events.push(ScheduledEvent {
-                    time: time as usize,
-                    param_id: clap_id.get(),
-                    value: param_event.value() as f32,
-                    is_mod: false,
-                });
-            } else if let Some(mod_event) = event.as_event::<ParamModEvent>() {
-                let Some(clap_id) = mod_event.param_id() else {
+                    // Explicit saturation: the flag is the observable signal
+                    // (logged by emit_pending_logs off-RT). Never suppress it.
+                    self.rt_status.set_flag(
+                        neural_amp_modeler_rs::common::spsc::RT_STATUS_SPSC_DRAIN_TRUNCATED,
+                    );
+                    debug_assert!(
+                        false,
+                        "Event flood > {MAX_SCHEDULED_EVENTS} in one block; truncating"
+                    );
+                    break;
+                }
+                let time = event.header().time();
+                if let Some(param_event) = event.as_event::<ParamValueEvent>() {
+                    let Some(clap_id) = param_event.param_id() else {
+                        core::hint::cold_path();
+                        continue;
+                    };
+                    let t = time as usize;
+                    sorted &= t >= last_time;
+                    last_time = t;
+                    events.push(ScheduledEvent {
+                        time: t,
+                        param_id: clap_id.get(),
+                        value: param_event.value() as f32,
+                        is_mod: false,
+                    });
+                } else if let Some(mod_event) = event.as_event::<ParamModEvent>() {
+                    let Some(clap_id) = mod_event.param_id() else {
+                        core::hint::cold_path();
+                        continue;
+                    };
+                    let t = time as usize;
+                    sorted &= t >= last_time;
+                    last_time = t;
+                    events.push(ScheduledEvent {
+                        time: t,
+                        param_id: clap_id.get(),
+                        value: mod_event.amount() as f32,
+                        is_mod: true,
+                    });
+                } else {
+                    // Unknown/unsupported event type for this plugin.
                     core::hint::cold_path();
-                    continue;
-                };
-                events.push(ScheduledEvent {
-                    time: time as usize,
-                    param_id: clap_id.get(),
-                    value: mod_event.amount() as f32,
-                    is_mod: true,
-                });
-            } else {
-                // Unknown/unsupported event type for this plugin.
-                core::hint::cold_path();
+                }
             }
         }
+        self.scheduled_events_sorted = sorted;
     }
 
     /// Containment leg of the two-phase reset amortization window: renders
@@ -648,6 +797,7 @@ impl<'a> NamClapProcessor<'a> {
                 self.gain_lut,
                 self.shared.cold.buffer_size.load(Ordering::Relaxed),
                 &self.shared.cold.pending_restart_os_factor,
+                true,
             );
         }
 

@@ -25,6 +25,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
+# ── Memory guard (OOM containment) ──────────────────────────────────────────
+# Re-exec inside a transient, memory-capped systemd scope so a debug/release
+# build peak is reclaimed inside its own cgroup instead of triggering a global
+# OOM that kills the IDE. Fail-open when the user manager/cgroup delegation is
+# unavailable. NAM_MEM_GUARD=1 marks the inner invocation.
+if [ "${NAM_MEM_GUARD:-0}" != "1" ] && [ "${NAM_NO_MEM_GUARD:-0}" != "1" ]; then
+    export NAM_MEM_GUARD=1
+    exec "$SCRIPT_DIR/mem-guard.sh" "$SCRIPT_PATH" "$@"
+fi
+
 PHASE_TOTAL=3
 source "$SCRIPT_DIR/lib/_lib.sh"
 
@@ -197,16 +207,19 @@ ensure_clap_artifact() {
 P1_START=$(date +%s%N)
 phase "Structural: unit & integration tests (debug)..."
 ensure_clap_artifact debug
-timeout 300 cargo test --features testing --lib \
-    --test clap \
-    --test clap_e0_containment_test \
-    --test clap_e2_proptest \
-    --test processor_bypass_test \
-    --test heap_audit \
-    --test slint_view_model_test \
-    --test slint_widgets_test \
+timeout 300 cargo test --features testing --lib --tests \
     2>&1 | tee target/logs/quick-phase1.log
-assert_ran_tests target/logs/quick-phase1.log 1
+assert_ran_target target/logs/quick-phase1.log "unittests src/lib.rs" 300
+assert_ran_target target/logs/quick-phase1.log "tests/clap.rs" 20
+assert_ran_target target/logs/quick-phase1.log "tests/fixtures_freshness.rs" 2
+assert_ran_target target/logs/quick-phase1.log "tests/receipt_semantics_test.rs" 5
+assert_ran_target target/logs/quick-phase1.log "tests/clap_e0_containment_test.rs" 5
+assert_ran_target target/logs/quick-phase1.log "tests/clap_e2_proptest.rs" 2
+assert_ran_target target/logs/quick-phase1.log "tests/processor_bypass_test.rs" 1
+assert_ran_target target/logs/quick-phase1.log "tests/heap_audit.rs" 1
+assert_ran_target target/logs/quick-phase1.log "tests/slint_view_model_test.rs" 1
+assert_ran_target target/logs/quick-phase1.log "tests/slint_widgets_test.rs" 1
+assert_ran_tests target/logs/quick-phase1.log 350
 P1_DUR_MS=$(( ($(date +%s%N) - P1_START) / 1000000 ))
 P1_DUR_STR=$(format_duration_ms "$P1_DUR_MS")
 ok "Phase 1 passed (${P1_DUR_STR})"

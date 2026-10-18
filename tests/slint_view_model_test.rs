@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use nam_plug::clap::gui::slint_view_model::amp_to_meter_frac;
+use nam_plug::clap::gui::slint_view_model::{StatusBarCache, StatusTextSink, amp_to_meter_frac};
 use nam_plug::clap::gui::{MainWindow, SlintViewModel};
 use nam_plug::clap::plugin::shared::{
     GESTURE_BEGIN_SHIFT, GESTURE_BITS_PER_PARAM, GESTURE_CHANGED_SHIFT, GESTURE_END_SHIFT,
@@ -260,6 +260,69 @@ fn test_slint_view_model_full_lifecycle() {
     vm.tick_telemetry();
     assert_eq!(window.get_channels_text(), "Stereo");
 
+    // ── Phase 4b: DSP Load & XRun Telemetry (T-R2.2) ─────────────────────
+    assert_eq!(window.get_dsp_load_text(), "0% DSP");
+    assert!(!window.get_xrun_active());
+
+    // 1. Changing permille within the same integer percentage (e.g. 5‰ = 0.5% -> int 0%)
+    shared
+        .rt_to_ui
+        .dsp_load_permille
+        .store(5, Ordering::Relaxed);
+    vm.tick_telemetry();
+    assert_eq!(window.get_dsp_load_text(), "0% DSP");
+
+    // Changing permille across integer boundary (12‰ = 1.2% -> 1%)
+    shared
+        .rt_to_ui
+        .dsp_load_permille
+        .store(12, Ordering::Relaxed);
+    vm.tick_telemetry();
+    assert_eq!(window.get_dsp_load_text(), "1% DSP");
+
+    // Changing within 1% (18‰ = 1.8% -> 1%)
+    shared
+        .rt_to_ui
+        .dsp_load_permille
+        .store(18, Ordering::Relaxed);
+    vm.tick_telemetry();
+    assert_eq!(window.get_dsp_load_text(), "1% DSP");
+
+    // Changing to 25% (250‰)
+    shared
+        .rt_to_ui
+        .dsp_load_permille
+        .store(250, Ordering::Relaxed);
+    vm.tick_telemetry();
+    assert_eq!(window.get_dsp_load_text(), "25% DSP");
+
+    // 2. Increment in xrun_epoch triggers xrun_active for exactly 120 frames (~2 s @ 60 Hz)
+    assert!(!window.get_xrun_active());
+    shared.rt_to_ui.xrun_epoch.store(1, Ordering::Relaxed);
+
+    // Frame 1
+    vm.tick_telemetry();
+    assert!(
+        window.get_xrun_active(),
+        "xrun_active must be true on first frame after xrun_epoch increment"
+    );
+
+    // Frames 2..=120 (total 120 frames active)
+    for frame in 2..=120 {
+        vm.tick_telemetry();
+        assert!(
+            window.get_xrun_active(),
+            "xrun_active must stay true at frame {frame} of 120"
+        );
+    }
+
+    // Frame 121: hold expires, xrun_active returns to false
+    vm.tick_telemetry();
+    assert!(
+        !window.get_xrun_active(),
+        "xrun_active must return to false after exactly 120 frames (2.0s hold)"
+    );
+
     // ── Phase 5: File Dialog Actions & Portal Interfacing ────────────────
     window.set_has_model(true);
     window.set_model_name("Test Model.nam".into());
@@ -287,19 +350,44 @@ fn test_slint_view_model_full_lifecycle() {
     assert!(!window.get_has_ir(), "has_ir on window must be false");
     assert_eq!(window.get_ir_name(), "No IR loaded");
 
-    // Select Model Clicked Trigger
+    // Select Model Clicked Trigger (F-UX-06): the dialog is open, but no load
+    // has started — `ui_dialog_open` and `ui_loading` are separate states and
+    // the spinner only follows the latter.
     window.invoke_load_model_clicked();
     assert!(
-        shared.cold.ui_loading.load(Ordering::Relaxed),
-        "ui_loading must be true while picker dialog is open"
+        shared.cold.ui_dialog_open.load(Ordering::Relaxed),
+        "ui_dialog_open must be true while picker dialog is open"
+    );
+    assert!(
+        !shared.cold.ui_loading.load(Ordering::Relaxed),
+        "ui_loading must stay false while the dialog is open (spinner is for real loads)"
     );
     assert!(
         shared.is_model_dialog_active(),
         "dialog_state.active must be true"
     );
 
+    // Spinner transitions (F-UX-06): `dialog_open → loading → idle`.
+    vm.tick_telemetry();
+    assert!(
+        !window.get_model_loading(),
+        "no spinner while the dialog is open"
+    );
+    shared.set_model_dialog_active(false);
+    shared.cold.ui_dialog_open.store(false, Ordering::Relaxed);
+    shared.cold.ui_loading.store(true, Ordering::Relaxed);
+    vm.tick_telemetry();
+    assert!(
+        window.get_model_loading(),
+        "the spinner follows ui_loading during the load"
+    );
+    shared.cold.ui_loading.store(false, Ordering::Relaxed);
+    vm.tick_telemetry();
+    assert!(!window.get_model_loading());
+
     // Clean up state
     shared.set_model_dialog_active(false);
+    shared.cold.ui_dialog_open.store(false, Ordering::Relaxed);
     shared.cold.ui_loading.store(false, Ordering::Relaxed);
 
     // ── Phase 6: Model Architecture Badge Live Update (Finding F6) ───────
@@ -321,4 +409,105 @@ fn test_slint_view_model_full_lifecycle() {
     }
     vm.tick_telemetry();
     assert_eq!(window.get_model_arch(), "No model loaded");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T2.1 — Status-bar string cache (F-UX-08)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Test wrapper around `StatusTextSink` (F-UX-08): records every `set_*_text`
+/// publication so the cache can be held to "no publication without a change".
+#[derive(Default)]
+struct CountingStatusSink {
+    calls: std::cell::RefCell<Vec<(&'static str, String)>>,
+}
+
+impl CountingStatusSink {
+    fn take(&self) -> Vec<(&'static str, String)> {
+        self.calls.borrow_mut().drain(..).collect()
+    }
+}
+
+impl StatusTextSink for CountingStatusSink {
+    fn publish_sample_rate_text(&self, text: &str) {
+        self.calls
+            .borrow_mut()
+            .push(("sample_rate", text.to_string()));
+    }
+    fn publish_buffer_size_text(&self, text: &str) {
+        self.calls
+            .borrow_mut()
+            .push(("buffer_size", text.to_string()));
+    }
+    fn publish_latency_text(&self, text: &str) {
+        self.calls.borrow_mut().push(("latency", text.to_string()));
+    }
+    fn publish_channels_text(&self, text: &str) {
+        self.calls.borrow_mut().push(("channels", text.to_string()));
+    }
+}
+
+/// T2.1: with unchanged inputs the cache must publish nothing (zero `format!`,
+/// zero `set_*_text`); on change it must publish exactly the legacy formats.
+#[test]
+fn test_status_bar_cache_publishes_only_on_change() {
+    let sink = CountingStatusSink::default();
+    // Mirrors a window already showing the values published at construction.
+    let mut cache = StatusBarCache::new(44100, 64, 128, 2);
+
+    // No change → no publication.
+    cache.update(44100, 64, 128, 2, &sink);
+    assert!(
+        sink.take().is_empty(),
+        "no set_*_text may be invoked without a value change"
+    );
+
+    // Buffer-size change only — formats unchanged from the legacy strings.
+    cache.update(44100, 128, 128, 2, &sink);
+    assert_eq!(sink.take(), vec![("buffer_size", "128 spl".to_string())]);
+
+    // Sample-rate change also republishes the latency text (ms depends on sr).
+    cache.update(48000, 128, 128, 2, &sink);
+    assert_eq!(
+        sink.take(),
+        vec![
+            ("sample_rate", "48 kHz".to_string()),
+            ("latency", "128 spl (2.7 ms)".to_string()),
+        ]
+    );
+
+    // Latency-only change.
+    cache.update(48000, 128, 0, 2, &sink);
+    assert_eq!(sink.take(), vec![("latency", "0 spl (0.0 ms)".to_string())]);
+
+    // Channel-count change.
+    cache.update(48000, 128, 0, 1, &sink);
+    assert_eq!(sink.take(), vec![("channels", "Mono".to_string())]);
+
+    // Still no change → nothing.
+    cache.update(48000, 128, 0, 1, &sink);
+    assert!(sink.take().is_empty());
+
+    // Full-format sweep from an empty cache (locks the legacy formats).
+    let mut cache = StatusBarCache::new(0, 0, 0, 0);
+    cache.update(44100, 64, 128, 3, &sink);
+    assert_eq!(
+        sink.take(),
+        vec![
+            ("sample_rate", "44.1 kHz".to_string()),
+            ("buffer_size", "64 spl".to_string()),
+            ("latency", "128 spl (2.9 ms)".to_string()),
+            ("channels", "Stereo".to_string()),
+        ]
+    );
+    cache.update(48001, 0, 64, 0, &sink);
+    assert_eq!(
+        sink.take(),
+        vec![
+            ("sample_rate", "48.0 kHz".to_string()),
+            ("buffer_size", "— spl".to_string()),
+            ("latency", "64 spl (1.3 ms)".to_string()),
+            ("channels", "Stereo".to_string()),
+        ]
+    );
 }

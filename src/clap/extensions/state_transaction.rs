@@ -12,8 +12,8 @@
 //! 2. **Validate** — off-RT validation: check paths, load/build model, IR, resamplers (`validate.rs`)
 //! 3. **Commit** — publish params + payloads via atomics and SPSC (only after full validation) (`commit.rs`)
 
-mod commit;
-mod validate;
+pub(crate) mod commit;
+pub(crate) mod validate;
 
 pub(crate) use commit::publish_restore;
 pub(crate) use validate::{compute_file_hash, is_valid_sha256_hex};
@@ -46,6 +46,14 @@ pub(crate) fn restore_state_transactional(
     if buffer.is_empty() {
         log::debug!("Empty state buffer, returning error");
         return Err(PluginError::Message(errors::state_txn::EMPTY_BUFFER));
+    }
+
+    // Opt-in (T4.3 / F-UX-01): offload the expensive validation of an
+    // interactive, active restore to the `nam-restore-loader` worker; the atomic
+    // commit runs later on the main thread. Pre-activate, offline, and default
+    // configurations keep the synchronous path below.
+    if main_thread.should_use_async_restore() {
+        return main_thread.enqueue_async_restore(buffer.to_vec(), mode);
     }
 
     // ══════ Phase 1: PREPARE — deserialise ══════

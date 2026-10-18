@@ -176,12 +176,12 @@ pub fn write_model_with_rate(src: &std::path::Path, sample_rate: u32) -> PathBuf
 
 // ── Shared pointer extraction ──
 
-/// Extracts a raw pointer to `NamClapShared` from a `PluginInstance<TestHost>`.
+/// Extracts a raw pointer to `NamClapShared` from a `PluginInstance<H>`.
 ///
 /// The caller should dereference this with `unsafe { &*ptr }` and ensure
 /// the `PluginInstance` outlives the dereferenced reference.
-pub fn extract_shared(
-    instance: &mut PluginInstance<TestHost>,
+pub fn extract_shared<H: HostHandlers>(
+    instance: &mut PluginInstance<H>,
 ) -> *const crate::clap::plugin::NamClapShared {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
     unsafe {
@@ -191,6 +191,42 @@ pub fn extract_shared(
         )
     }
     .expect("Failed to get plugin wrapper")
+}
+
+// ── Asynchronous model loading ──
+
+/// Drives the plugin main-thread callback until the asynchronous model loader
+/// settles: no queued request remains and `ui_loading` is clear. Panics if the
+/// loader does not settle within 15 s.
+///
+/// The production load path dispatches the expensive `prepare_model` phase to
+/// the `nam-model-loader` worker thread, so a single
+/// `call_on_main_thread_callback()` only *accepts* a request — completion is
+/// observed on a later tick. Tests that assert the loaded state must drive the
+/// loader through this helper.
+pub fn drain_async_model_loading<H: HostHandlers>(
+    instance: &mut PluginInstance<H>,
+    shared: &crate::clap::plugin::NamClapShared,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        instance.call_on_main_thread_callback();
+        let settled = !shared.cold.ui_loading.load(Ordering::Relaxed)
+            && shared
+                .cold
+                .pending_model_requests
+                .lock()
+                .unwrap()
+                .is_empty();
+        if settled {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "asynchronous model loading did not settle within 15 s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }
 
 // ── State loading ──

@@ -19,7 +19,9 @@ use neural_amp_modeler_rs::models::StaticModel;
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::CString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex};
 
 /// Active plugin instance counter.
@@ -459,6 +461,10 @@ pub struct RtToUi {
     pub cabsim_tail_samples: AtomicU32,
     /// Number of active channels: 1 = mono, 2 = stereo.
     pub active_channel_count: AtomicU32,
+    /// DSP load permille (0..=1000) updated per block via EWMA (tau ≈ 250 ms).
+    pub dsp_load_permille: AtomicU16,
+    /// Xrun / overload counter epoch (mirrors `dsp_overloads`).
+    pub xrun_epoch: AtomicU32,
 }
 
 /// Fields written by the UI/Main thread, read every block by the RT thread.
@@ -500,6 +506,8 @@ impl Default for RtToUi {
             current_latency: AtomicU32::new(0),
             cabsim_tail_samples: AtomicU32::new(0),
             active_channel_count: AtomicU32::new(1),
+            dsp_load_permille: AtomicU16::new(0),
+            xrun_epoch: AtomicU32::new(0),
         }
     }
 }
@@ -610,6 +618,15 @@ pub struct ColdShared {
     /// the audio thread can reject a stale slimmable rebuild. `0` is reserved
     /// for "no model installed yet".
     pub model_generation: AtomicU64,
+    /// Milliseconds since [`ui_monotonic_ms`]'s process epoch of the last user
+    /// interaction with the GUI (param gesture or button click), or
+    /// [`UI_NO_INTERACTION`] when none has been recorded yet.
+    ///
+    /// Written by the GUI thread via [`GuiSharedState::note_ui_interaction`],
+    /// read by the telemetry tick to keep the 60 Hz polling loop at full rate
+    /// for [`crate::clap::gui::slint_view_model::TELEMETRY_LOW_CADENCE_IDLE`]
+    /// after the last interaction (F-UX-08). Never touched by the audio thread.
+    pub ui_last_interaction_ms: AtomicU64,
     /// Loaded model name (path basename). Written by the main thread, read by the UI thread.
     pub ui_model_name: Mutex<String>,
     /// Loaded model metadata for UI display.
@@ -618,6 +635,17 @@ pub struct ColdShared {
     /// Enqueued by the UI thread (dialog / drop) or by the preset-load extension.
     /// Consumed sequentially by `housekeeping()` on the main thread.
     pub pending_model_requests: Mutex<std::collections::VecDeque<PendingModelRequest>>,
+    /// Whether the model file-picker dialog is currently open (F-UX-06).
+    ///
+    /// Set when the user opens the dialog and cleared once its outcome
+    /// (selected, cancelled, or timed out) is consumed by `housekeeping()`.
+    /// Raised *without* the loading spinner: an open dialog is not a load in
+    /// progress — [`Self::ui_loading`] is only raised while `housekeeping()` is
+    /// inside `load_model`.
+    pub ui_dialog_open: AtomicBool,
+    /// Whether a model load is actually running (F-UX-06): raised by
+    /// `housekeeping()` immediately before `load_model` and cleared when it
+    /// returns. Drives the ModelCard spinner.
     pub ui_loading: AtomicBool,
     /// Flag signaling that a model loading error occurred.
     pub ui_load_error: AtomicBool,
@@ -897,9 +925,11 @@ impl ColdShared {
             ],
             model_load_counter: AtomicU32::new(0),
             model_generation: AtomicU64::new(0),
+            ui_last_interaction_ms: AtomicU64::new(UI_NO_INTERACTION),
             ui_model_name: Mutex::new(String::new()),
             ui_model_metadata: Mutex::new(None),
             pending_model_requests: Mutex::new(std::collections::VecDeque::new()),
+            ui_dialog_open: AtomicBool::new(false),
             ui_loading: AtomicBool::new(false),
             ui_load_error: AtomicBool::new(false),
             ui_load_error_msg: Mutex::new(String::new()),
@@ -961,6 +991,27 @@ pub const GESTURE_BEGIN_SHIFT: u32 = 1;
 pub const GESTURE_END_SHIFT: u32 = 2;
 pub const GESTURE_BITS_PER_PARAM: u32 = 3;
 
+/// Sentinel for [`ColdShared::ui_last_interaction_ms`]: no GUI interaction has
+/// been recorded yet, which the telemetry tick treats as idle (nothing has
+/// interacted within the last cadence-downgrade window, F-UX-08).
+pub const UI_NO_INTERACTION: u64 = u64::MAX;
+
+/// Process-start anchor for the GUI interaction clock ([`ui_monotonic_ms`]).
+static UI_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Monotonic milliseconds since this process' first GUI interaction timestamp,
+/// the clock behind [`ColdShared::ui_last_interaction_ms`].
+///
+/// The anchor keeps the shared counter free of `Instant` (not atomic-friendly)
+/// while still monotonically increasing; [`UI_NO_INTERACTION`] remains
+/// unambiguous because process uptime can never approach `u64::MAX` ms.
+pub(crate) fn ui_monotonic_ms() -> u64 {
+    UI_EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
 impl GuiSharedState {
     /// Bitmask for the parameter in the `gesture_flags` field.
     /// 3 flags per parameter: Changed, GestureBegin, GestureEnd.
@@ -974,18 +1025,34 @@ impl GuiSharedState {
         param_id as usize
     }
 
+    /// Records a user interaction with the GUI (F-UX-08).
+    ///
+    /// The timestamp feeds the adaptive telemetry cadence: the 60 Hz polling
+    /// loop only drops to 30 Hz after
+    /// [`TELEMETRY_LOW_CADENCE_IDLE`](crate::clap::gui::slint_view_model::TELEMETRY_LOW_CADENCE_IDLE)
+    /// without interaction. Called from GUI callbacks only — never from the
+    /// audio thread (a relaxed atomic store in `cold`).
+    pub fn note_ui_interaction(&self) {
+        self.cold
+            .ui_last_interaction_ms
+            .store(ui_monotonic_ms(), Ordering::Relaxed);
+    }
+
     /// Sets a begin gesture flag for the given CLAP param_id.
     pub fn begin_gesture(&self, param_id: u32) {
+        self.note_ui_interaction();
         self.set_gesture(Self::param_index(param_id), Self::GESTURE_BEGIN_SHIFT);
     }
 
     /// Sets an end gesture flag for the given CLAP param_id.
     pub fn end_gesture(&self, param_id: u32) {
+        self.note_ui_interaction();
         self.set_gesture(Self::param_index(param_id), Self::GESTURE_END_SHIFT);
     }
 
     /// Sets a changed flag for the given CLAP param_id.
     pub fn mark_param_changed(&self, param_id: u32) {
+        self.note_ui_interaction();
         self.set_gesture(Self::param_index(param_id), Self::GESTURE_CHANGED_SHIFT);
     }
 

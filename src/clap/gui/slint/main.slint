@@ -64,6 +64,7 @@ export component MainWindow inherits Window {
     // default previously showed a hard-coded "1.4% DSP" that never reflected
     // the actually loaded model or host block size.
     in-out property <string> dsp_load_text: "—";
+    in-out property <bool> xrun_active: false;
     in-out property <string> oversample_text: "1x (Off)";
     in-out property <string> simd_badge: "AVX2+FMA";
     in-out property <string> backend_text: "Wayland Native";
@@ -87,6 +88,9 @@ export component MainWindow inherits Window {
     callback oversample_changed(int);
     callback activation_changed(int);
     callback cycle_oversample();
+    // Lifecycle bridge: invoked by the CLAP gui show()/hide() paths so the
+    // 60 Hz telemetry timer can be suspended with the window (F-UX-08).
+    callback set_telemetry_active(bool);
 
     VerticalLayout {
         padding: 6px;
@@ -583,12 +587,50 @@ export component MainWindow inherits Window {
                     spacing: 12px;
                     alignment: end;
 
-                    Text {
-                        text: root.dsp_load_text;
-                        font-size: 9px;
-                        font-weight: 700;
-                        color: #43E97B;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        spacing: 5px;
+                        alignment: center;
+
+                        LedIndicator {
+                            active: root.xrun_active;
+                            color-on: #F74E4E;
+                            color-off: #2E3440;
+                            size: 7px;
+                        }
+
+                        dsp_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            Text {
+                                text: root.dsp_load_text;
+                                font-size: 9px;
+                                font-weight: 700;
+                                color: root.xrun_active ? #F74E4E : #43E97B;
+                                vertical-alignment: center;
+                            }
+
+                            if dsp_touch.has-hover : Rectangle {
+                                x: -220px;
+                                y: -24px;
+                                width: 250px;
+                                height: 20px;
+                                background: #1a1d23;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: #3b4252;
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Reduza oversampling ou habilite computação adaptativa";
+                                        font-size: 8px;
+                                        color: #d8dee9;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Text {

@@ -73,10 +73,13 @@ impl DefaultPluginFactory for NamClapPlugin {
             neural_amp_modeler_rs::common::panic_hook::install_panic_hook("clap");
         });
 
-        // Initialize and calibrate hardware TSC on a background thread once per process (T-P4.2.3).
-        // Non-blocking for the host: during the 60ms calibration window, any initial audio blocks
-        // fall back safely to Instant::now(). Once calibrated, hot-path telemetry uses serialized
-        // RDTSC directly (~17 ns vs ~1134 ns fallback).
+        // Initialize and calibrate hardware TSC on a background thread once per process (T-P4.2.3, T-R1.1).
+        // Non-blocking for the host: during the 60ms calibration window, initial audio blocks
+        // fall back safely to Instant::now(). The calibration routine anchors the TSC baseline
+        // to Instant::now() before publishing the multiplier, ensuring continuous and monotonic
+        // readings across the flip. In addition, telemetry applies MAX_PLAUSIBLE_ELAPSED_NS as
+        // defense-in-depth against anomalous timestamps. Once calibrated, hot-path telemetry uses
+        // serialized RDTSC directly (~17 ns vs ~1134 ns fallback).
         static INIT_TSC: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         INIT_TSC.get_or_init(|| {
             #[cfg(target_arch = "x86_64")]
@@ -236,6 +239,8 @@ impl DefaultPluginFactory for NamClapPlugin {
             last_reported_latency: Cell::new(0),
             last_reported_cabsim_tail: Cell::new(0),
             last_seen_slimmable_stale: Cell::new(0),
+            last_seen_overloads: Cell::new(0),
+            last_overload_log_instant: Cell::new(None),
             slint_window: RefCell::new(None),
             gui_worker: RefCell::new(None),
             dialog_handle: RefCell::new(None),
@@ -249,6 +254,29 @@ impl DefaultPluginFactory for NamClapPlugin {
             staged_swap: RefCell::new(None),
             poison_restart_requested: Cell::new(false),
             watchdog_timer: Cell::new(None),
+            watchdog_period_ms: Cell::new(crate::clap::plugin::main_thread::WATCHDOG_PERIOD_MS),
+            model_loader: RefCell::new(None),
+            model_result_slot: crate::clap::plugin::main_thread::model_loader::new_result_slot(),
+            model_worker_busy: Cell::new(false),
+            dispatched_model_generation: Cell::new(0),
+            dispatched_model_is_gui: Cell::new(false),
+            rebuild_slots: crate::clap::plugin::main_thread::model_loader::RebuildSlots::new(),
+            // Rollback switch (S6-T1): `NAM_SYNC_ADAPTIVE_REBUILD=1` forces the
+            // structural rebuilds (slimmable slice + oversampling engines) back
+            // onto the main-thread inline path.
+            async_adaptive_rebuild: std::env::var_os("NAM_SYNC_ADAPTIVE_REBUILD").is_none(),
+            pending_async_loads: RefCell::new(std::collections::VecDeque::new()),
+            // Rollback switch (rollout guard): force the historical synchronous
+            // load path. Read once at instance creation.
+            sync_model_load: std::env::var_os("NAM_SYNC_MODEL_LOAD").is_some(),
+            restore_loader: RefCell::new(None),
+            restore_result_slot: crate::clap::plugin::main_thread::restore_loader::new_result_slot(
+            ),
+            restore_worker_busy: Cell::new(false),
+            pending_async_restore: RefCell::new(None),
+            // Opt-in: an async restore reports success to the host before
+            // validation runs, so it is only enabled deliberately.
+            async_restore_enabled: Cell::new(std::env::var_os("NAM_ASYNC_RESTORE").is_some()),
         };
 
         // Register periodic main-thread watchdog timer (F-NP-R1).
@@ -258,7 +286,10 @@ impl DefaultPluginFactory for NamClapPlugin {
             .host
             .get_extension::<clack_extensions::timer::HostTimer>()
         {
-            match timer_ext.register_timer(&main_thread.host, 250) {
+            match timer_ext.register_timer(
+                &main_thread.host,
+                crate::clap::plugin::main_thread::WATCHDOG_PERIOD_MS,
+            ) {
                 Ok(id) => {
                     main_thread.watchdog_timer.set(Some(id));
                     log::info!(

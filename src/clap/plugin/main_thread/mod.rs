@@ -11,6 +11,8 @@
 mod housekeeping;
 pub(crate) mod load;
 mod logging;
+pub(crate) mod model_loader;
+pub(crate) mod restore_loader;
 
 use super::command_scheduler::{CommandProducer, PushError};
 use super::errors::{self, static_plugin_error};
@@ -29,6 +31,16 @@ use rtrb::{Consumer, Producer};
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+
+/// Nominal main-thread watchdog period (ms): RT poison recovery, latency/PDC
+/// sync and the Tier-1 GC ring drain.
+pub(crate) const WATCHDOG_PERIOD_MS: u32 = 250;
+/// Accelerated watchdog period (ms) armed by S6-T2 while a structural rebuild
+/// flag (`RT_STATUS_NEEDS_SLIMMABLE_REBUILD` / `RT_STATUS_NEEDS_OS_REBUILD`) is
+/// still pending, so the retry cadence shortens on hosts where the worker's
+/// `request_callback` is ineffective. Restored to [`WATCHDOG_PERIOD_MS`] once the
+/// flag clears (no idle-CPU regression).
+pub(crate) const WATCHDOG_FAST_PERIOD_MS: u32 = 50;
 
 /// Main thread exclusive state (model loading, state save/load).
 ///
@@ -74,6 +86,10 @@ pub struct NamClapMainThread<'a> {
     /// Last-seen value of `ColdShared::slimmable_stale_discarded_total`, used to
     /// log stale-slimmable-rebuild discards exactly once.
     pub last_seen_slimmable_stale: Cell<u32>,
+    /// Last-seen count of `rt_status.dsp_overloads` logged to host/warnings.
+    pub last_seen_overloads: Cell<u32>,
+    /// Instant of the last rate-limited overload warning log emission.
+    pub last_overload_log_instant: Cell<Option<std::time::Instant>>,
     /// Slint window handle for GUI lifecycle control.
     pub slint_window: RefCell<Option<slint::Weak<crate::clap::gui::MainWindow>>>,
     /// Persistent per-instance GUI worker thread (owns the Slint platform and
@@ -124,6 +140,54 @@ pub struct NamClapMainThread<'a> {
     pub(crate) poison_restart_requested: Cell<bool>,
     /// Watchdog timer ID registered with the host for periodic housekeeping ticks (if supported).
     pub watchdog_timer: Cell<Option<clack_extensions::timer::TimerId>>,
+    /// Currently armed watchdog period in milliseconds. Tracks the cadence so the
+    /// adaptive-rebuild fallback (S6-T2 / F-UX-02) only reprograms the host timer
+    /// on an actual change.
+    pub(crate) watchdog_period_ms: Cell<u32>,
+    /// Persistent per-instance asynchronous model loader (Épico B / F-UX-01).
+    /// Spawned lazily on the first asynchronous load; `None` in the synchronous
+    /// fallback mode or before the first load.
+    pub(crate) model_loader: RefCell<Option<model_loader::ModelLoader>>,
+    /// Shared delivery slot written by the loader worker and drained by the
+    /// main thread on each `housekeeping()` tick. Off-RT only.
+    pub(crate) model_result_slot: model_loader::ModelResultSlot,
+    /// Whether the loader worker currently has an outstanding (dispatched,
+    /// not yet consumed) job. Gates dispatching a new job.
+    pub(crate) model_worker_busy: Cell<bool>,
+    /// Generation of the job currently dispatched to the worker (`0` = none /
+    /// invalidated). A worker result is committed only when its generation
+    /// matches; mismatches were superseded and are discarded.
+    pub(crate) dispatched_model_generation: Cell<u64>,
+    /// Whether the dispatched job originated from a GUI load. Only a newer GUI
+    /// request invalidates it (last-wins); presets are always honoured FIFO.
+    pub(crate) dispatched_model_is_gui: Cell<bool>,
+    /// Adaptive-rebuild delivery slots written by the loader worker and drained
+    /// by the main thread on each `housekeeping()` tick (S6-T1 / F-UX-02).
+    /// Off-RT only.
+    pub(crate) rebuild_slots: model_loader::RebuildSlots,
+    /// Whether the adaptive structural rebuilds (slimmable slice + oversampling
+    /// engines) run on the loader worker instead of the main thread. Disabled by
+    /// the `NAM_SYNC_ADAPTIVE_REBUILD` rollback switch (legacy inline path).
+    pub(crate) async_adaptive_rebuild: bool,
+    /// Asynchronous loads accepted but not yet dispatched (worker busy).
+    /// A newer GUI request supersedes pending GUI entries (last-wins), so at
+    /// most one GUI load is ever pending at a time.
+    pub(crate) pending_async_loads:
+        RefCell<std::collections::VecDeque<model_loader::ModelLoaderJob>>,
+    /// When true the loader runs synchronously on the main thread (legacy
+    /// behaviour). Set once from `NAM_SYNC_MODEL_LOAD` at instance creation.
+    pub(crate) sync_model_load: bool,
+    /// Opt-in asynchronous state-restore loader (T4.3). Spawned lazily.
+    pub(crate) restore_loader: RefCell<Option<restore_loader::RestoreLoader>>,
+    /// Delivery slot written by the restore worker and drained on each tick.
+    pub(crate) restore_result_slot: restore_loader::RestoreResultSlot,
+    /// Whether the restore worker has an outstanding job.
+    pub(crate) restore_worker_busy: Cell<bool>,
+    /// Accepted-but-not-dispatched restore job (last-wins).
+    pub(crate) pending_async_restore: RefCell<Option<restore_loader::RestoreJob>>,
+    /// When true, interactive active restores run on the restore worker. Set
+    /// once from `NAM_ASYNC_RESTORE`; offline/pre-activate always stay sync.
+    pub(crate) async_restore_enabled: Cell<bool>,
 }
 
 impl<'a> NamClapMainThread<'a> {
@@ -533,3 +597,7 @@ pub fn debug_assert_main_thread(host: &HostMainThreadHandle) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "model_loader_test.rs"]
+mod model_loader_test;

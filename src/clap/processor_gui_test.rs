@@ -346,10 +346,13 @@ mod tests {
                 origin: ModelRequestOrigin::Gui,
             });
         }
-        shared.cold.ui_loading.store(true, Ordering::Relaxed);
+        // F-UX-06: the dialog was open when the picker result was enqueued;
+        // housekeeping consumes it and ends idle (spinner only during the load).
+        shared.cold.ui_dialog_open.store(true, Ordering::Relaxed);
 
-        plugin_instance.call_on_main_thread_callback();
+        test_util::drain_async_model_loading(&mut plugin_instance, shared);
 
+        assert!(!shared.cold.ui_dialog_open.load(Ordering::Relaxed));
         assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
         assert!(shared.cold.ui_load_error.load(Ordering::Relaxed));
     }
@@ -382,10 +385,13 @@ mod tests {
                 origin: ModelRequestOrigin::Gui,
             });
         }
-        shared.cold.ui_loading.store(true, Ordering::Relaxed);
+        // F-UX-06: the spinner (`ui_loading`) only follows the actual
+        // `load_model` inside housekeeping — the dialog-open flag is separate.
+        shared.cold.ui_dialog_open.store(true, Ordering::Relaxed);
 
-        plugin_instance.call_on_main_thread_callback();
+        test_util::drain_async_model_loading(&mut plugin_instance, shared);
 
+        assert!(!shared.cold.ui_dialog_open.load(Ordering::Relaxed));
         assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
         assert!(
             shared.cold.ui_load_error.load(Ordering::Relaxed),

@@ -45,22 +45,22 @@ Designed for seamless integration into modern Linux digital audio workstations (
 
 ## 🥊 Feature Showcase ("Roofshoot")
 
-| Feature / Attribute            | Technical Implementation                                                  | Benefit & Impact                                                   |
-|:------------------------------ |:------------------------------------------------------------------------- |:------------------------------------------------------------------ |
-| **Inference Engine**           | Core `NeuralAmpModeler-rs` engine (WaveNet A1/A2, LSTM, ConvNet, Linear)  | Full model compatibility with exact C++ f32 & f64 reference parity |
-| **Plugin Standard**            | Native CLAP API wrapper (`clack-plugin` & `clack-extensions`)             | Sub-millisecond buffer sizes and sample-accurate DAW automation    |
-| **RT Determinism**             | Strict Zero Heap Drop, Zero Locks, Zero Hot-Path Logging                  | Guaranteed audio stability without buffer underruns (xruns)        |
-| **SIMD Hardware Acceleration** | Engine `x86-64-v3` (AVX2/FMA) production backend                          | Ultra-low CPU usage (WaveNet Std ≪ 1.33 ms deadline)               |
-| **Bypass Crossfader**          | 32 ms equal-power crossfade with branchless FMA loop & phase compensation | Smooth, pop-free bypass transitions with zero phase cancellation   |
-| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`     | Instant host Plugin Delay Compensation with 0 per-block overhead   |
-| **Cabinet IR Convolution**     | Partitioned FFT & Direct FIR convolution engine (.wav IRs)                | Seamless, zero-latency speaker cabinet simulation                  |
+| Feature / Attribute            | Technical Implementation                                                  | Benefit & Impact                                                                              |
+|:------------------------------ |:------------------------------------------------------------------------- |:--------------------------------------------------------------------------------------------- |
+| **Inference Engine**           | Core `NeuralAmpModeler-rs` engine (WaveNet A1/A2, LSTM, ConvNet, Linear)  | Full model compatibility with exact C++ f32 & f64 reference parity                            |
+| **Plugin Standard**            | Native CLAP API wrapper (`clack-plugin` & `clack-extensions`)             | Sub-millisecond buffer sizes and sample-accurate DAW automation                               |
+| **RT Determinism**             | Strict Zero Heap Drop, Zero Locks, Zero Hot-Path Logging                  | Guaranteed audio stability without buffer underruns (xruns)                                   |
+| **SIMD Hardware Acceleration** | Engine `x86-64-v3` (AVX2/FMA) production backend                          | Ultra-low CPU usage (WaveNet Std ≪ 1.33 ms deadline)                                          |
+| **Bypass Crossfader**          | 32 ms equal-power crossfade with branchless FMA loop & phase compensation | Smooth, pop-free bypass transitions with zero phase cancellation                              |
+| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`     | Instant host Plugin Delay Compensation with 0 per-block overhead                              |
+| **Cabinet IR Convolution**     | Partitioned FFT & Direct FIR convolution engine (.wav IRs)                | Seamless, zero-latency speaker cabinet simulation                                             |
 | **Graphical User Interface**   | Slint 1.17 declarative UI (FemtoVG/OpenGL backend via `winit`)            | Native X11 XEmbed embedding + Wayland/X11 floating, high-DPI scaling, IEC 60268-10 ballistics |
-| **GUI Event Loop & Telemetry** | Dedicated `"nam-slint-gui"` event loop thread with 60 Hz `SlintViewModel` | 0% audio thread overhead, lock-free atomics, smooth 60 FPS metering |
-| **Oversampling**               | Half-band polyphase FIR filters (`Off`, `2x`, `4x`)                       | Eliminates aliasing distortion in high-gain amp models             |
-| **Activation Precision**       | `Standard` (exact-grade, default) vs `Fast` (Padé approximations)         | User-selectable trade-off between math precision and CPU latency   |
-| **CLAP State Persistence**     | Lock-free atomic synchronization & JSON serialization                     | Full preset saving/loading and seamless DAW project restoration    |
-| **Diagnostics & Telemetry**    | Atomic telemetry bitmask & `LogBuffer` ring buffer integration            | Real-time CPU, latency, overload, and flag telemetry in GUI footer |
-| **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly report           | Minimized I-Cache misses and maximum instruction throughput        |
+| **GUI Event Loop & Telemetry** | Dedicated `"nam-slint-gui"` event loop thread with 60 Hz `SlintViewModel` | 0% audio thread overhead, lock-free atomics, smooth 60 FPS metering                           |
+| **Oversampling**               | Half-band polyphase FIR filters (`Off`, `2x`, `4x`)                       | Eliminates aliasing distortion in high-gain amp models                                        |
+| **Activation Precision**       | `Standard` (exact-grade, default) vs `Fast` (Padé approximations)         | User-selectable trade-off between math precision and CPU latency                              |
+| **CLAP State Persistence**     | Lock-free atomic synchronization & JSON serialization                     | Full preset saving/loading and seamless DAW project restoration                               |
+| **Diagnostics & Telemetry**    | Atomic telemetry bitmask & `LogBuffer` ring buffer integration            | Real-time CPU, latency, overload, and flag telemetry in GUI footer                            |
+| **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly report           | Minimized I-Cache misses and maximum instruction throughput                                   |
 
 ---
 
@@ -256,10 +256,10 @@ The status bar at the bottom of the plugin GUI provides real-time telemetry:
 
 ## ⚠️ Known Host Limitations & DAW Compatibility
 
-| DAW / Host Environment                                  | Status                  | Compatibility Notes                                                                                                                                                                                                                                                            |
-|:------------------------------------------------------- |:----------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Bitwig Studio** (Linux)                               | ✅ Full Support         | Native X11 embedded GUI (default) with X11/Wayland floating fallback, sample-accurate automation, state save/restore, and offline bounce.                                                                                                                                          |
-| **REAPER** (Native Linux)                               | ✅ Full Support         | Native X11 embedded GUI (default) with X11/Wayland floating fallback, parameter automation, and ultra-low latency playback.                                                                                                                                                       |
+| DAW / Host Environment                                  | Status                  | Compatibility Notes                                                                                                                                                                                                                                                           |
+|:------------------------------------------------------- |:----------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bitwig Studio** (Linux)                               | ✅ Full Support         | Native X11 embedded GUI (default) with X11/Wayland floating fallback, sample-accurate automation, state save/restore, and offline bounce.                                                                                                                                     |
+| **REAPER** (Native Linux)                               | ✅ Full Support         | Native X11 embedded GUI (default) with X11/Wayland floating fallback, parameter automation, and ultra-low latency playback.                                                                                                                                                   |
 | **PreSonus Studio One** / **Fender Studio Pro** (Linux) | ⚠️ Known GUI Limitation | **Known issue:** the host cannot initialize a natively embedded X11 GUI surface. NAM-Plug serves X11 floating and Wayland floating (`CLAP_WINDOW_API_X11`/`CLAP_WINDOW_API_WAYLAND` with `is_floating = true`), opening its own top-level window with bounded teardown joins. |
 
 ---
@@ -268,11 +268,18 @@ The status bar at the bottom of the plugin GUI provides real-time telemetry:
 
 The `./utils/` directory contains maintainer tools and standard scripts for code quality, CLAP compliance, and continuous integration:
 
-| Script                                             | Purpose & Execution Scope                                                                                                                                                                                                                      |
-|:-------------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`utils/lints.sh`](utils/lints.sh)                 | **Static Analysis Gate:** Runs `cargo fmt`, compilation checks (`cargo check`), strict `cargo clippy` across feature combinations (`--all-features`, `--no-default-features`), validates SPDX license headers, and checks anti-patterns.       |
-| [`utils/tests-quick.sh`](utils/tests-quick.sh)     | **Consolidated QA Suite:** Executes unit tests, host-harness tests, CLAP compliance checks (debug + release), and the RT-safety heap-audit gate (`--features testing,heap-audit`).                                                             |
-| [`utils/build-release.sh`](utils/build-release.sh) | **Compiler Optimization Pipeline:** Multi-stage release builder using PGO and LLVM BOLT, outputting assembly report `target/dsp_hotpath.asm`, binary `~/.clap/nam_plug.clap`, and release archive `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst`. |
+| Script                                                                           | Purpose & Execution Scope                                                                                                                                                                                                                      |
+|:-------------------------------------------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`utils/lints.sh`](utils/lints.sh)                                               | **Static Analysis Gate:** Runs `cargo fmt`, compilation checks (`cargo check`), strict `cargo clippy` across feature combinations, validates SPDX license headers, static RT allocations, and AppStream metadata.                              |
+| [`utils/tests-quick.sh`](utils/tests-quick.sh)                                   | **Consolidated QA Suite:** 3-phase agile gate executing all unit and integration tests (`--lib --tests`), release float parity against NAMCore C++, RT codegen disassembly guard, and RT-safety heap-audit (`--features testing,heap-audit`).  |
+| [`utils/tests-long.sh`](utils/tests-long.sh)                                     | **Nightly / Pre-Release Certification:** 4-phase heavy stress suite testing GC model swaps, off-RT teardown drain, multi-instance RT priority/SCHED_FIFO, and headless GUI lifecycle under isolated CPU core pinning.                          |
+| [`utils/tests-gui.sh`](utils/tests-gui.sh)                                       | **Headless GUI & XEmbed Suite:** Headless Xvfb lifecycle, XEmbed embedding cycles, and system clipboard interoperability testing.                                                                                                              |
+| [`utils/verify_rt_codegen.sh`](utils/verify_rt_codegen.sh)                       | **Static Machine-Code Codegen Guard:** Disassembles the CLAP `.so` and verifies zero `malloc`/`free`, zero `div`/`idiv` in core loops, and bounded TLS access via `dsp-hotpath-filter.py`.                                                     |
+| [`utils/tests-performance-regression.sh`](utils/tests-performance-regression.sh) | **Criterion Regression Guard:** Enforces performance budgets and checks CPU governor/isolation against benchmark baselines.                                                                                                                    |
+| [`utils/build-release.sh`](utils/build-release.sh)                               | **Compiler Optimization Pipeline:** Multi-stage release builder using PGO and LLVM BOLT, outputting assembly report `target/dsp_hotpath.asm`, binary `~/.clap/nam_plug.clap`, and release archive `~/nam-plug-vx.y.z-linux-x86_64-v3.tar.zst`. |
+| [`utils/mod-update.sh`](utils/mod-update.sh)                                     | **Supply Chain Update Pipeline:** Updates active Rust toolchain via `rustup`, dependency specifications via `cargo-upgrade`, and resolved versions in `Cargo.lock`.                                                                            |
+| [`utils/test-lib-drift.sh`](utils/test-lib-drift.sh)                             | **Shell QA Library Drift Guard:** Verifies cryptographic SHA-256 integrity of canonical `_lib_core.sh` and shared `dsp-hotpath-filter.py`, running `pick_bench_core` unit tests.                                                               |
+| [`utils/test-pick-bench-core.sh`](utils/test-pick-bench-core.sh)                 | **Bench Core Selection Unit Tests:** Verifies CPU core resolution logic against simulated sysfs trees (isolated cores, offline CPUs, fallbacks).                                                                                               |
 
 ---
 
@@ -280,14 +287,14 @@ The `./utils/` directory contains maintainer tools and standard scripts for code
 
 The following technical documents are maintained in the source repository:
 
-| Document                                                                                                                         | Primary Focus & Topic Coverage                                                                        |
-|:-------------------------------------------------------------------------------------------------------------------------------- |:----------------------------------------------------------------------------------------------------- |
-| [`docs/architecture.md`](docs/architecture.md)                                                                                   | CLAP plugin architecture, SPSC GC thread model, Slint declarative GUI integration, lock-free state synchronization |
-| [`docs/testing.md`](docs/testing.md)                                                                                             | Test suite layout, host-harness verification phases, CLAP test policies, and test coverage matrix     |
-| [`docs/functional-tests.md`](docs/functional-tests.md)                                                                           | Plugin functional test checklist and verification matrices                                            |
-| [`docs/postmortem-libm-symbol-interposition.md`](docs/postmortem-libm-symbol-interposition.md)                                   | Technical postmortem on libm symbol interposition resolution on Linux dynamic linkers                 |
-| [`docs/rt-hardening-evaluation.md`](docs/rt-hardening-evaluation.md)                                                               | Formal architectural evaluation of `rt-hardening` for CLAP plugins (E.5 / S6-T5) — decision: not activated in plugin, delegated to host |
-| [`NeuralAmpModeler-rs: Audio Fidelity Map`](https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/audio_fidelity_map.md) | DSP decision quality trade-off matrix and frequency response analysis (NeuralAmpModeler-rs engine)    |
+| Document                                                                                                                         | Primary Focus & Topic Coverage                                                                                                          |
+|:-------------------------------------------------------------------------------------------------------------------------------- |:--------------------------------------------------------------------------------------------------------------------------------------- |
+| [`docs/architecture.md`](docs/architecture.md)                                                                                   | CLAP plugin architecture, SPSC GC thread model, Slint declarative GUI integration, lock-free state synchronization                      |
+| [`docs/testing.md`](docs/testing.md)                                                                                             | Test suite layout, host-harness verification phases, CLAP test policies, and test coverage matrix                                       |
+| [`docs/functional-tests.md`](docs/functional-tests.md)                                                                           | Plugin functional test checklist and verification matrices                                                                              |
+| [`docs/postmortem-libm-symbol-interposition.md`](docs/postmortem-libm-symbol-interposition.md)                                   | Technical postmortem on libm symbol interposition resolution on Linux dynamic linkers                                                   |
+| [`docs/rt-hardening-evaluation.md`](docs/rt-hardening-evaluation.md)                                                             | Formal architectural evaluation of `rt-hardening` for CLAP plugins (E.5 / S6-T5) — decision: not activated in plugin, delegated to host |
+| [`NeuralAmpModeler-rs: Audio Fidelity Map`](https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/audio_fidelity_map.md) | DSP decision quality trade-off matrix and frequency response analysis (NeuralAmpModeler-rs engine)                                      |
 
 ---
 

@@ -88,11 +88,8 @@ impl PluginPresetLoadImpl for NamClapMainThread<'_> {
             });
         }
 
-        self.shared
-            .cold
-            .ui_loading
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
+        // F-UX-06: `ui_loading` is raised only while `housekeeping()` is inside
+        // `load_model`, not at enqueue time.
         self.host.shared().request_callback();
 
         log::info!("Loading preset \"{preset_name}\" from {path_str:?}");

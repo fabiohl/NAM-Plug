@@ -26,7 +26,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::clap::processor::TEST_TELEMETRY_STALL_NS;
+    use crate::clap::processor::{TEST_TELEMETRY_STALL_NS, TEST_TELEMETRY_STALL_TARGET_INSTANCE};
     use crate::clap::test_util::{self, StereoTestBuffers};
     use clack_host::prelude::*;
     use neural_amp_modeler_rs::dsp::adaptive::AdaptiveState;
@@ -72,6 +72,7 @@ mod tests {
         let mut started = stopped.start_processing().expect("start_processing");
 
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        TEST_TELEMETRY_STALL_TARGET_INSTANCE.store(shared.cold.instance_id, Ordering::Relaxed);
         let rt_status = &shared.cold.rt_status;
         // Block budget in samples must match the 64-sample harness blocks so
         // the 85%-of-budget overload line applies to the stall below.
@@ -123,6 +124,7 @@ mod tests {
             0,
             "stall hook is one-shot"
         );
+        TEST_TELEMETRY_STALL_TARGET_INSTANCE.store(0, Ordering::Relaxed);
     }
 
     /// Three consecutive over-budget blocks must degrade the FSM out of Full
@@ -140,6 +142,7 @@ mod tests {
         let mut started = stopped.start_processing().expect("start_processing");
 
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        TEST_TELEMETRY_STALL_TARGET_INSTANCE.store(shared.cold.instance_id, Ordering::Relaxed);
         let rt_status = &shared.cold.rt_status;
 
         let mut bufs = StereoTestBuffers::new(BLOCK, 0.1, 0.2);
@@ -163,5 +166,146 @@ mod tests {
         // Keep the unit-level state assertion next to the flag: the FSM type
         // the plugin drives is the engine's generic `AdaptiveCompute`.
         let _ = AdaptiveState::Full;
+        TEST_TELEMETRY_STALL_TARGET_INSTANCE.store(0, Ordering::Relaxed);
+        TEST_TELEMETRY_STALL_NS.store(0, Ordering::Relaxed);
+    }
+
+    /// Injects an implausible elapsed duration (> MAX_PLAUSIBLE_ELAPSED_NS)
+    /// into telemetry and prewarm, asserting that the sample is discarded:
+    /// - `dsp_overloads == 0` (does not increment overload count)
+    /// - `latency_hist` count does not increment
+    /// - prewarm cost remains unaffected
+    #[test]
+    fn test_implausible_elapsed_discarded_defense_in_depth() {
+        use crate::clap::processor::{MAX_PLAUSIBLE_ELAPSED_NS, TEST_PREWARM_ELAPSED_NS};
+
+        let _mutex_guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        TEST_TELEMETRY_STALL_NS.store(0, Ordering::Relaxed);
+        TEST_PREWARM_ELAPSED_NS.store(0, Ordering::Relaxed);
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+
+        let stopped = plugin_instance
+            .activate(|_, _| (), audio_config_64())
+            .expect("activate");
+        let mut started = stopped.start_processing().expect("start_processing");
+
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        TEST_TELEMETRY_STALL_TARGET_INSTANCE.store(shared.cold.instance_id, Ordering::Relaxed);
+        let rt_status = &shared.cold.rt_status;
+
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.1, 0.2);
+
+        // Run 1 warm block
+        test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
+        let base_overloads = rt_status.dsp_overloads.load(Ordering::Relaxed);
+        let base_hist = rt_status.latency_hist.total_count();
+
+        // Inject an implausible duration into telemetry (2 seconds > 1s MAX_PLAUSIBLE_ELAPSED_NS)
+        let implausible_ns = MAX_PLAUSIBLE_ELAPSED_NS + 1_000_000_000;
+        TEST_TELEMETRY_STALL_NS.store(implausible_ns, Ordering::Relaxed);
+
+        test_util::assert_zero_alloc("implausible elapsed block discard", || {
+            test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
+        });
+
+        // Telemetry must have discarded the block:
+        assert_eq!(
+            rt_status.dsp_overloads.load(Ordering::Relaxed),
+            base_overloads,
+            "implausible elapsed duration must not increment dsp_overloads"
+        );
+        assert_eq!(
+            rt_status.latency_hist.total_count(),
+            base_hist,
+            "implausible elapsed duration must not be recorded in latency histogram"
+        );
+
+        // Hook must have been consumed
+        assert_eq!(
+            TEST_TELEMETRY_STALL_NS.load(Ordering::Relaxed),
+            0,
+            "stall hook must be cleared"
+        );
+        TEST_TELEMETRY_STALL_TARGET_INSTANCE.store(0, Ordering::Relaxed);
+    }
+
+    /// Unit test for EWMA DSP load and xrun_epoch publishing (T-R2.1):
+    /// - Step response (degrau): 0 -> 500‰ load
+    /// - Convergence: after ~1.25s (~5 * tau), asserts load converges to ~500‰
+    /// - Saturation at 1000‰: 2000‰ overload clamps/saturates at 1000‰
+    /// - xrun_epoch: increments and mirrors dsp_overloads on over-budget blocks
+    #[test]
+    fn test_telemetry_ewma_step_convergence_and_saturation() {
+        let _mutex_guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        TEST_TELEMETRY_STALL_NS.store(0, Ordering::Relaxed);
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let stopped = plugin_instance
+            .activate(|_, _| (), audio_config_64())
+            .expect("activate");
+        let mut started = stopped.start_processing().expect("start_processing");
+
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        TEST_TELEMETRY_STALL_TARGET_INSTANCE.store(shared.cold.instance_id, Ordering::Relaxed);
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.1, 0.2);
+
+        // Budget for 64 samples @ 48kHz is 1_333_333 ns (1.333 ms).
+        let budget_ns = (BLOCK as u64 * 1_000_000_000) / SAMPLE_RATE as u64;
+
+        // Initial state
+        assert_eq!(shared.rt_to_ui.dsp_load_permille.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.rt_to_ui.xrun_epoch.load(Ordering::Relaxed), 0);
+
+        // Phase 1: Step response (50% budget = 500 permille)
+        let step_stall_ns = budget_ns / 2;
+
+        // Run 1 block with 50% stall:
+        TEST_TELEMETRY_STALL_NS.store(step_stall_ns, Ordering::Relaxed);
+        test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
+
+        let permille_1 = shared.rt_to_ui.dsp_load_permille.load(Ordering::Relaxed);
+        assert!(
+            permille_1 > 0 && permille_1 < 500,
+            "After 1 block of 500‰ step, EWMA must begin rising (got {permille_1}‰)"
+        );
+        // Overload threshold is at 85%, so 50% must NOT trigger xrun
+        assert_eq!(shared.rt_to_ui.xrun_epoch.load(Ordering::Relaxed), 0);
+
+        // Phase 2: Convergence after ~5 * tau (tau = 250ms -> 1.25s -> ~938 blocks of 64 samples @ 48kHz).
+        // Run 1000 blocks with 500‰ stall.
+        for _ in 0..1000 {
+            TEST_TELEMETRY_STALL_NS.store(step_stall_ns, Ordering::Relaxed);
+            test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
+        }
+        let converged = shared.rt_to_ui.dsp_load_permille.load(Ordering::Relaxed);
+        assert!(
+            (converged as i32 - 500).abs() <= 5,
+            "EWMA must converge to ~500‰ (got {converged}‰)"
+        );
+
+        // Phase 3: Saturation at 1000‰ with over-budget stall (e.g. 200% budget)
+        let overload_stall_ns = budget_ns * 2;
+        let base_overloads = shared.cold.rt_status.dsp_overloads.load(Ordering::Relaxed);
+
+        for _ in 0..2500 {
+            TEST_TELEMETRY_STALL_NS.store(overload_stall_ns, Ordering::Relaxed);
+            test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
+        }
+
+        let saturated = shared.rt_to_ui.dsp_load_permille.load(Ordering::Relaxed);
+        assert_eq!(
+            saturated, 1000,
+            "EWMA must saturate strictly at 1000‰ under sustained overload"
+        );
+        let current_overloads = shared.cold.rt_status.dsp_overloads.load(Ordering::Relaxed);
+        assert!(current_overloads > base_overloads);
+        assert_eq!(
+            shared.rt_to_ui.xrun_epoch.load(Ordering::Relaxed),
+            current_overloads,
+            "xrun_epoch must mirror dsp_overloads exactly"
+        );
+        TEST_TELEMETRY_STALL_TARGET_INSTANCE.store(0, Ordering::Relaxed);
+        TEST_TELEMETRY_STALL_NS.store(0, Ordering::Relaxed);
     }
 }

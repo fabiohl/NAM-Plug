@@ -6,7 +6,7 @@
 # A trailing '*' matches any executed id with that prefix; a group that did not
 # run makes the coverage cross-check fail closed (partial/filtered runs cannot
 # certify). `CLAP_Evidence` is the end-to-end inference anchor matrix.
-CLAP_Infrastructure/*
-CLAP_Inference/*
-CLAP_WorstCase/*
-CLAP_Evidence/*
+CLAP_Infrastructure_*
+CLAP_Inference_*
+CLAP_WorstCase_*
+CLAP_Evidence_*

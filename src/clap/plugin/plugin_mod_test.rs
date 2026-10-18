@@ -96,7 +96,8 @@ fn test_file_picker_alive_fence_and_timeout() {
 
     // 1. Success Case: alive_fence is true and we receive the path before timeout
     {
-        shared.cold.ui_loading.store(true, Ordering::Relaxed);
+        // F-UX-06: an open dialog raises `ui_dialog_open`, not `ui_loading`.
+        shared.cold.ui_dialog_open.store(true, Ordering::Relaxed);
         let alive_fence = Arc::clone(&shared.cold.alive_fence);
         let shared_addr = Arc::as_ptr(&shared) as usize;
 
@@ -139,7 +140,7 @@ fn test_file_picker_alive_fence_and_timeout() {
 
     // 2. Case alive_fence is false: the plugin was destroyed before the picker returned
     {
-        shared.cold.ui_loading.store(true, Ordering::Relaxed);
+        shared.cold.ui_dialog_open.store(true, Ordering::Relaxed);
         let alive_fence = Arc::clone(&shared.cold.alive_fence);
         let shared_addr = Arc::as_ptr(&shared) as usize;
 
@@ -179,10 +180,12 @@ fn test_file_picker_alive_fence_and_timeout() {
         );
     }
 
-    // 3. Timeout Case: rx.recv_timeout fails due to timeout, resetting ui_loading
+    // 3. Timeout Case: rx.recv_timeout fails due to timeout, resetting both
+    //    dialog/loading flags (cancelled/timed out outcomes end idle — F-UX-06)
     {
         // Restores alive_fence to true
         shared.cold.alive_fence.store(true, Ordering::Relaxed);
+        shared.cold.ui_dialog_open.store(true, Ordering::Relaxed);
         shared.cold.ui_loading.store(true, Ordering::Relaxed);
         let alive_fence = Arc::clone(&shared.cold.alive_fence);
         let shared_addr = Arc::as_ptr(&shared) as usize;
@@ -196,12 +199,17 @@ fn test_file_picker_alive_fence_and_timeout() {
                 // Timeout occurred
                 if alive_fence.load(Ordering::Relaxed) {
                     let shared_ref = unsafe { &*(shared_addr as *const NamClapShared) };
+                    shared_ref
+                        .cold
+                        .ui_dialog_open
+                        .store(false, Ordering::Relaxed);
                     shared_ref.cold.ui_loading.store(false, Ordering::Relaxed);
                 }
             }
         }
 
-        // ui_loading must be reset to false
+        // Both flags must be reset to false
+        assert!(!shared.cold.ui_dialog_open.load(Ordering::Relaxed));
         assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
     }
 }

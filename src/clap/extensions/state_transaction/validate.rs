@@ -209,7 +209,16 @@ pub(crate) fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
     }
 
     let hash = hasher.finalize();
-    Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
+    // Lowercase hex via a 16-entry table instead of `format!` per byte: the
+    // digest is on the hot state-restore path and per-byte formatting would
+    // allocate 32 throwaway strings. Output is byte-identical to `{b:02x}`.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut digest = String::with_capacity(hash.len() * 2);
+    for &b in hash.iter() {
+        digest.push(HEX[(b >> 4) as usize] as char);
+        digest.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    Ok(digest)
 }
 
 /// Returns true when `digest` is exactly 64 hex characters — the canonical

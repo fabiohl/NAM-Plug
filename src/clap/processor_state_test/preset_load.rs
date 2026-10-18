@@ -33,7 +33,7 @@ fn test_preset_load_integration() {
         .load_from_location(&handle, Location::File { path: &path_cstr }, None)
         .expect("load_from_location should succeed");
 
-    plugin_instance.call_on_main_thread_callback();
+    test_util::drain_async_model_loading(&mut plugin_instance, shared);
 
     let counter_after = shared.cold.model_load_counter.load(Ordering::Relaxed);
     assert!(
@@ -42,7 +42,6 @@ fn test_preset_load_integration() {
         counter_before,
         counter_after
     );
-
     let model_name = shared.cold.ui_model_name.lock().unwrap();
     assert!(
         !model_name.is_empty(),
@@ -88,29 +87,31 @@ fn test_consecutive_preset_loads_fifo_and_notification() {
         "All 3 requests should be enqueued"
     );
     assert!(
-        shared.cold.ui_loading.load(Ordering::Relaxed),
-        "ui_loading should be true"
+        !shared.cold.ui_loading.load(Ordering::Relaxed),
+        "ui_loading must stay false at enqueue: it is only raised while \
+         housekeeping is inside load_model (F-UX-06)"
     );
 
-    // Drain #1
-    instance.call_on_main_thread_callback();
+    // Drain all three: the asynchronous loader processes them strictly FIFO
+    // (one in flight at a time) and notifies the host per completed load.
+    test_util::drain_async_model_loading(&mut instance, shared);
+
     assert_eq!(
         shared.cold.pending_model_requests.lock().unwrap().len(),
-        2,
-        "1 item should be drained, 2 remaining"
+        0,
+        "Queue should be empty after draining all loads"
     );
     assert!(
-        state.callback_requested.load(Ordering::SeqCst),
-        "Host callback should be requested while requests remain"
+        !shared.cold.ui_loading.load(Ordering::Relaxed),
+        "ui_loading should be false when the queue is empty and no load is running"
     );
-    state.callback_requested.store(false, Ordering::SeqCst);
 
     let events = state.snapshot();
     let preset_events: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, HostEvent::PresetLoaded { .. }))
         .collect();
-    assert_eq!(preset_events.len(), 1);
+    assert_eq!(preset_events.len(), 3, "one notification per preset load");
     assert_eq!(
         preset_events[0],
         &HostEvent::PresetLoaded {
@@ -118,19 +119,6 @@ fn test_consecutive_preset_loads_fifo_and_notification() {
             load_key: Some("key-lstm".to_string()),
         }
     );
-
-    // Drain #2
-    instance.call_on_main_thread_callback();
-    assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 1);
-    assert!(state.callback_requested.load(Ordering::SeqCst));
-    state.callback_requested.store(false, Ordering::SeqCst);
-
-    let events = state.snapshot();
-    let preset_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, HostEvent::PresetLoaded { .. }))
-        .collect();
-    assert_eq!(preset_events.len(), 2);
     assert_eq!(
         preset_events[1],
         &HostEvent::PresetLoaded {
@@ -138,25 +126,6 @@ fn test_consecutive_preset_loads_fifo_and_notification() {
             load_key: Some("key-a2".to_string()),
         }
     );
-
-    // Drain #3
-    instance.call_on_main_thread_callback();
-    assert_eq!(
-        shared.cold.pending_model_requests.lock().unwrap().len(),
-        0,
-        "Queue should be empty after 3 drains"
-    );
-    assert!(
-        !shared.cold.ui_loading.load(Ordering::Relaxed),
-        "ui_loading should be false when queue is empty"
-    );
-
-    let events = state.snapshot();
-    let preset_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, HostEvent::PresetLoaded { .. }))
-        .collect();
-    assert_eq!(preset_events.len(), 3);
     assert_eq!(
         preset_events[2],
         &HostEvent::PresetLoaded {
@@ -191,7 +160,8 @@ fn test_interleaved_gui_and_preset_loads() {
             path: m_gui,
             origin: ModelRequestOrigin::Gui,
         });
-    shared.cold.ui_loading.store(true, Ordering::Relaxed);
+    // F-UX-06: `ui_loading` is not raised at enqueue time — housekeeping
+    // raises it around the actual `load_model`.
 
     // 2. Enqueue Preset load via extension
     let handle = instance.plugin_handle();
@@ -201,16 +171,17 @@ fn test_interleaved_gui_and_preset_loads() {
 
     assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 2);
 
-    // Drain GUI load
-    instance.call_on_main_thread_callback();
-    assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 1);
+    // Drain both: the asynchronous loader processes them FIFO (GUI first, then
+    // preset) and the host is notified only for the preset load.
+    test_util::drain_async_model_loading(&mut instance, shared);
+    assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
     assert_eq!(
         *shared.cold.ui_model_name.lock().unwrap(),
-        "lstm.nam",
-        "GUI load should have set ui_model_name"
+        "a2_example.nam",
+        "the preset load (accepted last) must be the active model"
     );
 
-    // Verify host received ZERO preset notifications for the GUI load
+    // The host must receive exactly one notification — for the preset load.
     let events = state.snapshot();
     let preset_events: Vec<_> = events
         .iter()
@@ -223,29 +194,8 @@ fn test_interleaved_gui_and_preset_loads() {
         .collect();
     assert_eq!(
         preset_events.len(),
-        0,
-        "GUI load must not notify HostPresetLoad"
-    );
-
-    // Drain Preset load
-    instance.call_on_main_thread_callback();
-    assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
-    assert_eq!(
-        *shared.cold.ui_model_name.lock().unwrap(),
-        "a2_example.nam",
-        "Preset load should have set ui_model_name"
-    );
-
-    // Verify host received the preset notification for the preset load
-    let events = state.snapshot();
-    let preset_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, HostEvent::PresetLoaded { .. }))
-        .collect();
-    assert_eq!(
-        preset_events.len(),
         1,
-        "HostPresetLoad must receive exactly one notification for preset load"
+        "only the preset load may notify HostPresetLoad (GUI loads never do)"
     );
     assert_eq!(
         preset_events[0],
@@ -334,6 +284,8 @@ fn test_pre_enqueuing_validation() {
 
 #[test]
 fn test_toctou_rejection_on_file_modification_during_load() {
+    // Serialise against other tests that install the global mid-load hook.
+    let _hook_guard = crate::clap::plugin::main_thread::load::test_mid_load_hook_lock();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
@@ -380,8 +332,8 @@ fn test_toctou_rejection_on_file_modification_during_load() {
         .load_from_location(&handle, Location::File { path: &temp_c }, Some(&k))
         .expect("load_from_location should enqueue successfully");
 
-    // Run housekeeping
-    instance.call_on_main_thread_callback();
+    // Run the load to completion (the TOCTOU hook fires on the loader worker).
+    test_util::drain_async_model_loading(&mut instance, shared);
 
     // Reset hook and clean up temp file
     crate::clap::plugin::main_thread::load::set_test_mid_load_hook::<fn(&std::path::Path)>(None);

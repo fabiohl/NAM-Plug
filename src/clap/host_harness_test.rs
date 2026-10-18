@@ -846,3 +846,78 @@ fn test_watchdog_timer_register_error_graceful_degradation() {
     let mut or = vec![0.0f32; n];
     let _ = process_block_harness(&mut started, &mut il, &mut ir, &mut ol, &mut or, None);
 }
+
+/// T3.3 (F-UX-01) — pre-worker baseline of the main-thread cost of a
+/// synchronous model load.
+///
+/// Enqueues a large model into `pending_model_requests`, then times the
+/// `housekeeping()` main-thread callback that consumes it (which runs
+/// `load_model` inline). The observed value is recorded, **not asserted**: it
+/// establishes the S4 target (`housekeeping()` < 2 ms per tick during a load,
+/// T4.4/`T3.3` gate). `#[ignore]` because wall-clock timing is
+/// environment-dependent; run on demand with:
+///
+/// ```text
+/// cargo test --lib -- --nocapture baselined_housekeeping_load_blocking_time
+/// ```
+#[test]
+fn baselined_housekeeping_load_blocking_time() {
+    use crate::clap::plugin::shared::{ModelRequestOrigin, PendingModelRequest};
+
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    let audio_config = default_audio_config();
+
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config)
+        .expect("activate failed");
+    let _started = stopped.start_processing().expect("start_processing failed");
+
+    let model = model_path("a2_example.nam");
+    shared
+        .cold
+        .pending_model_requests
+        .lock()
+        .unwrap()
+        .push_back(PendingModelRequest {
+            path: model,
+            origin: ModelRequestOrigin::Gui,
+        });
+    shared.cold.ui_dialog_open.store(true, Ordering::SeqCst);
+
+    let start = std::time::Instant::now();
+    instance.call_on_main_thread_callback();
+    let elapsed = start.elapsed();
+
+    // S4 gate (T4.4): the timed callback only *accepts and dispatches* the load
+    // to the `nam-model-loader` worker, so the main-thread `housekeeping()`
+    // tick must stay far below the 2 ms budget. The heavy `prepare_model`
+    // phase no longer runs on the main thread.
+    assert_eq!(
+        shared.cold.model_load_counter.load(Ordering::Relaxed),
+        0,
+        "the timed callback must not have loaded the model synchronously — \
+         the async loader (Épico B) must own the prepare phase \
+         (NAM_SYNC_MODEL_LOAD must not be set)"
+    );
+
+    let ms = elapsed.as_secs_f64() * 1e3;
+    eprintln!(
+        "[S4 gate] housekeeping() during async model load (a2_example.nam): {ms:.3} ms \
+         (target < 2.000 ms)"
+    );
+    assert!(
+        ms < 2.0,
+        "housekeeping() blocked for {ms:.3} ms while accepting a model load; \
+         the load must complete on the `nam-model-loader` worker (target < 2 ms). \
+         Check whether NAM_SYNC_MODEL_LOAD is set."
+    );
+
+    // Drive the loader to completion and confirm the model was adopted.
+    crate::clap::test_util::drain_async_model_loading(&mut instance, shared);
+    assert_eq!(
+        shared.cold.model_load_counter.load(Ordering::Relaxed),
+        1,
+        "the async loader must adopt the model within the driver timeout"
+    );
+}

@@ -58,10 +58,28 @@ pub(crate) static TEST_PANIC_INJECTION: std::sync::atomic::AtomicBool =
 pub(crate) static TEST_TELEMETRY_STALL_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Test-only hook to bind `TEST_TELEMETRY_STALL_NS` to a specific instance ID.
+/// When non-zero, only the matching plugin instance will consume the stall.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) static TEST_TELEMETRY_STALL_TARGET_INSTANCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Test-only hook to inject a panic inside the `reset()` audio processor method.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) static TEST_RESET_PANIC_INJECTION: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Maximum plausible duration for an audio callback measurement or prewarm step (1 second).
+///
+/// Defense-in-depth against clock jumps, uncalibrated-to-calibrated flips, or timer anomalies.
+/// Measurements exceeding this threshold are discarded: they are not recorded in histograms,
+/// do not increment overload counters, and do not update prewarm cost or adaptive compute.
+pub const MAX_PLAUSIBLE_ELAPSED_NS: u64 = 1_000_000_000;
+
+/// Test-only hook to inject a prewarm step elapsed duration.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) static TEST_PREWARM_ELAPSED_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 use crate::clap::plugin::errors::{self, static_plugin_error};
 use crate::clap::plugin::{
@@ -1122,6 +1140,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 mono_hyst,
                 process_mono: true,
                 scheduled_events: Vec::with_capacity(4096),
+                scheduled_events_sorted: true,
                 bypass_xfade: state::BypassCrossfader::new(params.bypass),
                 dry_delay,
                 rt_status: Arc::clone(&shared.cold.rt_status),
@@ -1164,6 +1183,13 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 cached_effective_latency: initial_latency,
                 host,
                 poisoned: false,
+                dsp_load_ewma: 0.0,
+                cached_n_samples: 0,
+                cached_sample_rate: 0,
+                cached_inv_budget_permille: 0.0,
+                cached_ewma_alpha: 0.0,
+                cached_threshold_ns: u64::MAX,
+                cached_budget_us: 0,
             })
         }));
         shared
@@ -1428,31 +1454,46 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         #[cfg(target_arch = "x86_64")]
                         {
                             if !self.prewarm_static {
-                                let elapsed = rdtsc_nanos().wrapping_sub(step_start);
-                                let effective_frames = if frames_count > 0 {
-                                    frames_count
-                                } else {
-                                    self.min_frames_count.max(1)
-                                };
-                                let effective_rate = if self.sample_rate > 0.0 {
-                                    self.sample_rate
-                                } else {
-                                    48000.0
-                                };
-                                let period_ns = (effective_frames as f64 / effective_rate) * 1e9;
-                                let sample_cost = elapsed as f64 / step as f64;
-                                const EWMA_ALPHA: f64 = 0.25;
-                                let mut ewma = match self.prewarm_cost_ns_per_sample {
-                                    Some(prev) if prev.is_finite() && prev > 0.0 => {
-                                        f64::from(prev) * (1.0 - EWMA_ALPHA)
-                                            + sample_cost * EWMA_ALPHA
+                                #[cfg(any(test, feature = "testing"))]
+                                let elapsed = {
+                                    let injected =
+                                        TEST_PREWARM_ELAPSED_NS.swap(0, Ordering::Relaxed);
+                                    if injected > 0 {
+                                        injected
+                                    } else {
+                                        rdtsc_nanos().wrapping_sub(step_start)
                                     }
-                                    _ => sample_cost,
                                 };
-                                if elapsed as f64 > 0.5 * period_ns {
-                                    ewma = ewma.max(sample_cost);
+                                #[cfg(not(any(test, feature = "testing")))]
+                                let elapsed = rdtsc_nanos().wrapping_sub(step_start);
+
+                                if elapsed <= MAX_PLAUSIBLE_ELAPSED_NS {
+                                    let effective_frames = if frames_count > 0 {
+                                        frames_count
+                                    } else {
+                                        self.min_frames_count.max(1)
+                                    };
+                                    let effective_rate = if self.sample_rate > 0.0 {
+                                        self.sample_rate
+                                    } else {
+                                        48000.0
+                                    };
+                                    let period_ns =
+                                        (effective_frames as f64 / effective_rate) * 1e9;
+                                    let sample_cost = elapsed as f64 / step as f64;
+                                    const EWMA_ALPHA: f64 = 0.25;
+                                    let mut ewma = match self.prewarm_cost_ns_per_sample {
+                                        Some(prev) if prev.is_finite() && prev > 0.0 => {
+                                            f64::from(prev) * (1.0 - EWMA_ALPHA)
+                                                + sample_cost * EWMA_ALPHA
+                                        }
+                                        _ => sample_cost,
+                                    };
+                                    if elapsed as f64 > 0.5 * period_ns {
+                                        ewma = ewma.max(sample_cost);
+                                    }
+                                    self.prewarm_cost_ns_per_sample = Some(ewma as f32);
                                 }
-                                self.prewarm_cost_ns_per_sample = Some(ewma as f32);
                             }
                         }
                     }

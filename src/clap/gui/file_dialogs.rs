@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ///
 /// All outcomes (selected, cancelled by user, timed out) set `pending_model`
 /// and call `host_static.request_callback()` so `housekeeping()` always
-/// processes the result — preventing stale `ui_loading` flags.
+/// processes the result — preventing stale `ui_dialog_open`/`ui_loading` flags.
 ///
 /// Teardown safety: if the plugin is destroyed while the picker is open (`alive_fence`
 /// drops), the outcome is **discarded**: the path is never written to

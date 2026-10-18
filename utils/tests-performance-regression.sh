@@ -34,6 +34,7 @@
 #   NAM_BASELINE_NAME      Criterion baseline name (default ci-baseline).
 #   NAM_BENCH_MANIFEST     Expected-id manifest (default benches/clap_bench.manifest).
 #   NAM_THERMAL_COOLDOWN_S Cooldown before benchmarking (default 180, 0 to skip).
+#   NAM_GOVERNOR_FILE      Governor sysfs path override (tests only).
 #
 # Usage
 #   utils/tests-performance-regression.sh [--check|--bootstrap-baseline]
@@ -47,6 +48,43 @@ source "$SCRIPT_DIR/lib/_lib.sh"
 # Single source of truth for the Criterion suite name: the expected-id manifest
 # default is derived from it, so the two can never drift apart.
 BENCH_SUITE="clap_bench"
+
+# ── Governor guard (F-EV-02) ─────────────────────────────────────────────────
+# A baseline captured under a DVFS-scaling governor is not comparable, so the
+# guard runs before delegating: it covers --check and --bootstrap-baseline
+# alike. Help/unknown arguments are delegated untouched so the shared core
+# keeps ownership of usage reporting.
+guard_governor() {
+    local mode="$1"
+    local bench_core governor_file governor
+
+    bench_core="$(pick_bench_core)"
+    # Pin the resolved core so the shared core reuses the same value instead of
+    # resolving it twice (and possibly recording a second cpu_not_isolated gap).
+    export NAM_BENCH_CORE="$bench_core"
+
+    governor_file="${NAM_GOVERNOR_FILE:-/sys/devices/system/cpu/cpu${bench_core}/cpufreq/scaling_governor}"
+    if [ ! -r "$governor_file" ]; then
+        die "governor cannot be verified in ${mode} mode: '${governor_file}' missing or unreadable (fail-closed). The gate requires the 'performance' governor. Fix with 'sudo cpupower frequency-set -g performance' (or re-run environment bootstrap) and retry."
+    fi
+    governor="$(tr -d '[:space:]' < "$governor_file" 2>/dev/null || true)"
+    if [ "$governor" != "performance" ]; then
+        die "current governor for CPU ${bench_core} is '${governor:-unknown}', but gate requires 'performance' (${governor_file}). Fix with 'sudo cpupower frequency-set -g performance' (or re-run environment bootstrap) and retry."
+    fi
+}
+
+guard_mode="--check"
+guard_enabled=1
+for arg in "$@"; do
+    case "$arg" in
+        --check) guard_mode="--check" ;;
+        --bootstrap-baseline) guard_mode="--bootstrap-baseline" ;;
+        *) guard_enabled=0; break ;;
+    esac
+done
+if [ "$guard_enabled" -eq 1 ]; then
+    guard_governor "$guard_mode"
+fi
 
 run_perf_regression_gate \
     "$SCRIPT_DIR" \

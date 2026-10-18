@@ -594,7 +594,16 @@ fn run_clap_scenario(
             }]);
 
             let mut input_events_buffer = EventBuffer::new();
-            if scenario.parameter_automation && block_idx.is_multiple_of(4) {
+            // T7.3 (S7 / F-UX-03): dense automation burst — one smoothed-gain
+            // event per sample. Exercises the fused gain-ramp path
+            // (`apply_gain_ramp_with_steps`) so PGO/BOLT profiles the S7 hot
+            // code, interleaving a gate boundary every 32 samples. It is the
+            // *sole* event source on its blocks: mixing it with the sparse
+            // automation below would make the stream non-monotonic and disable
+            // fusion (the very path this scenario exists to profile).
+            let dense_burst =
+                scenario.parameter_automation && chunk_len <= 512 && block_idx % 8 == 4;
+            if scenario.parameter_automation && block_idx.is_multiple_of(4) && !dense_burst {
                 let mod_gain = ((block_idx % 20) as f64 - 10.0) * 0.5;
                 input_events_buffer.push(&ParamValueEvent::new(
                     0,
@@ -621,6 +630,30 @@ fn run_clap_scenario(
                         Pckn::match_all(),
                         0.0,
                     ));
+                }
+            }
+            if dense_burst {
+                for i in 0..chunk_len {
+                    let id = if i.is_multiple_of(2) {
+                        PARAM_INPUT_GAIN
+                    } else {
+                        PARAM_OUTPUT_GAIN
+                    };
+                    let value = (((i * 37) % 24) as f64) - 12.0;
+                    input_events_buffer.push(&ParamValueEvent::new(
+                        i as u32,
+                        ClapId::new(id),
+                        Pckn::match_all(),
+                        value,
+                    ));
+                    if i % 32 == 31 {
+                        input_events_buffer.push(&ParamValueEvent::new(
+                            i as u32,
+                            ClapId::new(PARAM_GATE_THRESH),
+                            Pckn::match_all(),
+                            -30.0,
+                        ));
+                    }
                 }
             }
             let input_events = InputEvents::from_buffer(&input_events_buffer);

@@ -28,7 +28,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 │  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - Slint Event Loop    │
 │  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - "nam-slint-gui"     │
 │  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.17 FemtoVG│
-│  - Background Model Loading │  │  - Zero Blocking I/O    │  │  - Wayland & X11       │
+│  - Synchronous Model Load   │  │  - Zero Blocking I/O    │  │  - Wayland & X11       │
 │  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - Async rfd FileDialog│
 │                             │  │                         │  │  - 5-Zone UI Layout    │
 └──────────────┬──────────────┘  └────────────▲────────────┘  └───────────┬────────────┘
@@ -39,7 +39,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ### 1.1 Thread Roles & Hard Contracts
 
-- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, background model (`.nam`/`.namb`) loading, IR reading via `src/clap/plugin/main_thread/load.rs` (using `neural_amp_modeler_rs::dsp::cabsim::loader`), and Tier 1 Garbage Collection disposal. Under CLAP timer support (`clap_plugin_timer_support`), the main thread registers a periodic 250 ms watchdog timer with the host, driving autonomous `housekeeping()` (RT processor poisoning containment recovery via `request_restart()`, dynamic PDC latency announcements via `HostLatency::changed()`, and Tier 1 GC SPSC queue draining) without depending on sporadic GUI events or user interactions. On hosts lacking timer support, it degrades gracefully to event-driven housekeeping.
+- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, model (`.nam`/`.namb`) loading dispatched to the per-instance `nam-model-loader` worker (`housekeeping()` only accepts/dispatches the job and commits the short result — see §1.2), IR reading via `src/clap/plugin/main_thread/load.rs` (using `neural_amp_modeler_rs::dsp::cabsim::loader`), and Tier 1 Garbage Collection disposal. Under CLAP timer support (`clap_plugin_timer_support`), the main thread registers a periodic 250 ms watchdog timer with the host, driving autonomous `housekeeping()` (RT processor poisoning containment recovery via `request_restart()`, dynamic PDC latency announcements via `HostLatency::changed()`, and Tier 1 GC SPSC queue draining) without depending on sporadic GUI events or user interactions. On hosts lacking timer support, it degrades gracefully to event-driven housekeeping.
 
 - **Audio Thread (RT)** — Driven by the host `process()` callback (`PluginAudioProcessor::process` in `src/clap/processor/mod.rs`).
 
@@ -51,11 +51,11 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ## 2. Compilation Strategy & Feature Flags
 
-`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v0.8.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload` and `nam_perf_guard` under `src/bin/`, both gated behind the `testing` feature). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
+`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v1.0.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload` and `nam_perf_guard` under `src/bin/`, both gated behind the `testing` feature). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
 
 The crate feature flags defined in `Cargo.toml` are:
 
-- **`stereo` (default):** Enables dual-channel L/R audio processing and dynamic adaptive stereo VU metering.
+- **`dual-mono` (default):** Enables two independent, identical L/R inference chains with no interaction between channels, plus dynamic adaptive stereo VU metering.
 - **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, the `nam_perf_guard` certification binary, and the `pgo_profiling_workload` binary.
 - **`heap-audit`:** Activates the allocation counting allocator interceptor (`CountingAllocator`) for RT-safety heap audits.
 
@@ -145,7 +145,7 @@ Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-exten
 | `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                                                   |
 | `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision.                        |
 | `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining cab-sim IR ring-out frames.                                                   |
-| `clap_plugin_timer_support`          | `src/clap/extensions/timer.rs`                  | Periodic 250 ms watchdog timer driving autonomous housekeeping and RT recovery via `clap_host_timer_support`.      |
+| `clap_plugin_timer_support`          | `src/clap/extensions/timer.rs`                  | Periodic 250 ms watchdog timer driving autonomous housekeeping and RT recovery via `clap_host_timer_support`.     |
 | `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint declarative GUI with **native X11 XEmbed embedding** and X11/Wayland floating support. |
 
 > **Host Compatibility Note:** Native Wayland and X11 window negotiation (`CLAP_WINDOW_API_WAYLAND` and `CLAP_WINDOW_API_X11`) is verified across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. PreSonus Studio One / Fender Studio Pro for Linux is supported via floating window mode with bounded join teardown (`nam-gui-reaper`).
@@ -418,7 +418,7 @@ state matches the declared plugin latency for seamless host PDC.
   the new wet resources land; `activate()` initializes the delay from
   `initial_latency`. A staged + restart swap keeps the old delay until
   `activate()` consumes it (strict restart policy). Non-finite input containment
-  resets the ring.
+  resets the ring (see §6.5).
 - **Bypass keeps the declared latency:** in the fully-bypassed state the
   output is the input delayed by exactly the declared latency, so the plugin's
   physical latency matches its PDC report and automation ramps through bypass
@@ -442,6 +442,34 @@ Host parameter automation and modulation (`ParamValueEvent` and `ParamModEvent`)
    - **Out-of-Order / Jittered Events (`time < block_offset`):** The event timestamp is defensively clamped to `block_offset` and applied immediately before subsequent DSP processing.
    - **Out-of-Bounds Events (`time >= n_samples`):** The event timestamp is clamped to `n_samples` and applied at the block close boundary before exiting `process_dsp_audio`, ensuring the parameter value is applied and never lost when `events.clear()` runs on the next cycle.
    - **RT Observability (`RT_STATUS_EVENT_TIMING_ANOMALY`):** Setting bit 32 (`1 << 32`) on `RtStatusFlags` provides lock-free, zero-alloc telemetry. The main thread detects and clears this bit in `emit_pending_logs()`, emitting structured diagnostics via `log::warn!` and `clap_host_log`. Zero I/O and zero logging occur in the audio callback.
+
+### 6.5 Two-Phase Non-Finite Containment (S6-T3 / F-UX-04)
+
+A non-finite (NaN/Inf) host input sample would poison the recurrent model state
+and leak through the wet chain. The engine's input stage detects it at ~zero cost
+and raises `RT_STATUS_NON_FINITE_INPUT_DETECTED` (sanitizing only its own input
+slices). The **plugin-level containment** runs at the top of `process_dsp_audio`
+(`src/clap/processor/dsp/orchestrator.rs`) and is deliberately amortized like the
+seek/loop `reset()` (S6-T1), never a synchronous multi-millisecond `model.reset`:
+
+1. **Consume once:** `check_flag` + `clear_flag` are performed together, so the
+   containment runs **once per poisoning**, not once per block (the historical
+   path reset the model unthrottled on every block after a single fault).
+2. **Phase zero (O(1)):** `NamModel::prewarm_reset()` returns the model to the
+   freshly-built state without the stabilization feed, and `prewarm_pending` is
+   armed to drain the amortization window.
+3. **Latency/ramp hygiene:** `dry_delay.reset()` and the input/output smoother
+   `snap_to_target()` keep the dry path and parameter ramps free of pre-fault
+   history; the intermediate/scratch buffers are zeroed exactly as `reset()` does
+   so no pre-fault sample survives in a slot the wet path could read before
+   rewriting.
+4. **Held dry block:** the current callback returns
+   `process_dry_contained_block` (bypass-leg semantics, latency-compensated raw
+   input) and the following callbacks stay dry until the model reconverges; the
+   first wet block afterwards equals a fresh instance's first block.
+
+The heavy synchronous `model.reset` (measured 1.81 ms p99 LSTM / 4.18 ms p99
+WaveNet A2) is therefore removed from the poisoning callback.
 
 ---
 
@@ -543,7 +571,63 @@ alive (its window creation fails cleanly and the host sees the honest
 `create()` rejection). This is a documented Slint constraint, tracked
 separately from this delivery.
 
-### 7.4 GUI Lifecycle FSM Feedback
+### 7.4 Asynchronous Model Loader (`nam-model-loader`)
+
+Model loading is split into a **pure prepare phase** (`prepare_model`) and a
+**short effectful commit** (`commit_prepared_model`), both in
+`src/clap/plugin/main_thread/load.rs`. The prepare phase — file I/O, TOCTOU
+re-check, `load_and_build_model`, SHA-256, slimmable clone, pre-warm cost
+measurement, stream adapter and resampler construction — runs on a dedicated
+**non-RT** thread (`"nam-model-loader"`, normal scheduling priority, never
+`SCHED_FIFO`), created lazily on the first load
+(`main_thread/model_loader.rs`). The commit runs on the main thread, so the
+audio thread never observes a partial swap and the SHA-256 identity is verified
+before adoption (§3.3).
+
+- `housekeeping()` **accepts** a queued request (`pending_model_requests`),
+  allocates its monotonic model generation, and **dispatches** one job at a time
+  to the worker. A later **GUI** request supersedes pending GUI requests and
+  invalidates an in-flight GUI load (last-wins); preset requests are honoured
+  FIFO and always acknowledged.
+- On completion the worker publishes a `PreparedModelResult` into an
+  `Arc<Mutex<…>>` slot and calls `host.request_callback()`; the next tick
+  commits it. A result whose generation was superseded is discarded and never
+  signals `notify_preset_loaded`.
+- `ui_loading` is raised while a job is in flight and cleared on commit or
+  error; a successful commit also clears any stale `ui_load_error`.
+- Lifetime: the worker owns an `Arc<GuiSharedState>` and is `alive_fence`-gated,
+  so a load in progress can never dangle; teardown uses a bounded join with the
+  `"nam-model-loader-reaper"` fallback.
+- **Adaptive structural rebuild offload (S6-T1 / F-UX-02):** the same worker
+  also services the audio thread's two allocation-heavy structural refreshes —
+  the WaveNet *slimmable* slice (`slice` + `prewarm` + `set_max_buffer_size`) and
+  the *oversampling* engine pair (`OversampleEngine::new` ×2). Idle, the worker
+  re-reads `RT_STATUS_NEEDS_SLIMMABLE_REBUILD` / `RT_STATUS_NEEDS_OS_REBUILD`
+  with a 10 ms `park_timeout`, builds the payload off the main thread, publishes
+  it into a per-kind `RebuildSlots` slot and calls `host.request_callback()`. The
+  main thread's `housekeeping()` tick then performs the SPSC push (slimmable) or
+  command-ring push (`SetOversample`) and clears the flag — the fail-closed
+  retain-on-full retry is unchanged, and a payload still awaiting consumption is
+  never rebuilt. The flag→swap latency therefore no longer waits for the 250 ms
+  watchdog; a **fast watchdog cadence fallback (S6-T2)** re-arms the host timer at
+  50 ms while a rebuild flag is still pending, restoring 250 ms once it clears.
+- Rollback: `NAM_SYNC_MODEL_LOAD=1` (read once at instance creation) forces the
+  historical synchronous path. `NAM_SYNC_ADAPTIVE_REBUILD=1` reverts the
+  structural rebuilds (slimmable + oversampling) to the main-thread inline path.
+
+### 7.5 Opt-in Asynchronous State Restore (`nam-restore-loader`)
+
+State restore keeps its 3-phase atomic transaction (Prepare → Validate →
+Commit). When `NAM_ASYNC_RESTORE` is set on an **active, interactive** host
+(non-offline, `buffer_size > 0`), the expensive validation phase
+(`validate::validate_and_build`) runs on a dedicated `"nam-restore-loader"`
+worker while the atomic commit still runs on the main thread, preserving the
+fail-closed policy (digest required; previous DSP state intact on failure).
+Pre-activate restores, offline/render contexts, and the default configuration
+stay synchronous. The switch is opt-in because an asynchronous restore reports
+success to the host before validation has run.
+
+### 7.6 GUI Lifecycle FSM Feedback
 
 `src/clap/gui/lifecycle.rs` models window visibility as `Hidden → ShowRequested →
 Active → HideRequested → Hidden` (plus the terminal `Destroyed`). The FSM is fed
@@ -726,6 +810,7 @@ CLI gate executing realistic inference workloads against the finalized, stripped
 - Measures statistical latency distributions (p50, p95, p99, max, mean, ns/sample) across core topologies (WaveNet A1 Standard, WaveNet A2 Slimmable, LSTM) and block sizes (64 and 128 samples).
 - Validates real-time deadline margins against strict thresholds.
 - Detects host environmental noise / thermal anomalies, emitting a structured JSON certification report (`target/perf-certification-report.json`).
+- Requires a deterministic isolated CPU environment configured via GRUB kernel parameters (`isolcpus=managed_irq,domain,...`, `nohz_full`, `rcu_nocbs`, `clocksource=tsc`) and pinned execution via `taskset -c <core>` to eliminate environmental noise and guarantee reproducible baselines (detailed in [`docs/testing.md`](./testing.md#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset)).
 
 ---
 

@@ -14,6 +14,8 @@ use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
 use neural_amp_modeler_rs::dsp::smoother::ParamSmoother;
 use neural_amp_modeler_rs::math::dsp::sanitize_copy_peak;
 
+use super::worker::GainStep;
+
 /// Disjoint scratch-buffer borrows for one sub-block of the DSP pipeline.
 ///
 /// Groups the ~17 mutable slice borrows that [`process_sub_block`] and its
@@ -91,6 +93,7 @@ pub(crate) fn process_sub_block(
     smoother_out: &mut ParamSmoother,
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
+    gain_steps: &[GainStep],
 ) -> (usize, GateState, f32, f32) {
     if n_samples > neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF {
         core::hint::cold_path();
@@ -177,12 +180,14 @@ pub(crate) fn process_sub_block(
         return (n_samples, GateState::Open, peak_l, peak_r);
     }
 
-    apply_iir_gain_ramp_sub_block(
+    apply_gain_ramp_with_steps(
         smoother_in,
         buf_host_l,
         buf_host_r,
         offset,
         n_samples,
+        gain_steps,
+        true,
         true,
         input_clipped,
         process_mono,
@@ -212,6 +217,7 @@ pub(crate) fn process_sub_block(
             scratch,
             model_output_mult_adj,
             shared_sample_rate,
+            gain_steps,
         );
     }
 
@@ -281,12 +287,14 @@ pub(crate) fn process_sub_block(
         shared_sample_rate,
     );
 
-    apply_iir_gain_ramp_sub_block(
+    apply_gain_ramp_with_steps(
         smoother_out,
         buf_out_l,
         buf_out_r,
         0,
         n_out,
+        gain_steps,
+        false,
         false,
         &mut false,
         process_mono,
@@ -366,6 +374,7 @@ fn process_sub_block_chunked(
             smoother_out,
             model_output_mult_adj,
             shared_sample_rate,
+            &[],
         );
         total_out += c_out;
         last_gate = c_gate;
@@ -401,6 +410,10 @@ fn process_sub_block_chunked(
 /// still ringing — never on the steady-state audio path.
 #[cold]
 #[inline(never)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "gate-closed drain kernel fans out to ctx/smoother/scratch/steps with no further grouping available without unsafe"
+)]
 fn drain_tail_into(
     n_samples: usize,
     ctx: &mut DspPipelineContext<'_>,
@@ -409,6 +422,7 @@ fn drain_tail_into(
     scratch: &mut SubBlockScratch<'_>,
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
+    gain_steps: &[GainStep],
 ) -> usize {
     let SubBlockScratch {
         buf_host_l: _,
@@ -450,12 +464,32 @@ fn drain_tail_into(
             ctx.adaptive,
             shared_sample_rate,
         );
-        apply_iir_gain_ramp_sub_block(
+        apply_gain_ramp_with_steps(
             smoother_out,
             buf_out_l,
             buf_out_r,
             0,
             drain,
+            gain_steps,
+            false,
+            false,
+            &mut false,
+            process_mono,
+        );
+    } else {
+        // No tail samples to render, but fused output-gain targets staged
+        // earlier (`apply_smoother = false`) must still be committed to the
+        // smoother so a later gate reopen uses the correct gain. With n = 0
+        // the helper only performs the ordered `set_target` calls and touches
+        // no samples.
+        apply_gain_ramp_with_steps(
+            smoother_out,
+            buf_out_l,
+            buf_out_r,
+            0,
+            0,
+            gain_steps,
+            false,
             false,
             &mut false,
             process_mono,
@@ -502,6 +536,7 @@ fn process_tail_drain(
     scratch: &mut SubBlockScratch<'_>,
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
+    gain_steps: &[GainStep],
 ) -> (usize, GateState, f32, f32) {
     let drained = drain_tail_into(
         n_samples,
@@ -511,6 +546,7 @@ fn process_tail_drain(
         scratch,
         model_output_mult_adj,
         shared_sample_rate,
+        gain_steps,
     );
 
     if drained == 0 {
@@ -627,6 +663,7 @@ fn process_crossfade_sub_block(
             scratch,
             model_output_mult_adj,
             shared_sample_rate,
+            &[],
         );
         n_samples
     } else {
@@ -775,6 +812,61 @@ fn process_crossfade_sub_block(
     );
 
     (n_out, gate_state, peak_l, peak_r)
+}
+
+#[inline(always)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors apply_iir_gain_ramp_sub_block plus the fused step list"
+)]
+fn apply_gain_ramp_with_steps(
+    smoother: &mut ParamSmoother,
+    buf_l: &mut [f32],
+    buf_r: &mut [f32],
+    offset: usize,
+    n: usize,
+    steps: &[GainStep],
+    want_input: bool,
+    detect_clip: bool,
+    input_clipped: &mut bool,
+    process_mono: bool,
+) {
+    let end = offset + n;
+    let mut pos = offset;
+    for step in steps {
+        if step.is_input != want_input {
+            continue;
+        }
+        let step_off = offset + (step.offset as usize).min(n);
+        if step_off > pos {
+            apply_iir_gain_ramp_sub_block(
+                smoother,
+                buf_l,
+                buf_r,
+                pos,
+                step_off - pos,
+                detect_clip,
+                input_clipped,
+                process_mono,
+            );
+            pos = step_off;
+        }
+        // The target for the next piece is applied at this exact offset, so
+        // the concatenated ramps equal the legacy per-event sub-block split.
+        smoother.set_target(step.target);
+    }
+    if pos < end {
+        apply_iir_gain_ramp_sub_block(
+            smoother,
+            buf_l,
+            buf_r,
+            pos,
+            end - pos,
+            detect_clip,
+            input_clipped,
+            process_mono,
+        );
+    }
 }
 
 #[inline(always)]

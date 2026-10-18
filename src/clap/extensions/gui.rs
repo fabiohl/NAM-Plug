@@ -104,13 +104,17 @@ impl<'a> NamClapMainThread<'a> {
     /// Slint platform alive so the next `spawn_gui` reuses it (Slint 1.17
     /// pins the platform to the thread that initialized it).
     ///
-    /// The `quit_event_loop` is guarded by `gui_worker.is_some()`: Slint has a
-    /// single process-wide event-loop proxy, so an unconditional quit from an
-    /// instance that never owned a loop would tear down a *different*
-    /// instance's running loop (observable in parallel tests).
+    /// The `quit_event_loop` is guarded by the presence of the window handle:
+    /// Slint has a single process-wide event-loop proxy, so an unconditional
+    /// quit from an instance that never owned a running loop — including one
+    /// that only pre-warmed the platform from `create()` (F-UX-05) — would
+    /// leave a pending quit for the *next* `run_event_loop` (closing the next
+    /// window immediately) or tear down a *different* instance's loop
+    /// (observable in parallel tests). A window handle exists only while a
+    /// generation's loop is running.
     pub(crate) fn close_current_window(&self) {
         // 1. Quit the Slint event loop and clear the window reference.
-        if self.gui_worker.borrow().is_some() {
+        if self.slint_window.borrow().is_some() {
             let _ = slint::quit_event_loop();
         }
         self.slint_window.replace(None);
@@ -179,10 +183,43 @@ impl<'a> NamClapMainThread<'a> {
                 }
             }
         }
+
+        // 3. Shut down the asynchronous model loader worker with the same
+        //    bounded join / reaper protocol. The fence is already down, so the
+        //    worker publishes no result and issues no host callback after this
+        //    point; the Arc it holds keeps the shared state alive until it
+        //    exits, so a load in progress can never dangle.
+        if let Some(loader) = self.model_loader.borrow_mut().take()
+            && let Some(handle) = loader.shutdown()
+            && let Some(still_running) =
+                try_join_until(handle, std::time::Instant::now() + TEARDOWN_JOIN_TIMEOUT)
+        {
+            log::warn!(
+                "NAM-Plug: model loader thread did not exit within {:?} — \
+                 handing it to the reaper (thread holds no valid raw pointers \
+                 once the fence is lowered)",
+                TEARDOWN_JOIN_TIMEOUT
+            );
+            spawn_reaper("nam-model-loader-reaper", still_running);
+        }
+
+        // 4. Same bounded protocol for the opt-in asynchronous restore loader.
+        if let Some(loader) = self.restore_loader.borrow_mut().take()
+            && let Some(handle) = loader.shutdown()
+            && let Some(still_running) =
+                try_join_until(handle, std::time::Instant::now() + TEARDOWN_JOIN_TIMEOUT)
+        {
+            log::warn!(
+                "NAM-Plug: restore loader thread did not exit within {:?} — \
+                 handing it to the reaper",
+                TEARDOWN_JOIN_TIMEOUT
+            );
+            spawn_reaper("nam-restore-loader-reaper", still_running);
+        }
     }
 
     /// Returns the static host handle and shared Arc needed by window callbacks.
-    fn host_static_and_shared(
+    pub(crate) fn host_static_and_shared(
         &self,
     ) -> (
         clack_plugin::host::HostSharedHandle<'static>,
@@ -192,6 +229,33 @@ impl<'a> NamClapMainThread<'a> {
         let host_static = bridge.as_static();
         let shared_arc = Arc::clone(&self.shared.gui);
         (host_static, shared_arc)
+    }
+
+    /// Starts the persistent GUI worker (if absent) and pre-warms the Slint
+    /// platform on its thread **without a window** (F-UX-05 / T5.1).
+    ///
+    /// Called from `create()` so the winit/GL backend startup overlaps the rest
+    /// of the host's GUI negotiation instead of blocking the host main thread
+    /// inside the first `open_window`. `force_x11` mirrors the backend the
+    /// negotiation will require (`X11` → forced X11; Wayland/other → native
+    /// auto-selection), matching `spawn_gui`.
+    ///
+    /// Best-effort: a spawn failure is logged and the later `open_window` path
+    /// spawns the worker itself, so pre-warming never blocks GUI creation.
+    fn prewarm_gui_platform(&self, force_x11: bool) {
+        if self.gui_worker.borrow().is_none() {
+            let (host_static, shared_arc) = self.host_static_and_shared();
+            match crate::clap::gui::worker::GuiWorker::spawn(shared_arc, host_static) {
+                Ok(worker) => *self.gui_worker.borrow_mut() = Some(worker),
+                Err(msg) => {
+                    log::warn!("NAM-Plug: GUI worker spawn failed during pre-warm: {msg}");
+                    return;
+                }
+            }
+        }
+        if let Some(worker) = self.gui_worker.borrow().as_ref() {
+            worker.warm_up(force_x11);
+        }
     }
 
     /// Spawns the dedicated Slint GUI thread and waits for the window to be created.
@@ -431,6 +495,10 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             self.discard_pending_gui_close();
             self.gui_lifecycle.set(GuiLifecycle::Hidden);
         }
+        // F-UX-05 / T5.1: pre-warm the Slint/winit platform while the host
+        // finishes the GUI negotiation, so the first set_parent/set_transient
+        // and show do not pay backend startup on the host main thread.
+        self.prewarm_gui_platform(configuration.api_type == GuiApiType::X11);
         Ok(())
     }
 
@@ -440,6 +508,10 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// the host may call `create`/`set_parent` again (Slint 1.17 requires the
     /// platform to live on the thread that initialized it, so re-creation
     /// must reuse this instance's worker).
+    ///
+    /// The telemetry timer (F-UX-08) dies with the window generation: the
+    /// worker drops its `SlintViewModel` — and with it the `slint::Timer` —
+    /// as soon as the event loop quit is processed.
     fn destroy(&self) {
         debug_assert_main_thread(&self.host);
         {
@@ -576,6 +648,8 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                         "NAM-Plug: Slint window show failed (gui_lifecycle={lifecycle:?}): {e}"
                     );
                 }
+                // T2.2 (F-UX-08): re-arm the telemetry timer with the window.
+                w.invoke_set_telemetry_active(true);
             }) {
                 log::warn!(
                     "NAM-Plug: show dispatch failed \
@@ -614,6 +688,9 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
                         "NAM-Plug: Slint window hide failed (gui_lifecycle={lifecycle:?}): {e}"
                     );
                 }
+                // T2.2 (F-UX-08): a hidden window needs no telemetry — stop the
+                // 60 Hz timer instead of letting it wake a hidden GUI.
+                w.invoke_set_telemetry_active(false);
             }) {
                 log::warn!(
                     "NAM-Plug: hide dispatch failed \

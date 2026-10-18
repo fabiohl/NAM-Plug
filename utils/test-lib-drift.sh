@@ -96,4 +96,11 @@ if [ "$filter_computed" != "$FILTER_BODY_SHA256" ]; then
 fi
 
 echo "  OK shared filter body digest verified ($filter_computed)"
+
+# ── pick_bench_core unit tests (simulated sysfs) ─────────────────────────────
+if [ -x "$SCRIPT_DIR/test-pick-bench-core.sh" ]; then
+    echo "  → Running pick_bench_core mock unit tests (test-pick-bench-core.sh)..."
+    "$SCRIPT_DIR/test-pick-bench-core.sh"
+fi
+
 exit 0

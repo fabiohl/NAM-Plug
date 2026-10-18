@@ -4,23 +4,22 @@
 //! Benchmarks of CLAP host integration — the `process` call path through the full
 //! plugin stack (NamClapPlugin).
 //!
-//! Structured into four worst-case coverage layers (SP-P0.2, skill `tarefa`):
+//! Structured into coverage layers:
 //! 1. `CLAP_Infrastructure`: Isolated host wrapper, buffer routing, event dispatch, and bypass overhead.
 //! 2. `CLAP_Inference`: Real neural network inference through the complete CLAP plugin stack
 //!    with authentic models (WaveNet A1 Standard, WaveNet A2 / Slimmable, LSTM), sample rate
 //!    variations (44.1k, 48k, 96k), oversampling factors (Off, 2x, 4x), offline render mode, and CabSim IR.
-//! 3. `CLAP_WorstCase/SmallBlocks` (T-P0.2.1): passthrough/bypass/wet at 16/32 samples
+//! 3. `CLAP_WorstCase_SmallBlocks`: passthrough/bypass/wet at 16/32 samples
 //!    (+ 64/128 as the anchor to the existing matrix), reporting ns/sample, p50/p99/max.
-//! 4. `CLAP_WorstCase/DryDelay` (T-P0.2.2): pure `DelayLine::process_block`-equivalent
-//!    push/pop path (no model), sweeping delay 0/typical/max in mono and stereo — the
-//!    official baseline of F-NPPERF-01; `CLAP_WorstCase/EventFlood` (T-P0.2.3): dense
-//!    `ParamValueEvent`/`ParamModEvent` floods (16/64/256/1024 events) over 64/128/512
-//!    blocks, including the degenerate 1-event-per-sample case — the mandatory baseline
-//!    of F-NPPERF-05; `CLAP_WorstCase/MonoStereo`, `Crossfade`, `RingOut`, `ThreadHop`
-//!    (T-P0.2.4): real mono vs. stereo with L!=R content, bypass crossfade in flight,
+//! 4. `CLAP_WorstCase_DryDelay`: pure `DelayLine::process_block`-equivalent
+//!    push/pop path (no model), sweeping delay 0/typical/max in mono and stereo;
+//!    `CLAP_WorstCase_EventFlood`: dense `ParamValueEvent`/`ParamModEvent` floods
+//!    (16/64/256/1024 events) over 64/128/512 blocks, including the degenerate 1-event-per-sample case;
+//!    `CLAP_WorstCase_MonoStereo`, `CLAP_WorstCase_Crossfade`, `CLAP_WorstCase_RingOut`,
+//!    `CLAP_WorstCase_ThreadHop`: real mono vs. stereo with L!=R content, bypass crossfade in flight,
 //!    gate-closed CabSim ring-out, and a 2-thread `process` alternation harness
-//!    (TLS/MXCSR re-priming cost — feeds T-P1.1.1).
-//! 5. `CLAP_Evidence/InferenceE2E`: e2e inference matrix model×block
+//!    (TLS/MXCSR re-priming cost).
+//! 5. `CLAP_Evidence_InferenceE2E`: e2e inference matrix model×block
 //!    (LSTM / WaveNet-A1 / WaveNet-A2 × 64/128/512 host samples), ns/sample via
 //!    `Throughput::Elements` — the block-size evidence anchor for regression
 //!    baselines.
@@ -147,7 +146,7 @@ fn bench_clap_infrastructure(c: &mut Criterion) {
     const BLOCK_SIZES: &[usize] = &[32, 64, 128, 256, 512, 1024];
 
     // ── 1.1 Passthrough (Empty state, no model) ──
-    let mut group_passthrough = c.benchmark_group("CLAP_Infrastructure/Passthrough");
+    let mut group_passthrough = c.benchmark_group("CLAP_Infrastructure_Passthrough");
     for &block_size in BLOCK_SIZES {
         let params = ProcessingParams::default();
         let (mut plugin_instance, stopped_processor) =
@@ -210,7 +209,7 @@ fn bench_clap_infrastructure(c: &mut Criterion) {
     group_passthrough.finish();
 
     // ── 1.2 Parameter Modulation (Continuous ParamValueEvents) ──
-    let mut group_params = c.benchmark_group("CLAP_Infrastructure/ParamModulation");
+    let mut group_params = c.benchmark_group("CLAP_Infrastructure_ParamModulation");
     for &block_size in BLOCK_SIZES {
         let params = ProcessingParams::default();
         let (mut plugin_instance, stopped_processor) =
@@ -285,7 +284,7 @@ fn bench_clap_infrastructure(c: &mut Criterion) {
     group_params.finish();
 
     // ── 1.3 Bypass Path ──
-    let mut group_bypass = c.benchmark_group("CLAP_Infrastructure/Bypass");
+    let mut group_bypass = c.benchmark_group("CLAP_Infrastructure_Bypass");
     {
         let block_size = 64;
         let mut params = ProcessingParams::default();
@@ -381,7 +380,7 @@ fn bench_clap_inference(c: &mut Criterion) {
 
     // ── 2.1 Topology & Block Size Sweeps (48 kHz Live Mode) ──
     for (model_name, model_file) in models {
-        let group_name = format!("CLAP_Inference/{model_name}/BlockSize");
+        let group_name = format!("CLAP_Inference_{model_name}_BlockSize");
         let mut group = c.benchmark_group(&group_name);
 
         for &block_size in BLOCK_SIZES {
@@ -481,7 +480,7 @@ fn bench_clap_inference(c: &mut Criterion) {
 
     // ── 2.2 Sample Rate Variations (Resampling Overhead on WaveNet A1) ──
     {
-        let mut group_rates = c.benchmark_group("CLAP_Inference/WaveNet_A1/SampleRates");
+        let mut group_rates = c.benchmark_group("CLAP_Inference_WaveNet_A1_SampleRates");
         let sample_rates: &[(&str, f64)] = &[
             ("44100Hz", 44100.0),
             ("48000Hz", 48000.0),
@@ -552,7 +551,7 @@ fn bench_clap_inference(c: &mut Criterion) {
 
     // ── 2.3 Oversampling & RenderMode Matrix (WaveNet A1 Standard @ 48 kHz, Block 64) ──
     {
-        let mut group_os = c.benchmark_group("CLAP_Inference/WaveNet_A1/QualityModes");
+        let mut group_os = c.benchmark_group("CLAP_Inference_WaveNet_A1_QualityModes");
         let modes: &[(&str, OversampleFactor, Option<RenderMode>)] = &[
             ("Oversample_Off", OversampleFactor::Off, None),
             ("Oversample_2x", OversampleFactor::X2, None),
@@ -630,7 +629,7 @@ fn bench_clap_inference(c: &mut Criterion) {
     // ── 2.4 CabSim IR Matrix (WaveNet A1 Standard @ 48 kHz, Block 64) ──
     {
         let ir_path = common::create_bench_ir_wav(48000);
-        let mut group_cab = c.benchmark_group("CLAP_Inference/WaveNet_A1/CabSim");
+        let mut group_cab = c.benchmark_group("CLAP_Inference_WaveNet_A1_CabSim");
 
         // CabSim Off
         {
@@ -919,7 +918,7 @@ fn bench_worstcase_small_blocks(c: &mut Criterion) {
         ("Wet_LSTM", false, Some("lstm.nam")),
     ];
     for (mode_label, bypass, fixture) in modes {
-        let group_name = format!("CLAP_WorstCase/SmallBlocks/{mode_label}");
+        let group_name = format!("CLAP_WorstCase_SmallBlocks_{mode_label}");
         let mut group = c.benchmark_group(&group_name);
         for &block_size in SMALL {
             let mut params = ProcessingParams::default();
@@ -992,7 +991,7 @@ fn bench_worstcase_dry_delay(c: &mut Criterion) {
     const DELAYS: &[(&str, usize)] = &[("d0", 0), ("d12", 12), ("d256", 256), ("dmax", 3200)];
     for stereo in [false, true] {
         let ch_label = if stereo { "Stereo" } else { "Mono" };
-        let group_name = format!("CLAP_WorstCase/DryDelay/{ch_label}");
+        let group_name = format!("CLAP_WorstCase_DryDelay_{ch_label}");
         let mut group = c.benchmark_group(&group_name);
         for &block in BLOCKS {
             for (d_label, delay) in DELAYS {
@@ -1036,7 +1035,7 @@ fn bench_worstcase_dry_delay(c: &mut Criterion) {
 fn bench_worstcase_event_flood(c: &mut Criterion) {
     const BLOCKS: &[usize] = &[64, 128, 512];
     const FLOODS: &[usize] = &[16, 64, 256, 1024];
-    let mut group = c.benchmark_group("CLAP_WorstCase/EventFlood");
+    let mut group = c.benchmark_group("CLAP_WorstCase_EventFlood");
     for &block_size in BLOCKS {
         for &n_events in FLOODS {
             // Sem clamp no rótulo: `n_events` acima de `block_size` gera
@@ -1124,18 +1123,140 @@ fn bench_worstcase_event_flood(c: &mut Criterion) {
     group.finish();
 }
 
-// ── T-P0.2.4 — Remaining scenarios ──
+// ── T5.3 — Event flood with a loaded model (F-UX-03, D1) ──
 //
+// The empty-pipeline `CLAP_WorstCase_EventFlood` above only measures scheduler
+// overhead. F-UX-03's concern is that each event ends a sub-block and calls the
+// **inference** with a possibly 1-sample sub_n, losing the per-call
+// vectorization/amortization. This group reuses `build_flood_events` and the
+// model-loading path of `CLAP_Inference_*` (WaveNet A1 and LSTM) over the same
+// densities (16/64/256/1024 + 1-per-sample) and blocks (64/128/512) to expose
+// the real cost curve. Measurement only — no semantic change.
+// Decision criterion for Sprint S7: cost > 2× the block without events.
+
+fn bench_worstcase_event_flood_model(c: &mut Criterion) {
+    const BLOCKS: &[usize] = &[64, 128, 512];
+    const FLOODS: &[usize] = &[16, 64, 256, 1024];
+
+    let a1_path = common::model_path("wavenet_a1_standard.nam");
+    assert!(
+        a1_path.exists(),
+        "Mandatory fixture 'wavenet_a1_standard.nam' missing at {}",
+        a1_path.display()
+    );
+    let lstm_path = common::model_path("lstm.nam");
+    assert!(
+        lstm_path.exists(),
+        "Mandatory fixture 'lstm.nam' missing at {}",
+        lstm_path.display()
+    );
+
+    let models: &[(&str, &std::path::Path)] = &[("WaveNet_A1", &a1_path), ("LSTM", &lstm_path)];
+
+    let mut group = c.benchmark_group("CLAP_WorstCase_EventFloodModel");
+    for (model_name, model_file) in models {
+        for &block_size in BLOCKS {
+            // Densities 16/64/256/1024: shared timestamps when n_events exceeds
+            // the block (drain cost without extra fragmentation).
+            for &n_events in FLOODS {
+                let mut params = ProcessingParams::default();
+                params.model_path = Some(model_file.to_path_buf());
+                params.model_hash = asset_hash(model_file);
+                let (mut plugin_instance, stopped_processor) =
+                    create_and_activate_bench_plugin(48000.0, block_size, &params, None);
+                let mut started_processor = stopped_processor
+                    .start_processing()
+                    .expect("Failed to start processing");
+                let sine = generate_sine_440hz(block_size);
+                let mut in_l = sine.clone();
+                let mut in_r = sine.clone();
+                let mut out_l = vec![0.0f32; block_size];
+                let mut out_r = vec![0.0f32; block_size];
+                let mut input_ports = AudioPorts::with_capacity(2, 1);
+                let mut output_ports = AudioPorts::with_capacity(2, 1);
+                let mut output_events_buffer = EventBuffer::with_capacity(10);
+                let input_events_buffer = build_flood_events(block_size, n_events, false);
+                group.throughput(Throughput::Elements(block_size as u64));
+                group.bench_with_input(
+                    BenchmarkId::new(*model_name, format!("{block_size}_samp_{n_events}ev")),
+                    &(block_size, n_events),
+                    |b, _| {
+                        run_process_bench(
+                            b,
+                            &mut started_processor,
+                            &mut in_l,
+                            &mut in_r,
+                            &mut out_l,
+                            &mut out_r,
+                            &mut input_ports,
+                            &mut output_ports,
+                            &mut output_events_buffer,
+                            &input_events_buffer,
+                            block_size,
+                        );
+                    },
+                );
+                let stopped_processor = started_processor.stop_processing();
+                plugin_instance.deactivate(stopped_processor);
+            }
+            // Degenerate: 1 event per sample (max sub-block fragmentation).
+            {
+                let mut params = ProcessingParams::default();
+                params.model_path = Some(model_file.to_path_buf());
+                params.model_hash = asset_hash(model_file);
+                let (mut plugin_instance, stopped_processor) =
+                    create_and_activate_bench_plugin(48000.0, block_size, &params, None);
+                let mut started_processor = stopped_processor
+                    .start_processing()
+                    .expect("Failed to start processing");
+                let sine = generate_sine_440hz(block_size);
+                let mut in_l = sine.clone();
+                let mut in_r = sine.clone();
+                let mut out_l = vec![0.0f32; block_size];
+                let mut out_r = vec![0.0f32; block_size];
+                let mut input_ports = AudioPorts::with_capacity(2, 1);
+                let mut output_ports = AudioPorts::with_capacity(2, 1);
+                let mut output_events_buffer = EventBuffer::with_capacity(10);
+                let input_events_buffer = build_flood_events(block_size, block_size, true);
+                group.throughput(Throughput::Elements(block_size as u64));
+                group.bench_with_input(
+                    BenchmarkId::new(*model_name, format!("{block_size}_samp_1per1ev")),
+                    &block_size,
+                    |b, _| {
+                        run_process_bench(
+                            b,
+                            &mut started_processor,
+                            &mut in_l,
+                            &mut in_r,
+                            &mut out_l,
+                            &mut out_r,
+                            &mut input_ports,
+                            &mut output_ports,
+                            &mut output_events_buffer,
+                            &input_events_buffer,
+                            block_size,
+                        );
+                    },
+                );
+                let stopped_processor = started_processor.stop_processing();
+                plugin_instance.deactivate(stopped_processor);
+            }
+        }
+    }
+    group.finish();
+}
+
+// ── T-P0.2.4 — Remaining scenarios ──
 // (1) Real mono vs. stereo with L!=R content (baseline of F-NPPERF-06);
 // (2) bypass crossfade in flight (PARAM_BYPASS event at offset 0, 64-sample
 // ramp active during the measured block); (3) gate closed with a loaded IR
 // (ring-out drain path); (4) `process` alternating between 2 host-side thread
-// contexts (TLS/MXCSR re-priming cost harness — feeds T-P1.1.1, not a fix).
+// contexts (TLS/MXCSR re-priming cost harness, not a fix).
 
 fn bench_worstcase_remaining(c: &mut Criterion) {
     // ── (1) Mono vs. stereo with L!=R ──
     {
-        let mut group = c.benchmark_group("CLAP_WorstCase/MonoStereo");
+        let mut group = c.benchmark_group("CLAP_WorstCase_MonoStereo");
         for (label, same_content) in [("Mono_L_eq_R", true), ("Stereo_L_neq_R", false)] {
             for &block_size in &[32usize, 64, 128] {
                 let params = ProcessingParams::default();
@@ -1188,7 +1309,7 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
 
     // ── (2) Bypass crossfade in flight ──
     {
-        let mut group = c.benchmark_group("CLAP_WorstCase/Crossfade");
+        let mut group = c.benchmark_group("CLAP_WorstCase_Crossfade");
         for &block_size in &[64usize, 128] {
             // Start unbypassed, then flip to bypass at offset 0: the measured
             // block runs the 64-sample crossfade ramp (wet+dry blend).
@@ -1241,7 +1362,7 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
 
     // ── (3) Gate closed with IR loaded (ring-out drain) ──
     {
-        let mut group = c.benchmark_group("CLAP_WorstCase/RingOut");
+        let mut group = c.benchmark_group("CLAP_WorstCase_RingOut");
         for &block_size in &[64usize, 128] {
             let mut params = ProcessingParams::default();
             // Gate fully closed: threshold at max so silence closes the gate
@@ -1336,12 +1457,12 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
     //
     // Harness, not a fix: each iteration hops to the other thread, so the
     // measured cost includes TLS re-priming / MXCSR re-application on the new
-    // thread (the F-NPPERF-02 migration cost that T-P1.1.1 must eliminate).
+    // thread (the thread migration cost).
     // Implemented by moving the whole `process` call to a worker thread and
     // alternating between two workers; the Criterion thread only blocks on the
     // result. The two workers are pre-spawned (spawn cost outside the timer).
     {
-        let mut group = c.benchmark_group("CLAP_WorstCase/ThreadHop");
+        let mut group = c.benchmark_group("CLAP_WorstCase_ThreadHop");
         for &block_size in &[64usize, 128] {
             group.throughput(Throughput::Elements(block_size as u64));
             group.bench_with_input(
@@ -1480,6 +1601,7 @@ criterion_group! {
         bench_worstcase_small_blocks,
         bench_worstcase_dry_delay,
         bench_worstcase_event_flood,
+        bench_worstcase_event_flood_model,
         bench_worstcase_remaining,
         bench_evidence_inference_e2e_blocksize
 }
@@ -1525,7 +1647,7 @@ fn bench_evidence_inference_e2e_blocksize(c: &mut Criterion) {
         lstm_path.display()
     );
 
-    let mut group = c.benchmark_group("CLAP_Evidence/InferenceE2E");
+    let mut group = c.benchmark_group("CLAP_Evidence_InferenceE2E");
 
     for (model_name, model_file) in [
         ("LSTM", &lstm_path),

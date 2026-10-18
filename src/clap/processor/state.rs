@@ -216,6 +216,11 @@ pub struct NamClapProcessor<'a> {
     /// Pre-allocated event buffer for host CLAP parameter events.
     /// Cleared and refilled each process() cycle — zero alloc on RT thread.
     pub(crate) scheduled_events: Vec<ScheduledEvent>,
+    /// Whether the current `scheduled_events` are non-decreasing in time
+    /// (the host contract). Set during scheduling; when false the block
+    /// carries an out-of-order anomaly and gain fusion is disabled so the
+    /// defensive legacy path is used verbatim.
+    pub(crate) scheduled_events_sorted: bool,
     /// Bypass crossfade state machine for click-free bypass transitions.
     pub(crate) bypass_xfade: BypassCrossfader,
     /// Pre-allocated circular dry delay line: delays the dry (bypass/crossfade)
@@ -390,6 +395,20 @@ pub struct NamClapProcessor<'a> {
     /// falls back to the frozen per-family table. Read once from the
     /// environment in `activate()`.
     pub(crate) prewarm_static: bool,
+    /// EWMA smoothed DSP load permille (0.0 ..= 1000.0, tau ≈ 250 ms).
+    pub(crate) dsp_load_ewma: f32,
+    /// Cached block frame count for hot-path budget reciprocal scaling.
+    pub(crate) cached_n_samples: u32,
+    /// Cached sample rate for hot-path budget reciprocal scaling.
+    pub(crate) cached_sample_rate: u32,
+    /// Pre-calculated inverse budget in permille per nanosecond (1000.0 / budget_ns).
+    pub(crate) cached_inv_budget_permille: f32,
+    /// Pre-calculated discrete EWMA smoothing coefficient (1.0 - exp(-dt / 0.250)).
+    pub(crate) cached_ewma_alpha: f32,
+    /// Pre-calculated 85% overload budget threshold in nanoseconds.
+    pub(crate) cached_threshold_ns: u64,
+    /// Pre-calculated block budget in microseconds for adaptive compute.
+    pub(crate) cached_budget_us: u64,
 }
 
 #[cfg(test)]

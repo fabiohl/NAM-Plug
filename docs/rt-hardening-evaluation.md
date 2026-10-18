@@ -3,13 +3,13 @@ SPDX-License-Identifier: GPL-3.0-or-later
 Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 -->
 
-# Avaliação Arquitetural Formal — `rt-hardening` para Plugins CLAP (NAM-Plug)
+# Avaliação Arquitetural Formal - `rt-hardening` para Plugins CLAP (NAM-Plug)
 
-**Documento:** `NAM-Plug/docs/rt-hardening-evaluation.md`  
-**Sprint:** S6 — Epic E (Migração do NAM-Plug para APIs generalizadas do engine)  
-**Tarefa:** S6-T5 / E.5 / R5 / D.4  
-**Subprojeto:** `NAM-Plug` (`GPL-3.0-or-later`)  
-**Data:** 2026-09-18  
+**Documento:** `NAM-Plug/docs/rt-hardening-evaluation.md`
+**Sprint:** S6 — Epic E (Migração do NAM-Plug para APIs generalizadas do engine)
+**Tarefa:** S6-T5 / E.5 / R5 / D.4
+**Subprojeto:** `NAM-Plug` (`GPL-3.0-or-later`)
+**Data:** 2026-09-18
 **Status:** Aprovado — decisão formal documentada.
 
 ---
@@ -66,13 +66,13 @@ A questão arquitetural central (residual E.5, vinculada a R5 e D.4) é se `NAM-
 
 Embora `NAM-Plug` **não ative** `rt-hardening`, ele mantém — de forma independente e sem dependência do módulo — as práticas de tempo real aplicáveis ao escopo de um plugin CLAP:
 
-| Prática | Implementação no `NAM-Plug` | Referência no código |
-|---|---|---|
-| **FTZ / DAZ local** (`_MM_SET_FLUSH_ZERO_MODE`) | Ativado na primeira execução do `process()` (`Subnormal & Denormal Setup`), via registros SSE locais — não altera o estado do processo. | `src/clap/processor/mod.rs` (§6.1) |
-| **Zero alocações na thread de áudio** | Verificado por `heap-audit` (`CountingAllocator`); todos os buffers são pré-alocados em `activate()` e reutilizados no hot-path. | `docs/architecture.md` §5.2, `tests/` |
-| **Zero bloqueios de I/O** | Nenhuma chamada de sistema bloqueante (`open`, `read`, `write`) no `process()`; comunicação com host via SPSC lock-free (`rtrb`) e atomics. | `docs/architecture.md` §5 |
-| **Zero mutexes no hot-path** | Nenhum `std::sync::Mutex` ou `RwLock` no caminho de áudio; sincronização via `Arc<AtomicBool>` (`alive_fence`) e canais `rtrb`. | `docs/architecture.md` §5.1 |
-| **Telemetria RT** | `RtStatusFlags` publica `rt_affinity_err`, `rt_sched_err`, `rt_target_cpu`, `rt_cpu`, `rt_tid`, `rt_priority` — sem depender de `rt-hardening`, apenas refletindo o que o host define. | `NeuralAmpModeler-rs/src/common/spsc/status.rs` |
+| Prática                                         | Implementação no `NAM-Plug`                                                                                                                                                            | Referência no código                            |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| **FTZ / DAZ local** (`_MM_SET_FLUSH_ZERO_MODE`) | Ativado na primeira execução do `process()` (`Subnormal & Denormal Setup`), via registros SSE locais — não altera o estado do processo.                                                | `src/clap/processor/mod.rs` (§6.1)              |
+| **Zero alocações na thread de áudio**           | Verificado por `heap-audit` (`CountingAllocator`); todos os buffers são pré-alocados em `activate()` e reutilizados no hot-path.                                                       | `docs/architecture.md` §5.2, `tests/`           |
+| **Zero bloqueios de I/O**                       | Nenhuma chamada de sistema bloqueante (`open`, `read`, `write`) no `process()`; comunicação com host via SPSC lock-free (`rtrb`) e atomics.                                            | `docs/architecture.md` §5                       |
+| **Zero mutexes no hot-path**                    | Nenhum `std::sync::Mutex` ou `RwLock` no caminho de áudio; sincronização via `Arc<AtomicBool>` (`alive_fence`) e canais `rtrb`.                                                        | `docs/architecture.md` §5.1                     |
+| **Telemetria RT**                               | `RtStatusFlags` publica `rt_affinity_err`, `rt_sched_err`, `rt_target_cpu`, `rt_cpu`, `rt_tid`, `rt_priority` — sem depender de `rt-hardening`, apenas refletindo o que o host define. | `NeuralAmpModeler-rs/src/common/spsc/status.rs` |
 
 Essas práticas são suficientes para garantir o contrato RT do plugin dentro do escopo CLAP, sem invadir a fronteira de responsabilidade do host.
 
@@ -88,6 +88,7 @@ Essas práticas são suficientes para garantir o contrato RT do plugin dentro do
 2. **Especificação CLAP:** Não existe extensão CLAP que autorize o plugin a modificar scheduler, afinidade ou `PM-QoS` do host.
 3. **Separação de responsabilidades:** `rt-hardening` é projetado para **hosts** (`NAM-Audio-Pipe`); o plugin (`NAM-Plug`) consome a API pública do engine (`NeuralAmpModeler-rs`) sem ativar a feature.
 4. **Manutenção independente:** `NAM-Plug` mantém FTZ/DAZ local, zero-alloc e telemetria `RtStatusFlags` — práticas suficientes para o contrato RT sem dependência do módulo.
+5. **Isolamento em Benchmarks e Testes:** Enquanto o plugin delega afinidade em tempo de execução ao host DAW, o determinismo estrito exigido por benchmarks Criterion (`clap_bench`), suítes soak e a ferramenta de certificação (`nam_perf_guard`) é garantido via parâmetros de kernel GRUB (`isolcpus=managed_irq,domain,...`, `nohz_full`, `rcu_nocbs`, `clocksource=tsc`) e fixação via `taskset`, conforme documentado em [`docs/testing.md`](./testing.md#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset).
 
 ---
 

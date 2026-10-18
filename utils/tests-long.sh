@@ -39,7 +39,7 @@
 #   chrt -f 80 ./utils/tests-long.sh --strict-pre-release  # official pre-release ceremony
 #
 # Environment variables:
-#   NAM_BENCH_CORE              CPU core for affinity pinning (default: half of nproc)
+#   NAM_BENCH_CORE              CPU core for affinity pinning (default: isolated core or nproc/2)
 #   NAM_THERMAL_COOLDOWN_S      Seconds to idle after pre-compilation (default: 0)
 #   NAM_GUI_PHASE_AUTO          Set to 0 to suppress auto-trigger of GUI phase (default: 1)
 
@@ -77,7 +77,7 @@ for arg in "$@"; do
             echo "  -h, --help            Show this help and exit"
             echo ""
             echo "Environment variables:"
-            echo "  NAM_BENCH_CORE            CPU core for affinity pinning (default: nproc/2)"
+            echo "  NAM_BENCH_CORE            CPU core for affinity pinning (default: isolated core or nproc/2)"
             echo "  NAM_THERMAL_COOLDOWN_S    Idle seconds after pre-compilation (default: 0)"
             echo "  NAM_GUI_PHASE_AUTO        Set 0 to suppress auto GUI trigger (default: 1)"
             echo ""
@@ -93,6 +93,7 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 LIB_DIR="$SCRIPT_DIR/lib"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -134,6 +135,16 @@ if [ "${NAM_LIB_NO_CD:-0}" != "1" ]; then
     cd "$PROJECT_DIR" || exit 1
 fi
 
+# ── Memory guard (OOM containment) ──────────────────────────────────────────
+# Phase 0 pre-compiles every test binary in release (fat LTO). Re-exec inside a
+# transient, memory-capped systemd scope so that peak is contained in its own
+# cgroup instead of triggering a global OOM that kills the IDE. Fail-open when
+# unavailable; tune with NAM_MEM_GUARD_MAX on larger hosts.
+if [ "${NAM_MEM_GUARD:-0}" != "1" ] && [ "${NAM_NO_MEM_GUARD:-0}" != "1" ] && [ "$DRY_RUN" = "0" ]; then
+    export NAM_MEM_GUARD=1
+    exec "$SCRIPT_DIR/mem-guard.sh" "$SCRIPT_PATH" "$@"
+fi
+
 if [ "$STRICT_PRE_RELEASE" = "1" ] && [ "$DRY_RUN" = "1" ]; then
     echo -e "${RED}${BOLD}❌ --strict-pre-release rejects simulated receipts (--dry-run is active).${NC}" >&2
     exit 1
@@ -160,9 +171,7 @@ trap 'rc=$?; cleanup; if [ $rc -eq 124 ]; then echo -e "\n${RED}${BOLD}❌ TIMEO
 trap 'rc=$?; if [ $rc -ne 0 ]; then echo -e "\n${RED}${BOLD}❌ Unexpected error: \"$BASH_COMMAND\" failed at line $LINENO with status $rc (phase ${PHASE_NUM:-?}/${PHASE_TOTAL})${NC}"; fi; cleanup; exit $rc' ERR
 trap cleanup EXIT
 
-NUM_CORES="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
-DEFAULT_CORE=$(( (${NUM_CORES:-1} / 2) ))
-BENCH_CORE="${NAM_BENCH_CORE:-$DEFAULT_CORE}"
+BENCH_CORE="$(pick_bench_core)"
 HAS_TASKSET=0
 if command -v taskset >/dev/null 2>&1; then
     HAS_TASKSET=1

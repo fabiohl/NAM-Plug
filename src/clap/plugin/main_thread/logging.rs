@@ -6,6 +6,7 @@
 use super::NamClapMainThread;
 use clack_extensions::log::{HostLog, LogSeverity};
 use std::ffi::CString;
+use std::sync::atomic::Ordering;
 
 impl<'a> NamClapMainThread<'a> {
     /// Emits host log messages for RT telemetry flags that were set.
@@ -233,6 +234,45 @@ impl<'a> NamClapMainThread<'a> {
             log::warn!(
                 "NAM-Plug: Parameter event timing anomaly detected (out-of-order, late, or beyond block limits); clamped defensively with zero event loss"
             );
+        }
+
+        // Rate-limited DSP overload/xrun warning (T-R2.3) — at most 1 warning / 5 s.
+        let overloads = self
+            .shared
+            .cold
+            .rt_status
+            .dsp_overloads
+            .load(Ordering::Relaxed);
+        let last_overloads = self.last_seen_overloads.get();
+        if overloads > last_overloads {
+            let now = std::time::Instant::now();
+            let should_log = match self.last_overload_log_instant.get() {
+                None => true,
+                Some(last) => now.duration_since(last) >= std::time::Duration::from_secs(5),
+            };
+            if should_log {
+                let delta = overloads - last_overloads;
+                self.last_seen_overloads.set(overloads);
+                self.last_overload_log_instant.set(Some(now));
+
+                let permille = self
+                    .shared
+                    .rt_to_ui
+                    .dsp_load_permille
+                    .load(Ordering::Relaxed);
+                let load_pct = (permille as u32 + 5) / 10;
+
+                let msg_str = format!(
+                    "NAM-Plug: {delta} blocks exceeded 85% of the callback budget (load {load_pct}%)"
+                );
+                let msg = CString::new(msg_str.as_bytes()).unwrap_or_default();
+                if let Some(log) = log_ext {
+                    log.log(&shared, LogSeverity::Warning, &msg);
+                }
+                log::warn!(
+                    "NAM-Plug: {delta} blocks exceeded 85% of the callback budget (load {load_pct}%)"
+                );
+            }
         }
     }
 }

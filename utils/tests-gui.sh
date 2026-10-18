@@ -33,22 +33,25 @@ set -euo pipefail
 NOCAPTURE=0
 DRY_RUN=0
 STRICT=0
+TEST_FAIL_CLOSED=0
 
 for arg in "$@"; do
     case "$arg" in
-        --nocapture) NOCAPTURE=1 ;;
-        --dry-run)   DRY_RUN=1   ;;
-        --strict)    STRICT=1    ;;
+        --nocapture)        NOCAPTURE=1 ;;
+        --dry-run)          DRY_RUN=1   ;;
+        --strict)           STRICT=1    ;;
+        --test-fail-closed) TEST_FAIL_CLOSED=1 ;;
         --help|-h)
-            echo "Usage: $(basename "$0") [--nocapture] [--dry-run] [--strict]"
+            echo "Usage: $(basename "$0") [--nocapture] [--dry-run] [--strict] [--test-fail-closed]"
             echo ""
             echo "Headless GUI test runner — executes ignored X11/GUI tests under Xvfb."
             echo ""
             echo "Options:"
-            echo "  --nocapture  Pass --nocapture to cargo test"
-            echo "  --dry-run    Print planned commands without executing"
-            echo "  --strict     Fail if xvfb-run is not installed"
-            echo "  -h, --help   Show this help and exit"
+            echo "  --nocapture        Pass --nocapture to cargo test"
+            echo "  --dry-run          Print planned commands without executing"
+            echo "  --strict           Fail if xvfb-run is not installed"
+            echo "  --test-fail-closed Self-test fail-closed receipt logic and exit"
+            echo "  -h, --help         Show this help and exit"
             echo ""
             echo "Log:     target/logs/gui-tests.log (or target/logs/gui-tests.dryrun.log in --dry-run)"
             echo "Receipt: target/logs/gui-receipt.txt (or target/logs/gui-receipt.dryrun.txt in --dry-run)"
@@ -56,13 +59,14 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown option: $arg" >&2
-            echo "Usage: $(basename "$0") [--nocapture] [--dry-run] [--strict]" >&2
+            echo "Usage: $(basename "$0") [--nocapture] [--dry-run] [--strict] [--test-fail-closed]" >&2
             exit 1
             ;;
     esac
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 LIB_DIR="$SCRIPT_DIR/lib"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -85,11 +89,72 @@ if [ "${NAM_LIB_NO_CD:-0}" != "1" ]; then
     cd "$PROJECT_DIR" || exit 1
 fi
 
+# ── Memory guard (OOM containment) ──────────────────────────────────────────
+# This suite builds the test harness in release mode. On a 16 GiB host with no
+# swap, that build plus rust-analyzer/IDE can exhaust RAM and trigger a global
+# OOM that kills the editor. Re-exec inside a transient, memory-capped systemd
+# scope (fail-open when unavailable) so the build is the only thing at risk.
+if [ "${NAM_MEM_GUARD:-0}" != "1" ] && [ "${NAM_NO_MEM_GUARD:-0}" != "1" ] && [ "$DRY_RUN" = "0" ]; then
+    export NAM_MEM_GUARD=1
+    exec "$SCRIPT_DIR/mem-guard.sh" "$SCRIPT_PATH" "$@"
+fi
+
+# Release test artifacts never need the shipped fat-LTO profile: disabling LTO
+# and restoring parallel codegen keeps the build's peak memory bounded without
+# affecting the GUI lifecycle semantics under test. Exported (not per-command)
+# so the pre-compile and every test invocation reuse the exact same artifacts.
+export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-false}"
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}"
+
 # ── State ───────────────────────────────────────────────────────────────────
 
 # Save original display so the trap restores it in any signal path.
 ORIG_DISPLAY="${DISPLAY:-}"
 XVFB_PID=0
+
+cleanup_xvfb() {
+    local rc=$?
+    # Unset the virtual display; restore the original one if it was set.
+    unset DISPLAY
+    if [ -n "$ORIG_DISPLAY" ]; then
+        export DISPLAY="$ORIG_DISPLAY"
+    fi
+    # Kill any Xvfb server we spawned directly (xvfb-run manages its own).
+    if [ "${XVFB_PID:-0}" -ne 0 ] && kill -0 "$XVFB_PID" 2>/dev/null; then
+        kill "$XVFB_PID" 2>/dev/null || true
+        wait "$XVFB_PID" 2>/dev/null || true
+    fi
+    # Hardening (E-02 / T-R0.2): fail closed if receipt is empty or SIMULATED outside dry-run
+    if [ "${DRY_RUN:-0}" = "0" ]; then
+        if [ ! -s "${GUI_RECEIPT:-}" ]; then
+            echo -e "  ${RED}${BOLD}❌ Fail-closed: receipt '${GUI_RECEIPT:-}' is missing or empty.${NC}" >&2
+            rc=1
+        elif grep -q "status=SIMULATED" "${GUI_RECEIPT:-}"; then
+            echo -e "  ${RED}${BOLD}❌ Fail-closed: receipt '${GUI_RECEIPT:-}' contains status=SIMULATED outside --dry-run.${NC}" >&2
+            rc=1
+        fi
+    fi
+    return $rc
+}
+
+if [ "$TEST_FAIL_CLOSED" = "1" ]; then
+    echo "Running self-test for tests-gui.sh fail-closed logic..."
+    TMP_RECEIPT=$(mktemp)
+    : > "$TMP_RECEIPT"
+    if ( GUI_RECEIPT="$TMP_RECEIPT" DRY_RUN=0 OVERALL_RC=0 cleanup_xvfb 2>/dev/null ); then
+        rm -f "$TMP_RECEIPT"
+        die "Self-test failed: cleanup_xvfb did not fail on empty receipt"
+    fi
+    echo "gui_test_suite status=SIMULATED" > "$TMP_RECEIPT"
+    if ( GUI_RECEIPT="$TMP_RECEIPT" DRY_RUN=0 OVERALL_RC=0 cleanup_xvfb 2>/dev/null ); then
+        rm -f "$TMP_RECEIPT"
+        die "Self-test failed: cleanup_xvfb did not fail on SIMULATED receipt in non-dry-run mode"
+    fi
+    rm -f "$TMP_RECEIPT"
+    ok "Self-test passed: tests-gui.sh fails closed on empty or SIMULATED receipt"
+    exit 0
+fi
+
 if [ "$DRY_RUN" = "1" ]; then
     GUI_LOG="target/logs/gui-tests.dryrun.log"
     GUI_RECEIPT="target/logs/gui-receipt.dryrun.txt"
@@ -101,21 +166,6 @@ fi
 mkdir -p target/logs
 : > "$GUI_LOG"
 : > "$GUI_RECEIPT"
-
-cleanup_xvfb() {
-    local rc=$?
-    # Unset the virtual display; restore the original one if it was set.
-    unset DISPLAY
-    if [ -n "$ORIG_DISPLAY" ]; then
-        export DISPLAY="$ORIG_DISPLAY"
-    fi
-    # Kill any Xvfb server we spawned directly (xvfb-run manages its own).
-    if [ "$XVFB_PID" -ne 0 ] && kill -0 "$XVFB_PID" 2>/dev/null; then
-        kill "$XVFB_PID" 2>/dev/null || true
-        wait "$XVFB_PID" 2>/dev/null || true
-    fi
-    return $rc
-}
 
 trap 'rc=$?; cleanup_xvfb; if [ $rc -ne 0 ]; then echo -e "\n${RED}${BOLD}❌ GUI tests interrupted at line $LINENO (rc=$rc)${NC}"; fi; exit $rc' INT TERM EXIT ERR
 
@@ -156,13 +206,16 @@ fi
 
 # ── Build compile artifacts first (--no-run) ─────────────────────────────────
 # A dedicated pre-compile step avoids Xvfb timeout pressure during linking.
+# Only the lib test binary is needed: every GUI/X11 test below lives in `src/`
+# (lib test harness), so building all integration-test targets would multiply
+# linker memory for nothing.
 echo -e "\n${BLUE}→${NC} Pre-compiling test artifacts (--no-run)..."
 if [ "$DRY_RUN" = "0" ]; then
-    cargo test --features testing --release --no-run --lib --tests \
+    cargo test --features testing --release --no-run --lib \
         2>&1 | tee -a "$GUI_LOG"
     echo -e "  ${GREEN}✓${NC} Compile done."
 else
-    echo -e "  ${YELLOW}[dry-run]${NC} cargo test --features testing --release --no-run --lib --tests"
+    echo -e "  ${YELLOW}[dry-run]${NC} cargo test --features testing --release --no-run --lib"
 fi
 
 # ── Test list ───────────────────────────────────────────────────────────────
@@ -213,31 +266,31 @@ run_gui_test() {
 run_gui_test \
     "gui_embedded_x11_open_close_cycles_no_leak" \
     "gui_embedded_x11_open_close_cycles_no_leak" \
-    ""
+    "--lib"
 
 run_gui_test \
     "gui_lifecycle_hide_after_show_with_real_window" \
     "gui_lifecycle_hide_after_show_with_real_window" \
-    ""
+    "--lib"
 
 run_gui_test \
     "test_headless_clipboard_works" \
     "test_headless_clipboard_works" \
-    ""
+    "--lib"
 
 run_gui_test \
     "test_headless_gui_floating_window_lifecycle" \
     "test_headless_gui_floating_window_lifecycle" \
-    ""
+    "--lib"
 
 run_gui_test \
     "gui_lifecycle_x11_embedded_set_parent_honest" \
     "gui_lifecycle_x11_embedded_set_parent_honest" \
-    ""
+    "--lib"
 
 # ── Receipt ─────────────────────────────────────────────────────────────────
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-GUI_STATUS="PASSED"
+GUI_STATUS="PASS"
 [ "$OVERALL_RC" -ne 0 ] && GUI_STATUS="FAILED"
 [ "$DRY_RUN" = "1" ]    && GUI_STATUS="SIMULATED"
 
@@ -247,8 +300,22 @@ GUI_STATUS="PASSED"
     echo "  tests=gui_embedded_x11_open_close_cycles_no_leak,gui_lifecycle_hide_after_show_with_real_window,test_headless_clipboard_works,test_headless_gui_floating_window_lifecycle,gui_lifecycle_x11_embedded_set_parent_honest"
 } | tee "$GUI_RECEIPT"
 
+# Post-write fail-closed verification
+if [ "$DRY_RUN" = "0" ]; then
+    if [ ! -s "$GUI_RECEIPT" ]; then
+        echo -e "  ${RED}${BOLD}❌ Fail-closed: receipt $GUI_RECEIPT is empty.${NC}" >&2
+        OVERALL_RC=1
+    elif grep -q "status=SIMULATED" "$GUI_RECEIPT"; then
+        echo -e "  ${RED}${BOLD}❌ Fail-closed: receipt $GUI_RECEIPT contains status=SIMULATED outside --dry-run.${NC}" >&2
+        OVERALL_RC=1
+    elif ! grep -q "status=PASS" "$GUI_RECEIPT"; then
+        echo -e "  ${RED}${BOLD}❌ Fail-closed: receipt $GUI_RECEIPT does not contain status=PASS.${NC}" >&2
+        OVERALL_RC=1
+    fi
+fi
+
 echo -e "\n${BLUE}${BOLD}================== GUI TEST SUMMARY ==================${NC}"
-if [ "$GUI_STATUS" = "PASSED" ]; then
+if [ "$GUI_STATUS" = "PASS" ] || [ "$GUI_STATUS" = "PASSED" ]; then
     echo -e "  ${GREEN}${BOLD}✓ All GUI tests PASSED${NC}"
 elif [ "$GUI_STATUS" = "SIMULATED" ]; then
     echo -e "  ${YELLOW}Dry-run completed — simulated receipt in $GUI_RECEIPT (no tests executed).${NC}"

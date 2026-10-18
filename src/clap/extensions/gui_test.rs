@@ -9,10 +9,10 @@
 //! dereferencing `NamClapShared` after the plugin instance is destroyed.
 
 use super::{spawn_reaper, try_join_until};
-use crate::clap::gui::worker::{GuiWorker, GuiWorkerJob};
+use crate::clap::gui::worker::{GuiWindowJob, GuiWorker, GuiWorkerJob};
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::test_util::{self, make_test_plugin};
-use clack_extensions::gui::PluginGuiImpl;
+use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGuiImpl};
 use clack_host::plugin::PluginInstance;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -199,5 +199,90 @@ fn show_after_teardown_logs_warn() {
             .iter()
             .any(|(severity, msg)| *severity == "WARN" && msg.contains("hide dispatch failed")),
         "a failed hide dispatch must be logged at warn level.\nCaptured: {messages:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pre-warm (F-UX-05 / T5.1) and open_window timing (T5.2)
+// ---------------------------------------------------------------------------
+
+/// X11 floating configuration used by the pre-warm tests.
+fn x11_floating_cfg() -> GuiConfiguration<'static> {
+    GuiConfiguration {
+        api_type: GuiApiType::X11,
+        is_floating: true,
+    }
+}
+
+/// `create()` must eagerly spawn the persistent GUI worker so the Slint
+/// platform is pre-warmed before the first window (F-UX-05 / T5.1). The
+/// headless test process never shows a window; only the eager spawn is
+/// observable here.
+#[test]
+fn test_create_spawns_gui_worker_for_prewarm() {
+    let (_entry, _host_info, mut plugin_instance) = make_test_plugin();
+    let mt = main_thread_mut(&mut plugin_instance);
+    mt.create(x11_floating_cfg())
+        .expect("create(X11 floating) must succeed");
+    assert!(
+        mt.gui_worker.borrow().is_some(),
+        "create() must spawn the GUI worker eagerly so the platform can be pre-warmed"
+    );
+}
+
+/// `warm_up` must dispatch a `WarmUp` job (fire-and-forget) carrying the
+/// negotiated backend hint; the worker processes it before any later
+/// `open_window`.
+#[test]
+fn test_warm_up_dispatches_warmup_job() {
+    let (tx, rx) = mpsc::channel::<GuiWorkerJob>();
+    let handle = std::thread::spawn(|| {});
+    let worker = GuiWorker::from_parts_for_test(tx, handle);
+
+    worker.warm_up(true);
+
+    let job = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("warm_up must dispatch a job");
+    assert!(
+        matches!(job, GuiWorkerJob::WarmUp { force_x11: true }),
+        "warm_up(true) must dispatch WarmUp{{force_x11: true}}"
+    );
+}
+
+/// `open_window` must measure and log the host-main-thread block time at info
+/// level (the F-UX-05/T5.2 p95 < 50 ms budget). A fake worker replies
+/// immediately so the assertion is on the log record, not on real timing.
+#[test]
+fn test_open_window_logs_main_thread_block_time() {
+    let (_entry, _host_info, _plugin_instance) = make_test_plugin();
+    let (captured, _sink) = test_util::register_test_sink();
+
+    let (tx, rx) = mpsc::channel::<GuiWorkerJob>();
+    let handle = std::thread::spawn(move || {
+        while let Ok(job) = rx.recv() {
+            if let GuiWorkerJob::OpenWindow { reply, .. } = job {
+                let _ = reply.send(Ok(slint::Weak::<crate::clap::gui::MainWindow>::default()));
+            }
+        }
+    });
+    let worker = GuiWorker::from_parts_for_test(tx, handle);
+
+    let result = worker.open_window(GuiWindowJob {
+        force_x11: false,
+        backend_text: "Test".to_string(),
+    });
+    assert!(
+        result.is_ok(),
+        "the fake worker replies Ok, got err={:?}",
+        result.err()
+    );
+
+    let messages = captured.lock().unwrap();
+    assert!(
+        messages.iter().any(|(severity, msg)| {
+            severity == "INFO" && msg.contains("GUI open_window completed in")
+        }),
+        "open_window must log its main-thread block time at info level.\nCaptured: {messages:#?}"
     );
 }

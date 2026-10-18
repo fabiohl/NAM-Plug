@@ -16,6 +16,10 @@
 
 set -euo pipefail
 
+# Preserve the original CLI for the memory-guard re-exec below (the option
+# parser consumes "$@" with shift).
+ORIGINAL_ARGS=("$@")
+
 # Parse command line options
 DO_INSTALL_FLATPAK=false
 BUILD_FLATPAK=true
@@ -102,6 +106,7 @@ done
 
 # Import shared style helpers and utilities from _lib.sh.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 NAM_LIB_NO_CD=1 source "$SCRIPT_DIR/lib/_lib.sh"
 
 echo -e "${BLUE}${BOLD}========================================================================${NC}"
@@ -110,6 +115,19 @@ echo -e "${BLUE}${BOLD}=========================================================
 
 # Ensure execution from the subproject root directory
 cd "$PROJECT_DIR"
+
+# ── Memory guard (OOM containment) ──────────────────────────────────────────
+# PGO/BOLT + fat LTO is the heaviest build in the repository. Re-exec inside a
+# transient, memory-capped systemd scope so a compiler peak is contained in its
+# own cgroup instead of triggering a global OOM that kills the IDE. Fail-open
+# when unavailable. The PGO/BOLT pipeline legitimately needs more headroom than
+# the test suites, so it defaults to a 10G cap; override with NAM_MEM_GUARD_MAX.
+export NAM_MEM_GUARD_MAX="${NAM_MEM_GUARD_MAX:-10G}"
+export NAM_MEM_GUARD_HIGH="${NAM_MEM_GUARD_HIGH:-8G}"
+if [ "${NAM_MEM_GUARD:-0}" != "1" ] && [ "${NAM_NO_MEM_GUARD:-0}" != "1" ]; then
+    export NAM_MEM_GUARD=1
+    exec "$SCRIPT_DIR/mem-guard.sh" "$SCRIPT_PATH" "${ORIGINAL_ARGS[@]}"
+fi
 
 # Engine provenance variables
 CORE_PATH=""

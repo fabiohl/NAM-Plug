@@ -508,6 +508,83 @@ mod tests {
         }
     }
 
+    // ── Acceptance: NaN containment in two phases (S6-T3 / F-UX-04). ──
+
+    /// A non-finite block must raise the flag; the *next* clean callback must
+    /// clear it exactly once and hold the block on the raw dry path (bypass-leg),
+    /// and wet processing must resume after the model reconverges — every output
+    /// finite. This is the two-phase replacement for the old per-block
+    /// synchronous `model.reset` containment.
+    #[test]
+    fn test_non_finite_containment_two_phase_flag_cleared_and_recovers() {
+        use neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED;
+
+        let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+        let rt_status = &shared.cold.rt_status;
+        let stopped = instance
+            .activate(|_, _| make_harness_audio_processor(&state), audio_config())
+            .expect("activate");
+        let mut started = stopped.start_processing().expect("start_processing");
+
+        let path = model_path("lstm.nam");
+        assert!(path.exists(), "lstm.nam fixture missing");
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
+        mt.load_model(&path).expect("load lstm model");
+
+        let silence = [0.0f32; BLOCK];
+        let probe = noise_pattern(BLOCK, 0xABCD, 0.4);
+
+        // Install the model and settle the first wet block.
+        let _ = process_block(&mut started, &silence);
+
+        // Hostile NaN/Inf block: contained, finite output, flag raised.
+        let mut hostile = noise_pattern(BLOCK, 0x77, 0.5);
+        hostile[0] = f32::NAN;
+        hostile[BLOCK / 2] = f32::INFINITY;
+        let out = process_block(&mut started, &hostile);
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "the NaN block must produce finite output"
+        );
+        assert!(
+            rt_status.check_flag(RT_STATUS_NON_FINITE_INPUT_DETECTED),
+            "the NaN block must raise the non-finite flag"
+        );
+
+        // First clean callback: the two-phase containment consumes the flag once
+        // and publishes the raw dry input (bypass-leg, zero latency).
+        let contained = process_block(&mut started, &probe);
+        assert!(
+            !rt_status.check_flag(RT_STATUS_NON_FINITE_INPUT_DETECTED),
+            "the containment must clear the flag so it cannot reset every block"
+        );
+        assert_eq!(
+            contained.as_slice(),
+            probe.as_slice(),
+            "the poisoning callback's successor must output the raw dry input"
+        );
+
+        // Hold through the amortization window; wet processing must resume and
+        // every output must stay finite.
+        let mut resumed = false;
+        for _ in 0..(EXPECTED_CALLBACKS_TO_WET_LSTM + 4) {
+            let out = process_block(&mut started, &probe);
+            assert!(
+                out.iter().all(|s| s.is_finite()),
+                "outputs must stay finite throughout the containment window"
+            );
+            if out.as_slice() != probe.as_slice() {
+                resumed = true;
+                break;
+            }
+        }
+        assert!(
+            resumed,
+            "wet processing must resume after the model reconverges"
+        );
+    }
+
     // ── Acceptance: zero allocation on reset() itself. ──
 
     #[test]
@@ -964,5 +1041,43 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn test_prewarm_implausible_elapsed_discarded() {
+        if cfg!(debug_assertions) {
+            // Adaptive prewarm EWMA is disabled under debug_assertions (ADAPTIVE_COST_ENABLED = false)
+            // to keep convergence-count tests profile-independent.
+            return;
+        }
+        let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        let stopped = instance
+            .activate(|_, _| make_harness_audio_processor(&state), audio_config())
+            .expect("activate");
+        let mut started = stopped.start_processing().expect("start_processing");
+
+        let model = model_path("lstm.nam");
+        assert!(model.exists(), "lstm.nam fixture missing");
+        let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
+        mt.load_model(&model).expect("load lstm model");
+
+        let silence = [0.0f32; BLOCK];
+        let _ = process_block(&mut started, &silence);
+
+        // Seek/reset triggers prewarm_reset and prewarm_pending = true
+        started.reset();
+
+        // Inject an implausible duration into prewarm
+        let implausible_ns = crate::clap::processor::MAX_PLAUSIBLE_ELAPSED_NS + 1_000_000_000;
+        crate::clap::processor::TEST_PREWARM_ELAPSED_NS.store(implausible_ns, Ordering::Relaxed);
+
+        let _ = process_block(&mut started, &silence);
+
+        // Prewarm hook must have been consumed
+        assert_eq!(
+            crate::clap::processor::TEST_PREWARM_ELAPSED_NS.load(Ordering::Relaxed),
+            0,
+            "prewarm hook must be cleared upon processing"
+        );
     }
 }
