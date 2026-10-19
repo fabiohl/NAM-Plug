@@ -241,3 +241,158 @@ fn test_emit_pending_logs_overload_rate_limiting() {
         "100 stalls in burst must be suppressed by the 5-second rate limiter (no new warnings in window)"
     );
 }
+
+// T-R3.3: Verify standardized HostLog transitions (0 -> 1) and zero duplicate logs per tick
+#[test]
+fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
+    let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    use crate::clap::host_harness::{self, HostEvent};
+    use clack_extensions::log::LogSeverity;
+    use clack_extensions::timer::TimerId;
+    use neural_amp_modeler_rs::common::spsc::{
+        RT_STATUS_HOST_CONTRACT_VIOLATION, RT_STATUS_NON_FINITE_INPUT_DETECTED,
+        RT_STATUS_PROCESSOR_POISONED,
+    };
+
+    let (_entry, _host_info, mut instance, host_state) =
+        host_harness::make_test_plugin_with_harness();
+    let shared = unsafe { &*test_util::extract_shared(&mut instance) };
+
+    // Initial state: tick timer, expect zero warning/error alert logs
+    host_harness::fire_timer(&mut instance, TimerId(1));
+    let initial_events = host_state.snapshot();
+    let initial_alerts: Vec<_> = initial_events
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog { severity, message }
+                if *severity == LogSeverity::Warning || *severity == LogSeverity::Error =>
+            {
+                Some((severity, message.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        initial_alerts.is_empty(),
+        "Initial state must emit zero warning/error logs, got: {:?}",
+        initial_alerts
+    );
+
+    // 1. Transition 0 -> 1 on POISONED and NON_FINITE_INPUT
+    shared.cold.rt_status.set_flag(RT_STATUS_PROCESSOR_POISONED);
+    shared
+        .cold
+        .rt_status
+        .set_flag(RT_STATUS_NON_FINITE_INPUT_DETECTED);
+
+    host_harness::fire_timer(&mut instance, TimerId(1));
+
+    let events = host_state.snapshot();
+    let errors: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Error,
+                message,
+            } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    let warnings: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Warning,
+                message,
+            } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        errors
+            .iter()
+            .any(|m| m.contains("Audio processor is poisoned")),
+        "Must emit error log for POISONED transition: {:?}",
+        errors
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|m| m.contains("Non-finite input samples")),
+        "Must emit warning log for NON_FINITE_INPUT transition: {:?}",
+        warnings
+    );
+
+    let error_count_after_first = errors.len();
+    let warning_count_after_first = warnings.len();
+
+    // 2. Subsequent ticks with identical state must emit 0 additional logs (no flooding)
+    for _ in 0..5 {
+        host_harness::fire_timer(&mut instance, TimerId(1));
+    }
+    let events_after_ticks = host_state.snapshot();
+    let errors_after_ticks: Vec<_> = events_after_ticks
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Error,
+                message,
+            } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    let warnings_after_ticks: Vec<_> = events_after_ticks
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Warning,
+                message,
+            } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        errors_after_ticks.len(),
+        error_count_after_first,
+        "Subsequent ticks without bit transition must not emit duplicate error logs"
+    );
+    assert_eq!(
+        warnings_after_ticks.len(),
+        warning_count_after_first,
+        "Subsequent ticks without bit transition must not emit duplicate warning logs"
+    );
+
+    // 3. New transition: HOST_CONTRACT (0 -> 1)
+    shared
+        .cold
+        .rt_status
+        .set_flag(RT_STATUS_HOST_CONTRACT_VIOLATION);
+    host_harness::fire_timer(&mut instance, TimerId(1));
+
+    let events_after_new = host_state.snapshot();
+    let errors_after_new: Vec<_> = events_after_new
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Error,
+                message,
+            } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        errors_after_new.len(),
+        error_count_after_first + 2, // 1 from HostLog + 1 from log::error! forwarding
+        "New transition must emit exactly one log cycle"
+    );
+    assert!(
+        errors_after_new
+            .iter()
+            .any(|m| m.contains("Host audio buffer size exceeded")),
+        "Host contract violation log must be present"
+    );
+}

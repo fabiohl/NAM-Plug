@@ -119,6 +119,68 @@ pub(super) fn extract_channels<'a>(
     Ok(Some((out_l, out_r)))
 }
 
+/// Slices and copies the input channel into the pre-allocated scratch buffer for an oversize slice.
+#[inline(always)]
+pub(super) fn copy_channel_input(
+    pair: Option<&ChannelPair<f32>>,
+    scratch: &mut [f32],
+    slice_start: usize,
+    slice_len: usize,
+) {
+    if let Some(pair) = pair {
+        match pair {
+            ChannelPair::InputOutput(i, _) | ChannelPair::InputOnly(i) => {
+                let avail = i.len().saturating_sub(slice_start).min(slice_len);
+                scratch[..avail].copy_from_slice(&i[slice_start..slice_start + avail]);
+                if avail < slice_len {
+                    scratch[avail..slice_len].fill(0.0);
+                }
+            }
+            ChannelPair::InPlace(io) => {
+                let avail = io.len().saturating_sub(slice_start).min(slice_len);
+                scratch[..avail].copy_from_slice(&io[slice_start..slice_start + avail]);
+                if avail < slice_len {
+                    scratch[avail..slice_len].fill(0.0);
+                }
+            }
+            ChannelPair::OutputOnly(_) => {
+                scratch[..slice_len].fill(0.0);
+            }
+        }
+    } else {
+        scratch[..slice_len].fill(0.0);
+    }
+}
+
+/// Extracts a mutable sub-slice for the output channel for an oversize slice.
+#[inline(always)]
+pub(super) fn get_channel_output<'a>(
+    pair: Option<&'a mut ChannelPair<f32>>,
+    slice_start: usize,
+    slice_len: usize,
+) -> Option<&'a mut [f32]> {
+    let slice_end = slice_start + slice_len;
+    match pair? {
+        ChannelPair::InputOutput(_, o) | ChannelPair::OutputOnly(o) => {
+            let end = slice_end.min(o.len());
+            if slice_start < end {
+                Some(&mut o[slice_start..end])
+            } else {
+                None
+            }
+        }
+        ChannelPair::InPlace(io) => {
+            let end = slice_end.min(io.len());
+            if slice_start < end {
+                Some(&mut io[slice_start..end])
+            } else {
+                None
+            }
+        }
+        ChannelPair::InputOnly(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

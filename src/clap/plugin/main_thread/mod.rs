@@ -16,6 +16,7 @@ pub(crate) mod restore_loader;
 
 use super::command_scheduler::{CommandProducer, PushError};
 use super::errors::{self, static_plugin_error};
+use super::lock::lock_cold;
 use super::shared::{
     ClapParamPayload, NamClapShared, PendingModel, PendingRestore, SlimmableRebuild, StagedRestore,
     StagedSwap,
@@ -90,11 +91,17 @@ pub struct NamClapMainThread<'a> {
     pub last_seen_overloads: Cell<u32>,
     /// Instant of the last rate-limited overload warning log emission.
     pub last_overload_log_instant: Cell<Option<std::time::Instant>>,
+    /// Last-seen `RtToUi::non_finite_epoch` to detect new non-finite input events.
+    pub(crate) last_seen_non_finite_epoch: Cell<u32>,
+    /// Instant until which the non-finite input alert should be held active (3s hold).
+    pub(crate) non_finite_hold_until: Cell<Option<std::time::Instant>>,
+    /// Last-seen alert bits to emit host logs only on 0 -> 1 transitions.
+    pub(crate) last_seen_alert_bits: Cell<u32>,
     /// Slint window handle for GUI lifecycle control.
     pub slint_window: RefCell<Option<slint::Weak<crate::clap::gui::MainWindow>>>,
     /// Persistent per-instance GUI worker thread (owns the Slint platform and
     /// event loop for the instance lifetime; survives `gui.destroy()` so
-    /// repeated create/destroy cycles keep working — Slint 1.17 pins the
+    /// repeated create/destroy cycles keep working — Slint 1.18 pins the
     /// platform to the thread that first initialized it).
     pub(crate) gui_worker: RefCell<Option<crate::clap::gui::worker::GuiWorker>>,
     /// Handle for the model file-dialog background thread (if active). Joined during teardown.
@@ -244,61 +251,105 @@ impl<'a> NamClapMainThread<'a> {
     /// F3 fix: this ensures heap alloc + mmap/munmap/memfd_create + drop
     /// never happen on the audio thread.
     pub fn flush_pending_model(&self) -> Result<(), PluginError> {
-        let pending = if let Ok(mut guard) = self.shared.cold.pending_model.lock() {
-            guard.take()
-        } else {
-            return Ok(());
-        };
+        let pending = lock_cold(&self.shared.cold.pending_model, "pending_model").take();
         let Some(p) = pending else { return Ok(()) };
+
+        // RAII guard: any `Err`/early-return below restores the `PendingModel`
+        // for retry instead of silently dropping it (F-RB-01). Disarmed only
+        // once the payload is pushed to the SPSC.
+        struct RestoreOnDrop<'a> {
+            slot: &'a std::sync::Mutex<Option<PendingModel>>,
+            pending: Option<PendingModel>,
+        }
+        impl Drop for RestoreOnDrop<'_> {
+            fn drop(&mut self) {
+                if let Some(p) = self.pending.take() {
+                    *lock_cold(self.slot, "pending_model_restore") = Some(p);
+                }
+            }
+        }
+        let mut restore = RestoreOnDrop {
+            slot: &self.shared.cold.pending_model,
+            pending: Some(p),
+        };
 
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
         if buffer_size == 0 {
-            // Still no buffer_size — store model back for later retry.
-            if let Ok(mut guard) = self.shared.cold.pending_model.lock() {
-                *guard = Some(p);
-            }
+            // Still no buffer_size — keep the model for a later retry.
             return Ok(());
         }
 
-        let PendingModel {
+        let Some(PendingModel {
             model: mut model_l,
             generation,
             model_rate,
             input_mult_adj,
             output_mult_adj,
-        } = p;
+        }) = restore.pending.take()
+        else {
+            return Ok(());
+        };
 
         let sample_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
 
         // Construct the resampler HERE with the real host sample rate
         // now that activate() has been called.
-        let new_resampler = Box::new(NamResampler::new_simple(sample_rate, model_rate).map_err(
-            |e| {
-                static_plugin_error(
+        let new_resampler = match NamResampler::new_simple(sample_rate, model_rate) {
+            Ok(r) => Box::new(r),
+            Err(e) => {
+                restore.pending = Some(PendingModel {
+                    generation,
+                    model: model_l,
+                    model_rate,
+                    input_mult_adj,
+                    output_mult_adj,
+                });
+                self.note_flush_failure(&format!(
+                    "Failed to create deferred resampler (host {sample_rate} Hz, model {model_rate} Hz): {e:?}. Check the host sample rate."
+                ));
+                return Err(static_plugin_error(
                     errors::dsp_resources::RESAMPLER_BUILD_FAILED,
                     format_args!("Failed to create deferred resampler: {e:?}"),
-                )
-            },
-        )?);
+                ));
+            }
+        };
 
         // Streaming resample adapter (T1.2/F-PERF-002), sized for the worst-case
         // host block now that `buffer_size` is known.
         let new_stream =
-            crate::clap::plugin::build_stream_adapter(sample_rate, model_rate, buffer_size)
-                .map_err(|e| {
-                    static_plugin_error(
+            match crate::clap::plugin::build_stream_adapter(sample_rate, model_rate, buffer_size) {
+                Ok(s) => s,
+                Err(e) => {
+                    restore.pending = Some(PendingModel {
+                        generation,
+                        model: model_l,
+                        model_rate,
+                        input_mult_adj,
+                        output_mult_adj,
+                    });
+                    self.note_flush_failure(&format!(
+                    "Failed to create deferred streaming buffer (buffer size {buffer_size}): {e:?}."
+                ));
+                    return Err(static_plugin_error(
                         errors::dsp_resources::STREAM_BUILD_FAILED,
                         format_args!("Failed to create deferred streaming buffer: {e:?}"),
-                    )
-                })?;
+                    ));
+                }
+            };
 
         if let Some(ref mut model) = model_l
             && let Err(e) = model.set_max_buffer_size(buffer_size)
         {
-            self.shared
-                .cold
-                .rt_status
-                .set_flag(spsc::RT_STATUS_MODEL_LOAD_FAILED);
+            restore.pending = Some(PendingModel {
+                generation,
+                model: model_l,
+                model_rate,
+                input_mult_adj,
+                output_mult_adj,
+            });
+            self.note_flush_failure(&format!(
+                "Failed to resize deferred model buffers for host buffer size ({buffer_size}): {e}. Try a smaller host buffer size."
+            ));
             return Err(static_plugin_error(
                 errors::activation::MODEL_RESIZE_FAILED,
                 format_args!(
@@ -335,6 +386,9 @@ impl<'a> NamClapMainThread<'a> {
                 });
         match push_result {
             Ok(seq) => {
+                // Delivered: disarm the restore guard so the drop below is a
+                // no-op — the model now belongs to the audio thread.
+                restore.pending = None;
                 log::trace!("Deferred model sent to audio thread (seq={seq})");
                 Ok(())
             }
@@ -353,21 +407,49 @@ impl<'a> NamClapMainThread<'a> {
                 {
                     drop(new_resampler);
                     drop(new_stream);
-                    if let Ok(mut guard) = self.shared.cold.pending_model.lock() {
-                        *guard = Some(PendingModel {
+                    *lock_cold(&self.shared.cold.pending_model, "pending_model") =
+                        Some(PendingModel {
                             generation,
                             model: model_l,
                             model_rate,
                             input_mult_adj,
                             output_mult_adj,
                         });
-                    }
                 }
                 self.host.request_callback();
                 Ok(())
             }
         }
     }
+    /// Records a deferred-load failure visibly: sets
+    /// `RT_STATUS_MODEL_LOAD_FAILED` and fills `ui_load_error` /
+    /// `ui_load_error_msg` with an actionable message (F-RB-01).
+    ///
+    /// Anti-spam: housekeeping retries every 250 ms while the model is
+    /// retained, so the `log::error!` fires only on the flag transition; a
+    /// flag that is already set logs at `debug` level.
+    fn note_flush_failure(&self, msg: &str) {
+        let already = self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_MODEL_LOAD_FAILED);
+        self.shared
+            .cold
+            .rt_status
+            .set_flag(spsc::RT_STATUS_MODEL_LOAD_FAILED);
+        self.shared
+            .cold
+            .ui_load_error
+            .store(true, Ordering::Relaxed);
+        *lock_cold(&self.shared.cold.ui_load_error_msg, "ui_load_error_msg") = msg.to_string();
+        if already {
+            log::debug!("flush_pending_model still failing: {msg}");
+        } else {
+            log::error!("flush_pending_model failed: {msg}");
+        }
+    }
+
     /// Synchronises atomic values from the audio thread and cold state into `self.params`
     /// before serialisation. Shared by `state.rs` and `state_context.rs`.
     pub(crate) fn snapshot_params(&self) {
@@ -422,15 +504,13 @@ impl<'a> NamClapMainThread<'a> {
                     .param_activation
                     .load(std::sync::atomic::Ordering::Relaxed) as f32,
             );
-        if let Ok(ir_guard) = self.shared.cold.ir_path.lock() {
-            params.ir_path = ir_guard.as_ref().map(std::path::PathBuf::from);
-        }
+        params.ir_path = lock_cold(&self.shared.cold.ir_path, "ir_path")
+            .as_ref()
+            .map(std::path::PathBuf::from);
         // Mandatory asset identity: keep the IR digest in lockstep with the path — no persisted IR
         // reference without its SHA-256 digest, and no stale digest when the
         // IR was cleared.
-        if let Ok(hash_guard) = self.shared.cold.ir_hash.lock() {
-            params.ir_hash = hash_guard.clone();
-        }
+        params.ir_hash = lock_cold(&self.shared.cold.ir_hash, "ir_hash").clone();
         if params.ir_path.is_none() {
             params.ir_hash = None;
         }
@@ -528,9 +608,7 @@ impl<'a> Drop for NamClapMainThread<'a> {
         }
 
         // 3. Clear host log sink arc in cold shared
-        if let Ok(mut sink_guard) = self.shared.cold.host_log_sink.lock() {
-            *sink_guard = None;
-        }
+        *lock_cold(&self.shared.cold.host_log_sink, "host_log_sink") = None;
 
         // 3b. Unregister periodic watchdog timer before lowering alive_fence
         if let Some(timer_id) = self.watchdog_timer.take()

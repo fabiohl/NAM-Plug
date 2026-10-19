@@ -68,6 +68,9 @@ export component MainWindow inherits Window {
     in-out property <string> oversample_text: "1x (Off)";
     in-out property <string> simd_badge: "AVX2+FMA";
     in-out property <string> backend_text: "Wayland Native";
+    in-out property <bool> alert_active: false;
+    in-out property <string> alert_text: "";
+    in-out property <color> alert_color: #EBCB8B;
 
     // ── Host Interaction Callbacks ────────────────────────────
     callback toggle_bypass();
@@ -629,6 +632,36 @@ export component MainWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    if root.alert_active : Rectangle {
+                        background: #1a1d23;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: root.alert_color;
+                        height: 16px;
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 4px;
+                            alignment: center;
+
+                            LedIndicator {
+                                active: true;
+                                color-on: root.alert_color;
+                                color-off: #2E3440;
+                                size: 6px;
+                            }
+
+                            Text {
+                                text: root.alert_text;
+                                font-size: 8px;
+                                font-weight: 700;
+                                color: root.alert_color;
+                                vertical-alignment: center;
                             }
                         }
                     }

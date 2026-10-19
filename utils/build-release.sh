@@ -916,6 +916,16 @@ PYEOF
     fi
 
     if [ -x "$SCRIPT_DIR/verify_rt_codegen.sh" ]; then
+        if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
+            echo -e "  ${BLUE}→ Enforcing real-time codegen static invariants on pre-BOLT libnam_plug.so...${NC}"
+            if ! "$SCRIPT_DIR/verify_rt_codegen.sh" "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so"; then
+                if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+                    die "RT codegen static gate failed on pre-BOLT artifact!"
+                else
+                    warn "RT codegen static gate reported violations on pre-BOLT artifact (non-strict mode)."
+                fi
+            fi
+        fi
         echo -e "  ${BLUE}→ Enforcing real-time codegen static invariants on $(basename "$ASM_BIN")...${NC}"
         if ! "$SCRIPT_DIR/verify_rt_codegen.sh" "$ASM_BIN"; then
             if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
@@ -1269,7 +1279,7 @@ receipt = {
         'bolt_profile_sha256': '$BOLT_PROFILE_SHA' or None,
         'bolt_version': '$BOLT_VERSION' or None,
         # S6-T3: independent proof that the BOLT transform actually won
-        # (`ab-opt-ceremony:<id>` | `perf-gate:<id>`), or the explicit MISSING
+        # ('ab-opt-ceremony:<id>' | 'perf-gate:<id>'), or the explicit MISSING
         # sentinel. Read from the environment to avoid literal injection.
         'bolt_proof': os.environ.get('BOLT_PROOF', 'MISSING') or 'MISSING',
         'bolt_lbr_samples': os.environ.get('BOLT_LBR_SAMPLES') or None,

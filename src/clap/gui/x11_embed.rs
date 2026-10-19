@@ -7,7 +7,7 @@
 //! parented** under the host's X11 `Window` (CLAP `set_parent`) via
 //! `slint::BackendSelector::with_winit_window_attributes_hook` +
 //! `winit::platform::x11::WindowAttributesExtX11::with_embed_parent_window`.
-//! The design decision (option i) is documented in `docs/architecture.md` §7.5.
+//! The design decision (option i) is documented in `docs/architecture.md` §7.7.
 //!
 //! # Process-global constraints
 //!
@@ -37,9 +37,9 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-// winit is not a direct dependency: it is re-exported by Slint 1.17 behind the
+// winit is not a direct dependency: it is re-exported by Slint 1.18 behind the
 // `unstable-winit-030` feature (pinned via Cargo.lock; see the stability
-// caveat in docs/architecture.md §7.5).
+// caveat in docs/architecture.md §7.7).
 use slint::winit_030::winit;
 use winit::platform::x11::{EventLoopBuilderExtX11, WindowAttributesExtX11};
 
@@ -90,7 +90,7 @@ pub(crate) fn backend_kind_for_diag() -> &'static str {
 ///
 /// Only clears the embed target (the dynamic hook becomes a no-op). The
 /// backend pinning itself happens later on the GUI worker thread, where the
-/// winit event loop must be created (Slint 1.17 pins the platform to the
+/// winit event loop must be created (Slint 1.18 pins the platform to the
 /// initializing thread).
 #[inline]
 pub(crate) fn prepare_floating() {
@@ -123,7 +123,7 @@ pub(crate) fn prepare_embedded_x11(parent_id: u32) -> Result<(), &'static str> {
 /// the dynamic embed hook.
 ///
 /// Must be called from the thread that creates the Slint windows (the
-/// persistent GUI worker), because Slint 1.17 pins the platform — and the
+/// persistent GUI worker), because Slint 1.18 pins the platform — and the
 /// winit event loop — to the initializing thread.
 ///
 /// # Errors

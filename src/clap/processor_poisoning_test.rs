@@ -16,7 +16,8 @@
 //!   `activate()` clears the poisoned flag, allowing clean audio resumption.
 
 use crate::clap::host_harness::{
-    extract_plugin_main_thread, extract_plugin_shared, make_harness_audio_processor,
+    CompleteHostState, HostEvent, extract_plugin_main_thread, extract_plugin_shared,
+    make_harness_audio_processor, make_test_plugin_with_custom_state,
     make_test_plugin_with_harness, perform_restart,
 };
 use crate::clap::plugin::errors;
@@ -407,4 +408,132 @@ fn test_f64_audio_ports_silenced_on_poisoning() {
             "out_r_f64[{i}] must be silenced to 0.0f64 on poisoning"
         );
     }
+}
+
+/// T-R5.1 / F-RA-05: Validates that on a host without timer-support and with GUI closed,
+/// an audio processing panic triggers a single `request_callback()`, subsequent blocks remain
+/// silenced with zero-alloc containment and do NOT repeat the callback request, and the
+/// host's subsequent `call_on_main_thread_callback()` triggers `request_restart()` within <= 1 callback.
+#[test]
+fn test_poisoning_triggers_single_request_callback_and_restart_without_timer_support() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    ensure_isolated_crash_dir();
+
+    // 1. Host harness configured with timer support disabled (no HostTimer extension)
+    let state = CompleteHostState::new();
+    state.enable_timer_support.store(false, Ordering::SeqCst);
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_custom_state(state);
+    let config = audio_config();
+    let state_ap = state.clone();
+
+    // GUI is closed by default in headless harness (no timer, no GUI tick driving housekeeping)
+    let stopped = instance
+        .activate(move |_, _| make_harness_audio_processor(&state_ap), config)
+        .expect("activate");
+    let mut started = stopped.start_processing().expect("start_processing");
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+
+    assert!(
+        shared.cold.is_processing.load(Ordering::Relaxed),
+        "is_processing must be true after start_processing"
+    );
+    assert!(
+        !state.callback_requested.load(Ordering::SeqCst),
+        "callback_requested must be false initially"
+    );
+    assert!(
+        !state.restart_requested.load(Ordering::SeqCst),
+        "restart_requested must be false initially"
+    );
+
+    // 2. Inject audio processing panic
+    super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+    let mut in_l = vec![0.5f32; BLOCK];
+    let mut in_r = vec![0.5f32; BLOCK];
+    let mut out_l = vec![1.0f32; BLOCK];
+    let mut out_r = vec![1.0f32; BLOCK];
+
+    let panic_res = process_block(&mut started, &mut in_l, &mut in_r, &mut out_l, &mut out_r);
+    assert!(
+        panic_res.is_err(),
+        "First block must catch injected panic and return Err"
+    );
+
+    // Latch must be poisoned and callback must be requested exactly once
+    assert!(
+        shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_PROCESSOR_POISONED),
+        "RT_STATUS_PROCESSOR_POISONED must be set"
+    );
+    assert!(
+        state.callback_requested.load(Ordering::SeqCst),
+        "host.request_callback() must be invoked on poisoning latch"
+    );
+
+    let callback_events_count = state
+        .snapshot()
+        .into_iter()
+        .filter(|e| matches!(e, HostEvent::CallbackRequested))
+        .count();
+    assert_eq!(
+        callback_events_count, 1,
+        "request_callback() must be called exactly once upon poisoning"
+    );
+
+    // 3. Subsequent blocks while poisoned: zero-alloc containment, silence policy,
+    // and MUST NOT call request_callback() again.
+    out_l.fill(1.0);
+    out_r.fill(1.0);
+    assert_zero_alloc("poisoned containment block", || {
+        let res = process_block(&mut started, &mut in_l, &mut in_r, &mut out_l, &mut out_r);
+        assert_eq!(res.unwrap(), ProcessStatus::Continue);
+    });
+
+    for &s in out_l.iter().chain(out_r.iter()) {
+        assert_eq!(s, 0.0, "Subsequent block must be silenced");
+    }
+
+    let callback_events_count_after = state
+        .snapshot()
+        .into_iter()
+        .filter(|e| matches!(e, HostEvent::CallbackRequested))
+        .count();
+    assert_eq!(
+        callback_events_count_after, 1,
+        "Subsequent process() calls must NOT re-trigger request_callback()"
+    );
+
+    // 4. Host processes the callback request on the main thread:
+    // With timer-support disabled and GUI closed, housekeeping() is executed via on_main_thread.
+    assert!(
+        !state.restart_requested.load(Ordering::SeqCst),
+        "restart_requested must remain false before host callback executes"
+    );
+
+    instance.call_on_main_thread_callback();
+
+    assert!(
+        state.restart_requested.load(Ordering::SeqCst),
+        "housekeeping via on_main_thread must request host restart within <= 1 callback"
+    );
+
+    let restart_events_count = state
+        .snapshot()
+        .into_iter()
+        .filter(|e| matches!(e, HostEvent::RestartRequested))
+        .count();
+    assert_eq!(
+        restart_events_count, 1,
+        "request_restart() must be triggered exactly once"
+    );
+
+    // 5. Teardown / stop processing sets is_processing back to false
+    let stopped_proc = started.stop_processing();
+    assert!(
+        !shared.cold.is_processing.load(Ordering::Relaxed),
+        "is_processing must be false after stop_processing"
+    );
+    instance.deactivate(stopped_proc);
 }

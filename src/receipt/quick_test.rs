@@ -35,6 +35,35 @@ fn parses_clean_receipt_and_audits() {
 }
 
 #[test]
+fn parses_receipt_with_telemetry_lines() {
+    let text = "SUITE: tests-quick\n\
+                STRICT: 1\n\
+                PHASE1_COMPILE_S: 12\n\
+                PHASE1_RUN_S: 3\n\
+                PHASE1: PASS log=target/logs/quick-phase1.log\n\
+                PHASE2_COMPILE_S: 0\n\
+                PHASE2_RUN_S: 25\n\
+                PHASE2: PASS log=target/logs/quick-phase2.log\n\
+                PHASE3_COMPILE_S: 0\n\
+                PHASE3_RUN_S: 5\n\
+                PHASE3: PASS log=target/logs/quick-heap-audit.log\n\
+                HEAP_AUDIT=RAN\n\
+                OVERALL: PASSED\n";
+    let r = parse_quick_receipt(text).unwrap();
+    assert!(r.audit().is_ok());
+    assert!(r.verify_release_gate(true, true).is_ok());
+
+    let invalid_telemetry = "SUITE: tests-quick\n\
+                             STRICT: 1\n\
+                             PHASE1_COMPILE_S: not_a_number\n\
+                             PHASE1: PASS log=x\n\
+                             PHASE2: PASS log=x\n\
+                             PHASE3: PASS log=x\n\
+                             OVERALL: PASSED\n";
+    assert!(parse_quick_receipt(invalid_telemetry).is_err());
+}
+
+#[test]
 fn completed_with_gaps_is_consistent_but_not_release_green() {
     let text = "SUITE: tests-quick\n\
                 STRICT: 0\n\

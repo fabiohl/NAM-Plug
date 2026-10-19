@@ -5,6 +5,7 @@
 
 use crate::clap::gui::dialog_state::{DialogSharedState, IrDialogSharedState};
 use crate::clap::plugin::command_scheduler::CMD_QUEUE_CAPACITY;
+use crate::clap::plugin::lock::lock_cold;
 use crate::clap::processor::DeactivatedDspState;
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::ModelInfo;
@@ -465,6 +466,8 @@ pub struct RtToUi {
     pub dsp_load_permille: AtomicU16,
     /// Xrun / overload counter epoch (mirrors `dsp_overloads`).
     pub xrun_epoch: AtomicU32,
+    /// Non-finite input detection epoch counter incremented by RT audio loop.
+    pub non_finite_epoch: AtomicU32,
 }
 
 /// Fields written by the UI/Main thread, read every block by the RT thread.
@@ -508,6 +511,7 @@ impl Default for RtToUi {
             active_channel_count: AtomicU32::new(1),
             dsp_load_permille: AtomicU16::new(0),
             xrun_epoch: AtomicU32::new(0),
+            non_finite_epoch: AtomicU32::new(0),
         }
     }
 }
@@ -559,6 +563,25 @@ pub struct PendingModelRequest {
 /// Maximum capacity of the pending model load queue (bounded FIFO).
 pub const MAX_PENDING_MODEL_REQUESTS: usize = 16;
 
+// ---------------------------------------------------------------------------
+// UI Alert bits (F-RA-03)
+// ---------------------------------------------------------------------------
+
+/// Audio processor is poisoned due to a fatal panic in the RT callback.
+pub const UI_ALERT_POISONED: u32 = 1 << 0;
+/// Audio host provided a buffer violating the FFI contract (e.g. oversize block).
+pub const UI_ALERT_HOST_CONTRACT: u32 = 1 << 1;
+/// Polyphase sinc resampler rebuild failed.
+pub const UI_ALERT_RESAMPLER_FAILED: u32 = 1 << 2;
+/// CabSim sub-block violated adapter contract.
+pub const UI_ALERT_CABSIM_CONTRACT: u32 = 1 << 3;
+/// Soft-degrade: minimal quality mode engaged under CPU pressure.
+pub const UI_ALERT_DEGRADE_MINIMAL: u32 = 1 << 4;
+/// Soft-degrade: reduced quality mode engaged under CPU pressure.
+pub const UI_ALERT_DEGRADE_REDUCED: u32 = 1 << 5;
+/// Non-finite input samples (NaN/Inf) detected; muted and reconverging (3s hold).
+pub const UI_ALERT_NON_FINITE_INPUT: u32 = 1 << 6;
+
 /// Fields accessed at low frequency by both threads (init, shutdown, rare events).
 #[repr(align(128))]
 pub struct ColdShared {
@@ -578,6 +601,8 @@ pub struct ColdShared {
     pub gc_overflow: Arc<GcOverflowBuffer>,
     /// Atomic status flags (RT->Main telemetry).
     pub rt_status: Arc<RtStatusFlags>,
+    /// Aggregated UI alert bits derived from RT status flags by housekeeping.
+    pub ui_alert_bits: AtomicU32,
     /// Native sample rate required by the actively loaded model.
     pub model_sample_rate: AtomicU32,
     /// Detected host sample rate.
@@ -612,13 +637,13 @@ pub struct ColdShared {
     /// Model load counter (incremented on each successful model load).
     pub model_load_counter: AtomicU32,
     /// Monotonic model-generation allocator.
-    /// Written only by the main thread via [`ColdShared::allocate_model_generation`]
+    /// Written only by the main thread via `ColdShared::allocate_model_generation`
     /// each time a new model identity is adopted (load, restore-with-model, or
     /// clear). The returned value tags the payload that installs that model so
     /// the audio thread can reject a stale slimmable rebuild. `0` is reserved
     /// for "no model installed yet".
     pub model_generation: AtomicU64,
-    /// Milliseconds since [`ui_monotonic_ms`]'s process epoch of the last user
+    /// Milliseconds since `ui_monotonic_ms`'s process epoch of the last user
     /// interaction with the GUI (param gesture or button click), or
     /// [`UI_NO_INTERACTION`] when none has been recorded yet.
     ///
@@ -728,7 +753,7 @@ pub struct ColdShared {
     /// Set by the audio thread (via `host.request_restart()`) when
     /// oversampling changes during active processing. Consumed by
     /// `activate()` to build engines at the correct factor. Stored with the
-    /// [`PendingRestartOs`] encoding — `0` means *no pending restart* and a
+    /// `PendingRestartOs` encoding — `0` means *no pending restart* and a
     /// pending transition **to Off** is representable (`1`), so the raw value
     /// no longer doubles as the Off factor.
     pub pending_restart_os_factor: AtomicU32,
@@ -769,6 +794,12 @@ pub struct ColdShared {
     /// setting the value to `false`. This guarantees that no thread is mid-call in `host_log.log()`
     /// after teardown completes.
     pub(crate) host_log_quiescence: Arc<std::sync::RwLock<bool>>,
+    /// Whether the audio processor is currently active in audio processing.
+    /// Used by the model loader background worker to adapt its rebuild poll interval
+    /// (10ms while processing, 250ms when idle/deactivated, F-RA-06).
+    pub is_processing: AtomicBool,
+    /// Total wakeups of the background model loader worker thread (telemetry/test observability).
+    pub loader_worker_wakeups: AtomicU64,
 }
 
 /// Model payload deferred from the main thread until `buffer_size` is known
@@ -895,6 +926,7 @@ impl ColdShared {
                 neural_amp_modeler_rs::common::spsc::SPSC_CAPACITY,
             )),
             rt_status: Arc::new(RtStatusFlags::new()),
+            ui_alert_bits: AtomicU32::new(0),
             model_sample_rate: AtomicU32::new(48000),
             sample_rate: AtomicU32::new(0),
             buffer_size: AtomicU32::new(0),
@@ -967,6 +999,8 @@ impl ColdShared {
             ir_dialog_handle_sink: Mutex::new(None),
             host_log_sink: Mutex::new(None),
             host_log_quiescence: Arc::new(std::sync::RwLock::new(true)),
+            is_processing: AtomicBool::new(false),
+            loader_worker_wakeups: AtomicU64::new(0),
         }
     }
 
@@ -1244,11 +1278,7 @@ impl GuiSharedState {
 
 impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for GuiSharedState {
     fn model_info(&self) -> Option<neural_amp_modeler_rs::common::diagnostics::ModelInfo> {
-        if let Ok(info_guard) = self.cold.ui_model_info.lock() {
-            info_guard.clone()
-        } else {
-            None
-        }
+        lock_cold(&self.cold.ui_model_info, "ui_model_info").clone()
     }
 
     fn model_memory_bytes(&self) -> Option<usize> {

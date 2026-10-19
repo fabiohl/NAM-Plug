@@ -525,3 +525,121 @@ fn test_multi_instance_housekeeping_tick_stays_fast() {
         test_util::drain_async_model_loading(instance, shared);
     }
 }
+
+/// T-R5.2 / F-RA-06: Verifies that adaptive worker polling reduces idle wakeups by >= 10x
+/// (250 ms idle vs 10 ms active = 25x theoretical reduction), and that under active processing,
+/// flag->swap latency remains strictly < 60 ms.
+#[test]
+fn test_adaptive_worker_polling_reduces_idle_wakeups_by_at_least_10x_and_preserves_swap_latency() {
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+
+    // 1. Load an initial model to ensure the loader worker thread is running.
+    let good = temp_model("lstm.nam");
+    push_gui(shared, &good);
+    test_util::drain_async_model_loading(&mut instance, shared);
+
+    // 2. Measure idle wakeups over 250 ms window while plugin is inactive/deactivated
+    assert!(
+        !shared.cold.is_processing.load(Ordering::Relaxed),
+        "Plugin must not be in active processing state while idle"
+    );
+
+    let w_idle_start = shared.cold.loader_worker_wakeups.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(250));
+    let w_idle_end = shared.cold.loader_worker_wakeups.load(Ordering::Relaxed);
+    let idle_wakeups = w_idle_end.saturating_sub(w_idle_start);
+
+    // With 250 ms idle polling, in 250 ms there should be at most 2 wakeups (typically 1).
+    // With legacy 10 ms polling, there would have been ~25 wakeups.
+    assert!(
+        idle_wakeups <= 2,
+        "Idle wakeups in 250 ms must be <= 2, got {idle_wakeups}"
+    );
+
+    // 3. Activate and start processing audio
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config())
+        .expect("activate failed");
+    let started = stopped.start_processing().expect("start_processing failed");
+    assert!(
+        shared.cold.is_processing.load(Ordering::Relaxed),
+        "is_processing must be true after start_processing"
+    );
+
+    // 4. Measure active wakeups over 250 ms window while actively processing.
+    // Allow the in-flight idle timeout (up to 250 ms) to expire so the worker enters active cadence.
+    let pre_active_wakeups = shared.cold.loader_worker_wakeups.load(Ordering::Relaxed);
+    let wait_deadline = Instant::now() + Duration::from_millis(350);
+    while shared.cold.loader_worker_wakeups.load(Ordering::Relaxed) == pre_active_wakeups
+        && Instant::now() < wait_deadline
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let w_active_start = shared.cold.loader_worker_wakeups.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(250));
+    let w_active_end = shared.cold.loader_worker_wakeups.load(Ordering::Relaxed);
+    let active_wakeups = w_active_end.saturating_sub(w_active_start);
+
+    // With 10 ms active polling, in 250 ms there should be ~25 wakeups (>= 18 with scheduling jitter).
+    assert!(
+        active_wakeups >= 18,
+        "Active wakeups in 250 ms must be >= 18, got {active_wakeups}"
+    );
+
+    let reduction_ratio = active_wakeups as f64 / (idle_wakeups.max(1) as f64);
+    assert!(
+        reduction_ratio >= 10.0,
+        "Wakeup reduction ratio between active and idle must be >= 10x, measured: {reduction_ratio:.1}x \
+         (active={active_wakeups}, idle={idle_wakeups})"
+    );
+
+    // 5. Test flag->swap latency during active processing: must remain < 60 ms
+    shared
+        .cold
+        .rt_status
+        .requested_slimmable_ch
+        .store(8, Ordering::Relaxed);
+    shared
+        .cold
+        .requested_slimmable_generation
+        .store(0, Ordering::Relaxed);
+
+    let t0 = Instant::now();
+    shared
+        .cold
+        .rt_status
+        .set_flag_release(neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+
+    let deadline = Instant::now() + Duration::from_millis(200);
+    while shared
+        .cold
+        .rt_status
+        .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
+        && Instant::now() < deadline
+    {
+        instance.call_on_main_thread_callback();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    let flag_to_swap_latency = t0.elapsed();
+    assert!(
+        !shared
+            .cold
+            .rt_status
+            .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD),
+        "Rebuild flag must be cleared by the worker and main-thread handshake"
+    );
+    assert!(
+        flag_to_swap_latency < Duration::from_millis(60),
+        "Flag->swap latency must be < 60 ms, measured: {flag_to_swap_latency:?}"
+    );
+
+    // 6. Stop processing and deactivate
+    let stopped_proc = started.stop_processing();
+    assert!(!shared.cold.is_processing.load(Ordering::Relaxed));
+    instance.deactivate(stopped_proc);
+
+    let _ = std::fs::remove_file(&good);
+}

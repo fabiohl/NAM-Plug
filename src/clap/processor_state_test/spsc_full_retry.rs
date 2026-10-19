@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! SPSC saturation must not drop a validated model nor advance
-//! the UI ahead of the DSP. Filling the command ring and attempting a model
-//! load must retain the model in `pending_model` for retry.
+//! SPSC saturation must not drop a validated model. Filling the command ring
+//! and attempting a model load must retain the model in `pending_model` for
+//! retry AND publish the full UI commit together with it (F-RB-02: the UI may
+//! advance because the model is retained, never ahead of it).
 
 use crate::clap::plugin::ClapParamPayload;
 use crate::clap::test_util;
@@ -47,7 +48,8 @@ fn test_model_retained_on_spsc_full_no_ui_desync() {
     let counter_before = mt.shared.cold.model_load_counter.load(Ordering::Relaxed);
 
     // On Full, load_model must defer (retain the model) rather than fail —
-    // and must NOT advance the UI state.
+    // and publish the full UI commit together with the retained model
+    // (F-RB-02: UI advances with the retained model).
     mt.load_model(&model_path)
         .expect("load_model should defer on SPSC full, not return an error");
 
@@ -59,14 +61,111 @@ fn test_model_retained_on_spsc_full_no_ui_desync() {
 
     let counter_after = mt.shared.cold.model_load_counter.load(Ordering::Relaxed);
     assert_eq!(
-        counter_before, counter_after,
-        "model_load_counter must not advance on SPSC full"
+        counter_before + 1,
+        counter_after,
+        "model_load_counter must advance once when the model is retained on SPSC full (F-RB-02)"
     );
 
     let name = mt.shared.cold.ui_model_name.lock().unwrap();
+    assert_eq!(
+        *name, "lstm.nam",
+        "ui_model_name must be published with the retained model on SPSC full (F-RB-02)"
+    );
+}
+
+/// T1.1-B (F-RB-02): an SPSC-full deferral retains the model AND publishes
+/// the full UI commit (the model is retained for retry, so the UI may advance:
+/// "UI só avança com o modelo retido/entregue"). On `PushError::Full`,
+/// `load_model` must set `ui_model_name`, increment `model_load_counter`,
+/// clear a stale `ui_load_error`, rescan params and mark dirty.
+///
+/// RED test: fails on current code — `commit_prepared_model` publishes
+/// `params.model_path/hash` + metadata *before* the SPSC push, then `return`s
+/// early on `Full` before name/counter/rescan/error-clear/mark_dirty, leaving
+/// metadata of the new model paired with the old name and a stale error.
+#[test]
+fn test_spsc_full_retry_publishes_full_ui_commit() {
+    use crate::clap::host_harness::{
+        extract_plugin_main_thread, make_harness_audio_processor, make_test_plugin_with_harness,
+    };
+
+    let model_path = crate::clap::test_util::model_path("lstm.nam");
+    assert!(model_path.exists(), "lstm.nam fixture missing");
+
+    let (_entry, _host_info, mut plugin_instance, state) = make_test_plugin_with_harness();
+
+    let audio_config = PluginAudioConfiguration {
+        sample_rate: 48000.0,
+        min_frames_count: 512,
+        max_frames_count: 512,
+    };
+    let _stopped_processor = plugin_instance
+        .activate(
+            {
+                let state = state.clone();
+                move |_, _| make_harness_audio_processor(&state)
+            },
+            audio_config,
+        )
+        .unwrap();
+
+    let mt = unsafe { &*extract_plugin_main_thread(&mut plugin_instance) };
+
+    // Seed a stale error: a later success must clear it (F-UX-06 contract).
+    mt.shared.cold.ui_load_error.store(true, Ordering::Relaxed);
+    *mt.shared.cold.ui_load_error_msg.lock().unwrap() = "stale error".to_string();
+
+    // Saturate the SPSC command ring (capacity 256).
+    for _ in 0..256 {
+        mt.cmd_producer
+            .borrow_mut()
+            .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+            .expect("expected the first 256 pushes to succeed");
+    }
+
+    let counter_before = mt.shared.cold.model_load_counter.load(Ordering::Relaxed);
+
+    // On Full, load_model must defer (retain the model) rather than fail —
+    // and publish the full UI commit since the model is retained.
+    mt.load_model(&model_path)
+        .expect("load_model should defer on SPSC full, not return an error");
+
     assert!(
-        name.is_empty(),
-        "ui_model_name must not be set on SPSC full (UI must not get ahead of DSP)"
+        mt.shared.cold.pending_model.lock().unwrap().is_some(),
+        "model must be retained in pending_model on SPSC full"
+    );
+
+    // F-RB-02 contract: full UI commit on deferral.
+    let counter_after = mt.shared.cold.model_load_counter.load(Ordering::Relaxed);
+    assert_eq!(
+        counter_after,
+        counter_before + 1,
+        "F-RB-02: model_load_counter must advance when the model is retained on SPSC full"
+    );
+    assert_eq!(
+        *mt.shared.cold.ui_model_name.lock().unwrap(),
+        "lstm.nam",
+        "F-RB-02: ui_model_name must be published when the model is retained on SPSC full"
+    );
+    assert!(
+        !mt.shared.cold.ui_load_error.load(Ordering::Relaxed),
+        "F-RB-02: a retained load must clear a stale ui_load_error"
+    );
+    assert!(
+        mt.shared.cold.ui_load_error_msg.lock().unwrap().is_empty(),
+        "F-RB-02: a retained load must clear ui_load_error_msg"
+    );
+
+    // Host notification proxy: `mark_dirty` (HostState) is a no-op in the
+    // harness, but the params rescan must be observed.
+    use crate::clap::host_harness::HostEvent;
+    assert!(
+        state
+            .snapshot()
+            .iter()
+            .any(|e| matches!(e, HostEvent::ParamsRescan)),
+        "F-RB-02: a retained load must rescan params, got: {:?}",
+        state.snapshot()
     );
 }
 

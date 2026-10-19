@@ -26,6 +26,7 @@ use crate::clap::extensions::params::{
 use crate::clap::gui::GuiHostBridge;
 use crate::clap::gui::file_dialogs::{spawn_file_dialog, spawn_ir_file_dialog};
 use crate::clap::plugin::GuiSharedState;
+use crate::clap::plugin::lock::lock_cold;
 use crate::clap::plugin::shared::{UI_NO_INTERACTION, ui_monotonic_ms};
 
 slint::include_modules!();
@@ -632,6 +633,89 @@ impl SlintViewModelInner {
         self.status_bar
             .update(sr, buf, stream_lat + cab_lat, channels, &self.window);
 
+        // ── 5b. GUI Alert Pill Evaluation (T-R3.2) ──────────────────────────
+        let rt = &self.shared.cold.rt_status;
+        let mut effective_bits = self.shared.cold.ui_alert_bits.load(Ordering::Relaxed);
+        if rt.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED) {
+            effective_bits |= crate::clap::plugin::shared::UI_ALERT_POISONED;
+        }
+        if rt.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION) {
+            effective_bits |= crate::clap::plugin::shared::UI_ALERT_HOST_CONTRACT;
+        }
+        if rt.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_RESAMPLER_REBUILD_FAILED) {
+            effective_bits |= crate::clap::plugin::shared::UI_ALERT_RESAMPLER_FAILED;
+        }
+        if rt.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_CABSIM_CONTRACT_VIOLATION) {
+            effective_bits |= crate::clap::plugin::shared::UI_ALERT_CABSIM_CONTRACT;
+        }
+        if rt.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_DEGRADE_MINIMAL) {
+            effective_bits |= crate::clap::plugin::shared::UI_ALERT_DEGRADE_MINIMAL;
+        }
+        if rt.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_DEGRADE_REDUCED) {
+            effective_bits |= crate::clap::plugin::shared::UI_ALERT_DEGRADE_REDUCED;
+        }
+        if rt.check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED) {
+            effective_bits |= crate::clap::plugin::shared::UI_ALERT_NON_FINITE_INPUT;
+        }
+
+        let alert: Option<(&'static str, slint::Color)> = if (effective_bits
+            & crate::clap::plugin::shared::UI_ALERT_POISONED)
+            != 0
+        {
+            Some((
+                "Plugin parado — reiniciando…",
+                slint::Color::from_argb_encoded(0xFF_F7_4E_4E),
+            ))
+        } else if (effective_bits & crate::clap::plugin::shared::UI_ALERT_HOST_CONTRACT) != 0 {
+            Some((
+                "Bloco do host acima do limite",
+                slint::Color::from_argb_encoded(0xFF_F7_4E_4E),
+            ))
+        } else if (effective_bits & crate::clap::plugin::shared::UI_ALERT_RESAMPLER_FAILED) != 0 {
+            Some((
+                "Falha ao reconstruir resampler",
+                slint::Color::from_argb_encoded(0xFF_F7_4E_4E),
+            ))
+        } else if (effective_bits & crate::clap::plugin::shared::UI_ALERT_CABSIM_CONTRACT) != 0 {
+            Some((
+                "Violação de partição do CabSim",
+                slint::Color::from_argb_encoded(0xFF_F7_4E_4E),
+            ))
+        } else if (effective_bits & crate::clap::plugin::shared::UI_ALERT_DEGRADE_MINIMAL) != 0 {
+            Some((
+                "Qualidade mínima: CPU alta",
+                slint::Color::from_argb_encoded(0xFF_EB_CB_8B),
+            ))
+        } else if (effective_bits & crate::clap::plugin::shared::UI_ALERT_DEGRADE_REDUCED) != 0 {
+            Some((
+                "Qualidade reduzida: CPU alta",
+                slint::Color::from_argb_encoded(0xFF_EB_CB_8B),
+            ))
+        } else if (effective_bits & crate::clap::plugin::shared::UI_ALERT_NON_FINITE_INPUT) != 0 {
+            Some((
+                "Entrada inválida (NaN) — reconvergindo",
+                slint::Color::from_argb_encoded(0xFF_EB_CB_8B),
+            ))
+        } else {
+            None
+        };
+
+        match alert {
+            Some((text, color)) => {
+                if !self.window.get_alert_active() {
+                    self.window.set_alert_active(true);
+                }
+                self.window.set_alert_text(text.into());
+                self.window.set_alert_color(color);
+            }
+            None => {
+                if self.window.get_alert_active() {
+                    self.window.set_alert_active(false);
+                    self.window.set_alert_text("".into());
+                }
+            }
+        }
+
         // ── 6. Adaptive Telemetry Cadence (F-UX-08) ──────────────────────────
         self.evaluate_cadence(raw_l, raw_r)
     }
@@ -1007,9 +1091,8 @@ impl SlintViewModel {
                             host_static,
                             Arc::clone(&shared.cold.alive_fence),
                         );
-                        if let Ok(mut guard) = shared.cold.dialog_handle_sink.lock() {
-                            *guard = Some(handle);
-                        }
+                        *lock_cold(&shared.cold.dialog_handle_sink, "dialog_handle_sink") =
+                            Some(handle);
                     }
                 }
             });
@@ -1060,9 +1143,8 @@ impl SlintViewModel {
                             host_static,
                             Arc::clone(&shared.cold.alive_fence),
                         );
-                        if let Ok(mut guard) = shared.cold.ir_dialog_handle_sink.lock() {
-                            *guard = Some(handle);
-                        }
+                        *lock_cold(&shared.cold.ir_dialog_handle_sink, "ir_dialog_handle_sink") =
+                            Some(handle);
                     }
                 }
             });

@@ -185,6 +185,19 @@ pub fn parse_quick_receipt(text: &str) -> Result<QuickReceipt, String> {
             }
         } else if let Some(v) = line.strip_prefix("GAP:") {
             gaps.push(v.trim().to_string());
+        } else if line.starts_with("PHASE")
+            && (line.contains("_COMPILE_S:") || line.contains("_RUN_S:"))
+        {
+            // Optional phase compile/run telemetry emitted by cargo_test_budgeted (T2.1).
+            // Validated as non-negative integer or float seconds; ignored for semantic pass/fail gate.
+            if let Some((key, val)) = line.split_once(':') {
+                let val = val.trim();
+                if val.parse::<f64>().is_err() {
+                    return Err(format!(
+                        "line {lineno}: invalid telemetry duration in {key}: {val}"
+                    ));
+                }
+            }
         } else if line.starts_with("PHASE") {
             let (id, status, log, reason) = parse_quick_phase(line)
                 .ok_or_else(|| format!("line {lineno}: malformed phase line: {line:?}"))?;

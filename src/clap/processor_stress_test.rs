@@ -540,28 +540,29 @@ mod tests {
             None,
         );
 
+        // F-RA-04 / Sprint R4: transparent slicing allows processing blocks > max_frames_count
+        // without silence/mute or Err, asserting RT_STATUS_HOST_CONTRACT_VIOLATION for diagnostics.
         assert!(
-            result.is_err(),
-            "Expected Err(PluginError) across all build profiles when host sends 600 frames with max_frames_count=512"
+            result.is_ok(),
+            "Expected Ok(ProcessStatus) via transparent slicing when host sends 600 frames with max_frames_count=512"
         );
         assert!(
             rt_status
                 .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION),
             "RT_STATUS_HOST_CONTRACT_VIOLATION must be set on block size contract violation"
         );
-        // Verify fail-safe deterministic zeroing of output buffer
-        for &s in &out_l {
-            assert_eq!(
-                s, 0.0,
-                "Output channel L must be zeroed on contract violation"
-            );
-        }
-        for &s in &out_r {
-            assert_eq!(
-                s, 0.0,
-                "Output channel R must be zeroed on contract violation"
-            );
-        }
+        assert!(
+            out_l.iter().all(|s| s.is_finite()),
+            "Output channel L must be finite"
+        );
+        assert!(
+            out_r.iter().all(|s| s.is_finite()),
+            "Output channel R must be finite"
+        );
+        assert!(
+            out_l.iter().any(|&s| s != 0.0),
+            "Output channel L must not be muted/silenced on oversize block"
+        );
     }
 
     #[test]

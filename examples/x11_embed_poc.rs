@@ -3,7 +3,7 @@
 
 //! X11 embedding proof-of-concept.
 //!
-//! Proves that a Slint 1.17 window can be created as a **native X11 child**
+//! Proves that a Slint 1.18 window can be created as a **native X11 child**
 //! (XEmbed) of an arbitrary host window, **without forking Slint**, via the
 //! `unstable-winit-030` feature: `BackendSelector::with_winit_window_attributes_hook`
 //! + `winit::platform::x11::WindowAttributesExtX11::with_embed_parent_window`.

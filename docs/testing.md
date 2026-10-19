@@ -155,10 +155,10 @@ The benchmark suite under [`../benches/`](../benches/) uses [Criterion.rs](https
 3. **`CLAP_WorstCase` (Worst-Case Coverage):**
 
    - **`SmallBlocks_{Passthrough,Bypass,Wet_LSTM}`**: 16/32-sample worst-case fixed cost (+ 64/128 as the anchor to the existing matrix), ns/sample via `Throughput::Elements`, p50/p99/max from the Criterion distribution.
-   - **`DryDelay_{Mono,Stereo}`**: Pure engine `DelayLine<f32>` push/pop path (same per-sample pattern as `DryDelayLine::process_block`, no model), sweeping delay 0/12/256/max over 32/64/128/512 blocks.
+   - **`DryDelay_{Mono,DualMono}`**: Pure engine `DelayLine<f32>` push/pop path (same per-sample pattern as `DryDelayLine::process_block`, no model), sweeping delay 0/12/256/max over 32/64/128/512 blocks.
    - **`EventFlood`**: Dense `ParamValueEvent`/`ParamModEvent` floods (16/64/256/1024 events over 64/128/512 blocks, plus the degenerate 1-event-per-sample case); ns/sample × event-density curves in the Criterion summary.
    - **`EventFloodModel`**: Same flood densities/blocks as `EventFlood` but with a loaded **WaveNet A1 / LSTM** model (`CLAP_WorstCase_EventFloodModel`), exposing the real sub-block fragmentation cost — an event per sample forces a 1-sample inference call, losing the per-call vectorization the empty pipeline never pays (F-UX-03, D1). The Sprint S7 decision criterion is cost **> 2×** the same block without events (gate met; see §5.10).
-   - **`MonoStereo` / `Crossfade` / `RingOut` / `ThreadHop`**: Real mono (L==R) vs. stereo (L!=R) content; bypass crossfade in flight (`PARAM_BYPASS` at offset 0, 64-sample ramp active); gate-closed CabSim ring-out drain; 2-worker `process` alternation harness measuring TLS/MXCSR re-priming cost.
+   - **`MonoDualMono` / `Crossfade` / `RingOut` / `ThreadHop`**: Real mono (L==R) vs. stereo (L!=R) content; bypass crossfade in flight (`PARAM_BYPASS` at offset 0, 64-sample ramp active); gate-closed CabSim ring-out drain; 2-worker `process` alternation harness measuring TLS/MXCSR re-priming cost.
 
 4. **`CLAP_Evidence_InferenceE2E` (End-to-End Regression Matrix):**
 

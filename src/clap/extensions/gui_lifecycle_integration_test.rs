@@ -582,9 +582,9 @@ fn gui_lifecycle_hide_after_show_with_real_window() {
 /// Xvfb :99 -screen 0 1280x800x24 &; DISPLAY=:99 cargo test --features testing -- --ignored gui_embedded
 /// ```
 ///
-/// Keep this the only test matching `gui_embedded`: Slint 1.17 allows one
+/// Keep this the only test matching `gui_embedded`: Slint 1.18 allows one
 /// platform per process, so a second display test in the same process could
-/// not create windows (see `docs/architecture.md` §7.5).
+/// not create windows (see `docs/architecture.md` §7.7).
 #[test]
 #[ignore = "requires a dedicated X11 display server (Xvfb/Xephyr) and mutates process env"]
 fn gui_embedded_x11_open_close_cycles_no_leak() {

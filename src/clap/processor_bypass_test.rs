@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wet_path_stereo_independence() {
+    fn test_wet_path_dual_mono_independence() {
         let n = 512;
         let in_l = vec![0.1f32; n];
         let in_r = vec![0.2f32; n];

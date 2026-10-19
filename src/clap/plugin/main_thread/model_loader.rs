@@ -65,9 +65,13 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Poll window while the worker is idle: the rebuild flags are re-read at this
-/// cadence, so a flag→swap response no longer waits for the 250 ms watchdog.
-const REBUILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Poll window while the worker is idle and the processor is in processing state (10 ms):
+/// armed in `start_processing()` and `apply_rt_thread_setup()`, preserving the flag→swap latency (< 60 ms).
+pub(crate) const REBUILD_POLL_INTERVAL_ACTIVE: Duration = Duration::from_millis(10);
+
+/// Poll window while the worker is idle and the plugin is NOT processing audio (250 ms):
+/// disarmed in `stop_processing()`, reduces background thread wakeups by 25x while idle/deactivated (F-RA-06).
+pub(crate) const REBUILD_POLL_INTERVAL_IDLE: Duration = Duration::from_millis(250);
 
 /// One model load dispatched to the loader worker.
 ///
@@ -318,9 +322,22 @@ fn worker_main(
     let mut os_built: Option<u32> = None;
 
     loop {
-        // Park for a bounded window so the rebuild flags are polled even when
+        let is_processing = shared.cold.is_processing.load(Ordering::Relaxed);
+        let poll_interval = if is_processing {
+            REBUILD_POLL_INTERVAL_ACTIVE
+        } else {
+            REBUILD_POLL_INTERVAL_IDLE
+        };
+
+        // Park for an adaptive window so the rebuild flags are polled even when
         // no load job arrives; `Disconnected` (channel dropped) ends the worker.
-        match rx.recv_timeout(REBUILD_POLL_INTERVAL) {
+        let recv_res = rx.recv_timeout(poll_interval);
+        shared
+            .cold
+            .loader_worker_wakeups
+            .fetch_add(1, Ordering::Relaxed);
+
+        match recv_res {
             Ok(job) => {
                 // Fence down: the instance is being destroyed; abandon the queue.
                 if !shared.cold.alive_fence.load(Ordering::Acquire) {

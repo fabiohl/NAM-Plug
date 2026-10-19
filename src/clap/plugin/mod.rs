@@ -5,6 +5,7 @@
 
 pub mod command_scheduler;
 pub mod errors;
+pub(crate) mod lock;
 pub mod shared;
 pub use command_scheduler::{
     CMD_QUEUE_CAPACITY, CommandConsumer, CommandProducer, CommandScheduler,
@@ -25,6 +26,7 @@ pub use main_thread::{NamClapMainThread, debug_assert_main_thread};
 use crate::clap::descriptor::nam_descriptor;
 use crate::clap::processor::NamClapProcessor;
 use clack_plugin::prelude::*;
+use lock::lock_cold;
 use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use std::cell::{Cell, RefCell};
@@ -190,9 +192,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                 if let Some(nl) = NamLogger::global() {
                     nl.register_instance_sink(shared.cold.instance_id, &sink);
                 }
-                if let Ok(mut guard) = shared.cold.host_log_sink.lock() {
-                    *guard = Some(sink);
-                }
+                *lock_cold(&shared.cold.host_log_sink, "host_log_sink") = Some(sink);
             }
         }
 
@@ -241,6 +241,9 @@ impl DefaultPluginFactory for NamClapPlugin {
             last_seen_slimmable_stale: Cell::new(0),
             last_seen_overloads: Cell::new(0),
             last_overload_log_instant: Cell::new(None),
+            last_seen_non_finite_epoch: Cell::new(0),
+            non_finite_hold_until: Cell::new(None),
+            last_seen_alert_bits: Cell::new(0),
             slint_window: RefCell::new(None),
             gui_worker: RefCell::new(None),
             dialog_handle: RefCell::new(None),

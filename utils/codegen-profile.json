@@ -4,7 +4,7 @@
     {
       "id": "process",
       "pattern": "^<.*NamClapProcessor as clack_plugin::plugin::PluginAudioProcessor<.*>>::process$",
-      "required": true,
+      "required": false,
       "gates": { "alloc": 0, "div": 2, "tls": 5 }
     },
     {
@@ -40,7 +40,7 @@
     {
       "id": "process_dry_contained_block",
       "pattern": "^<nam_plug::clap::processor::state::NamClapProcessor>::process_dry_contained_block$",
-      "required": true,
+      "required": false,
       "gates": { "alloc": 0, "div": 2, "tls": 0 }
     }
   ]

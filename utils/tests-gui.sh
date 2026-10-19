@@ -222,7 +222,7 @@ fi
 #
 # Each entry is: "<cargo_args_for_filter>"
 # Note: gui_embedded must run in isolation (Slint one-platform-per-process rule,
-# documented in docs/architecture.md §7.5). All four tests share one Xvfb
+# documented in docs/architecture.md §7.7). All four tests share one Xvfb
 # session so they don't fight for the same display number, but they are
 # serialised by running them one at a time with --test-threads=1.
 
@@ -262,7 +262,7 @@ run_gui_test() {
 }
 
 # gui_embedded must be the only test matching its prefix to respect the
-# one-platform-per-process invariant (see docs/architecture.md §7.5).
+# one-platform-per-process invariant (see docs/architecture.md §7.7).
 run_gui_test \
     "gui_embedded_x11_open_close_cycles_no_leak" \
     "gui_embedded_x11_open_close_cycles_no_leak" \

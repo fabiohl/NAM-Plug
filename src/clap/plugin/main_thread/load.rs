@@ -3,6 +3,7 @@
 
 //! Model loading (main thread only).
 
+use super::super::lock::lock_cold;
 use super::super::shared::StagedSwap;
 use super::super::shared::{ClapParamPayload, LoadModelPayload, NamModelMetadata, PendingModel};
 use super::NamClapMainThread;
@@ -318,6 +319,57 @@ impl<'a> NamClapMainThread<'a> {
         self.commit_prepared_model_with_generation(prepared, generation);
     }
 
+    /// Publishes the UI/host commit for a retained model: identity metadata,
+    /// name, load counter, param rescan, stale-error clear and host dirty bit.
+    ///
+    /// Called in **every** outcome that retains the model for the audio thread
+    /// (SPSC-ok, staged-restart, pending/`Full`, deferred): the UI may advance
+    /// because the model is retained, never ahead of it (F-RB-02). All
+    /// `RefCell` borrows are released before the host calls below.
+    fn finish_commit_ui(&self, path: &Path, metadata: NamModelMetadata, model_info: ModelInfo) {
+        *lock_cold(&self.shared.cold.ui_model_metadata, "ui_model_metadata") = Some(metadata);
+        *lock_cold(&self.shared.cold.ui_model_info, "ui_model_info") = Some(model_info);
+
+        self.shared
+            .cold
+            .model_load_counter
+            .fetch_add(1, Ordering::Relaxed);
+
+        let basename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        *lock_cold(&self.shared.cold.ui_model_name, "ui_model_name") = basename;
+
+        if let Some(params_ext) = self
+            .host
+            .get_extension::<clack_extensions::params::HostParams>()
+        {
+            params_ext.rescan(
+                &self.host,
+                clack_extensions::params::ParamRescanFlags::VALUES,
+            );
+        }
+
+        log::info!("Model loaded: {path:?}");
+
+        // A successful adoption clears any stale load error (F-UX-06): a later
+        // success must never be shadowed by an earlier failure.
+        self.shared
+            .cold
+            .ui_load_error
+            .store(false, Ordering::Relaxed);
+        lock_cold(&self.shared.cold.ui_load_error_msg, "ui_load_error_msg").clear();
+
+        if let Some(state_ext) = self
+            .host
+            .get_extension::<clack_extensions::state::HostState>()
+        {
+            state_ext.mark_dirty(&self.host);
+        }
+    }
+
     /// Generation-explicit variant of [`Self::commit_prepared_model`].
     ///
     /// The asynchronous loader allocates the generation on the main thread
@@ -345,6 +397,10 @@ impl<'a> NamClapMainThread<'a> {
             buffer_size,
         } = prepared;
 
+        // Identity (path/hash/search-path) is published up-front; the display
+        // metadata (`ui_model_metadata`/`ui_model_info`), name, counter,
+        // rescan, error-clear and dirty bit all land together in
+        // `finish_commit_ui`, which runs in every retaining outcome (F-RB-02).
         {
             let mut params = self.params.borrow_mut();
             params.model_path = Some(path.clone());
@@ -361,12 +417,6 @@ impl<'a> NamClapMainThread<'a> {
             params.model_hash = Some(model_hash);
         }
 
-        if let Ok(mut meta_guard) = self.shared.cold.ui_model_metadata.lock() {
-            *meta_guard = Some(metadata);
-        }
-        if let Ok(mut info_guard) = self.shared.cold.ui_model_info.lock() {
-            *info_guard = Some(model_info);
-        }
         self.shared
             .cold
             .ui_model_memory_bytes
@@ -381,20 +431,18 @@ impl<'a> NamClapMainThread<'a> {
         // *before* the pure/effectful split (`commit_prepared_model` for the
         // synchronous path, the accepting tick for the asynchronous path), so
         // the worker can echo it and superseded results can be discarded.
-        {
-            let mut storage = self
-                .shared
-                .cold
-                .full_wavenet_model
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *storage = full_wavenet;
-        }
+        *lock_cold(&self.shared.cold.full_wavenet_model, "full_wavenet_model") = full_wavenet;
 
         if buffer_size > 0 {
-            // `prepare_model` always builds the resampler/stream when
-            // `buffer_size > 0`; the `None` arm is unreachable in practice and
-            // falls back to the deferred path rather than panicking.
+            // `prepare_model` builds both the resampler and the streaming adapter
+            // whenever `buffer_size > 0`; assert that invariant in debug builds.
+            // The `else` arm below is a defensive fallback that defers the model
+            // rather than panicking, so the two halves stay in lockstep even if a
+            // future change breaks the invariant.
+            debug_assert!(
+                new_resampler.is_some() && new_stream.is_some(),
+                "prepare_model must build resampler+stream when buffer_size > 0"
+            );
             if let (Some(new_resampler), Some(new_stream)) = (new_resampler, new_stream) {
                 // Explicit user load supersedes any pending staged restore.
                 *self.staged_restore.borrow_mut() = None;
@@ -436,11 +484,13 @@ impl<'a> NamClapMainThread<'a> {
                         },
                     );
                     match push_result {
-                        Ok(_seq) => {}
+                        Ok(_seq) => {
+                            self.finish_commit_ui(&path, metadata, model_info);
+                        }
                         Err((PushError::Full, payload)) => {
                             // Fail-closed — retain the model for retry instead of
-                            // dropping it. The UI is not advanced because the model
-                            // is not yet installed on the audio thread;
+                            // dropping it. The model is retained, so the UI
+                            // commit advances together with it (F-RB-02);
                             // `flush_pending_model` retries on the next cycle.
                             if let ClapParamPayload::LoadModel {
                                 generation,
@@ -454,19 +504,17 @@ impl<'a> NamClapMainThread<'a> {
                             {
                                 drop(new_resampler); // rebuilt by flush_pending_model()
                                 drop(new_stream); // rebuilt by flush_pending_model()
-                                if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock()
-                                {
-                                    *pending_guard = Some(PendingModel {
+                                *lock_cold(&self.shared.cold.pending_model, "pending_model") =
+                                    Some(PendingModel {
                                         generation,
                                         model: model_l,
                                         model_rate,
                                         input_mult_adj,
                                         output_mult_adj,
                                     });
-                                }
                             }
                             self.host.request_callback();
-                            return;
+                            self.finish_commit_ui(&path, metadata, model_info);
                         }
                     }
                 } else {
@@ -489,15 +537,17 @@ impl<'a> NamClapMainThread<'a> {
                         });
                     }
                     self.host.request_restart();
+                    self.finish_commit_ui(&path, metadata, model_info);
                 }
-            } else if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock() {
-                *pending_guard = Some(PendingModel {
+            } else {
+                *lock_cold(&self.shared.cold.pending_model, "pending_model") = Some(PendingModel {
                     generation,
                     model: model_l,
                     model_rate,
                     input_mult_adj,
                     output_mult_adj,
                 });
+                self.finish_commit_ui(&path, metadata, model_info);
             }
         } else {
             // Defer sending until `buffer_size` and `sample_rate` become known in
@@ -505,58 +555,14 @@ impl<'a> NamClapMainThread<'a> {
             // sample rate is unknown during pre-activation state restore
             // (defaults to 48000). `flush_pending_model()` builds it with the
             // correct rates determined at activate() time.
-            if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock() {
-                *pending_guard = Some(PendingModel {
-                    generation,
-                    model: model_l,
-                    model_rate,
-                    input_mult_adj,
-                    output_mult_adj,
-                });
-            }
-        }
-
-        self.shared
-            .cold
-            .model_load_counter
-            .fetch_add(1, Ordering::Relaxed);
-
-        let basename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        if let Ok(mut name_guard) = self.shared.cold.ui_model_name.lock() {
-            *name_guard = basename;
-        }
-
-        if let Some(params_ext) = self
-            .host
-            .get_extension::<clack_extensions::params::HostParams>()
-        {
-            params_ext.rescan(
-                &self.host,
-                clack_extensions::params::ParamRescanFlags::VALUES,
-            );
-        }
-
-        log::info!("Model loaded: {path:?}");
-
-        // A successful adoption clears any stale load error (F-UX-06): a later
-        // success must never be shadowed by an earlier failure.
-        self.shared
-            .cold
-            .ui_load_error
-            .store(false, Ordering::Relaxed);
-        if let Ok(mut msg) = self.shared.cold.ui_load_error_msg.lock() {
-            msg.clear();
-        }
-
-        if let Some(state_ext) = self
-            .host
-            .get_extension::<clack_extensions::state::HostState>()
-        {
-            state_ext.mark_dirty(&self.host);
+            *lock_cold(&self.shared.cold.pending_model, "pending_model") = Some(PendingModel {
+                generation,
+                model: model_l,
+                model_rate,
+                input_mult_adj,
+                output_mult_adj,
+            });
+            self.finish_commit_ui(&path, metadata, model_info);
         }
     }
 
@@ -564,8 +570,8 @@ impl<'a> NamClapMainThread<'a> {
     ///
     /// Performs I/O and memory allocations, being safe to execute only on the
     /// main thread. The load is split into a pure
-    /// [`prepare_model`](Self::prepare_model) phase and an effectful
-    /// [`commit_prepared_model`](Self::commit_prepared_model) phase; here they
+    /// `prepare_model` phase and an effectful
+    /// `commit_prepared_model` phase; here they
     /// run back-to-back, preserving the fully synchronous behaviour.
     ///
     /// Runs under `&self`: mutations go through the granular interior
@@ -688,9 +694,8 @@ impl<'a> NamClapMainThread<'a> {
                 {
                     Ok(_) => true,
                     Err(_) => {
-                        if let Ok(mut pending) = self.shared.cold.ui_pending_ir.lock() {
-                            *pending = Some(path.to_path_buf());
-                        }
+                        *lock_cold(&self.shared.cold.ui_pending_ir, "ui_pending_ir") =
+                            Some(path.to_path_buf());
                         self.host.request_callback();
                         false
                     }
@@ -713,15 +718,10 @@ impl<'a> NamClapMainThread<'a> {
         };
 
         if delivered {
-            if let Ok(mut ir_guard) = self.shared.cold.ir_path.lock() {
-                *ir_guard = Some(path.to_string_lossy().to_string());
-            }
-            if let Ok(mut hash_guard) = self.shared.cold.ir_hash.lock() {
-                *hash_guard = Some(ir_hash.clone());
-            }
-            if let Ok(mut raw_guard) = self.shared.cold.ir_raw_samples.lock() {
-                *raw_guard = Some(cabsim.samples);
-            }
+            *lock_cold(&self.shared.cold.ir_path, "ir_path") =
+                Some(path.to_string_lossy().to_string());
+            *lock_cold(&self.shared.cold.ir_hash, "ir_hash") = Some(ir_hash.clone());
+            *lock_cold(&self.shared.cold.ir_raw_samples, "ir_raw_samples") = Some(cabsim.samples);
             self.shared
                 .cold
                 .ir_raw_sample_rate
@@ -748,9 +748,7 @@ impl<'a> NamClapMainThread<'a> {
 
         let generation = self.shared.cold.allocate_model_generation();
 
-        if let Ok(mut storage) = self.shared.cold.full_wavenet_model.lock() {
-            *storage = None;
-        }
+        *lock_cold(&self.shared.cold.full_wavenet_model, "full_wavenet_model") = None;
 
         {
             let mut params = self.params.borrow_mut();
@@ -759,19 +757,13 @@ impl<'a> NamClapMainThread<'a> {
             params.model_hash = None;
         }
 
-        if let Ok(mut meta_guard) = self.shared.cold.ui_model_metadata.lock() {
-            *meta_guard = None;
-        }
-        if let Ok(mut info_guard) = self.shared.cold.ui_model_info.lock() {
-            *info_guard = None;
-        }
+        *lock_cold(&self.shared.cold.ui_model_metadata, "ui_model_metadata") = None;
+        *lock_cold(&self.shared.cold.ui_model_info, "ui_model_info") = None;
         self.shared
             .cold
             .ui_model_memory_bytes
             .store(0, Ordering::Relaxed);
-        if let Ok(mut name_guard) = self.shared.cold.ui_model_name.lock() {
-            name_guard.clear();
-        }
+        lock_cold(&self.shared.cold.ui_model_name, "ui_model_name").clear();
 
         self.shared
             .cold
@@ -839,15 +831,15 @@ impl<'a> NamClapMainThread<'a> {
                             output_mult_adj,
                             ..
                         } = payload
-                            && let Ok(mut pending_guard) = self.shared.cold.pending_model.lock()
                         {
-                            *pending_guard = Some(PendingModel {
-                                generation,
-                                model: model_l,
-                                model_rate: host_rate,
-                                input_mult_adj,
-                                output_mult_adj,
-                            });
+                            *lock_cold(&self.shared.cold.pending_model, "pending_model") =
+                                Some(PendingModel {
+                                    generation,
+                                    model: model_l,
+                                    model_rate: host_rate,
+                                    input_mult_adj,
+                                    output_mult_adj,
+                                });
                         }
                     }
                 }
@@ -868,15 +860,13 @@ impl<'a> NamClapMainThread<'a> {
                 self.host.request_restart();
             }
         } else {
-            if let Ok(mut pending_guard) = self.shared.cold.pending_model.lock() {
-                *pending_guard = Some(PendingModel {
-                    generation,
-                    model: None,
-                    model_rate: host_rate,
-                    input_mult_adj: 1.0,
-                    output_mult_adj: 1.0,
-                });
-            }
+            *lock_cold(&self.shared.cold.pending_model, "pending_model") = Some(PendingModel {
+                generation,
+                model: None,
+                model_rate: host_rate,
+                input_mult_adj: 1.0,
+                output_mult_adj: 1.0,
+            });
         }
 
         self.shared

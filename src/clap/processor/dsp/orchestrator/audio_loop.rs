@@ -63,14 +63,6 @@ pub(crate) struct SubBlockScratch<'a> {
 /// (bypass toggles, gate ring-out) and must not inflate the steady-state body of
 /// `process` (L1i/uop-cache pressure, register allocation of the hot path).
 #[inline]
-/// `process_sub_block` and `process_sub_block_chunked` intentionally keep the
-/// explicit scalar tail (`out_*`, `ctx`, `stream`, `crossfader`, `dry_delay`,
-/// smoothers, scalars) alongside the grouped `scratch`: moving `ctx` (engine
-/// context) into the plugin-owned struct would tangle the engine/plugin
-/// ownership domains (R2), and the remaining scalars are not slice borrows
-/// the struct could absorb. The lint is allowed with justification — the
-/// struct still removed ~13 slice parameters per signature plus the two dead
-/// ones (`buf_mid_*`, `GainLUT`).
 #[expect(
     clippy::too_many_arguments,
     reason = "explicit scalar tail beside the grouped SubBlockScratch: ctx/engine borrows and control scalars stay outside the plugin-owned scratch struct by design"

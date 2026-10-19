@@ -12,7 +12,7 @@
 //! fully-bypassed state returns to zero physical latency while the plugin keeps
 //! announcing the wet latency — a PDC inconsistency.
 //!
-//! [`DryDelayLine`] is a thin stereo wrapper over two engine
+//! [`DryDelayLine`] is a thin dual-mono wrapper over two engine
 //! [`DelayLine<f32>`] rings (one per channel) that delays the dry signal by
 //! exactly the applied wet latency, reusing the engine's RT-safe ring
 //! implementation instead of duplicating ring storage and pointer arithmetic
@@ -46,20 +46,20 @@ use neural_amp_modeler_rs::dsp::utils::DelayLine;
 /// oversampling X4 half-band delay (2 × HB_DELAY = 24) with margin.
 pub(crate) const DRY_DELAY_MAX_EXTRA: usize = 3200;
 
-/// Stereo dry delay line: one bounded engine ring per channel.
+/// Dual-channel dry delay line: one bounded engine ring per channel.
 ///
 /// The two [`DelayLine<f32>`] instances are independent — no dry signal ever
 /// leaks between L and R — and share the same capacity/delay contract. In
 /// mono processing (`process_mono == true`) only the L ring is fed; the R
 /// output is a pure mirror of the L output, and the R ring keeps its last
-/// stereo history untouched until the next stereo block re-seeds it from L
+/// dual-channel history untouched until the next dual-channel block re-seeds it from L
 /// (one-shot cold mirror) so the delayed dry stays continuous across the
-/// engine's runtime mono/stereo switches.
+/// engine's runtime mono/dual-mono switches.
 pub(crate) struct DryDelayLine {
     line_l: DelayLine<f32>,
     line_r: DelayLine<f32>,
     /// Mono state of the previously processed block, driving the one-shot
-    /// L→R ring re-seed when the detector flips back to stereo.
+    /// L→R ring re-seed when the detector flips back to dual-channel.
     last_mono: bool,
 }
 
@@ -98,7 +98,7 @@ impl DryDelayLine {
     ///
     /// The last-mono latch is deliberately preserved: it describes the state
     /// of the *previous* block's channel feed, not of the ring storage, so
-    /// the next mono→stereo flip still re-seeds the R ring correctly.
+    /// the next mono→dual-mono flip still re-seeds the R ring correctly.
     #[inline(always)]
     pub(crate) fn reset(&mut self) {
         self.line_l.reset();
@@ -108,7 +108,7 @@ impl DryDelayLine {
     /// Re-seeds the R ring from the L ring (cold, zero allocations).
     ///
     /// During a mono stretch the R ring is frozen while the L ring keeps
-    /// absorbing the collapsed signal, so once stereo processing resumes the
+    /// absorbing the collapsed signal, so once dual-channel processing resumes the
     /// R ring must inherit the L history to keep `out_r[i] == in_r[i -
     /// delay]` continuous: the mono inputs were broadcast into both channels
     /// (`extract_channels` mirrors L into `buf_host_r`), so the L history is
@@ -125,13 +125,13 @@ impl DryDelayLine {
     /// for `j < 0` during the initial zero-priming), so the delayed dry is
     /// time-aligned with the wet chain output, which is itself delayed by the
     /// same `delay` (stream + oversample + cab-sim). The invariant holds per
-    /// channel in stereo and for the broadcast mono signal (R mirrors L)
-    /// across runtime mono/stereo flips, including the delayed stretch after
+    /// channel in dual-channel mode and for the broadcast mono signal (R mirrors L)
+    /// across runtime mono/dual-mono flips, including the delayed stretch after
     /// a transition.
     ///
     /// In mono (`process_mono == true`) only the L ring is fed and `out_r`
     /// mirrors `out_l`, halving the ring work; the R ring stays frozen with
-    /// its last stereo history. The first stereo block after a mono stretch
+    /// its last dual-channel history. The first dual-channel block after a mono stretch
     /// re-seeds the R ring from L on a cold path so the delayed R output
     /// continues the mono-collapsed history without a discontinuity.
     ///
@@ -175,7 +175,7 @@ mod dry_delay_test {
     //! zero-priming, clamping, reset, zero-allocation) are unit-tested by the
     //! engine's `DelayLine`, and the end-to-end dry/wet alignment by the
     //! integration tests in `src/clap/processor_dry_delay_test.rs`; these tests
-    //! cover what is unique here: slice bridging, stereo independence and
+    //! cover what is unique here: slice bridging, dual-channel independence and
     //! per-channel delegation.
     use super::*;
 
@@ -243,7 +243,7 @@ mod dry_delay_test {
     }
 
     #[test]
-    fn test_stereo_channels_remain_independent() {
+    fn test_dual_mono_channels_remain_independent() {
         let delay = 16usize;
         let mut line = make_line(32, delay);
         let in_l = vec![0.1f32; 64];
@@ -406,10 +406,10 @@ mod dry_delay_test {
 
     #[test]
     fn test_repeated_mode_flips_stay_bit_exact() {
-        // Alternating mono/stereo blocks. The R-side oracle encodes the
+        // Alternating mono/dual-channel blocks. The R-side oracle encodes the
         // prescribed transition semantics at ring level: the R ring freezes
         // during mono (its output mirrors L instead) and inherits the L
-        // history at every mono→stereo flip, so R's delayed output remains
+        // history at every mono→dual-channel flip, so R's delayed output remains
         // continuous with the broadcast signal the mono output represented.
         let delay = 6usize;
         let cap = 48usize;

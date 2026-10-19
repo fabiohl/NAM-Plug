@@ -4,6 +4,11 @@
 //! RT-Safe logging via atomic flags — consumes transient events on the main thread.
 
 use super::NamClapMainThread;
+use crate::clap::plugin::shared::{
+    UI_ALERT_CABSIM_CONTRACT, UI_ALERT_DEGRADE_MINIMAL, UI_ALERT_DEGRADE_REDUCED,
+    UI_ALERT_HOST_CONTRACT, UI_ALERT_NON_FINITE_INPUT, UI_ALERT_POISONED,
+    UI_ALERT_RESAMPLER_FAILED,
+};
 use clack_extensions::log::{HostLog, LogSeverity};
 use std::ffi::CString;
 use std::sync::atomic::Ordering;
@@ -14,8 +19,101 @@ impl<'a> NamClapMainThread<'a> {
     /// RT-Safe: all `CString::new(…).unwrap_or_default()` calls use static
     /// ASCII literals with no internal null bytes — guaranteed non-panicking.
     pub(crate) fn emit_pending_logs(&self) {
+        self.update_alert_bits();
+
         let log_ext = self.host.get_extension::<HostLog>();
         let shared = self.host.shared();
+
+        // Standardized alert transition logs to host (T-R3.3).
+        // Emits only on 0 -> 1 transitions to prevent flooding.
+        let current_alerts = self.shared.cold.ui_alert_bits.load(Ordering::Acquire);
+        let last_alerts = self.last_seen_alert_bits.get();
+        let new_alerts = current_alerts & !last_alerts;
+        self.last_seen_alert_bits.set(current_alerts);
+
+        if (new_alerts & UI_ALERT_POISONED) != 0 {
+            let msg = CString::new(
+                "NAM-Plug: Audio processor is poisoned due to a fatal panic in RT callback! DSP halted — restart requested.",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Error, &msg);
+            }
+            log::error!(
+                "NAM-Plug: Audio processor is poisoned due to a fatal panic in RT callback! DSP halted — restart requested."
+            );
+        }
+
+        if (new_alerts & UI_ALERT_HOST_CONTRACT) != 0 {
+            let msg = CString::new(
+                "NAM-Plug: Host audio buffer size exceeded negotiated maximum contract limit!",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Error, &msg);
+            }
+            log::error!(
+                "NAM-Plug: Host audio buffer size exceeded negotiated maximum contract limit!"
+            );
+        }
+
+        if (new_alerts & UI_ALERT_RESAMPLER_FAILED) != 0 {
+            let msg =
+                CString::new("NAM-Plug: Resampler rebuild failed for current host sample rate!")
+                    .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Error, &msg);
+            }
+            log::error!("NAM-Plug: Resampler rebuild failed for current host sample rate!");
+        }
+
+        if (new_alerts & UI_ALERT_CABSIM_CONTRACT) != 0 {
+            let msg = CString::new(
+                "NAM-Plug: Host buffer size violates CabSim partition contract limit!",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Error, &msg);
+            }
+            log::error!("NAM-Plug: Host buffer size violates CabSim partition contract limit!");
+        }
+
+        if (new_alerts & UI_ALERT_DEGRADE_MINIMAL) != 0 {
+            let msg = CString::new(
+                "NAM-Plug: DSP degraded to minimal quality mode due to critical CPU pressure.",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Warning, &msg);
+            }
+            log::warn!(
+                "NAM-Plug: DSP degraded to minimal quality mode due to critical CPU pressure."
+            );
+        }
+
+        if (new_alerts & UI_ALERT_DEGRADE_REDUCED) != 0 {
+            let msg = CString::new(
+                "NAM-Plug: DSP degraded to reduced quality mode due to high CPU pressure.",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Warning, &msg);
+            }
+            log::warn!("NAM-Plug: DSP degraded to reduced quality mode due to high CPU pressure.");
+        }
+
+        if (new_alerts & UI_ALERT_NON_FINITE_INPUT) != 0 {
+            let msg = CString::new(
+                "NAM-Plug: Non-finite input samples (NaN/Inf) detected — recovering DSP state.",
+            )
+            .unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Warning, &msg);
+            }
+            log::warn!(
+                "NAM-Plug: Non-finite input samples (NaN/Inf) detected — recovering DSP state."
+            );
+        }
 
         if self
             .shared

@@ -9,6 +9,7 @@ use super::{
     bypass_f32_to_bool, sanitize_param_value, sanitize_param_value_f64,
 };
 use crate::clap::plugin::NamClapMainThread;
+use crate::clap::plugin::lock::lock_cold;
 use clack_extensions::params::{
     ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginMainThreadParams,
 };
@@ -171,10 +172,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     .load(std::sync::atomic::Ordering::Relaxed) as f64,
             ),
             PARAM_ACTIVE_MODEL => {
-                let guard = self.shared.cold.ui_model_name.lock().unwrap_or_else(|e| {
-                    log::error!("PoisonError in ui_model_name lock: {e:?}");
-                    e.into_inner()
-                });
+                let guard = lock_cold(&self.shared.cold.ui_model_name, "ui_model_name");
                 if guard.is_empty() {
                     Some(0.0)
                 } else {
@@ -234,10 +232,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 }
             }
             PARAM_ACTIVE_MODEL => {
-                let guard = self.shared.cold.ui_model_name.lock().unwrap_or_else(|e| {
-                    log::error!("PoisonError in ui_model_name lock: {e:?}");
-                    e.into_inner()
-                });
+                let guard = lock_cold(&self.shared.cold.ui_model_name, "ui_model_name");
                 let name = if guard.is_empty() {
                     "None".to_string()
                 } else {
@@ -291,10 +286,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 _ => None,
             },
             PARAM_ACTIVE_MODEL => {
-                let guard = self.shared.cold.ui_model_name.lock().unwrap_or_else(|e| {
-                    log::error!("PoisonError in ui_model_name lock: {e:?}");
-                    e.into_inner()
-                });
+                let guard = lock_cold(&self.shared.cold.ui_model_name, "ui_model_name");
                 let current_name = if guard.is_empty() {
                     "None".to_string()
                 } else {
@@ -457,18 +449,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 producer.force_flush()
             };
             if flush_result.is_err() {
-                let mut guard = self
-                    .shared
-                    .cold
-                    .in_flight_params
-                    .lock()
-                    .unwrap_or_else(|e| {
-                        log::error!(
-                            "in_flight_params mutex poisoned during param flush, recovering"
-                        );
-                        e.into_inner()
-                    });
-                *guard = Some(snapshot);
+                *lock_cold(&self.shared.cold.in_flight_params, "in_flight_params") = Some(snapshot);
                 self.shared.bump_generation();
                 self.host.request_callback();
             }

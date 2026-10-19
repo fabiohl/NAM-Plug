@@ -12,11 +12,11 @@
 //! 3. `CLAP_WorstCase_SmallBlocks`: passthrough/bypass/wet at 16/32 samples
 //!    (+ 64/128 as the anchor to the existing matrix), reporting ns/sample, p50/p99/max.
 //! 4. `CLAP_WorstCase_DryDelay`: pure `DelayLine::process_block`-equivalent
-//!    push/pop path (no model), sweeping delay 0/typical/max in mono and stereo;
+//!    push/pop path (no model), sweeping delay 0/typical/max in mono and dual-mono;
 //!    `CLAP_WorstCase_EventFlood`: dense `ParamValueEvent`/`ParamModEvent` floods
 //!    (16/64/256/1024 events) over 64/128/512 blocks, including the degenerate 1-event-per-sample case;
-//!    `CLAP_WorstCase_MonoStereo`, `CLAP_WorstCase_Crossfade`, `CLAP_WorstCase_RingOut`,
-//!    `CLAP_WorstCase_ThreadHop`: real mono vs. stereo with L!=R content, bypass crossfade in flight,
+//!    `CLAP_WorstCase_MonoDualMono`, `CLAP_WorstCase_Crossfade`, `CLAP_WorstCase_RingOut`,
+//!    `CLAP_WorstCase_ThreadHop`: real mono vs. dual-mono with L!=R content, bypass crossfade in flight,
 //!    gate-closed CabSim ring-out, and a 2-thread `process` alternation harness
 //!    (TLS/MXCSR re-priming cost).
 //! 5. `CLAP_Evidence_InferenceE2E`: e2e inference matrix model×block
@@ -977,11 +977,11 @@ fn bench_worstcase_small_blocks(c: &mut Criterion) {
 // ── T-P0.2.2 — Isolated DryDelay (`DryDelay/{32,64,128,512}`) ──
 //
 // Pure delay-line path (no model): sweeps delay 0 / typical / max in mono
-// and stereo. Archived numbers are the official baseline of F-NPPERF-01.
+// and dual-mono. Archived numbers are the official baseline of F-NPPERF-01.
 // `DryDelayLine` itself is `pub(crate)`, so the bench drives the engine
 // `DelayLine<f32>` rings directly with the pattern the plugin executes per
 // sub-block after the T-P2.1.3 delegation: one bulk `process_block` per
-// ring in stereo; mono feeds only the L ring and mirrors its output into R
+// ring in dual-mono; mono feeds only the L ring and mirrors its output into R
 // (the per-sample push/pop loop it replaced is the archived baseline).
 
 fn bench_worstcase_dry_delay(c: &mut Criterion) {
@@ -989,8 +989,8 @@ fn bench_worstcase_dry_delay(c: &mut Criterion) {
     // (delay label, delay samples) — 0 = passthrough, 12 = typical OS X2
     // half-band, 256 = cab-sim partition class, max = ring capacity edge.
     const DELAYS: &[(&str, usize)] = &[("d0", 0), ("d12", 12), ("d256", 256), ("dmax", 3200)];
-    for stereo in [false, true] {
-        let ch_label = if stereo { "Stereo" } else { "Mono" };
+    for dual_mono in [false, true] {
+        let ch_label = if dual_mono { "DualMono" } else { "Mono" };
         let group_name = format!("CLAP_WorstCase_DryDelay_{ch_label}");
         let mut group = c.benchmark_group(&group_name);
         for &block in BLOCKS {
@@ -1011,7 +1011,7 @@ fn bench_worstcase_dry_delay(c: &mut Criterion) {
                         // Same block pattern as `DryDelayLine::process_block`
                         // (T-P0.2.2 invariant).
                         line_l.process_block(&sine[..block], &mut out_l);
-                        if stereo {
+                        if dual_mono {
                             line_r.process_block(&half[..block], &mut out_r);
                         } else {
                             out_r.copy_from_slice(&out_l);
@@ -1247,17 +1247,17 @@ fn bench_worstcase_event_flood_model(c: &mut Criterion) {
 }
 
 // ── T-P0.2.4 — Remaining scenarios ──
-// (1) Real mono vs. stereo with L!=R content (baseline of F-NPPERF-06);
+// (1) Real mono vs. dual-mono with L!=R content (baseline of F-NPPERF-06);
 // (2) bypass crossfade in flight (PARAM_BYPASS event at offset 0, 64-sample
 // ramp active during the measured block); (3) gate closed with a loaded IR
 // (ring-out drain path); (4) `process` alternating between 2 host-side thread
 // contexts (TLS/MXCSR re-priming cost harness, not a fix).
 
 fn bench_worstcase_remaining(c: &mut Criterion) {
-    // ── (1) Mono vs. stereo with L!=R ──
+    // ── (1) Mono vs. dual-mono with L!=R ──
     {
-        let mut group = c.benchmark_group("CLAP_WorstCase_MonoStereo");
-        for (label, same_content) in [("Mono_L_eq_R", true), ("Stereo_L_neq_R", false)] {
+        let mut group = c.benchmark_group("CLAP_WorstCase_MonoDualMono");
+        for (label, same_content) in [("Mono_L_eq_R", true), ("DualMono_L_neq_R", false)] {
             for &block_size in &[32usize, 64, 128] {
                 let params = ProcessingParams::default();
                 let (mut plugin_instance, stopped_processor) =
@@ -1267,7 +1267,7 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
                     .expect("Failed to start processing");
                 let sine = generate_sine_440hz(block_size);
                 let mut in_l = sine.clone();
-                // Real stereo: R carries distinct content (inverted + scaled),
+                // Real dual-mono: R carries distinct content (inverted + scaled),
                 // so the engine mono detector cannot collapse to the fast path.
                 let mut in_r = if same_content {
                     sine.clone()

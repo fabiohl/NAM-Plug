@@ -19,6 +19,13 @@
 # Each phase persists its output to target/logs/quick-phaseN.log (phase 3:
 # quick-heap-audit.log) and the run closes with a typed receipt at
 # target/logs/quick-receipt.txt.
+#
+# Environment:
+#   NAM_QUICK_STRICT           — Abort on warnings/gaps (strict mode; default: 0).
+#   NAM_LOW_PRIORITY           — Re-exec with nice/ionice (default unless NAM_NO_LOW_PRIORITY=1).
+#   NAM_NO_LOW_PRIORITY        — Prevent nice/ionice priority lowering.
+#   CARGO_PROFILE_RELEASE_STRIP — Release profile strip mode (default: false, unifies build & test).
+#   NAM_QUICK_SELFTEST         — Diagnostic selftest hook: 'timeout' simulates execution timeout in ~1s.
 
 set -euo pipefail
 
@@ -38,6 +45,11 @@ fi
 PHASE_TOTAL=3
 source "$SCRIPT_DIR/lib/_lib.sh"
 
+# One release profile for BOTH the artifact pre-build and `cargo test --release`:
+# Cargo hashes `strip` into the profile, so building with strip=false and testing
+# with the default strip=true recompiled the whole fat-LTO dependency graph.
+export CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-false}"
+
 # Re-execute with low CPU and I/O priority (nice and ionice) to prevent overloading the system.
 if [ "${NAM_LOW_PRIORITY:-0}" != "1" ] && [ "${NAM_NO_LOW_PRIORITY:-0}" != "1" ]; then
     export NAM_LOW_PRIORITY=1
@@ -54,11 +66,16 @@ if [ "${NAM_LOW_PRIORITY:-0}" != "1" ] && [ "${NAM_NO_LOW_PRIORITY:-0}" != "1" ]
     fi
 fi
 
+set -o errtrace
 trap 'status=$?
 if [ "$status" -eq 124 ]; then
     echo -e "\n${RED}${BOLD}❌ TIMEOUT: command \"$BASH_COMMAND\" timed out at line $LINENO (phase ${PHASE_NUM:-?}/${PHASE_TOTAL:-?}). Aborting test suite.${NC}"
+    emit "PHASE${PHASE_NUM:-?}: TIMEOUT line=$LINENO" 2>/dev/null || true
+    emit "OVERALL: FAIL reason=timeout phase=${PHASE_NUM:-?}" 2>/dev/null || true
 else
     echo -e "\n${RED}${BOLD}❌ Unexpected error: command \"$BASH_COMMAND\" failed at line $LINENO with status $status (phase ${PHASE_NUM:-?}/${PHASE_TOTAL:-?}). Aborting test suite.${NC}"
+    emit "PHASE${PHASE_NUM:-?}: FAIL status=$status line=$LINENO" 2>/dev/null || true
+    emit "OVERALL: FAIL reason=error phase=${PHASE_NUM:-?}" 2>/dev/null || true
 fi
 exit 1' ERR
 
@@ -76,6 +93,52 @@ echo -e "${BLUE}${BOLD}========================================${NC}"
 emit "SUITE: tests-quick"
 emit "STRICT: ${NAM_QUICK_STRICT:-0}"
 SUITE_START=$(date +%s%N)
+
+# cargo_test_budgeted <timeout_s> <log> [cargo test args...] [-- runtime args...]
+#   Compiles the test binaries WITHOUT a time budget (`--no-run`; a cold
+#   fat-LTO release build can legitimately take >10 min) and applies the
+#   `timeout` budget ONLY to test execution, so the budget measures the
+#   test's behaviour and not the compiler. Output is appended to <log>.
+#
+#   Budget Calibration Policy (T3.2, E2):
+#     - Formula: timeout = ceil(2 * p95(execution_s)) rounded to multiple of 30s.
+#     - Floor invariant: Never reduce below established conservative floors:
+#         * Phase 1 (debug unit/integration tests): 300s
+#         * Phase 2 (release CLAP × NAMCore parity oracle): 600s
+#         * Phase 2 (release cabsim IR dlopen artifact): 300s
+#         * Phase 3 (debug zero-alloc RT heap-audit): 120s
+#     - Empirical rationale: test execution is measured separately from build
+#       time; budgets must never be increased without verified empirical data.
+cargo_test_budgeted() {
+    local secs="$1" log="$2"
+    shift 2
+    if [ "${NAM_QUICK_SELFTEST:-}" = "timeout" ]; then
+        timeout 1 sleep 3 2>&1 | tee -a "$log"
+        return
+    fi
+    local -a build_args=()
+    local a
+    for a in "$@"; do
+        [ "$a" = "--" ] && break
+        build_args+=("$a")
+    done
+    local t0 t1 compile_dur_s run_dur_s
+    t0=$(date +%s%N)
+    cargo test "${build_args[@]}" --no-run 2>&1 | tee -a "$log"
+    t1=$(date +%s%N)
+    compile_dur_s=$(( (t1 - t0) / 1000000000 ))
+    emit "PHASE${PHASE_NUM:-?}_COMPILE_S: $compile_dur_s"
+
+    t0=$(date +%s%N)
+    local rc=0
+    timeout "$secs" cargo test "$@" 2>&1 | tee -a "$log" || rc=$?
+    t1=$(date +%s%N)
+    run_dur_s=$(( (t1 - t0) / 1000000000 ))
+    if [ "$rc" -eq 0 ]; then
+        emit "PHASE${PHASE_NUM:-?}_RUN_S: $run_dur_s"
+    fi
+    return "$rc"
+}
 
 # find_stale_artifact_input <artifact>
 #   Prints the first source input that is strictly newer than <artifact>, or
@@ -207,8 +270,8 @@ ensure_clap_artifact() {
 P1_START=$(date +%s%N)
 phase "Structural: unit & integration tests (debug)..."
 ensure_clap_artifact debug
-timeout 300 cargo test --features testing --lib --tests \
-    2>&1 | tee target/logs/quick-phase1.log
+cargo_test_budgeted 300 target/logs/quick-phase1.log \
+    --features testing --lib --tests
 assert_ran_target target/logs/quick-phase1.log "unittests src/lib.rs" 300
 assert_ran_target target/logs/quick-phase1.log "tests/clap.rs" 20
 assert_ran_target target/logs/quick-phase1.log "tests/fixtures_freshness.rs" 2
@@ -335,13 +398,12 @@ if [ -n "$render_bin" ] && [ -x "$render_bin" ]; then
 
         verify_parity_harness_fixtures
 
-        NAM_CORE_RENDER_BIN="$render_bin" timeout 600 cargo test \
+        NAM_CORE_RENDER_BIN="$render_bin" cargo_test_budgeted 600 target/logs/quick-phase2.log \
             --features testing \
             --release \
             --test clap \
             test_clap_parity_multi_rate \
-            -- --ignored --nocapture \
-            2>&1 | tee -a target/logs/quick-phase2.log
+            -- --ignored --nocapture
         if verify_parity_log target/logs/quick-phase2.log; then
             emit "CLAP_CPP_PARITY: PASS"
             ok "Multi-rate parity oracle: PASS"
@@ -371,9 +433,9 @@ fi
 
 if [ -f "$release_artifact" ]; then
     echo -e "  ${BLUE}→ Executing cab-sim IR artifact test (dlopen)...${NC}"
-    timeout 300 cargo test --features testing --release --test clap \
-        test_cabsim_ir_changes_audio_release_artifact -- --ignored --nocapture \
-        2>&1 | tee -a target/logs/quick-phase2.log
+    cargo_test_budgeted 300 target/logs/quick-phase2.log \
+        --features testing --release --test clap \
+        test_cabsim_ir_changes_audio_release_artifact -- --ignored --nocapture
     if grep -q "test_cabsim_ir_changes_audio_release_artifact .* ok" target/logs/quick-phase2.log; then
         emit "CABSIM_IR: PASS"
         ok "Cab-sim IR artifact test: PASS"
@@ -404,9 +466,9 @@ ok "Phase 2 passed (${P2_DUR_STR})"
 # ── Phase 3: RT-Safety & Heap Allocation Audit (debug, heap-audit) ───────────
 P3_START=$(date +%s%N)
 phase "RT-Safety & Heap Allocation Audit..."
-timeout 120 cargo test --features testing,heap-audit --lib \
-    processor_heap_audit_test \
-    2>&1 | tee target/logs/quick-heap-audit.log
+cargo_test_budgeted 120 target/logs/quick-heap-audit.log \
+    --features testing,heap-audit --lib \
+    processor_heap_audit_test
 assert_ran_tests target/logs/quick-heap-audit.log 1
 P3_DUR_MS=$(( ($(date +%s%N) - P3_START) / 1000000 ))
 P3_DUR_STR=$(format_duration_ms "$P3_DUR_MS")

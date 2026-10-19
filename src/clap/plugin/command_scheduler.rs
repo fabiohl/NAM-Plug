@@ -25,12 +25,13 @@
 //! receives payloads already boxed — zero allocation when popping. This is
 //! the element shape the engine's structural-swap scheduler expects, so
 //! [`CommandConsumer`] implements
-//! [`SwapRing`](neural_amp_modeler_rs::common::spsc::SwapRing) directly and
+//! [`SwapRing`] directly and
 //! can be owned by an `RtSwapDrain` without any adapter ring: the drain
 //! operates on the single source of truth for commands, and the sequence
 //! bookkeeping stays in one place.
 
 use super::shared::ClapParamPayload;
+use crate::clap::plugin::lock::lock_cold;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::SwapRing;
 use rtrb::{Consumer, Producer};
@@ -229,16 +230,8 @@ impl CommandScheduler {
     /// main thread and audio thread respectively. Returns `None` if
     /// already extracted.
     pub fn extract_producer_consumer(&self) -> Option<CommandSchedulerChannels> {
-        let tx = self
-            .cmd_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()?;
-        let rx = self
-            .cmd_rx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()?;
+        let tx = lock_cold(&self.cmd_tx, "cmd_tx_extract").take()?;
+        let rx = lock_cold(&self.cmd_rx, "cmd_rx_extract").take()?;
         Some(CommandSchedulerChannels {
             cmd_tx: tx,
             cmd_rx: rx,
@@ -252,12 +245,8 @@ impl CommandScheduler {
         tx: Producer<Box<ClapParamPayload>>,
         rx: Consumer<Box<ClapParamPayload>>,
     ) {
-        if let Ok(mut g) = self.cmd_tx.lock() {
-            *g = Some(tx);
-        }
-        if let Ok(mut g) = self.cmd_rx.lock() {
-            *g = Some(rx);
-        }
+        *lock_cold(&self.cmd_tx, "cmd_tx_restore") = Some(tx);
+        *lock_cold(&self.cmd_rx, "cmd_rx_restore") = Some(rx);
     }
 }
 
@@ -565,9 +554,9 @@ impl<'a> CommandConsumer<'a> {
 /// [`CommandConsumer`] is the single source of truth for commands: the drain
 /// operates on this impl instead of a second adapter ring. The hook mapping
 /// keeps the ack gapless across structural deferrals —
-/// `advance_resolved` ≡ [`CommandConsumer::advance_pending`] (a parked
+/// `advance_resolved` ≡ `CommandConsumer::advance_pending` (a parked
 /// payload resolved without a pop consumes its sequence slot exactly once)
-/// and `rollback_last_pop` ≡ [`CommandConsumer::rollback_last_pop`] (a
+/// and `rollback_last_pop` ≡ `CommandConsumer::rollback_last_pop` (a
 /// candidate parked unapplied rewinds its slot, so the ack never covers a
 /// parked command).
 impl SwapRing for CommandConsumer<'_> {

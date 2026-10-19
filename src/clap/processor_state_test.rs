@@ -5,6 +5,8 @@
 mod edge_detection;
 #[path = "processor_state_test/flush.rs"]
 mod flush;
+#[path = "processor_state_test/flush_pending_failure.rs"]
+mod flush_pending_failure;
 #[path = "processor_state_test/logging.rs"]
 mod logging;
 #[path = "processor_state_test/preset_load.rs"]

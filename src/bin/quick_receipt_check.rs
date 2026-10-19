@@ -9,7 +9,7 @@
 //! (`OVERALL:` consistent with the phase/gap evidence).
 //!
 //! Usage:
-//!   quick_receipt_check <path> [--require-passed] [--require-heap-audit]
+//!   `quick_receipt_check <path> [--require-passed] [--require-heap-audit]`
 //!
 //! Exit codes:
 //!   * `0` — receipt parsed, consistent (and, when required, green).

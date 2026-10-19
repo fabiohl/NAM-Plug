@@ -7,6 +7,7 @@ use super::RestoreMode;
 use super::validate::{IrResources, ModelResources, ValidatedRestore};
 use crate::clap::plugin::command_scheduler::PushError;
 use crate::clap::plugin::errors::{self, static_plugin_error};
+use crate::clap::plugin::lock::lock_cold;
 use crate::clap::plugin::shared::StagedSwap;
 use crate::clap::plugin::{
     ClapParamPayload, LoadModelPayload, NamClapMainThread, PendingModel, PendingRestartOs,
@@ -397,15 +398,15 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
 
     // ── Model publication (only after the audio thread applied the package) ──
     if let Some(model) = model {
-        if let Ok(mut storage) = main_thread.shared.cold.full_wavenet_model.lock() {
-            *storage = model.full_wavenet;
-        }
-        if let Ok(mut meta_guard) = main_thread.shared.cold.ui_model_metadata.lock() {
-            *meta_guard = Some(model.metadata);
-        }
-        if let Ok(mut info_guard) = main_thread.shared.cold.ui_model_info.lock() {
-            *info_guard = Some(model.info);
-        }
+        *lock_cold(
+            &main_thread.shared.cold.full_wavenet_model,
+            "full_wavenet_model",
+        ) = model.full_wavenet;
+        *lock_cold(
+            &main_thread.shared.cold.ui_model_metadata,
+            "ui_model_metadata",
+        ) = Some(model.metadata);
+        *lock_cold(&main_thread.shared.cold.ui_model_info, "ui_model_info") = Some(model.info);
         main_thread
             .shared
             .cold
@@ -416,10 +417,8 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
             .cold
             .model_sample_rate
             .store(model.model_rate, Ordering::Relaxed);
-        if let Some(ref basename) = model_basename
-            && let Ok(mut name_guard) = main_thread.shared.cold.ui_model_name.lock()
-        {
-            *name_guard = basename.clone();
+        if let Some(ref basename) = model_basename {
+            *lock_cold(&main_thread.shared.cold.ui_model_name, "ui_model_name") = basename.clone();
         }
         log::info!(
             "Model restored (ack): {:?}",
@@ -427,23 +426,21 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         );
     } else if mode_full {
         // Explicitly clear model UI/ColdShared.
-        if let Ok(mut storage) = main_thread.shared.cold.full_wavenet_model.lock() {
-            *storage = None;
-        }
-        if let Ok(mut meta_guard) = main_thread.shared.cold.ui_model_metadata.lock() {
-            *meta_guard = None;
-        }
-        if let Ok(mut info_guard) = main_thread.shared.cold.ui_model_info.lock() {
-            *info_guard = None;
-        }
+        *lock_cold(
+            &main_thread.shared.cold.full_wavenet_model,
+            "full_wavenet_model",
+        ) = None;
+        *lock_cold(
+            &main_thread.shared.cold.ui_model_metadata,
+            "ui_model_metadata",
+        ) = None;
+        *lock_cold(&main_thread.shared.cold.ui_model_info, "ui_model_info") = None;
         main_thread
             .shared
             .cold
             .ui_model_memory_bytes
             .store(0, Ordering::Relaxed);
-        if let Ok(mut name_guard) = main_thread.shared.cold.ui_model_name.lock() {
-            name_guard.clear();
-        }
+        lock_cold(&main_thread.shared.cold.ui_model_name, "ui_model_name").clear();
         main_thread
             .shared
             .cold
@@ -460,15 +457,9 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
 
     // ── IR publication (only after the audio thread applied the package) ──
     if let Some(ref ir_path_str) = ir_path_on_disk {
-        if let Ok(mut ir_guard) = main_thread.shared.cold.ir_path.lock() {
-            *ir_guard = Some(ir_path_str.clone());
-        }
-        if let Ok(mut hash_guard) = main_thread.shared.cold.ir_hash.lock() {
-            *hash_guard = ir_hash.clone();
-        }
-        if let Ok(mut raw_guard) = main_thread.shared.cold.ir_raw_samples.lock() {
-            *raw_guard = ir_raw_samples;
-        }
+        *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = Some(ir_path_str.clone());
+        *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = ir_hash.clone();
+        *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = ir_raw_samples;
         main_thread
             .shared
             .cold
@@ -480,15 +471,9 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
             params.ir_hash = ir_hash;
         }
     } else if mode_full {
-        if let Ok(mut ir_guard) = main_thread.shared.cold.ir_path.lock() {
-            *ir_guard = None;
-        }
-        if let Ok(mut hash_guard) = main_thread.shared.cold.ir_hash.lock() {
-            *hash_guard = None;
-        }
-        if let Ok(mut raw_guard) = main_thread.shared.cold.ir_raw_samples.lock() {
-            *raw_guard = None;
-        }
+        *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = None;
+        *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = None;
+        *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = None;
         main_thread
             .shared
             .cold
@@ -624,28 +609,22 @@ fn local_commit(
         } = resources;
 
         // Store full WaveNet weights for slimmable rebuild.
-        {
-            let mut storage = main_thread
-                .shared
-                .cold
-                .full_wavenet_model
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *storage = model_l.as_ref().and_then(|m| {
-                if let StaticModel::WavenetDyn(w) = m.as_ref() {
-                    clone_wavenet_for_slimmable_storage(w).ok()
-                } else {
-                    None
-                }
-            });
-        }
+        *lock_cold(
+            &main_thread.shared.cold.full_wavenet_model,
+            "full_wavenet_model",
+        ) = model_l.as_ref().and_then(|m| {
+            if let StaticModel::WavenetDyn(w) = m.as_ref() {
+                clone_wavenet_for_slimmable_storage(w).ok()
+            } else {
+                None
+            }
+        });
 
-        if let Ok(mut meta_guard) = main_thread.shared.cold.ui_model_metadata.lock() {
-            *meta_guard = Some(model_metadata);
-        }
-        if let Ok(mut info_guard) = main_thread.shared.cold.ui_model_info.lock() {
-            *info_guard = Some(model_info);
-        }
+        *lock_cold(
+            &main_thread.shared.cold.ui_model_metadata,
+            "ui_model_metadata",
+        ) = Some(model_metadata);
+        *lock_cold(&main_thread.shared.cold.ui_model_info, "ui_model_info") = Some(model_info);
         let mem_bytes = model_l.as_ref().map(|m| m.memory_footprint()).unwrap_or(0);
         main_thread
             .shared
@@ -653,15 +632,13 @@ fn local_commit(
             .ui_model_memory_bytes
             .store(mem_bytes, Ordering::Relaxed);
 
-        if let Ok(mut pending_guard) = main_thread.shared.cold.pending_model.lock() {
-            *pending_guard = Some(PendingModel {
-                generation: main_thread.shared.cold.allocate_model_generation(),
-                model: model_l,
-                model_rate,
-                input_mult_adj,
-                output_mult_adj,
-            });
-        }
+        *lock_cold(&main_thread.shared.cold.pending_model, "pending_model") = Some(PendingModel {
+            generation: main_thread.shared.cold.allocate_model_generation(),
+            model: model_l,
+            model_rate,
+            input_mult_adj,
+            output_mult_adj,
+        });
         main_thread
             .shared
             .cold
@@ -674,9 +651,7 @@ fn local_commit(
             .store(model_rate, Ordering::Relaxed);
 
         if let Some(ref basename) = model_basename {
-            if let Ok(mut name_guard) = main_thread.shared.cold.ui_model_name.lock() {
-                *name_guard = basename.clone();
-            }
+            *lock_cold(&main_thread.shared.cold.ui_model_name, "ui_model_name") = basename.clone();
             log::info!(
                 "Model restored (local): {:?}",
                 model_path_on_disk.as_deref().unwrap_or(Path::new(""))
@@ -684,32 +659,28 @@ fn local_commit(
         }
     } else if let RestoreMode::Full = mode {
         // Explicitly clear model UI/ColdShared.
-        if let Ok(mut storage) = main_thread.shared.cold.full_wavenet_model.lock() {
-            *storage = None;
-        }
-        if let Ok(mut meta_guard) = main_thread.shared.cold.ui_model_metadata.lock() {
-            *meta_guard = None;
-        }
-        if let Ok(mut info_guard) = main_thread.shared.cold.ui_model_info.lock() {
-            *info_guard = None;
-        }
+        *lock_cold(
+            &main_thread.shared.cold.full_wavenet_model,
+            "full_wavenet_model",
+        ) = None;
+        *lock_cold(
+            &main_thread.shared.cold.ui_model_metadata,
+            "ui_model_metadata",
+        ) = None;
+        *lock_cold(&main_thread.shared.cold.ui_model_info, "ui_model_info") = None;
         main_thread
             .shared
             .cold
             .ui_model_memory_bytes
             .store(0, Ordering::Relaxed);
-        if let Ok(mut name_guard) = main_thread.shared.cold.ui_model_name.lock() {
-            name_guard.clear();
-        }
-        if let Ok(mut pending_guard) = main_thread.shared.cold.pending_model.lock() {
-            *pending_guard = Some(PendingModel {
-                generation: main_thread.shared.cold.allocate_model_generation(),
-                model: None,
-                model_rate: 48000,
-                input_mult_adj: 1.0,
-                output_mult_adj: 1.0,
-            });
-        }
+        lock_cold(&main_thread.shared.cold.ui_model_name, "ui_model_name").clear();
+        *lock_cold(&main_thread.shared.cold.pending_model, "pending_model") = Some(PendingModel {
+            generation: main_thread.shared.cold.allocate_model_generation(),
+            model: None,
+            model_rate: 48000,
+            input_mult_adj: 1.0,
+            output_mult_adj: 1.0,
+        });
         main_thread
             .shared
             .cold
@@ -736,15 +707,9 @@ fn local_commit(
             let staged = staged_swap.get_or_insert_with(StagedSwap::default);
             staged.ir = Some(Some(adapter));
         }
-        if let Ok(mut ir_guard) = main_thread.shared.cold.ir_path.lock() {
-            *ir_guard = ir_path_on_disk.clone();
-        }
-        if let Ok(mut hash_guard) = main_thread.shared.cold.ir_hash.lock() {
-            *hash_guard = ir_hash.clone();
-        }
-        if let Ok(mut raw_guard) = main_thread.shared.cold.ir_raw_samples.lock() {
-            *raw_guard = Some(samples);
-        }
+        *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = ir_path_on_disk.clone();
+        *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = ir_hash.clone();
+        *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = Some(samples);
         main_thread
             .shared
             .cold
@@ -759,15 +724,9 @@ fn local_commit(
         let mut staged_swap = main_thread.staged_swap.borrow_mut();
         let staged = staged_swap.get_or_insert_with(StagedSwap::default);
         staged.ir = Some(None);
-        if let Ok(mut ir_guard) = main_thread.shared.cold.ir_path.lock() {
-            *ir_guard = None;
-        }
-        if let Ok(mut hash_guard) = main_thread.shared.cold.ir_hash.lock() {
-            *hash_guard = None;
-        }
-        if let Ok(mut raw_guard) = main_thread.shared.cold.ir_raw_samples.lock() {
-            *raw_guard = None;
-        }
+        *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = None;
+        *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = None;
+        *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = None;
         main_thread
             .shared
             .cold

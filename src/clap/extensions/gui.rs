@@ -9,6 +9,7 @@ use crate::clap::gui::x11_embed;
 use crate::clap::gui::{GUI_HEIGHT, GUI_WIDTH};
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::plugin::debug_assert_main_thread;
+use crate::clap::plugin::lock::lock_cold;
 use clack_extensions::gui::{
     GuiApiType, GuiConfiguration, GuiSize, HostGui, PluginGui, PluginGuiImpl, Window,
 };
@@ -101,7 +102,7 @@ impl<'a> NamClapMainThread<'a> {
     /// shutting down the persistent GUI worker thread.
     ///
     /// Idempotent — safe to call when no window is open. The worker keeps its
-    /// Slint platform alive so the next `spawn_gui` reuses it (Slint 1.17
+    /// Slint platform alive so the next `spawn_gui` reuses it (Slint 1.18
     /// pins the platform to the thread that initialized it).
     ///
     /// The `quit_event_loop` is guarded by the presence of the window handle:
@@ -174,9 +175,7 @@ impl<'a> NamClapMainThread<'a> {
             &self.shared.cold.dialog_handle_sink,
             &self.shared.cold.ir_dialog_handle_sink,
         ] {
-            if let Ok(mut guard) = sink.lock()
-                && let Some(h) = guard.take()
-            {
+            if let Some(h) = lock_cold(sink, "dialog_handle_sink").take() {
                 let deadline = std::time::Instant::now() + TEARDOWN_JOIN_TIMEOUT;
                 if let Some(still_running) = try_join_until(h, deadline) {
                     spawn_reaper("nam-dialog-reaper", still_running);
@@ -271,7 +270,7 @@ impl<'a> NamClapMainThread<'a> {
     ///
     /// All window generations run on the instance's persistent GUI worker
     /// thread (`gui::worker::GuiWorker`), which owns the Slint platform and
-    /// event loop for the instance lifetime — required by Slint 1.17 (the
+    /// event loop for the instance lifetime — required by Slint 1.18 (the
     /// platform is pinned to the initializing thread) and by the XEmbed hook,
     /// which is installed once on that thread and applied to every generation.
     fn spawn_gui(
@@ -505,7 +504,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// Frees the resources allocated for the graphical interface.
     ///
     /// Closes the current window but keeps the persistent GUI worker alive:
-    /// the host may call `create`/`set_parent` again (Slint 1.17 requires the
+    /// the host may call `create`/`set_parent` again (Slint 1.18 requires the
     /// platform to live on the thread that initialized it, so re-creation
     /// must reuse this instance's worker).
     ///

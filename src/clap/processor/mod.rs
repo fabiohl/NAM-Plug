@@ -279,6 +279,10 @@ impl<'a> NamClapProcessor<'a> {
     /// setup on the new thread before any further block is processed.
     pub(crate) fn apply_rt_thread_setup(&mut self) {
         self.rt_thread_setup_done = true;
+        self.shared
+            .cold
+            .is_processing
+            .store(true, Ordering::Relaxed);
 
         // Query RT thread scheduling parameters via POSIX FFI.
         // SAFETY: `pthread_self()` is POSIX FFI with no arguments; always succeeds
@@ -1203,6 +1207,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     }
 
     fn deactivate(mut self, _main_thread: &NamClapMainThread<'a>) {
+        self.shared
+            .cold
+            .is_processing
+            .store(false, Ordering::Relaxed);
         // Isolate panics during cleanup.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // A structural command deferred by the final callback is resolved
@@ -1314,6 +1322,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     /// processing (possibly on another thread) triggers it again after
     /// [`stop_processing`](Self::stop_processing) re-armed the latch.
     fn start_processing(&mut self) -> Result<(), PluginError> {
+        self.shared
+            .cold
+            .is_processing
+            .store(true, Ordering::Relaxed);
         // Containment mirrors process()/reset(): any panic in the one-shot
         // setup latches the poisoned state (silenced O(1) processing) instead
         // of unwinding through the C ABI into the host.
@@ -1327,6 +1339,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 self.poisoned = true;
                 self.rt_status
                     .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
+                self.host.request_callback();
                 drop(err);
             }
         }
@@ -1340,6 +1353,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     /// thread, keeping priority/CPU telemetry and FTZ/DAZ current even when a
     /// pool host migrates processing to another thread.
     fn stop_processing(&mut self) {
+        self.shared
+            .cold
+            .is_processing
+            .store(false, Ordering::Relaxed);
         self.rt_thread_setup_done = false;
     }
 
@@ -1519,6 +1536,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 self.poisoned = true;
                 self.rt_status
                     .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
+                self.host.request_callback();
                 silence_audio_ports(&mut audio);
                 Err(panic_to_error(err))
             }
@@ -1654,6 +1672,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.poisoned = true;
             self.rt_status
                 .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
+            self.host.request_callback();
             drop(err);
         }
     }
@@ -1834,3 +1853,7 @@ mod processor_telemetry_test;
 #[cfg(test)]
 #[path = "../processor_poisoning_test.rs"]
 mod processor_poisoning_test;
+
+#[cfg(test)]
+#[path = "../processor_oversize_block_test.rs"]
+mod processor_oversize_block_test;

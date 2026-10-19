@@ -7,7 +7,9 @@ use super::NamClapMainThread;
 use crate::clap::gui::dialog_state;
 use crate::clap::plugin::shared::{
     MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, RENDER_MODE_OFFLINE,
-    SlimmableRebuild, StagedSwap,
+    SlimmableRebuild, StagedSwap, UI_ALERT_CABSIM_CONTRACT, UI_ALERT_DEGRADE_MINIMAL,
+    UI_ALERT_DEGRADE_REDUCED, UI_ALERT_HOST_CONTRACT, UI_ALERT_NON_FINITE_INPUT, UI_ALERT_POISONED,
+    UI_ALERT_RESAMPLER_FAILED,
 };
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::host::HostMainThreadHandle;
@@ -47,8 +49,13 @@ impl<'a> NamClapMainThread<'a> {
         // Flush any model deferred by load_model().
         // Primary mechanism is activate(), this is a fallback for hosts
         // that call state-load between activate() and the first process().
-        // Errors set RT_STATUS_MODEL_LOAD_FAILED internally; housekeeping is void.
-        let _ = self.flush_pending_model();
+        // `flush_pending_model` restores the model for retry on failure and
+        // records RT_STATUS_MODEL_LOAD_FAILED + ui_load_error internally
+        // (F-RB-01); the `Err` return only drives this log line (anti-spam
+        // rule lives in `note_flush_failure`).
+        if let Err(e) = self.flush_pending_model() {
+            log::debug!("housekeeping: deferred model flush failed: {e:?}");
+        }
 
         self.drain_gc_and_sync_flags();
         self.handle_slimmable_rebuild();
@@ -58,6 +65,7 @@ impl<'a> NamClapMainThread<'a> {
         self.handle_pending_async_restore();
         self.handle_pending_ir_and_clear();
         self.sync_latency_and_telemetry();
+        self.update_alert_bits();
     }
 
     /// Drain obsolete models to free memory outside RT and sync status flags.
@@ -135,6 +143,94 @@ impl<'a> NamClapMainThread<'a> {
             // Processor has been reactivated cleanly; reset the latch
             self.poison_restart_requested.set(false);
         }
+    }
+
+    /// Aggregates RT status flags into cold-path alert bitmask (T-R3.1).
+    ///
+    /// Evaluates current RT status flags and derives `ColdShared::ui_alert_bits`.
+    /// Handles the 3-second hold window for non-finite input events using
+    /// main-thread monotonic instants and `RtToUi::non_finite_epoch`.
+    pub(crate) fn update_alert_bits(&self) {
+        let epoch = self
+            .shared
+            .rt_to_ui
+            .non_finite_epoch
+            .load(Ordering::Relaxed);
+        let flag_non_finite = self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED);
+        let now = std::time::Instant::now();
+
+        if epoch != self.last_seen_non_finite_epoch.get() || flag_non_finite {
+            self.last_seen_non_finite_epoch.set(epoch);
+            self.non_finite_hold_until
+                .set(Some(now + std::time::Duration::from_secs(3)));
+        }
+
+        let non_finite_active = match self.non_finite_hold_until.get() {
+            Some(deadline) => now < deadline,
+            None => false,
+        };
+
+        let mut bits = 0u32;
+        if self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_PROCESSOR_POISONED)
+        {
+            bits |= UI_ALERT_POISONED;
+        }
+        if self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_HOST_CONTRACT_VIOLATION)
+        {
+            bits |= UI_ALERT_HOST_CONTRACT;
+        }
+        if self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_RESAMPLER_REBUILD_FAILED)
+        {
+            bits |= UI_ALERT_RESAMPLER_FAILED;
+        }
+        if self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_CABSIM_CONTRACT_VIOLATION)
+        {
+            bits |= UI_ALERT_CABSIM_CONTRACT;
+        }
+        if self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_DEGRADE_MINIMAL)
+        {
+            bits |= UI_ALERT_DEGRADE_MINIMAL;
+        }
+        if self
+            .shared
+            .cold
+            .rt_status
+            .check_flag(spsc::RT_STATUS_DEGRADE_REDUCED)
+        {
+            bits |= UI_ALERT_DEGRADE_REDUCED;
+        }
+        if non_finite_active {
+            bits |= UI_ALERT_NON_FINITE_INPUT;
+        }
+
+        self.shared
+            .cold
+            .ui_alert_bits
+            .store(bits, Ordering::Release);
     }
 
     /// Adaptive-rebuild watchdog fallback (S6-T2 / F-UX-02).

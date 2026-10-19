@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
 use crate::clap::gui::dialog_state::{self, DialogSharedState, IrDialogSharedState};
+use crate::clap::plugin::lock::lock_cold;
 use clack_plugin::host::HostSharedHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -135,16 +136,8 @@ fn complete_dialog(
     }
 
     match outcome {
-        Some(path) => {
-            if let Ok(mut guard) = pending.lock() {
-                *guard = Some(path);
-            }
-        }
-        None => {
-            if let Ok(mut guard) = pending.lock() {
-                *guard = Some(sentinel_cancel);
-            }
-        }
+        Some(path) => *lock_cold(pending, "dialog_pending_model") = Some(path),
+        None => *lock_cold(pending, "dialog_pending_model") = Some(sentinel_cancel),
     }
 
     active.store(false, Ordering::Release);

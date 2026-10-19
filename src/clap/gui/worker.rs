@@ -3,7 +3,7 @@
 
 //! Persistent per-instance GUI worker thread.
 //!
-//! Slint 1.17 pins the platform — and with it the winit event loop and the
+//! Slint 1.18 pins the platform — and with it the winit event loop and the
 //! X11 XEmbed hook — to the **thread that first initializes it**. A
 //! per-generation "spawn a thread per window" model therefore breaks the very
 //! first `destroy()` + re-open cycle of a real window: the new thread has no
@@ -33,11 +33,11 @@
 //!   as its current work ends) and returns the join handle so the caller can
 //!   bounded-join it and fall back to the `nam-gui-reaper` thread.
 //!
-//! Multi-instance note: Slint 1.17 allows a single platform per process, so a
+//! Multi-instance note: Slint 1.18 allows a single platform per process, so a
 //! second instance opening a GUI while a first instance's worker is alive
 //! fails that instance's `set_parent`/`set_transient` cleanly (honest error,
 //! host falls back / reports). This is a documented Slint constraint, not a
-//! teardown bug; see `docs/architecture.md` §7.5.
+//! teardown bug; see `docs/architecture.md` §7.7.
 
 use crate::clap::gui::MainWindow;
 use crate::clap::gui::x11_embed;

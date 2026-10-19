@@ -9,7 +9,7 @@ This document is the primary architecture bible and source of truth for **NAM-Pl
 
 NAM-Plug wraps the low-latency DSP neural inference engine provided by the [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) library crate into a production-grade CLAP plugin. It handles plugin lifecycle, DAW parameter automation, lock-free real-time audio processing, state persistence, host extension compliance, and an immediate-mode graphical user interface.
 
-For deep microarchitectural details on neural model execution (WaveNet, LSTM, ConvNet, Linear), SIMD (production AVX2 `x86-64-v3`), resampler sinc math, oversampling half-band FIR filters, or model loading formats (`.nam`/`.namb`), see the core engine documentation in [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) (`docs/architecture.md` §1.2).
+For deep microarchitectural details on neural model execution (WaveNet, LSTM, ConvNet, Linear), SIMD (production AVX2 `x86-64-v3`), resampler sinc math, oversampling half-band FIR filters, or model loading formats (`.nam`/`.namb`), see the core engine documentation in [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) (`docs/architecture.md`).
 
 ---
 
@@ -27,8 +27,8 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 │        Main Thread          │  │    Audio Thread (RT)    │  │       GUI Thread       │
 │  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - Slint Event Loop    │
 │  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - "nam-slint-gui"     │
-│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.17 FemtoVG│
-│  - Synchronous Model Load   │  │  - Zero Blocking I/O    │  │  - Wayland & X11       │
+│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.18 FemtoVG│
+│  - nam-model-loader Offload │  │  - Zero Blocking I/O    │  │  - Wayland & X11       │
 │  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - Async rfd FileDialog│
 │                             │  │                         │  │  - 5-Zone UI Layout    │
 └──────────────┬──────────────┘  └────────────▲────────────┘  └───────────┬────────────┘
@@ -39,13 +39,13 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ### 1.1 Thread Roles & Hard Contracts
 
-- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, model (`.nam`/`.namb`) loading dispatched to the per-instance `nam-model-loader` worker (`housekeeping()` only accepts/dispatches the job and commits the short result — see §1.2), IR reading via `src/clap/plugin/main_thread/load.rs` (using `neural_amp_modeler_rs::dsp::cabsim::loader`), and Tier 1 Garbage Collection disposal. Under CLAP timer support (`clap_plugin_timer_support`), the main thread registers a periodic 250 ms watchdog timer with the host, driving autonomous `housekeeping()` (RT processor poisoning containment recovery via `request_restart()`, dynamic PDC latency announcements via `HostLatency::changed()`, and Tier 1 GC SPSC queue draining) without depending on sporadic GUI events or user interactions. On hosts lacking timer support, it degrades gracefully to event-driven housekeeping.
+- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, model (`.nam`/`.namb`) loading dispatched to the per-instance `nam-model-loader` worker (`housekeeping()` only accepts/dispatches the job and commits the short result — see §7.4), IR reading via `src/clap/plugin/main_thread/load.rs` (using `neural_amp_modeler_rs::dsp::cabsim::loader`), and Tier 1 Garbage Collection disposal. Under CLAP timer support (`clap_plugin_timer_support`), the main thread registers a periodic 250 ms watchdog timer with the host, driving autonomous `housekeeping()` (RT processor poisoning containment recovery via `request_restart()`, dynamic PDC latency announcements via `HostLatency::changed()`, and Tier 1 GC SPSC queue draining) without depending on sporadic GUI events or user interactions. On hosts lacking timer support, it degrades gracefully to event-driven housekeeping.
 
 - **Audio Thread (RT)** — Driven by the host `process()` callback (`PluginAudioProcessor::process` in `src/clap/processor/mod.rs`).
 
   > **Hard Real-Time Contract:** Zero heap allocations, zero mutex locks, zero blocking I/O, zero panics. Operates directly on host audio buffers using host-driven single-callback processing.
 
-- **GUI Thread** — Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.17 (FemtoVG / winit backend). Fully isolated from the audio thread, synchronizing telemetry at 60 Hz via `SlintViewModel`.
+- **GUI Thread** — Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.18 (FemtoVG / winit backend). Fully isolated from the audio thread, synchronizing telemetry at 60 Hz via `SlintViewModel`.
 
 ---
 
@@ -163,7 +163,7 @@ Guarantees: an embedded request is honored **only** when embedding actually
 happens (create-time viability gate + strict `set_parent` error path); the
 plugin never silently delivers a floating window for an embedded contract and
 never creates two windows. Repeated `create`/`destroy` cycles reuse the
-persistent per-instance GUI worker (Slint 1.17 pins the platform to the
+persistent per-instance GUI worker (Slint 1.18 pins the platform to the
 initializing thread); a *second plugin instance's* GUI in the same process is
 limited to one platform per process (documented Slint constraint).
 
@@ -280,6 +280,27 @@ thread can dereference freed plugin state.
 ### 5.7 Deferred Model Load (`pending_model`)
 
 When DAW state is restored prior to `activate()`, the host buffer size (`max_frames_count`) is unknown. The model payload is cached in `ColdShared::pending_model` and flushed via `flush_pending_model()` during `activate()` (primary) or initial `housekeeping()` before the audio thread processes frames.
+
+**S1 contract — "UI only advances with the retained/delivered model"**
+(`src/clap/plugin/main_thread/load.rs::finish_commit_ui`,
+`src/clap/plugin/main_thread/mod.rs::flush_pending_model`):
+
+- `commit_prepared_model` publishes the identity (`params.model_path/hash`)
+  up-front, but the display commit — `ui_model_metadata`/`ui_model_info`,
+  `ui_model_name`, `model_load_counter`, param rescan, stale-error clear
+  (`ui_load_error`/`ui_load_error_msg`) and host `mark_dirty` — lands together
+  in `finish_commit_ui`, which runs in **every** retaining outcome: SPSC-ok,
+  staged-restart, pending/`Full` deferral and pre-activation deferral. The UI
+  advances because the model is retained, never ahead of it.
+- `flush_pending_model` holds the taken `PendingModel` in an RAII
+  restore-guard: any `Err`/early-return (resampler build, stream build,
+  `set_max_buffer_size`) puts the model back in `pending_model` for retry
+  instead of dropping it. Every failure path sets
+  `RT_STATUS_MODEL_LOAD_FAILED` and fills `ui_load_error`/`ui_load_error_msg`
+  with an actionable message; the error is logged once per flag transition
+  (`debug` on repeats, since housekeeping retries every 250 ms).
+- `housekeeping()` propagates the flush `Err` to a `debug` log line; the
+  visible error state above is the contract, not the return value.
 
 ### 5.8 Channel Preservation on `deactivate()`
 
@@ -471,11 +492,19 @@ seek/loop `reset()` (S6-T1), never a synchronous multi-millisecond `model.reset`
 The heavy synchronous `model.reset` (measured 1.81 ms p99 LSTM / 4.18 ms p99
 WaveNet A2) is therefore removed from the poisoning callback.
 
+### 6.6 Transparent Oversize Block Slicing (F-RA-04)
+
+DAW hosts occasionally deliver audio buffers whose frame count exceeds the internal processing limits (`n_samples > MAX_RESAMP_BUF`, where `MAX_RESAMP_BUF = 2048` frames). Rather than rejecting, truncating, or failing the callback, NAM-Plug handles oversize blocks transparently on the audio thread:
+
+1. **Cold-Path Delegation:** `process_sub_block` checks `n_samples > MAX_RESAMP_BUF` at its entry and branches via `core::hint::cold_path()` to `process_sub_block_chunked`.
+2. **Zero-Allocation Slicing:** The chunking loop partitions the oversize sub-block into successive slices of at most `MAX_RESAMP_BUF` frames using existing pre-allocated scratch buffers (`SubBlockScratch`). Zero heap allocations occur in this path.
+3. **Continuous DSP Continuity:** Internal DSP state — including the `DryDelayLine` ring buffer, `BypassCrossfader` crossfade progression, parameter smoother trajectories, streaming resampler state, and CabSim convolution partitions — advances continuously across slices without boundary clicks, latency mismatch, or state discontinuities.
+
 ---
 
 ## 7. Graphical User Interface (Slint GUI Architecture)
 
-The graphical interface is built using the declarative Slint UI framework (v1.17) under `src/clap/gui/`.
+The graphical interface is built using the declarative Slint UI framework (v1.18) under `src/clap/gui/`.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -489,7 +518,7 @@ The graphical interface is built using the declarative Slint UI framework (v1.17
 │    Zone 4: Bypass Toggle (ToggleSwitch with active glow & crossfader sync)  │
 │    Zone 5: Status Bar (Sample Rate, Latency, DSP Load, Oversample, XRuns)   │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Rendering Pipeline: Slint v1.17 ──► FemtoVG / OpenGL backend via winit     │
+│  Rendering Pipeline: Slint v1.18 ──► FemtoVG / OpenGL backend via winit     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Windowing: X11 embedded (native XEmbed) + X11/Wayland floating fallback   │
 │             Persistent per-instance GUI worker + bounded teardown reaper   │
@@ -530,11 +559,18 @@ The status bar exposes four informational strings that are **never** hard-coded 
 - **`model_arch`** — live: sourced from `ColdShared::ui_model_metadata` (`NamModelMetadata::architecture`/`topology`), diffed every 60 Hz tick with the same echo-guard pattern as `model_name`/`ir_name`. Shows `"No model loaded"` when no model is active, never a stale architecture after a swap or clear.
 - **`simd_badge`** — static-per-window: the runtime-detected SIMD backend (`neural_amp_modeler_rs::math::common::SIMD_MATH.instruction_set`) never changes for the lifetime of a process, so it is read and set once in `SlintViewModel::new()` rather than every tick. Reads `"AVX2+FMA"` in every standard build (the opt-in `avx512` feature is not enabled by `NAM-Plug`).
 - **`backend_text`** — static-per-window: the negotiated windowing backend (`"X11 (Embedded)"` / `"X11 (Floating)"` / `"Wayland (Floating)"` / `"Floating"`) is computed once in `spawn_gui()` from the CLAP host's `Window::api_type()` and the negotiated mode, and passed into `SlintViewModel::new()`.
-- **`dsp_load_text`** — **honest placeholder**: no real per-block DSP-load percentage metric exists yet in the codebase (verified: no such counter is computed anywhere in `src/clap/processor/`). The design-time default was corrected from a hard-coded, misleading `"1.4% DSP"` to `"—"`; `SlintViewModel` intentionally never overwrites it. Wiring a real metric here is a distinct, larger follow-up (would require instrumenting an RT-safe cycle/deadline counter and publishing it through `RtToUi`), tracked as future work rather than bundled into this fix.
+- **`dsp_load_text`** — live telemetry: reads atomic `rt_to_ui.dsp_load_permille` (permille / 10 = integer percentage) published lock-free by the audio processor callback. Formatted as `"{pct}% DSP"` with change-detection gating to eliminate redundant Slint string allocations. Paired with `xrun_epoch` monitoring that triggers a 2.0-second (120 UI frames @ 60 Hz) peak-hold indicator for audio dropouts.
+
+#### 7.2.2 Status Alert Banner / Pill (R3 / F-RA-03)
+
+Critical operational warnings and degraded states are derived off-RT from `ColdShared::ui_alert_bits` (updated via `housekeeping.rs::update_alert_bits()` and evaluated every 60 Hz tick):
+
+- **Bitmask Alert Sources:** Captures processor poisoning (`UI_ALERT_POISONED`), host contract violations (`UI_ALERT_HOST_CONTRACT`), CabSim violations (`UI_ALERT_CABSIM_CONTRACT`), resampler rebuild failures (`UI_ALERT_RESAMPLER_FAILED`), structural degradation states (`UI_ALERT_DEGRADE_MINIMAL`, `UI_ALERT_DEGRADE_REDUCED`), and a 3-second monotonic hold window for non-finite input events (`UI_ALERT_NON_FINITE`).
+- **Visual Presentation:** Displayed as an active alert pill badge in the status bar with color coding and contextual tooltip messages, informing the user of internal health without any RT-thread logging or I/O.
 
 ### 7.3 Persistent GUI Worker & Bounded Teardown (`nam-gui-reaper`)
 
-**Why a persistent worker:** Slint 1.17 pins the platform — and
+**Why a persistent worker:** Slint 1.18 pins the platform — and
 with it the winit event loop and the X11 XEmbed hook — to the **thread that
 first initializes it**. A per-generation "one thread per window" model breaks
 the first `destroy()` + re-open cycle (the new thread gets
@@ -565,7 +601,7 @@ Window closing and destruction follow a deterministic, leak-free protocol:
    (`spawn_reaper`), guaranteeing that the DAW main thread is never blocked
    while preventing thread abandonment and use-after-free conditions.
 
-**Multi-instance constraint (Slint 1.17):** one platform per process means a
+**Multi-instance constraint (Slint 1.18):** one platform per process means a
 second plugin instance cannot open a GUI while a first instance's worker is
 alive (its window creation fails cleanly and the host sees the honest
 `create()` rejection). This is a documented Slint constraint, tracked
@@ -650,7 +686,7 @@ the dispatched `Window::hide()` as the completion of the request and drives
 as well, so a host that hides before `WindowReady` never leaves a window stuck
 visible.
 
-### 7.5 X11 Embedding — Architecture & Implementation
+### 7.7 X11 Embedding — Architecture & Implementation
 
 > **Status:** Production implementation in `src/clap/gui/x11_embed.rs`
 > (process-global embed engine) + `src/clap/gui/worker.rs` (persistent GUI
@@ -658,15 +694,15 @@ visible.
 > `gui_embedded_x11_open_close_cycles_no_leak` (10 open/close cycles, zero
 > orphan children).
 
-**Go/no-go verdict: GO.** Slint 1.17 can create a window as a native X11 child
+**Go/no-go verdict: GO.** Slint 1.18 can create a window as a native X11 child
 (XEmbed) **without forking Slint**, using the officially exposed
 `unstable-winit-030` feature.
 
-**Spike evidence (read-only, Slint 1.17.1 / winit 0.30.13 / clack-extensions 0.2.0):**
+**Spike evidence (read-only, Slint 1.18.1 / winit 0.30.13 / clack-extensions 0.2.0):**
 
 | Question                                                                                      | Finding                                                                                                                                                                                                                                                                                                                                                                                        |
 | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| (a) Can a custom `slint::platform::WindowAdapter`/`Platform` inject an existing X11 `Window`? | Not required. Slint 1.17 exposes `slint::BackendSelector::with_winit_window_attributes_hook(Fn(WindowAttributes) -> WindowAttributes)` (feature `unstable-winit-030`), invoked in `i-slint-backend-winit::Backend::create_window_adapter` on **every** window creation. A custom `WindowAdapter` is therefore unnecessary for embedding.                                                       |
+| (a) Can a custom `slint::platform::WindowAdapter`/`Platform` inject an existing X11 `Window`? | Not required. Slint 1.18 exposes `slint::BackendSelector::with_winit_window_attributes_hook(Fn(WindowAttributes) -> WindowAttributes)` (feature `unstable-winit-030`), invoked in `i-slint-backend-winit::Backend::create_window_adapter` on **every** window creation. A custom `WindowAdapter` is therefore unnecessary for embedding.                                                       |
 | (b) How to extract the host X11 `Window` id from CLAP?                                        | `clack_extensions::gui::Window::as_x11_handle() -> Option<XlibHandle>` returns the host `Window` directly (the `raw-window-handle_06` feature is **not** needed). Fallbacks: `Window::to_standard_api_type()` + the rwh-0.6 `HasWindowHandle` impl (`XlibWindowHandle`).                                                                                                                       |
 | (c) Does `winit` expose the X11 window id for `XReparentWindow`/`xcb_reparent_window`?        | Yes, and better: `winit::platform::x11::WindowAttributesExtX11::with_embed_parent_window(XWindow)` sets `platform_specific.x11.embed_window`; the X11 backend then creates the window as a child (`create_window(..., parent=embed_window, ...)`, `platform_impl/linux/x11/window.rs:305`) and sets the `_XEMBED` property `[0,1]` (version 0, mapped) via `embed_window()` (`window.rs:368`). |
 | (d) Is `build.rs` affected?                                                                   | No. `slint_build::compile("src/clap/gui/slint/main.slint")` stays untouched; the feature flag and backend selection are runtime-only.                                                                                                                                                                                                                                                          |

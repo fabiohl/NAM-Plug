@@ -39,7 +39,7 @@ mod tests {
     #[cfg(feature = "heap-audit")]
     static AUDIT_LANE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Runs a single stereo block through the processor, returning the
+    /// Runs a single dual-channel block through the processor, returning the
     /// `ProcessStatus`. The audio and event buffers are re-created per block
     /// so the borrows stay local to each call.
     #[cfg(feature = "heap-audit")]
@@ -50,7 +50,7 @@ mod tests {
         process_block_with_events(started, bufs, &InputEvents::empty())
     }
 
-    /// Runs a single stereo block through the processor with caller-supplied
+    /// Runs a single dual-channel block through the processor with caller-supplied
     /// host input events, returning the `ProcessStatus`. The audio buffer is
     /// re-created per call so the borrows stay local; the event buffer is
     /// owned by the caller and must be built off-RT (outside the audited
@@ -822,13 +822,13 @@ mod tests {
         }
     }
 
-    /// The stereo wet path must be zero-alloc as well.
+    /// The dual-mono wet path must be zero-alloc as well.
     /// Asymmetric L/R inputs keep the engine's mono detector open, so the
     /// audited steady state exercises independent-channel inference (R dry
     /// passthrough, `process_mono == false`).
     #[cfg(feature = "heap-audit")]
     #[test]
-    fn test_heap_audit_stereo_wet_path_zero_alloc() {
+    fn test_heap_audit_dual_mono_wet_path_zero_alloc() {
         let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
         assert!(
             model_path.exists(),
@@ -861,7 +861,7 @@ mod tests {
         let mut bufs = StereoTestBuffers::new(n, 0.2, 0.3);
 
         // Warm-up: drain the LoadModel command and let gate/smoothers converge
-        // while the engine settles on the stereo path (L != R keeps the mono
+        // while the engine settles on the dual-channel path (L != R keeps the mono
         // detector open).
         for _ in 0..8 {
             process_block(&mut started_processor, &mut bufs);
@@ -884,12 +884,94 @@ mod tests {
                     .cold
                     .rt_status
                     .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
-                "RT_STATUS_HEAP_ALLOC set — allocation detected in stereo inference hot path"
+                "RT_STATUS_HEAP_ALLOC set — allocation detected in dual-mono inference hot path"
             );
             assert_eq!(
                 neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
                 0,
-                "zero heap allocations expected in stereo inference path"
+                "zero heap allocations expected in dual-mono inference path"
+            );
+        }
+    }
+
+    /// Gate: oversize blocks (2x max_frames_count) with parameter automation
+    /// events scheduled across slice boundaries must process with zero heap
+    /// allocations on the hot path (R7.1).
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_oversize_block_events_zero_alloc() {
+        use crate::clap::extensions::params::PARAM_OUTPUT_GAIN;
+        use clack_common::events::Pckn;
+        use clack_common::events::event_types::ParamValueEvent;
+        use clack_common::utils::ClapId;
+
+        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
+
+        const BLOCK: usize = 256;
+        let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
+        assert!(model_path.exists());
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let params = test_util::make_default_params(Some(model_path));
+        test_util::load_plugin_state(&mut plugin_instance, &params);
+        plugin_instance.call_on_main_thread_callback();
+
+        let audio_config = PluginAudioConfiguration {
+            sample_rate: 48000.0,
+            min_frames_count: BLOCK as u32,
+            max_frames_count: BLOCK as u32,
+        };
+
+        let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+
+        // Warm up with conforming blocks
+        let mut warm_bufs = StereoTestBuffers::new(BLOCK, 0.2, 0.3);
+        for _ in 0..8 {
+            process_block(&mut started_processor, &mut warm_bufs);
+        }
+
+        // Oversize block: 2 * BLOCK = 512 samples
+        let n_oversize = 2 * BLOCK;
+        let mut bufs = StereoTestBuffers::new(n_oversize, 0.2, 0.3);
+
+        // Pre-build events off-RT
+        let mut event_buf = EventBuffer::new();
+        let ev = ParamValueEvent::new(
+            (BLOCK + 64) as u32,
+            ClapId::new(PARAM_OUTPUT_GAIN),
+            Pckn::match_all(),
+            -3.0,
+        );
+        event_buf.push(&ev);
+        let input_events = InputEvents::from_buffer(&event_buf);
+
+        let _audit_guard = AuditEnabledGuard::new();
+        shared
+            .cold
+            .rt_status
+            .clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC);
+
+        for _ in 0..4 {
+            let status =
+                process_block_with_events(&mut started_processor, &mut bufs, &input_events);
+            assert!(
+                matches!(status, ProcessStatus::Continue),
+                "expected ProcessStatus::Continue (zero-alloc), got {status:?}"
+            );
+            assert!(
+                !shared
+                    .cold
+                    .rt_status
+                    .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
+                "RT_STATUS_HEAP_ALLOC set during oversize block slicing + event execution"
+            );
+            assert_eq!(
+                neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
+                0,
+                "zero heap allocations expected during oversize block with events"
             );
         }
     }
