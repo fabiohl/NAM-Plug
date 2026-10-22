@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Processor poisoning containment test suite (S2-T1, S2-T2, S2-T4 / F-NP-02, F-NP-09).
+//! Processor poisoning containment test suite (F-NP-02, F-NP-09).
 //!
 //! Validates:
 //! * Single panic per activation: Injected panics in `process()` or `reset()` are caught
@@ -333,7 +333,7 @@ fn test_deactivate_discards_dsp_pipeline_when_poisoned() {
     let stopped_proc = started.stop_processing();
     instance.deactivate(stopped_proc);
 
-    // S2-T1 invariant: deactivated_dsp MUST be None when deactivated while poisoned!
+    // Invariant: deactivated_dsp MUST be None when deactivated while poisoned!
     let saved_dsp = shared.cold.deactivated_dsp.lock().unwrap();
     assert!(
         saved_dsp.is_none(),
@@ -363,7 +363,7 @@ fn test_f64_audio_ports_silenced_on_poisoning() {
     let mut out_r = vec![0.0f32; BLOCK];
     let _ = process_block(&mut started, &mut in_l, &mut in_r, &mut out_l, &mut out_r);
 
-    // Setup an f64 output audio port filled with non-zero values (F-NP-R4 / S3-T3)
+    // Setup an f64 output audio port filled with non-zero values (F-NP-R4)
     let mut out_l_f64 = vec![123.456f64; BLOCK];
     let mut out_r_f64 = vec![789.012f64; BLOCK];
 
@@ -395,7 +395,7 @@ fn test_f64_audio_ports_silenced_on_poisoning() {
         "Process must succeed with Ok in poisoned state"
     );
 
-    // S3-T3: verify f64 output buffers are completely silenced to 0.0f64
+    // Verify f64 output buffers are completely silenced to 0.0f64
     for (i, &s) in out_l_f64.iter().enumerate() {
         assert_eq!(
             s, 0.0f64,

@@ -5,25 +5,22 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # Avaliação Arquitetural Formal - `rt-hardening` para Plugins CLAP (NAM-Plug)
 
-**Documento:** `NAM-Plug/docs/rt-hardening-evaluation.md`
-**Sprint:** S6 — Epic E (Migração do NAM-Plug para APIs generalizadas do engine)
-**Tarefa:** S6-T5 / E.5 / R5 / D.4
+**Documento:** `docs/rt-hardening-evaluation.md`
 **Subprojeto:** `NAM-Plug` (`GPL-3.0-or-later`)
-**Data:** 2026-09-18
 **Status:** Aprovado — decisão formal documentada.
 
 ---
 
 ## 1. Contexto e Objetivo
 
-O `NeuralAmpModeler-rs` expõe, desde S4-T4, o módulo `rt-hardening` (`src/rt_hardening/`), uma feature opt-in (`Cargo.toml`: `rt-hardening = []`) que fornece utilitários de hardening de tempo real para hosts Linux:
+O `NeuralAmpModeler-rs` expõe o módulo `rt-hardening` (`src/rt_hardening/`), uma feature opt-in (`Cargo.toml`: `rt-hardening = []`) que fornece utilitários de hardening de tempo real para hosts Linux:
 
 - `disable_thp()`, `mlockall_current()` — controle de Transparent Huge Pages e bloqueio de memória (`thread.rs`).
 - `promote_sched_fifo()`, `set_cpu_affinity()` — escalonamento `SCHED_FIFO` e afinidade de CPU (`thread.rs`, `affinity.rs`).
 - `request_cpu_dma_latency()` — guarda `PM-QoS` via `/dev/cpu_dma_latency` (`pm_qos.rs`).
 - `set_ftz_daz()` — configuração local de FTZ/DAZ (`thread.rs`).
 
-A questão arquitetural central (residual E.5, vinculada a R5 e D.4) é se `NAM-Plug` — um plugin CLAP que executa dentro do processo da DAW hospedeira — deve consumir ou ativar esse módulo.
+A questão arquitetural central é se `NAM-Plug` — um plugin CLAP que executa dentro do processo da DAW hospedeira — deve consumir ou ativar esse módulo.
 
 **Veredito formal:** `NAM-Plug` **não consome** `rt-hardening`. A responsabilidade de controle de realtime é delegada integralmente ao host (DAW / `NAM-Audio-Pipe`), conforme a separação de fronteiras entre plugin e host na especificação CLAP.
 
@@ -113,4 +110,4 @@ Essas práticas são suficientes para garantir o contrato RT do plugin dentro do
 
 A avaliação arquitetural formal confirma que `NAM-Plug` **não deve** e **não ativa** a feature `rt-hardening` do `NeuralAmpModeler-rs`. A decisão preserva o isolamento de processo, respeita a especificação CLAP, evita interferência no balanceamento do host e mantém a separação clara de responsabilidades: o plugin executa DSP neural com contrato RT estrito (zero-alloc, zero-lock, FTZ/DAZ local, telemetria); o host (`NAM-Audio-Pipe` ou a DAW) gerencia `mlockall`, `SCHED_FIFO`, afinidade e `PM-QoS`.
 
-**Status:** S6-T5 concluída. Residual E.5 e D.4 formalmente fechados.
+**Status:** Decisão formal documentada e em vigor.

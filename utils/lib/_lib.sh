@@ -46,6 +46,78 @@ if [ "${NAM_LIB_NO_CD:-0}" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Release-receipt status derivation (shared by build-release and finalizer)
+# ---------------------------------------------------------------------------
+
+# receipt_derive_status <git_dirty> <core_git_dirty> <perf_status>
+#                       <quick_passed> <heap_passed> <pgo_applied>
+#                       <bolt_applied> <non_artifact_skip_count>
+#   Applies the single certification rule used by both the build pipeline and
+#   the post-long-audit finalizer. `non_artifact_skip_count` deliberately
+#   excludes `artifact_consistency:*` gaps: those are capped separately by
+#   `receipt_apply_artifact_cap`, so a missing long audit can degrade a receipt
+#   to FUNCTIONALLY_CERTIFIED (non-strict) without pretending other gaps do not
+#   exist. Prints CERTIFIED, FUNCTIONALLY_CERTIFIED or INCOMPLETE.
+receipt_derive_status() {
+    local git_dirty="$1" core_dirty="$2" perf_status="$3"
+    local quick_passed="$4" heap_passed="$5" pgo_applied="$6"
+    local bolt_applied="$7" skip_count="$8"
+    local status="CERTIFIED"
+
+    if [ "$git_dirty" = "true" ] || [ "$core_dirty" = "true" ]; then
+        status="INCOMPLETE"
+    fi
+
+    if [ "${skip_count:-0}" -gt 0 ] \
+        || [ "$perf_status" = "FAILED" ] \
+        || [ "$quick_passed" != "true" ] \
+        || [ "$heap_passed" != "true" ]; then
+        status="INCOMPLETE"
+    elif [ "$perf_status" = "INCONCLUSIVE" ] \
+        || [ "$pgo_applied" != "true" ] \
+        || [ "$bolt_applied" != "true" ]; then
+        if [ "$status" = "CERTIFIED" ]; then
+            status="FUNCTIONALLY_CERTIFIED"
+        fi
+    fi
+
+    printf '%s\n' "$status"
+}
+
+# receipt_artifact_gap <consistency>
+#   Prints the typed gap token for a non-match artifact verdict, or nothing.
+receipt_artifact_gap() {
+    case "$1" in
+        absent|incomplete|mismatch) printf 'artifact_consistency:%s\n' "$1" ;;
+        *) : ;;
+    esac
+}
+
+# receipt_apply_artifact_cap <status> <consistency> <strict_mode>
+#   Caps the derived status according to the long-audit provenance verdict:
+#   `match` keeps it; `absent`/`incomplete` cap at FUNCTIONALLY_CERTIFIED in
+#   non-strict mode and become INCOMPLETE in strict mode; `mismatch` is always
+#   INCOMPLETE. An operator waiver is expressed by not adding the gap and by
+#   passing `match` here.
+receipt_apply_artifact_cap() {
+    local status="$1" consistency="$2" strict="${3:-0}"
+    case "$consistency" in
+        match|"") printf '%s\n' "$status" ;;
+        mismatch) printf 'INCOMPLETE\n' ;;
+        absent|incomplete)
+            if [ "$strict" = "1" ] || [ "$strict" = "true" ]; then
+                printf 'INCOMPLETE\n'
+            elif [ "$status" = "CERTIFIED" ]; then
+                printf 'FUNCTIONALLY_CERTIFIED\n'
+            else
+                printf '%s\n' "$status"
+            fi
+            ;;
+        *) printf 'INCOMPLETE\n' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Mandatory test-target execution gate
 # ---------------------------------------------------------------------------
 

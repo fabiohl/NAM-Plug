@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Tests for the asynchronous per-instance model loader (Épico B / F-UX-01).
+//! Tests for the asynchronous per-instance model loader (F-UX-01).
 
 use crate::clap::host_harness::{
     extract_plugin_main_thread, extract_plugin_shared, make_harness_audio_processor,
@@ -310,7 +310,7 @@ fn test_destroy_during_in_flight_prepare_is_safe() {
     let _ = std::fs::remove_file(&a);
 }
 
-/// S6-T2: while a structural rebuild flag is pending the host watchdog is
+/// While a structural rebuild flag is pending the host watchdog is
 /// re-armed at the fast cadence, and restored to nominal once the flag clears.
 #[test]
 fn test_watchdog_fast_cadence_while_rebuild_pending() {
@@ -348,7 +348,7 @@ fn audio_config() -> PluginAudioConfiguration {
     }
 }
 
-/// S6-T1: the loader worker services `RT_STATUS_NEEDS_SLIMMABLE_REBUILD` off the
+/// The loader worker services `RT_STATUS_NEEDS_SLIMMABLE_REBUILD` off the
 /// main thread. With no WaveNet installed the build degenerates to `Skipped`
 /// (clear the flag, no slice), which exercises the whole worker→slot→main-tick
 /// handshake without needing a heavy fixture.
@@ -409,7 +409,7 @@ fn test_adaptive_rebuild_worker_services_slimmable_flag() {
     );
 }
 
-/// S6-T1: the loader worker services `RT_STATUS_NEEDS_OS_REBUILD`, and the main
+/// The loader worker services `RT_STATUS_NEEDS_OS_REBUILD`, and the main
 /// thread pushes the built `SetOversample` command and clears the flag.
 #[test]
 fn test_adaptive_rebuild_worker_services_oversample_flag() {

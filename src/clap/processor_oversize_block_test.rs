@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Oversize block handling test suite (F-RA-04 / Sprint R4).
+//! Oversize block handling test suite (F-RA-04).
 //!
 //! Validates that host audio blocks exceeding `max_frames_count` (e.g., 2×, 3×+1)
 //! are sliced and processed without mute/silence, without panic, without

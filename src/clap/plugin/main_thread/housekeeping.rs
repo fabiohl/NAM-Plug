@@ -122,7 +122,7 @@ impl<'a> NamClapMainThread<'a> {
             log::error!("ContainerModel submodel reset failed — model may run in previous state.");
         }
 
-        // Processor poisoning containment (S2-T1 / F-NP-02):
+        // Processor poisoning containment (F-NP-02):
         // If the RT audio thread panicked, it transitioned to a poisoned silent state
         // and set RT_STATUS_PROCESSOR_POISONED. The main thread detects this flag,
         // logs an error, and requests a restart from the host (once per occurrence).
@@ -233,7 +233,7 @@ impl<'a> NamClapMainThread<'a> {
             .store(bits, Ordering::Release);
     }
 
-    /// Adaptive-rebuild watchdog fallback (S6-T2 / F-UX-02).
+    /// Adaptive-rebuild watchdog fallback (F-UX-02).
     ///
     /// While a structural rebuild flag is still pending at the end of the tick
     /// (the worker-retained / full-ring retry case), the host watchdog is
@@ -283,7 +283,7 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// WaveNet slimmable rebuild (S6-T1 / F-UX-02).
+    /// WaveNet slimmable rebuild (F-UX-02).
     ///
     /// When the adaptive offload is enabled the loader worker performs the
     /// allocation-heavy `slice` + `prewarm` + `set_max_buffer_size` off the main
@@ -467,7 +467,7 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// Oversampling engine rebuild (S6-T1 / F-UX-02).
+    /// Oversampling engine rebuild (F-UX-02).
     ///
     /// When the adaptive offload is enabled the loader worker creates the two
     /// `OversampleEngine`s (filters + buffers) off the main thread; this tick
@@ -964,7 +964,7 @@ impl<'a> NamClapMainThread<'a> {
     /// Lazily spawns the per-instance asynchronous model loader.
     ///
     /// When the adaptive-rebuild offload is enabled the worker also receives the
-    /// rebuild delivery slots and polls the `RT_STATUS_NEEDS_*` flags (S6-T1);
+    /// rebuild delivery slots and polls the `RT_STATUS_NEEDS_*` flags;
     /// under the `NAM_SYNC_ADAPTIVE_REBUILD` rollback it is spawned with `None`
     /// and the main thread keeps the legacy inline rebuild path.
     fn spawn_model_loader(&self) -> Result<(), &'static str> {

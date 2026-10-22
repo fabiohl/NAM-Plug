@@ -25,6 +25,8 @@
 #   NAM_LOW_PRIORITY           — Re-exec with nice/ionice (default unless NAM_NO_LOW_PRIORITY=1).
 #   NAM_NO_LOW_PRIORITY        — Prevent nice/ionice priority lowering.
 #   CARGO_PROFILE_RELEASE_STRIP — Release profile strip mode (default: false, unifies build & test).
+#   CARGO_PROFILE_RELEASE_LTO  — Release profile LTO mode (default: false, matches tests-long & tests-gui).
+#   CARGO_PROFILE_RELEASE_CODEGEN_UNITS — Release codegen units (default: 16, parallel codegen).
 #   NAM_QUICK_SELFTEST         — Diagnostic selftest hook: 'timeout' simulates execution timeout in ~1s.
 
 set -euo pipefail
@@ -49,6 +51,12 @@ source "$SCRIPT_DIR/lib/_lib.sh"
 # Cargo hashes `strip` into the profile, so building with strip=false and testing
 # with the default strip=true recompiled the whole fat-LTO dependency graph.
 export CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-false}"
+
+# Release test artifacts never need the shipped fat-LTO profile: disabling LTO
+# and restoring parallel codegen keeps the build's peak memory bounded and ensures
+# fast execution of the quick QA suite without affecting runtime semantics.
+export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-false}"
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}"
 
 # Re-execute with low CPU and I/O priority (nice and ionice) to prevent overloading the system.
 if [ "${NAM_LOW_PRIORITY:-0}" != "1" ] && [ "${NAM_NO_LOW_PRIORITY:-0}" != "1" ]; then
@@ -84,7 +92,9 @@ export NAM_CRASH_DIR="${PROJECT_DIR}/target/test_crashes"
 rm -f target/logs/quick-phase1.log \
       target/logs/quick-phase2.log \
       target/logs/quick-heap-audit.log \
-      target/logs/quick-receipt.txt
+      target/logs/quick-receipt.txt \
+      target/logs/quick-receipt-check.log \
+      target/logs/codegen-quick.json
 
 echo -e "${BLUE}${BOLD}========================================${NC}"
 echo -e "${BLUE}${BOLD}        NAM-Plug Quick QA Suite         ${NC}"
@@ -203,7 +213,7 @@ verify_artifact_fresh() {
 # mask build-time failures specific to debug assertions or release codegen.
 # In NAM_QUICK_STRICT=1 the artifact is also freshness-checked: a
 # stale .so aborts the suite instead of being validated.
-ensure_clap_artifact() {
+_ensure_clap_artifact_impl() {
     local profile="${1:-debug}"
     local flag=""
     if [ "$profile" = "release" ]; then
@@ -264,6 +274,34 @@ ensure_clap_artifact() {
     local sha
     sha=$(sha256sum "$artifact_path" | cut -d' ' -f1)
     echo -e "  ${GREEN}✓ CLAP artifact ($profile):${NC} $artifact_path (sha256: ${sha:0:16}...)"
+}
+
+# Timed wrapper: emits PHASE<n>_BUILD_S so the artifact build/freshness cost is
+# attributed in the receipt instead of vanishing between compile and run times.
+ensure_clap_artifact() {
+    local t0 rc=0
+    t0=$(date +%s%N)
+    _ensure_clap_artifact_impl "$@" || rc=$?
+    emit "PHASE${PHASE_NUM:-?}_BUILD_S: $(( ($(date +%s%N) - t0) / 1000000000 ))"
+    return "$rc"
+}
+
+# Fail-fast receipt verification: runs the same semantic verifier the release
+# gate uses, right after the receipt is sealed. A producer/parser contract
+# mismatch therefore surfaces here (seconds) rather than after the whole
+# release pipeline. Usage: verify_receipt_fail_fast [extra quick_receipt_check args]
+verify_receipt_fail_fast() {
+    if [ "${NAM_QUICK_NO_RECEIPT_CHECK:-0}" = "1" ] || [ -n "${NAM_QUICK_SELFTEST:-}" ]; then
+        return 0
+    fi
+    local out rc=0
+    out=$(cargo run --quiet --locked --bin quick_receipt_check -- \
+        target/logs/quick-receipt.txt "$@" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo -e "${RED}${BOLD}FAIL: quick receipt failed its own semantic verification:${NC}\n$out" >&2
+        exit 1
+    fi
+    ok "Quick receipt verified (fail-fast)"
 }
 
 # ── Phase 1: Structural unit & integration tests (debug) ─────────────────────
@@ -337,11 +375,27 @@ find_namcore_render() {
     return 1
 }
 
-model_fixture=""
+# E-D parity matrix requires all three certified topologies (WaveNet A1,
+# WaveNet A2/Slimmable, LSTM). Resolve one complete fixture directory so a
+# partial set becomes a typed gap instead of silently shrinking the matrix.
+parity_fixture_dir=""
 if [ -n "${NAM_FIXTURES_DIR:-}" ] && [ -f "$NAM_FIXTURES_DIR/wavenet_a1_standard.nam" ]; then
-    model_fixture="$NAM_FIXTURES_DIR/wavenet_a1_standard.nam"
+    parity_fixture_dir="$NAM_FIXTURES_DIR"
 elif [ -f "tests/fixtures/models/wavenet_a1_standard.nam" ]; then
-    model_fixture="tests/fixtures/models/wavenet_a1_standard.nam"
+    parity_fixture_dir="tests/fixtures/models"
+fi
+if [ -n "$parity_fixture_dir" ]; then
+    for required_fixture in wavenet_a1_standard.nam a2_example.nam lstm.nam; do
+        if [ ! -f "$parity_fixture_dir/$required_fixture" ]; then
+            warn "Parity fixture missing: $parity_fixture_dir/$required_fixture"
+            parity_fixture_dir=""
+            break
+        fi
+    done
+fi
+model_fixture=""
+if [ -n "$parity_fixture_dir" ]; then
+    model_fixture="$parity_fixture_dir/wavenet_a1_standard.nam"
 fi
 
 # verify_parity_log <logfile>
@@ -412,6 +466,20 @@ if [ -n "$render_bin" ] && [ -x "$render_bin" ]; then
         else
             die "PARITY: FAIL test_clap_parity_multi_rate did not complete successfully"
         fi
+
+        echo -e "  ${BLUE}→ Executing CLAP × NAMCore oversampling parity (2x/4x)...${NC}"
+        NAM_CORE_RENDER_BIN="$render_bin" cargo_test_budgeted 300 target/logs/quick-phase2.log \
+            --features testing \
+            --release \
+            --test clap \
+            test_clap_parity_oversample \
+            -- --ignored --nocapture
+        if grep -q "test_clap_parity_oversample .* ok" target/logs/quick-phase2.log; then
+            emit "CLAP_OS_PARITY: PASS"
+            ok "Oversampling parity (2x/4x): PASS"
+        else
+            die "OS_PARITY: FAIL test_clap_parity_oversample did not complete successfully"
+        fi
     else
         if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
             die "PARITY: FAIL missing release artifact or fixture in strict mode"
@@ -442,6 +510,17 @@ if [ -f "$release_artifact" ]; then
     else
         die "CABSIM_IR: FAIL test_cabsim_ir_changes_audio_release_artifact did not complete successfully"
     fi
+
+    echo -e "  ${BLUE}→ Executing CabSim parity vs direct convolution (artifact)...${NC}"
+    cargo_test_budgeted 300 target/logs/quick-phase2.log \
+        --features testing --release --test clap \
+        test_clap_parity_cabsim -- --ignored --nocapture
+    if grep -q "test_clap_parity_cabsim .* ok" target/logs/quick-phase2.log; then
+        emit "CABSIM_PARITY: PASS"
+        ok "Cab-sim parity vs direct convolution: PASS"
+    else
+        die "CABSIM_PARITY: FAIL test_clap_parity_cabsim did not complete successfully"
+    fi
 else
     if [ "${NAM_QUICK_STRICT:-0}" = "1" ]; then
         die "CABSIM_IR: FAIL missing release artifact in strict mode"
@@ -454,9 +533,27 @@ fi
 
 if [ -f "$release_artifact" ] && [ -x "$SCRIPT_DIR/verify_rt_codegen.sh" ]; then
     echo -e "  ${BLUE}→ Verifying real-time codegen invariants (static assembly scan)...${NC}"
-    "$SCRIPT_DIR/verify_rt_codegen.sh" "$release_artifact" 2>&1 | tee -a target/logs/quick-phase2.log
-    emit "RT_CODEGEN: PASS"
-    ok "RT codegen verification: PASS"
+    codegen_t0=$(date +%s%N)
+    codegen_out=$("$SCRIPT_DIR/verify_rt_codegen.sh" "$release_artifact" \
+        --json-out target/logs/codegen-quick.json 2>&1 | tee -a target/logs/quick-phase2.log)
+    emit "PHASE2_CODEGEN_S: $(( ($(date +%s%N) - codegen_t0) / 1000000000 ))"
+    codegen_metrics=$(printf '%s\n' "$codegen_out" | grep -m1 '^RT_CODEGEN_METRICS: ' || true)
+    if [ -z "$codegen_metrics" ]; then
+        die "RT_CODEGEN: FAIL verify_rt_codegen.sh did not emit metrics"
+    fi
+    emit "RT_CODEGEN: PASS ${codegen_metrics#RT_CODEGEN_METRICS: }"
+    ok "RT codegen verification: PASS (${codegen_metrics#RT_CODEGEN_METRICS: })"
+
+    # Coverage provenance: the quick artifact is the pre-PGO/BOLT release
+    # `.so`. The post-BOLT count is read from the release pipeline's metrics
+    # when present, so both receipts carry the same field names.
+    pre_bolt_symbols=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["symbols"])' target/logs/codegen-quick.json 2>/dev/null || echo "n/a")
+    post_bolt_symbols="n/a"
+    if [ -f target/logs/codegen-post-bolt.json ]; then
+        post_bolt_symbols=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["symbols"])' target/logs/codegen-post-bolt.json 2>/dev/null || echo "n/a")
+    fi
+    emit "PRE_BOLT_SYMBOLS: $pre_bolt_symbols"
+    emit "POST_BOLT_SYMBOLS: $post_bolt_symbols"
 fi
 
 P2_DUR_MS=$(( ($(date +%s%N) - P2_START) / 1000000 ))
@@ -504,6 +601,7 @@ if [ ${#GAPS[@]} -gt 0 ]; then
         exit 1
     fi
     emit "OVERALL: COMPLETED_WITH_GAPS"
+    verify_receipt_fail_fast
     echo -e "${YELLOW}${BOLD}OVERALL: COMPLETED_WITH_GAPS (${TOTAL_DUR_STR})${NC}"
     exit 0
 fi
@@ -522,3 +620,4 @@ echo -e "    - Phase 3:     ${P3_DUR_STR:-N/A}"
 echo -e "    - Total:       ${TOTAL_DUR_STR}"
 echo -e "${GREEN}${BOLD}================================================================================${NC}\n"
 emit "OVERALL: PASSED"
+verify_receipt_fail_fast --require-passed --require-heap-audit

@@ -41,6 +41,27 @@
 //! // The resampled rates sit on the same native floor: re-rendering the oracle
 //! // over the round-trip model input cancels the sinc interpolation error, so
 //! // the gate (ESR < 1e-8, SNR > 80 dB) is uniform across the rate matrix.
+//!
+//! # Artifact-level oversampling and CabSim coverage (E-D)
+//!
+//! The NAMCore render tool enforces `input.wav.sample_rate == model.sample_rate`,
+//! so it cannot render a model at 2×/4×. The oversampling reference therefore
+//! keeps the oracle at the model's native rate but feeds it the exact sequence
+//! the plugin's `OversampleEngine` presents to the model: the half-band
+//! upsampler output is rendered by the C++ model and then decimated by the same
+//! half-band engine. Only the half-band filters are shared with the artifact; the
+//! model remains C++ (oracle) vs Rust (artifact), so the comparison is still
+//! cross-implementation. Oversampled parity is measured at 48 kHz on
+//! `wavenet_a1_standard.nam`.
+//!
+//! CabSim parity takes the artifact's IR-free output as the pre-convolution
+//! reference, convolves it with the same IR using a direct time-domain FIR, and
+//! compares it against the artifact's IR-enabled output. Host blocks equal the
+//! adapter partition, so steady-state delivery is in-call and needs no quantum
+//! shift; the first and last partitions are trimmed as activation/tail
+//! boundaries. The IR-free output is itself certified against NAMCore by the
+//! matrix above, so the CabSim check isolates the convolution path of the final
+//! binary without duplicating an oracle render.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,7 +70,17 @@ use super::common::metrics::{compute_esr, compute_snr_db};
 use clack_extensions::state::PluginState;
 use clack_host::prelude::*;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
+use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
+
+/// Host `max_frames_count` used by every parity instance. It is also the
+/// CabSim adapter's partition size; the CabSim parity test uses it as the host
+/// block size so each partition is delivered in-call.
+const PARITY_MAX_FRAMES: u32 = 1024;
+
+/// Irregular host block pattern used by the native-rate and oversampling
+/// matrices (exercises the streaming adapters across non-aligned boundaries).
+const IRREGULAR_BLOCK_SIZES: &[usize] = &[127, 251, 64, 383, 192, 512];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NAMCore C++ oracle helpers
@@ -60,7 +91,7 @@ fn project_root() -> PathBuf {
 }
 
 fn render_bin() -> PathBuf {
-    // S5-T01 — Self-contained sibling resolution. Search order:
+    // Self-contained sibling resolution. Search order:
     //   1. Formal environment contract NAM_CORE_RENDER_BIN.
     //   2. This repo's own `build/namcore_render` (self-contained clone).
     //   3. The `neural_amp_modeler_rs` testing fixture helper, which resolves
@@ -189,21 +220,29 @@ fn generate_stress_signal(sample_rate: f64, duration_secs: f64) -> Vec<f32> {
 }
 
 /// Runs NAMCore C++ render on `wav_in` using `model_path`, writes to `wav_out`.
-fn run_cpp_render(model_path: &Path, wav_in: &Path, wav_out: &Path) {
+/// Returns `Err` with the renderer's stderr on non-zero exit (used for oracle
+/// capability probing, so an unsupported topology becomes a typed gap instead
+/// of a hard panic).
+fn try_run_cpp_render(model_path: &Path, wav_in: &Path, wav_out: &Path) -> Result<(), String> {
     std::fs::create_dir_all(wav_out.parent().unwrap()).ok();
     let bin = render_bin();
     if !bin.exists() {
-        oracle_fail_loud(&bin);
-        return;
+        return Err(format!("render binary not found at {bin:?}"));
     }
     let output = Command::new(&bin)
         .arg(model_path)
         .arg(wav_in)
         .arg(wav_out)
         .output()
-        .expect("Failed to execute NAMCore render");
+        .map_err(|e| format!("failed to execute NAMCore render: {e}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+fn run_cpp_render(model_path: &Path, wav_in: &Path, wav_out: &Path) {
+    if let Err(stderr) = try_run_cpp_render(model_path, wav_in, wav_out) {
         panic!("NAMCore render failed: {stderr}");
     }
 }
@@ -237,9 +276,20 @@ impl HostHandlers for ParityHost {
     type AudioProcessor<'a> = ();
 }
 
-/// Processes `input` through CLAP plugin at `sample_rate` Hz using
-/// variable buffer sizes, returns output samples.
-fn process_through_clap(model_path: &Path, input: &[f32], sample_rate: f64) -> Vec<f32> {
+/// Processes `input` through CLAP plugin at `sample_rate` Hz using the given
+/// host block sizes, returns output samples.
+///
+/// `oversample` and `ir_path` exercise the artifact's production DSP branches
+/// (half-band oversampling and CabSim convolution); the default matrix uses
+/// `Off`/`None`, matching the NAMCore native-rate oracle.
+fn process_through_clap(
+    model_path: &Path,
+    input: &[f32],
+    sample_rate: f64,
+    oversample: OversampleFactor,
+    ir_path: Option<&Path>,
+    block_sizes: &[usize],
+) -> Vec<f32> {
     let artifact = super::artifact_validator::TestedArtifact::resolve_and_hash();
     // SAFETY: Dynamic loading of .so artifact.
     let entry = unsafe { PluginEntry::load(&artifact.path).expect("Failed to load CLAP plugin") };
@@ -270,6 +320,11 @@ fn process_through_clap(model_path: &Path, input: &[f32], sample_rate: f64) -> V
         params.output_gain_db = 0.0;
         params.gate_threshold_db = -90.0; // effectively disabled gate
         params.bypass = false;
+        params.oversample = oversample;
+        if let Some(ir) = ir_path {
+            params.ir_path = Some(ir.to_path_buf());
+            params.ir_hash = nam_plug::clap::test_util::asset_hash(ir);
+        }
         let state_ext = instance
             .plugin_handle()
             .get_extension::<PluginState>()
@@ -285,7 +340,7 @@ fn process_through_clap(model_path: &Path, input: &[f32], sample_rate: f64) -> V
     let audio_config = PluginAudioConfiguration {
         sample_rate,
         min_frames_count: 32,
-        max_frames_count: 1024,
+        max_frames_count: PARITY_MAX_FRAMES,
     };
 
     let stopped = instance
@@ -295,11 +350,10 @@ fn process_through_clap(model_path: &Path, input: &[f32], sample_rate: f64) -> V
         .start_processing()
         .expect("Failed to start processing");
 
-    // Process in irregular buffer sizes
+    // Process in the caller-provided host block pattern
     let mut output = vec![0.0f32; input.len()];
     let mut pos = 0;
-    // Irregular buffer sizes that cycle: 127, 251, 64, 383, 192, 512
-    let block_sizes: &[usize] = &[127, 251, 64, 383, 192, 512];
+    assert!(!block_sizes.is_empty(), "block_sizes must not be empty");
     let mut block_idx = 0;
     let mut event_buffer = EventBuffer::with_capacity(10);
 
@@ -372,6 +426,7 @@ fn get_model_sample_rate(model_path: &Path) -> u32 {
                 .as_f64()
                 .map(|v| v as u32)
         })
+        .or_else(|| model_data["sample_rate"].as_f64().map(|v| v as u32))
         .unwrap_or(48000)
 }
 
@@ -446,25 +501,39 @@ fn resampler_latency_samples(host_sr: u32, model_sr: u32) -> usize {
 /// re-renders the oracle over the exact round-trip model input — the sinc
 /// interpolation error cancels and the resampled rates measure at the same
 /// cross-implementation float floor as 48 kHz native.
-fn parity_gates(host_sr: f64) -> (f64, f64, &'static str) {
-    match host_sr.round() as u32 {
-        // Measured: (2026-07-30) — cross-implementation floor against
-        // the real C++ oracle + LUT gain @ 48 kHz native (resampler bypass):
-        //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB.
-        // Re-measured 2026-09-03 on the current engine/oracle: ESR 7.98e-12,
-        // SNR 111.0 dB.
-        48_000 => (1e-8, 80.0, "ESR ≈ 7.98e-12, SNR ≈ 111.0 dB (2026-09-03)"),
-        // Measured: 2026-09-03 — ESR 9.01e-12, SNR 110.5 dB (latency 11).
-        44_100 => (1e-8, 80.0, "ESR ≈ 9.01e-12, SNR ≈ 110.5 dB (2026-09-03)"),
-        // Measured: 2026-09-03 — ESR 8.13e-12, SNR 110.9 dB (latency 19).
-        96_000 => (1e-8, 80.0, "ESR ≈ 8.13e-12, SNR ≈ 110.9 dB (2026-09-03)"),
-        _ => (1e-8, 80.0, "default parity gate (native floor)"),
-    }
+fn parity_gates(model_name: &str, host_sr: f64) -> (f64, f64, &'static str) {
+    let host_u32 = host_sr.round() as u32;
+    // Empirically measured floor against NAMCore C++ oracle across certified topologies:
+    // - wavenet_a1_standard: ESR 7.98e-12 @ 48k, 9.01e-12 @ 44.1k, 8.13e-12 @ 96k
+    // - a2_example:         ESR 2.75e-12 @ 48k, 2.77e-12 @ 44.1k, 2.76e-12 @ 96k
+    // - lstm:               ESR 2.05e-11 @ 48k, 1.91e-11 @ 44.1k, 2.03e-11 @ 96k
+    let comment = match (model_name, host_u32) {
+        ("wavenet_a1_standard.nam", 48_000) => "ESR ≈ 7.98e-12, SNR ≈ 111.0 dB",
+        ("wavenet_a1_standard.nam", 44_100) => "ESR ≈ 9.01e-12, SNR ≈ 110.5 dB",
+        ("wavenet_a1_standard.nam", 96_000) => "ESR ≈ 8.13e-12, SNR ≈ 110.9 dB",
+        ("a2_example.nam", 48_000) => "ESR ≈ 2.75e-12, SNR ≈ 115.6 dB",
+        ("a2_example.nam", 44_100) => "ESR ≈ 2.77e-12, SNR ≈ 115.6 dB",
+        ("a2_example.nam", 96_000) => "ESR ≈ 2.76e-12, SNR ≈ 115.6 dB",
+        ("lstm.nam", 48_000) => "ESR ≈ 2.05e-11, SNR ≈ 106.9 dB",
+        ("lstm.nam", 44_100) => "ESR ≈ 1.91e-11, SNR ≈ 107.2 dB",
+        ("lstm.nam", 96_000) => "ESR ≈ 2.03e-11, SNR ≈ 106.9 dB",
+        _ => "default parity gate (native floor)",
+    };
+    (1e-8, 80.0, comment)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Outcome of a parity matrix cell group. `OracleUnsupported` is a typed gap,
+/// not a silent skip: the caller aggregates it and fails the suite unless the
+/// fixture is explicitly known to be unsupported by the render tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParityOutcome {
+    Passed,
+    OracleUnsupported,
+}
 
 /// Verifies CLAP plugin parity against the NAMCore C++ oracle at every host
 /// rate in `host_rates`, with irregular buffer sizes.
@@ -476,11 +545,15 @@ fn parity_gates(host_sr: f64) -> (f64, f64, &'static str) {
 /// high-fidelity reference resampler, so the input-stage group delay cancels
 /// and both curves are content-aligned at equal host indices after the
 /// plugin's declared resampler latency is skipped.
-fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: f64) {
+fn run_multi_rate_parity(
+    model_name: &str,
+    host_rates: &[f64],
+    stress_duration: f64,
+) -> ParityOutcome {
     let bin = render_bin();
     if !bin.exists() {
         oracle_fail_loud(&bin);
-        return;
+        return ParityOutcome::OracleUnsupported;
     }
 
     let model_path = crate::common::fixtures::model_path(model_name);
@@ -494,16 +567,30 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
     );
 
     let model_sr = get_model_sample_rate(&model_path);
+    let tmp_dir = std::env::temp_dir().join("nam_plug_clap_parity");
+    std::fs::create_dir_all(&tmp_dir).ok();
+
+    // Oracle capability probe (E-D.1): the render tool rejects unsupported
+    // topologies before any real signal is rendered. Probe with silence so a
+    // genuine DSP failure on the real signal still fails hard below.
+    let probe_in = tmp_dir.join(format!("oracle_probe_{model_name}_in.wav"));
+    let probe_out = tmp_dir.join(format!("oracle_probe_{model_name}_out.wav"));
+    write_wav_mono(&probe_in, &[0.0f32; 64], model_sr);
+    if let Err(err) = try_run_cpp_render(&model_path, &probe_in, &probe_out) {
+        eprintln!("GAP: oracle_unsupported:{model_name} ({err})");
+        return ParityOutcome::OracleUnsupported;
+    }
+
     let mut all_passed = true;
 
     // Stress is generated once at the model NATIVE rate: every host rate is
     // derived from this same signal, keeping the model operating point
     // comparable across the whole rate matrix.
     let stress = generate_stress_signal(model_sr as f64, stress_duration);
-    eprintln!("  Native stress: {} samples @ {model_sr} Hz", stress.len());
-
-    let tmp_dir = std::env::temp_dir().join("nam_plug_clap_parity");
-    std::fs::create_dir_all(&tmp_dir).ok();
+    eprintln!(
+        "  Fixture {model_name}: native rate {model_sr} Hz, {} stress samples",
+        stress.len()
+    );
 
     for &host_sr in host_rates {
         eprintln!("\n=== CLAP Parity: {model_name} @ {host_sr:.0} Hz ===");
@@ -557,7 +644,14 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
         let reference = reference_resample(&calibrated_cpp, model_sr, host_u32);
         eprintln!("  Reference: {} samples @ {host_sr:.0} Hz", reference.len());
 
-        let clap_output = process_through_clap(&model_path, &plugin_input, host_sr);
+        let clap_output = process_through_clap(
+            &model_path,
+            &plugin_input,
+            host_sr,
+            OversampleFactor::Off,
+            None,
+            IRREGULAR_BLOCK_SIZES,
+        );
 
         // Group-delay compensation: the streaming adapter zero-primes exactly
         // `latency_samples()` host samples, and the one-shot reference filter
@@ -596,7 +690,7 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
             f64::INFINITY
         };
 
-        let (esr_gate, snr_gate, gate_comment) = parity_gates(host_sr);
+        let (esr_gate, snr_gate, gate_comment) = parity_gates(model_name, host_sr);
         eprintln!(
             "  ESR  = {esr:.2e}  ({:.1} dB)  [threshold < {esr_gate:.0e}]",
             esr_db
@@ -621,17 +715,24 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
     }
 
     assert!(all_passed, "CLAP parity failed for {model_name}");
+    ParityOutcome::Passed
 }
 
-/// Multi-rate CLAP vs NAMCore parity with irregular buffers.
+/// Fixtures certified by the multi-rate matrix (E-D.1). They cover the three
+/// production topologies: WaveNet A1, WaveNet A2/Slimmable container, and LSTM.
+const PARITY_FIXTURES: &[&str] = &["wavenet_a1_standard.nam", "a2_example.nam", "lstm.nam"];
+
+/// Multi-rate CLAP vs NAMCore parity matrix with irregular buffers.
 ///
-/// Tests a WaveNet model at 48 kHz against the C++ oracle across the three
-/// Gate-4 certification rates: 44.1 kHz, 48 kHz (native), and 96 kHz. At the
-/// native rate the plugin's resampler fully bypasses; at 44.1/96 kHz the
-/// reference-resampling oracle pipeline described in the module docs is used.
-/// Applies loudness calibration compensation (input/output_mult_adj via
-/// gain LUT) mirroring the plugin DSP chain, so residuals reflect only
-/// actual DSP divergence.
+/// Runs every fixture in [`PARITY_FIXTURES`] at the three Gate-4 certification
+/// rates: 44.1 kHz, 48 kHz (native), and 96 kHz. At the native rate the
+/// plugin's resampler fully bypasses; at 44.1/96 kHz the reference-resampling
+/// oracle pipeline described in the module docs is used. Applies loudness
+/// calibration compensation (input/output_mult_adj via gain LUT) mirroring the
+/// plugin DSP chain, so residuals reflect only actual DSP divergence.
+///
+/// The renderer is probed once per fixture; an unsupported topology becomes
+/// the typed gap `oracle_unsupported:<fixture>` instead of an ambiguous crash.
 ///
 /// // Measured: (2026-07-30) — cross-implementation floor
 /// //   ESR ≈ 1.07e-9, SNR ≈ 89.7 dB (48 kHz native) → conservative gates:
@@ -644,11 +745,345 @@ fn run_multi_rate_parity(model_name: &str, host_rates: &[f64], stress_duration: 
 #[test]
 #[ignore = "requires NAMCore C++ render + release CLAP .so"]
 fn test_clap_parity_multi_rate() {
-    run_multi_rate_parity(
-        "wavenet_a1_standard.nam",
-        &[44100.0, 48000.0, 96000.0],
-        0.5, // 0.5s stress signal at the model native rate
+    let bin = render_bin();
+    if !bin.exists() {
+        oracle_fail_loud(&bin);
+        return;
+    }
+
+    let mut gaps = Vec::new();
+    for &fixture in PARITY_FIXTURES {
+        eprintln!("\n════════ Fixture parity matrix: {fixture} ════════");
+        if run_multi_rate_parity(fixture, &[44100.0, 48000.0, 96000.0], 0.5)
+            == ParityOutcome::OracleUnsupported
+        {
+            gaps.push(fixture);
+        }
+    }
+
+    assert!(
+        gaps.is_empty(),
+        "typed oracle gap(s) — render tool does not support: {gaps:?}. \
+         Install/provide a render build with the required topology support, or \
+         record the gap explicitly in docs/testing.md before certifying."
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Oversampling reference (E-D.2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Native block size used by the reference half-band engine. The engine is
+/// streaming, so this only bounds scratch buffers, not the result.
+const REFERENCE_OS_BLOCK: usize = 8192;
+
+/// Reference half-band upsampling of a whole native-rate signal.
+fn os_upsample_all(
+    signal: &[f32],
+    factor: OversampleFactor,
+    engine: &mut OversampleEngine,
+) -> Vec<f32> {
+    let mult = factor.multiplier();
+    let mut up = Vec::with_capacity(signal.len() * mult);
+    let mut scratch = vec![0.0f32; REFERENCE_OS_BLOCK * mult];
+    for chunk in signal.chunks(REFERENCE_OS_BLOCK) {
+        let n = engine.upsample(chunk, &mut scratch[..chunk.len() * mult], None);
+        up.extend_from_slice(&scratch[..n]);
+    }
+    up
+}
+
+/// Reference half-band decimation of a whole oversampled signal.
+fn os_downsample_all(
+    signal: &[f32],
+    factor: OversampleFactor,
+    engine: &mut OversampleEngine,
+) -> Vec<f32> {
+    let mult = factor.multiplier();
+    let aligned = signal.len() - (signal.len() % mult);
+    let mut down = Vec::with_capacity(aligned / mult + 1);
+    let mut scratch = vec![0.0f32; REFERENCE_OS_BLOCK];
+    for chunk in signal[..aligned].chunks(REFERENCE_OS_BLOCK * mult) {
+        let n = engine.downsample(chunk, &mut scratch[..chunk.len() / mult], None);
+        down.extend_from_slice(&scratch[..n]);
+    }
+    down
+}
+
+/// Artifact-level oversampling parity at the model native rate.
+///
+/// The C++ renderer cannot run at 2×/4×: it rejects an input whose sample rate
+/// differs from the model's expected rate. The reference therefore presents to
+/// the oracle the exact oversampled sequence the artifact feeds its model and
+/// decimates the oracle output with the same half-band engine the artifact
+/// embeds. The neural model remains cross-implementation (C++ oracle vs Rust),
+/// so this certifies the artifact's production oversampling branch, not just
+/// the engine unit tests.
+///
+/// // Measured: (2026-10-22, wavenet_a1_standard @ 48 kHz) — see the test log.
+/// // Gate: ESR < 1e-8, SNR > 80 dB (same cross-implementation floor as native).
+fn run_oversample_parity(model_name: &str, factor: OversampleFactor) {
+    let bin = render_bin();
+    if !bin.exists() {
+        oracle_fail_loud(&bin);
+        return;
+    }
+
+    let model_path = crate::common::fixtures::model_path(model_name);
+    let model_sr = get_model_sample_rate(&model_path);
+    let (input_mult_adj, output_mult_adj) =
+        neural_amp_modeler_rs::testing::fixtures::calibration_multipliers_from_model_json(
+            &model_path,
+        );
+    let stress = generate_stress_signal(model_sr as f64, 0.5);
+    let tmp_dir = std::env::temp_dir().join("nam_plug_clap_parity");
+    std::fs::create_dir_all(&tmp_dir).ok();
+
+    let scaled_input: Vec<f32> = stress.iter().map(|s| s * input_mult_adj).collect();
+    let mut os = OversampleEngine::new(factor, REFERENCE_OS_BLOCK)
+        .unwrap_or_else(|e| panic!("reference OversampleEngine::new({factor:?}) failed: {e}"));
+    let upsampled = os_upsample_all(&scaled_input, factor, &mut os);
+
+    let tag = format!("os{}_{model_sr}", factor.multiplier());
+    let raw_cpp = render_oracle(&model_path, model_sr, &upsampled, &tmp_dir, &tag);
+    let calibrated_cpp: Vec<f32> = raw_cpp.iter().map(|s| s * output_mult_adj).collect();
+    let reference = os_downsample_all(&calibrated_cpp, factor, &mut os);
+
+    let clap_output = process_through_clap(
+        &model_path,
+        &stress,
+        model_sr as f64,
+        factor,
+        None,
+        IRREGULAR_BLOCK_SIZES,
+    );
+
+    let latency = os.latency_samples();
+    const EDGE_GUARD: usize = 16;
+    let skip = latency + EDGE_GUARD;
+    let common = reference
+        .len()
+        .min(clap_output.len())
+        .saturating_sub(skip + EDGE_GUARD);
+    assert!(
+        common > 64,
+        "Oversample {factor:?} comparison window too small ({common} samples)"
+    );
+    assert!(
+        reference.len().abs_diff(clap_output.len()) <= 8,
+        "Oversample {factor:?} length mismatch: reference {} vs artifact {}",
+        reference.len(),
+        clap_output.len()
+    );
+
+    let esr = compute_esr(
+        &reference[skip..skip + common],
+        &clap_output[skip..skip + common],
+    );
+    let snr = compute_snr_db(
+        &reference[skip..skip + common],
+        &clap_output[skip..skip + common],
+    );
+    let esr_db = if esr > 0.0 {
+        10.0 * (1.0 / esr).log10()
+    } else {
+        f64::INFINITY
+    };
+    const ESR_MAX: f64 = 1e-8;
+    const SNR_MIN_DB: f64 = 80.0;
+    eprintln!(
+        "=== CLAP Parity: {model_name} @ {model_sr} Hz, oversample {factor:?} ===\n  \
+         Reference OS latency: {latency} native samples (skip {skip}, window {common})\n  \
+         ESR = {esr:.2e} ({esr_db:.1} dB)  [threshold < {ESR_MAX:.0e}]\n  \
+         SNR = {snr:.1} dB                 [threshold > {SNR_MIN_DB} dB]"
+    );
+    assert!(
+        esr < ESR_MAX && snr > SNR_MIN_DB,
+        "Oversample {factor:?} parity failed: ESR={esr:.2e} ({esr_db:.1} dB), \
+         SNR={snr:.1} dB"
+    );
+    eprintln!("  PASS oversample {factor:?} ESR={esr:.2e} SNR={snr:.1}");
+}
+
+/// Artifact-level oversampling parity (2× and 4×) on the final `.so`.
+#[test]
+#[ignore = "requires NAMCore C++ render + release CLAP .so"]
+fn test_clap_parity_oversample() {
+    run_oversample_parity("wavenet_a1_standard.nam", OversampleFactor::X2);
+    run_oversample_parity("wavenet_a1_standard.nam", OversampleFactor::X4);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CabSim reference (E-D.2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Direct time-domain FIR convolution used as an independent CabSim reference.
+fn direct_convolution(input: &[f32], ir: &[f32]) -> Vec<f32> {
+    let mut out = vec![0.0f32; input.len() + ir.len() - 1];
+    for (i, &x) in input.iter().enumerate() {
+        if x == 0.0 {
+            continue;
+        }
+        for (k, &h) in ir.iter().enumerate() {
+            out[i + k] += x * h;
+        }
+    }
+    out
+}
+
+/// Deterministic, strictly causal synthetic cab IR (decaying multi-tap).
+fn synthetic_cab_ir() -> Vec<f32> {
+    let taps = 256usize;
+    let mut ir = vec![0.0f32; taps];
+    ir[0] = 0.6;
+    ir[1] = -0.35;
+    ir[2] = 0.22;
+    for (k, h) in ir.iter_mut().enumerate().skip(3) {
+        let t = k as f32;
+        *h = 0.35 * (-t / 40.0).exp() * (t * 0.7).sin();
+    }
+    let peak = ir.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+    if peak > 0.0 {
+        for h in &mut ir {
+            *h /= peak;
+        }
+    }
+    ir
+}
+
+/// Artifact-level CabSim parity: the IR-enabled output must equal the direct
+/// convolution of the IR-free artifact output with the same IR, after the
+/// adapter's documented one-partition latency.
+///
+/// This isolates the final binary's convolution path; the IR-free curve is
+/// certified separately against NAMCore by `test_clap_parity_multi_rate`.
+///
+/// // Measured: (2026-10-22, wavenet_a1_standard @ 48 kHz) — see the test log.
+/// // Gate: ESR < 1e-8, SNR > 80 dB.
+#[test]
+#[ignore = "requires release CLAP .so"]
+fn test_clap_parity_cabsim() {
+    let model_name = "wavenet_a1_standard.nam";
+    let model_path = crate::common::fixtures::model_path(model_name);
+    let model_sr = get_model_sample_rate(&model_path);
+    assert_eq!(
+        model_sr, 48000,
+        "CabSim parity fixture must be native 48 kHz"
+    );
+
+    let ir = synthetic_cab_ir();
+    let ir_path = std::env::temp_dir().join("nam_plug_cabsim_parity_ir.wav");
+    write_wav_mono(&ir_path, &ir, model_sr);
+
+    // Warm-up prefix: gives the asynchronous IR load time to land before the
+    // measured signal starts. Host blocks equal the adapter partition, so once
+    // the IR is active the adapter renders each partition in-call and the
+    // output is aligned sample-for-sample with a direct convolution of the
+    // dry stream (no steady-state quantum latency). The prefix is zeros, so the
+    // FIR state at the measurement boundary is zero regardless of when the IR
+    // load landed.
+    let warmup = 32 * PARITY_MAX_FRAMES as usize;
+    let mut padded = vec![0.0f32; warmup];
+    padded.extend_from_slice(&generate_stress_signal(model_sr as f64, 0.5));
+    let partition_blocks = [PARITY_MAX_FRAMES as usize];
+
+    let dry = process_through_clap(
+        &model_path,
+        &padded,
+        model_sr as f64,
+        OversampleFactor::Off,
+        None,
+        &partition_blocks,
+    );
+    let wet = process_through_clap(
+        &model_path,
+        &padded,
+        model_sr as f64,
+        OversampleFactor::Off,
+        Some(&ir_path),
+        &partition_blocks,
+    );
+    let dry_sig = &dry[warmup..];
+    let wet_sig = &wet[warmup..];
+    let reference = direct_convolution(dry_sig, &ir);
+    let rms = |x: &[f32]| {
+        (x.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / x.len() as f64).sqrt()
+    };
+    eprintln!(
+        "  Reference RMS: dry={:.6} wet={:.6} direct-conv={:.6}",
+        rms(dry_sig),
+        rms(wet_sig),
+        rms(&reference)
+    );
+
+    // With host blocks equal to the adapter partition, delivery is in-call:
+    // no steady-state quantum latency remains. The edge guard trims the
+    // boundary where the last warm-up zeros leave the FIR.
+    const EDGE_GUARD: usize = 16;
+    let partition = PARITY_MAX_FRAMES as usize;
+    // The final partial host block has no queued convolution output (the
+    // adapter delivered only complete partitions), and the first measured
+    // partition is excluded conservatively as an activation boundary.
+    let measurable = wet_sig.len() - (wet_sig.len() % partition);
+    let skip = partition + EDGE_GUARD;
+    let common = reference
+        .len()
+        .min(measurable)
+        .saturating_sub(skip + EDGE_GUARD);
+    assert!(
+        common > 64,
+        "CabSim comparison window too small ({common} samples)"
+    );
+
+    let esr = compute_esr(
+        &reference[skip..skip + common],
+        &wet_sig[skip..skip + common],
+    );
+    let snr = compute_snr_db(
+        &reference[skip..skip + common],
+        &wet_sig[skip..skip + common],
+    );
+    let esr_db = if esr > 0.0 {
+        10.0 * (1.0 / esr).log10()
+    } else {
+        f64::INFINITY
+    };
+    const ESR_MAX: f64 = 1e-8;
+    const SNR_MIN_DB: f64 = 80.0;
+    eprintln!(
+        "=== CLAP Parity: {model_name} @ {model_sr} Hz, CabSim ===\n  \
+         Partition blocks: {PARITY_MAX_FRAMES} samples (warmup {warmup}, window {common})\n  \
+         ESR = {esr:.2e} ({esr_db:.1} dB)  [threshold < {ESR_MAX:.0e}]\n  \
+         SNR = {snr:.1} dB                 [threshold > {SNR_MIN_DB} dB]"
+    );
+    if !(esr < ESR_MAX && snr > SNR_MIN_DB) {
+        // Alignment diagnostics only on failure: report the best integer lag
+        // so a quantum/partition regression is immediately actionable.
+        let seg = 4096usize.min(reference.len()).min(wet_sig.len());
+        let mut best = (0usize, f64::INFINITY);
+        for lag in 0..=PARITY_MAX_FRAMES as usize {
+            if lag + seg > wet_sig.len() {
+                break;
+            }
+            let e: f64 = (0..seg)
+                .map(|i| {
+                    let d = reference[i] as f64 - wet_sig[lag + i] as f64;
+                    d * d
+                })
+                .sum();
+            if e < best.1 {
+                best = (lag, e);
+            }
+        }
+        panic!(
+            "CabSim parity failed: ESR={esr:.2e} ({esr_db:.1} dB), SNR={snr:.1} dB; \
+             best lag={} (mse {:.3e})",
+            best.0, best.1
+        );
+    }
+    eprintln!("  PASS cabsim ESR={esr:.2e} SNR={snr:.1}");
+
+    let _ = std::fs::remove_file(&ir_path);
 }
 
 /// Quick smoke test: processes a tiny signal through the CLAP plugin
@@ -662,7 +1097,14 @@ fn test_clap_parity_smoke() {
     assert!(!stress.is_empty());
     assert!(stress.iter().any(|&s| s.abs() > 0.01));
 
-    let output = process_through_clap(&model_path, &stress, 48000.0f64);
+    let output = process_through_clap(
+        &model_path,
+        &stress,
+        48000.0f64,
+        OversampleFactor::Off,
+        None,
+        IRREGULAR_BLOCK_SIZES,
+    );
 
     assert_eq!(output.len(), stress.len());
     assert!(

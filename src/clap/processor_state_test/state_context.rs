@@ -164,7 +164,7 @@ fn test_state_context_roundtrip() {
 /// 2. ForPreset → state.load  ← this test
 /// 3. ForDuplicate → state.load
 #[test]
-fn test_s6e6t03_state_context_preset_roundtrip_via_state_load() {
+fn test_state_context_preset_roundtrip_via_state_load() {
     use clack_extensions::state_context::{PluginStateContext, StateContextType};
     use neural_amp_modeler_rs::common::params::{
         ActivationPrecision, AdaptiveComputeMode, ProcessingParams,

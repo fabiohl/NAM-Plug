@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Synthetic tamper-rejection tests for the NAM-Plug receipt stack (S4-T4.3).
+//! Synthetic tamper-rejection tests for the NAM-Plug receipt stack.
 //!
 //! The release ceremonies must reject a tampered or simulated receipt. These
 //! tests exercise the same semantic verifiers the gate uses — the quick text
@@ -14,6 +14,12 @@ use nam_plug::receipt::quick::{QuickPhaseStatus, parse_quick_receipt};
 use neural_amp_modeler_rs::testing::receipt::{
     LongAuditReceipt, LongPhaseReceipt, LongPhaseStatus,
 };
+
+/// Golden copied from the semantic lines of `target/logs/quick-receipt.txt`
+/// produced by `utils/tests-quick.sh` (2026-10-22, pre-PGO release `.so`).
+/// Regenerate it whenever the producer's receipt grammar changes, together with
+/// the parser in `src/receipt/quick.rs`.
+const QUICK_RECEIPT_GOLDEN: &str = include_str!("fixtures/quick-receipt-golden.txt");
 
 fn phase(id: &str, status: LongPhaseStatus, tests: u64) -> LongPhaseReceipt {
     LongPhaseReceipt {
@@ -37,6 +43,20 @@ fn clean_long_jsonl() -> String {
         phase("overall", LongPhaseStatus::Passed, 40),
     ];
     LongAuditReceipt { phases }.render_jsonl()
+}
+
+#[test]
+fn golden_quick_receipt_from_producer_parses() {
+    let parsed = parse_quick_receipt(QUICK_RECEIPT_GOLDEN)
+        .expect("receipt emitted by utils/tests-quick.sh must parse");
+    assert!(parsed.verify_release_gate(true, true).is_ok());
+}
+
+#[test]
+fn golden_quick_receipt_mutation_is_rejected() {
+    let mutated = QUICK_RECEIPT_GOLDEN.replace("symbols=7", "symbols=x");
+    assert_ne!(mutated, QUICK_RECEIPT_GOLDEN);
+    assert!(parse_quick_receipt(&mutated).is_err());
 }
 
 #[test]

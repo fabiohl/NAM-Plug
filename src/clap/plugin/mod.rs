@@ -264,7 +264,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             dispatched_model_generation: Cell::new(0),
             dispatched_model_is_gui: Cell::new(false),
             rebuild_slots: crate::clap::plugin::main_thread::model_loader::RebuildSlots::new(),
-            // Rollback switch (S6-T1): `NAM_SYNC_ADAPTIVE_REBUILD=1` forces the
+            // Rollback switch: `NAM_SYNC_ADAPTIVE_REBUILD=1` forces the
             // structural rebuilds (slimmable slice + oversampling engines) back
             // onto the main-thread inline path.
             async_adaptive_rebuild: std::env::var_os("NAM_SYNC_ADAPTIVE_REBUILD").is_none(),

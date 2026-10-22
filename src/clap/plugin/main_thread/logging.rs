@@ -19,6 +19,9 @@ impl<'a> NamClapMainThread<'a> {
     /// RT-Safe: all `CString::new(…).unwrap_or_default()` calls use static
     /// ASCII literals with no internal null bytes — guaranteed non-panicking.
     pub(crate) fn emit_pending_logs(&self) {
+        let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
+            self.shared.cold.instance_id,
+        );
         self.update_alert_bits();
 
         let log_ext = self.host.get_extension::<HostLog>();

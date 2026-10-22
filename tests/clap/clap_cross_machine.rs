@@ -206,7 +206,7 @@ fn test_corrupted_model_weights_rejected_gracefully() {
     let start = (bytes.len() / 3).max(1);
     let end = (bytes.len() * 2 / 3).max(start + 1);
     corrupted[start..end].fill(0xFF);
-    let corrupted_path = std::env::temp_dir().join("nam_s6e6t05_corrupted.nam");
+    let corrupted_path = std::env::temp_dir().join("nam_test_corrupted.nam");
     std::fs::write(&corrupted_path, &corrupted).expect("write corrupted model");
 
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
@@ -264,7 +264,7 @@ fn test_truncated_model_file_rejected_gracefully() {
     let original = model_fixture("wavenet_a1_standard.nam");
     let bytes = std::fs::read(&original).unwrap();
     let truncated = &bytes[..100.min(bytes.len())];
-    let truncated_path = std::env::temp_dir().join("nam_s6e6t05_truncated.nam");
+    let truncated_path = std::env::temp_dir().join("nam_test_truncated.nam");
     std::fs::write(&truncated_path, truncated).unwrap();
 
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
@@ -282,7 +282,7 @@ fn test_truncated_model_file_rejected_gracefully() {
 
 #[test]
 fn test_zero_byte_model_file_rejected_gracefully() {
-    let zero_path = std::env::temp_dir().join("nam_s6e6t05_zero.nam");
+    let zero_path = std::env::temp_dir().join("nam_test_zero.nam");
     std::fs::write(&zero_path, []).unwrap();
 
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
@@ -336,7 +336,7 @@ fn test_cross_machine_restore_via_basename_search_succeeds() {
 
 #[test]
 fn test_cross_machine_basename_not_found_is_rejected() {
-    let non_existent_dir = PathBuf::from("/tmp/nam_s6e6t05_empty");
+    let non_existent_dir = std::env::temp_dir().join("nam_test_empty");
     let _ = std::fs::create_dir_all(&non_existent_dir);
 
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();

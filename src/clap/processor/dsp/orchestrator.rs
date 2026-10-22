@@ -32,7 +32,7 @@ use std::sync::atomic::Ordering;
 const MAX_SCHEDULED_EVENTS: usize = 4096;
 
 /// Minimum sub-block length retained when fusing gain-only event boundaries
-/// (F-UX-03 / S7-T7.2, Épico D).
+/// (F-UX-03).
 ///
 /// Gain parameters (`PARAM_INPUT_GAIN`/`PARAM_OUTPUT_GAIN`, value or
 /// modulation) are already continuously smoothed by [`ParamSmoother`], so a
@@ -44,7 +44,7 @@ const MAX_SCHEDULED_EVENTS: usize = 4096;
 /// that must stay sample-accurate (`gate`, `bypass`, `oversample`, `slim`,
 /// adaptive/activation) are unaffected.
 ///
-/// A value of `1` disables fusion entirely and reproduces the pre-S7 behavior
+/// A value of `1` disables fusion entirely and reproduces the un-fused behavior
 /// exactly (rollback switch). The window is additionally capped by
 /// [`MAX_GAIN_STEPS`]; exceeding it forces a boundary so the fused window can
 /// never grow unbounded.
@@ -73,13 +73,13 @@ impl<'a> NamClapProcessor<'a> {
         input_events: &InputEvents,
         start_nanos: u64,
     ) -> Result<ProcessStatus, PluginError> {
-        // S6-T0 note (implementation): when `prewarm_pending` is armed the
+        // Implementation note: when `prewarm_pending` is armed the
         // caller (`process()` above) drains the amortization window and
         // contains the block (dry via `dry_delay`, crossfade/gate/FSM held)
         // in `process_dry_contained_block` — this function is not reached
         // while the non-converged model is outstanding.
         //
-        // S6-T3 (F-UX-04): a non-finite input sample poisons the model. The
+        // Non-finite containment (F-UX-04): a non-finite input sample poisons the model. The
         // engine's input stage raises `RT_STATUS_NON_FINITE_INPUT_DETECTED`
         // (and sanitizes only its own slices — never the downstream scratch
         // buffers); the containment here restores the model to the
@@ -312,7 +312,7 @@ impl<'a> NamClapProcessor<'a> {
                 continue;
             };
 
-            // S6-T3 (F-UX-04): non-finite containment is handled *before* this
+            // Non-finite containment (F-UX-04): non-finite containment is handled *before* this
             // loop by the two-phase window at the top of the function, so a
             // poisoning block never reaches the wet pipeline and the flag is
             // consumed exactly once per occurrence.

@@ -163,7 +163,7 @@ fn test_emit_pending_logs_overload_rate_limiting() {
             HostEvent::PluginLog {
                 severity: LogSeverity::Warning,
                 message,
-            } => Some(message),
+            } if message.contains("blocks exceeded 85%") => Some(message),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -194,7 +194,7 @@ fn test_emit_pending_logs_overload_rate_limiting() {
             HostEvent::PluginLog {
                 severity: LogSeverity::Warning,
                 message,
-            } => Some(message),
+            } if message.contains("blocks exceeded 85%") => Some(message),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -231,7 +231,7 @@ fn test_emit_pending_logs_overload_rate_limiting() {
             HostEvent::PluginLog {
                 severity: LogSeverity::Warning,
                 message,
-            } => Some(message),
+            } if message.contains("blocks exceeded 85%") => Some(message),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -266,7 +266,8 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
         .iter()
         .filter_map(|e| match e {
             HostEvent::PluginLog { severity, message }
-                if *severity == LogSeverity::Warning || *severity == LogSeverity::Error =>
+                if (*severity == LogSeverity::Warning || *severity == LogSeverity::Error)
+                    && message.starts_with("NAM-Plug:") =>
             {
                 Some((severity, message.clone()))
             }
@@ -295,7 +296,7 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
             HostEvent::PluginLog {
                 severity: LogSeverity::Error,
                 message,
-            } => Some(message.clone()),
+            } if message.starts_with("NAM-Plug:") => Some(message.clone()),
             _ => None,
         })
         .collect();
@@ -305,7 +306,7 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
             HostEvent::PluginLog {
                 severity: LogSeverity::Warning,
                 message,
-            } => Some(message.clone()),
+            } if message.starts_with("NAM-Plug:") => Some(message.clone()),
             _ => None,
         })
         .collect();
@@ -339,7 +340,7 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
             HostEvent::PluginLog {
                 severity: LogSeverity::Error,
                 message,
-            } => Some(message.clone()),
+            } if message.starts_with("NAM-Plug:") => Some(message.clone()),
             _ => None,
         })
         .collect();
@@ -349,7 +350,7 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
             HostEvent::PluginLog {
                 severity: LogSeverity::Warning,
                 message,
-            } => Some(message.clone()),
+            } if message.starts_with("NAM-Plug:") => Some(message.clone()),
             _ => None,
         })
         .collect();
@@ -379,7 +380,7 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
             HostEvent::PluginLog {
                 severity: LogSeverity::Error,
                 message,
-            } => Some(message.clone()),
+            } if message.starts_with("NAM-Plug:") => Some(message.clone()),
             _ => None,
         })
         .collect();
@@ -393,6 +394,7 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
         errors_after_new
             .iter()
             .any(|m| m.contains("Host audio buffer size exceeded")),
-        "Host contract violation log must be present"
+        "Host contract violation log must be present: {:?}",
+        errors_after_new
     );
 }

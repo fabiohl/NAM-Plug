@@ -24,8 +24,13 @@
 //! FIXTURE_SHA256: <hex>         (optional, referenced input fixture)
 //! ARTIFACT_SHA256: <hex>        (optional, referenced built artifact)
 //! CLAP_CPP_PARITY: PASS         (optional evidence flag)
+//! CLAP_OS_PARITY: PASS          (optional evidence flag)
 //! CABSIM_IR: PASS               (optional evidence flag)
-//! RT_CODEGEN: PASS              (optional evidence flag)
+//! CABSIM_PARITY: PASS           (optional evidence flag)
+//! RT_CODEGEN: PASS symbols=7 instructions=14115   (optional evidence flag;
+//!                               PASS may carry `key=uint` metric tokens)
+//! PRE_BOLT_SYMBOLS: <uint>|n/a  (optional provenance telemetry)
+//! POST_BOLT_SYMBOLS: <uint>|n/a (optional provenance telemetry)
 //! HEAP_AUDIT=RAN                (optional evidence flag)
 //! GAP: <typed reason>           (zero or more)
 //! OVERALL: PASSED|COMPLETED_WITH_GAPS|FAIL [reason=...]
@@ -75,9 +80,17 @@ pub struct QuickReceipt {
     pub fixture_sha256: Option<String>,
     /// Referenced built-artifact hash.
     pub artifact_sha256: Option<String>,
-    /// Evidence flags proven by the run (`CLAP_CPP_PARITY`, `CABSIM_IR`,
-    /// `RT_CODEGEN`, `HEAP_AUDIT`).
+    /// Evidence flags proven by the run (`CLAP_CPP_PARITY`, `CLAP_OS_PARITY`,
+    /// `CABSIM_IR`, `CABSIM_PARITY`, `RT_CODEGEN`, `HEAP_AUDIT`).
     pub evidence: BTreeSet<String>,
+    /// Numeric metrics attached to an evidence verdict, keyed by flag and then
+    /// by metric name (e.g. `RT_CODEGEN.symbols`). Metrics are provenance only
+    /// and never influence the pass/fail verdict.
+    pub evidence_metrics: BTreeMap<String, BTreeMap<String, u64>>,
+    /// Pre-BOLT symbol count provenance (optional; e.g. "7" or "n/a").
+    pub pre_bolt_symbols: Option<String>,
+    /// Post-BOLT symbol count provenance (optional; e.g. "7" or "n/a").
+    pub post_bolt_symbols: Option<String>,
     /// Typed `GAP:` reasons.
     pub gaps: Vec<String>,
     /// `OVERALL:` verdict token.
@@ -88,7 +101,26 @@ pub struct QuickReceipt {
 pub const QUICK_PHASES: [&str; 3] = ["PHASE1", "PHASE2", "PHASE3"];
 
 /// Canonical evidence flag identifiers.
-const EVIDENCE_FLAGS: [&str; 3] = ["CLAP_CPP_PARITY", "CABSIM_IR", "RT_CODEGEN"];
+const EVIDENCE_FLAGS: [&str; 5] = [
+    "CLAP_CPP_PARITY",
+    "CLAP_OS_PARITY",
+    "CABSIM_IR",
+    "CABSIM_PARITY",
+    "RT_CODEGEN",
+];
+
+/// Parses a `key=uint` metric token, accepting only `[a-z_]+` keys.
+fn parse_metric_token(token: &str) -> Option<(&str, u64)> {
+    let (key, value) = token.split_once('=')?;
+    if key.is_empty()
+        || !key.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        || value.is_empty()
+        || !value.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    value.parse::<u64>().ok().map(|v| (key, v))
+}
 
 /// Parses an optional `key=value` token from a detail string.
 fn parse_kv<'a>(tokens: &'a str, key: &str) -> Option<&'a str> {
@@ -148,7 +180,10 @@ pub fn parse_quick_receipt(text: &str) -> Result<QuickReceipt, String> {
     let mut oracle_sha256: Option<String> = None;
     let mut fixture_sha256: Option<String> = None;
     let mut artifact_sha256: Option<String> = None;
+    let mut pre_bolt_symbols: Option<String> = None;
+    let mut post_bolt_symbols: Option<String> = None;
     let mut evidence: BTreeSet<String> = BTreeSet::new();
+    let mut evidence_metrics: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
     let mut gaps: Vec<String> = Vec::new();
     let mut overall: Option<String> = None;
 
@@ -186,9 +221,13 @@ pub fn parse_quick_receipt(text: &str) -> Result<QuickReceipt, String> {
         } else if let Some(v) = line.strip_prefix("GAP:") {
             gaps.push(v.trim().to_string());
         } else if line.starts_with("PHASE")
-            && (line.contains("_COMPILE_S:") || line.contains("_RUN_S:"))
+            && (line.contains("_COMPILE_S:")
+                || line.contains("_RUN_S:")
+                || line.contains("_BUILD_S:")
+                || line.contains("_CODEGEN_S:"))
         {
-            // Optional phase compile/run telemetry emitted by cargo_test_budgeted (T2.1).
+            // Optional phase telemetry: test compile/run (cargo_test_budgeted),
+            // artifact build (ensure_clap_artifact) and static codegen scan.
             // Validated as non-negative integer or float seconds; ignored for semantic pass/fail gate.
             if let Some((key, val)) = line.split_once(':') {
                 let val = val.trim();
@@ -228,6 +267,26 @@ pub fn parse_quick_receipt(text: &str) -> Result<QuickReceipt, String> {
             if artifact_sha256.replace(v.trim().to_string()).is_some() {
                 return Err(format!("line {lineno}: duplicate ARTIFACT_SHA256: line"));
             }
+        } else if let Some(v) = line.strip_prefix("PRE_BOLT_SYMBOLS:") {
+            let val = v.trim();
+            if val != "n/a" && val.parse::<u64>().is_err() {
+                return Err(format!(
+                    "line {lineno}: invalid PRE_BOLT_SYMBOLS value {val:?} (expected uint or n/a)"
+                ));
+            }
+            if pre_bolt_symbols.replace(val.to_string()).is_some() {
+                return Err(format!("line {lineno}: duplicate PRE_BOLT_SYMBOLS: line"));
+            }
+        } else if let Some(v) = line.strip_prefix("POST_BOLT_SYMBOLS:") {
+            let val = v.trim();
+            if val != "n/a" && val.parse::<u64>().is_err() {
+                return Err(format!(
+                    "line {lineno}: invalid POST_BOLT_SYMBOLS value {val:?} (expected uint or n/a)"
+                ));
+            }
+            if post_bolt_symbols.replace(val.to_string()).is_some() {
+                return Err(format!("line {lineno}: duplicate POST_BOLT_SYMBOLS: line"));
+            }
         } else if let Some(v) = line.strip_prefix("HEAP_AUDIT=") {
             if v.trim() != "RAN" {
                 return Err(format!(
@@ -241,14 +300,35 @@ pub fn parse_quick_receipt(text: &str) -> Result<QuickReceipt, String> {
         } else if let Some((key, v)) = line.split_once(':') {
             let key = key.trim();
             if EVIDENCE_FLAGS.contains(&key) {
-                if v.trim() != "PASS" {
+                let mut tokens = v.split_whitespace();
+                let verdict = tokens.next().unwrap_or("");
+                if verdict != "PASS" {
                     return Err(format!(
-                        "line {lineno}: invalid {key} value {:?} (expected PASS)",
+                        "line {lineno}: invalid {key} value {:?} (expected PASS, got token {verdict:?})",
                         v.trim()
                     ));
                 }
+                let mut metrics = BTreeMap::new();
+                for token in tokens {
+                    let (metric, value) = match parse_metric_token(token) {
+                        Some(parsed) => parsed,
+                        None => {
+                            return Err(format!(
+                                "line {lineno}: invalid {key} metric token {token:?} (expected [a-z_]+=<uint>)"
+                            ));
+                        }
+                    };
+                    if metrics.insert(metric.to_string(), value).is_some() {
+                        return Err(format!(
+                            "line {lineno}: duplicate {key} metric token {token:?}"
+                        ));
+                    }
+                }
                 if !evidence.insert(key.to_string()) {
                     return Err(format!("line {lineno}: duplicate {key}: line"));
+                }
+                if !metrics.is_empty() {
+                    evidence_metrics.insert(key.to_string(), metrics);
                 }
             } else {
                 return Err(format!(
@@ -298,6 +378,9 @@ pub fn parse_quick_receipt(text: &str) -> Result<QuickReceipt, String> {
         fixture_sha256,
         artifact_sha256,
         evidence,
+        evidence_metrics,
+        pre_bolt_symbols,
+        post_bolt_symbols,
         gaps,
         overall,
     })

@@ -124,7 +124,7 @@ cd "$PROJECT_DIR"
 # the test suites, so it defaults to a 10G cap; override with NAM_MEM_GUARD_MAX.
 export NAM_MEM_GUARD_MAX="${NAM_MEM_GUARD_MAX:-10G}"
 export NAM_MEM_GUARD_HIGH="${NAM_MEM_GUARD_HIGH:-8G}"
-if [ "${NAM_MEM_GUARD:-0}" != "1" ] && [ "${NAM_NO_MEM_GUARD:-0}" != "1" ]; then
+if [ "${NAM_MEM_GUARD:-0}" != "1" ] && [ "${NAM_MEM_GUARD_ACTIVE:-0}" != "1" ] && [ "${NAM_NO_MEM_GUARD:-0}" != "1" ]; then
     export NAM_MEM_GUARD=1
     exec "$SCRIPT_DIR/mem-guard.sh" "$SCRIPT_PATH" "${ORIGINAL_ARGS[@]}"
 fi
@@ -225,6 +225,23 @@ ORIG_PARANOID=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "2"
 PARANOID_MODIFIED=false
 WORKLOAD_PID=""
 declare -a GATE_SKIPS=()
+
+# PGO workload evidence recorded in the release receipt (S3.2–S3.4).
+PGO_WORKLOAD_LOG="$PROJECT_DIR/target/logs/pgo-workload.log"
+PGO_WORKLOAD_RECEIPT="$PROJECT_DIR/target/pgo-workload-receipt.json"
+PGO_WORKLOAD_RAN_PHASE1=false
+PGO_WORKLOAD_RAN_BOLT=false
+PGO_CLIPPING_PHASE1=0
+PGO_CLIPPING_BOLT=0
+PGO_WORKLOAD_GAIN=""
+PGO_WORKLOAD_SCENARIOS=""
+PGO_WORKLOAD_CALLBACKS=""
+
+# Artifact parity gates (S3.1).
+PARITY_OVERSAMPLE_STATUS="SKIP"
+PARITY_OVERSAMPLE_REASON=""
+PARITY_CABSIM_STATUS="SKIP"
+PARITY_CABSIM_REASON=""
 
 # Dynamic isolated temporary directories for PGO & BOLT profiling and packaging
 PGO_DIR="$(mktemp -d -t nam-plug-pgo.XXXXXX)"
@@ -332,6 +349,14 @@ except Exception:
 # Deliverable Targets
 CLAP_INSTALL_DIR="$HOME/.clap"
 CLAP_TARGET="$CLAP_INSTALL_DIR/nam_plug.clap"
+
+# Artifact installed by the previous session, captured before this pipeline
+# overwrites it. The long-audit receipt is bound to this hash: a receipt that
+# describes a different binary is not evidence for this build.
+INSTALLED_AT_START_SHA=""
+if [ -f "$CLAP_TARGET" ]; then
+    INSTALLED_AT_START_SHA=$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)
+fi
 
 # -----------------------------------------------------------------------------
 # PHASE 1: Environment & Dependency Verification
@@ -443,6 +468,7 @@ echo -e "\n${BLUE}${BOLD}[Phase 1.5/7] Executing strict Quick QA & RT Heap Alloc
 
 QUICK_RECEIPT="$PROJECT_DIR/target/logs/quick-receipt.txt"
 HEAP_LOG="$PROJECT_DIR/target/logs/quick-heap-audit.log"
+QUICK_RECEIPT_CHECK_LOG="$PROJECT_DIR/target/logs/quick-receipt-check.log"
 
 # Discovery helper for NAMCore render oracle
 find_namcore_render() {
@@ -486,9 +512,53 @@ if [ -z "${NAM_CORE_RENDER_BIN:-}" ]; then
     fi
 fi
 
-if [ "${NAM_SKIP_QUICK_QA:-0}" != "1" ]; then
+# Semantic verification of the quick receipt — never a substring search. The
+# declared OVERALL verdict must be consistent with the phase/gap evidence in the
+# same receipt; a green token pasted into a comment is rejected (fail-closed).
+# The same failure is reported once even though the gate is queried several times.
+_QUICK_RECEIPT_LAST_WARN=""
+quick_receipt_ok() {
+    local status=0 err="" last=""
+    mkdir -p "$(dirname "$QUICK_RECEIPT_CHECK_LOG")"
+    err=$(cargo run --quiet --locked --bin quick_receipt_check -- "$@" 2>&1 >/dev/null) || status=$?
+    printf '%s\n' "$err" > "$QUICK_RECEIPT_CHECK_LOG"
+    if [ "$status" -ne 0 ]; then
+        last=$(printf '%s\n' "$err" | grep -v '^[[:space:]]*$' | tail -n 1 || true)
+        if [ -n "$last" ] && [ "$last" != "$_QUICK_RECEIPT_LAST_WARN" ]; then
+            warn "quick receipt verification failed: $last (see target/logs/quick-receipt-check.log)"
+            _QUICK_RECEIPT_LAST_WARN="$last"
+        fi
+    fi
+    return "$status"
+}
+
+# Opt-in reuse (NAM_REUSE_QUICK_RECEIPT=1): skips the ~25 min quick suite only
+# when the existing receipt is provably still valid — strict run, OVERALL PASSED,
+# heap audit proven, ARTIFACT_SHA256 equal to the artifact being released and no
+# build input newer than the receipt. Any doubt falls back to a full run.
+quick_receipt_reusable() {
+    [ "${NAM_REUSE_QUICK_RECEIPT:-0}" = "1" ] || return 1
+    [ -f "$QUICK_RECEIPT" ] || return 1
+    local art sha newer
+    art="${CLAP_PLUGIN_UNDER_TEST:-${CLAP_PLUGIN_PATH:-${CARGO_TARGET_DIR:-target}/release/libnam_plug.so}}"
+    [ -f "$art" ] || return 1
+    sha=$(sha256sum "$art" | cut -d' ' -f1)
+    newer=$(find src tests Cargo.toml Cargo.lock .cargo build.rs \
+        utils/tests-quick.sh utils/verify_rt_codegen.sh \
+        -type f -newer "$QUICK_RECEIPT" -print -quit 2>/dev/null || true)
+    if [ -n "$newer" ]; then
+        warn "Quick receipt not reusable: '$newer' is newer than the receipt."
+        return 1
+    fi
+    quick_receipt_ok --require-passed --require-heap-audit --require-strict \
+        --expect-artifact-sha256 "$sha" "$QUICK_RECEIPT"
+}
+
+if [ "${NAM_SKIP_QUICK_QA:-0}" != "1" ] && quick_receipt_reusable; then
+    echo -e "  ${GREEN}✓${NC} Reusing strict quick receipt (artifact hash unchanged, no newer inputs); quick suite skipped."
+elif [ "${NAM_SKIP_QUICK_QA:-0}" != "1" ]; then
     local_quick_strict=0
-    if [ "$RELEASE_CEREMONY" = "true" ]; then
+    if [ "$RELEASE_CEREMONY" = "true" ] || [ "$STRICT_MODE" = "1" ]; then
         local_quick_strict=1
     fi
     NAM_QUICK_STRICT=$local_quick_strict "$SCRIPT_DIR/tests-quick.sh" || {
@@ -507,14 +577,7 @@ HEAP_AUDIT_PASSED=false
 QUICK_RECEIPT_SHA=""
 HEAP_AUDIT_LOG_SHA=""
 
-# Semantic verification of the quick receipt — never a substring search. The
-# declared OVERALL verdict must be consistent with the phase/gap evidence in the
-# same receipt; a green token pasted into a comment is rejected (fail-closed).
-quick_receipt_ok() {
-    cargo run --quiet --locked --bin quick_receipt_check -- "$@" >/dev/null 2>&1
-}
-
-if [ -f "$QUICK_RECEIPT" ] && quick_receipt_ok "$QUICK_RECEIPT"; then
+if [ -f "$QUICK_RECEIPT" ] && quick_receipt_ok --require-passed "$QUICK_RECEIPT"; then
     QUICK_QA_PASSED=true
     QUICK_RECEIPT_SHA=$(sha256sum "$QUICK_RECEIPT" | cut -d' ' -f1)
 fi
@@ -522,6 +585,33 @@ fi
 if [ -f "$HEAP_LOG" ] && [ -f "$QUICK_RECEIPT" ] && quick_receipt_ok --require-heap-audit "$QUICK_RECEIPT"; then
     HEAP_AUDIT_PASSED=true
     HEAP_AUDIT_LOG_SHA=$(sha256sum "$HEAP_LOG" | cut -d' ' -f1)
+fi
+
+# The quick suite tests the release `.so` (pre-PGO/BOLT), not the installed
+# binary, and its strictness is independent of this build. Record both facts
+# explicitly instead of letting a green OVERALL imply "strict, installed artifact".
+QUICK_RECEIPT_ARTIFACT_SHA=""
+QUICK_RECEIPT_STRICT=""
+if [ -f "$QUICK_RECEIPT" ]; then
+    QUICK_RECEIPT_ARTIFACT_SHA=$(awk '/^ARTIFACT_SHA256: /{print $2; exit}' "$QUICK_RECEIPT" || true)
+    QUICK_RECEIPT_STRICT=$(awk '/^STRICT: /{print $2; exit}' "$QUICK_RECEIPT" || true)
+fi
+
+# Gaps declared by the quick suite are never silently accepted: propagate each
+# one as a typed gate skip, and fail closed in strict/ceremony builds.
+QUICK_GAPS=()
+if [ -f "$QUICK_RECEIPT" ]; then
+    while IFS= read -r quick_gap; do
+        [ -n "$quick_gap" ] || continue
+        QUICK_GAPS+=("$quick_gap")
+        GATE_SKIPS+=("quick_gap:$quick_gap")
+    done < <(sed -n 's/^GAP:[[:space:]]*//p' "$QUICK_RECEIPT")
+fi
+if [ ${#QUICK_GAPS[@]} -gt 0 ]; then
+    if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+        die "Quick QA receipt declares gaps in strict release mode: ${QUICK_GAPS[*]}"
+    fi
+    warn "Quick QA receipt gaps propagated to the release receipt: ${QUICK_GAPS[*]}"
 fi
 
 if [ "$QUICK_QA_PASSED" = true ] && [ "$HEAP_AUDIT_PASSED" = true ]; then
@@ -534,6 +624,19 @@ else
     fi
     warn "Quick QA preflight or heap audit not fully verified."
     GATE_SKIPS+=("quick_qa:unverified")
+fi
+
+# -----------------------------------------------------------------------------
+# GUI/X11 evidence: the real-window tests are #[ignore]d (they need a dedicated
+# Xvfb) and only run through utils/tests-gui.sh. A release must not silently
+# omit them, so a missing/failed/simulated GUI receipt becomes a typed gap.
+# -----------------------------------------------------------------------------
+GUI_RECEIPT_PATH="$PROJECT_DIR/target/logs/gui-receipt.txt"
+if [ -s "$GUI_RECEIPT_PATH" ] && grep -q '^gui_test_suite status=PASS' "$GUI_RECEIPT_PATH"; then
+    echo -e "  ${GREEN}✓${NC} GUI/X11 test receipt present (status=PASS)."
+else
+    warn "No passing GUI/X11 receipt (target/logs/gui-receipt.txt): run utils/tests-gui.sh — typed gap gui_tests:unverified."
+    GATE_SKIPS+=("gui_tests:unverified")
 fi
 
 # -----------------------------------------------------------------------------
@@ -571,10 +674,25 @@ if [ "$USE_PGO" = true ]; then
     }
 
     echo -e "  Executing PGO profiling workload..."
-    LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw" timeout 60 "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" || {
+    mkdir -p "$PROJECT_DIR/target/logs"
+    LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw" timeout 60 "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" 2>&1 | tee "$PGO_WORKLOAD_LOG" || {
         echo -e "${RED}Error: pgo_profiling_workload failed (or timed out after 60s). Cannot generate PGO profiles.${NC}"
         exit 1
     }
+    PGO_WORKLOAD_RAN_PHASE1=true
+    PGO_CLIPPING_PHASE1=$(grep -c "Output clipping" "$PGO_WORKLOAD_LOG" || true)
+    if [ "${PGO_CLIPPING_PHASE1:-0}" -gt 0 ]; then
+        # A profile trained on clipped output is not representative of the
+        # shipped signal path: fail closed in strict/ceremony mode and keep a
+        # typed gap otherwise (never a silent WARN-only pass).
+        if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+            die "PGO workload reported $PGO_CLIPPING_PHASE1 output-clipping warning(s); refusing to train/certify in a clipping regime (see $PGO_WORKLOAD_LOG)."
+        fi
+        GATE_SKIPS+=("pgo_workload:clipping")
+        warn "PGO workload reported $PGO_CLIPPING_PHASE1 output-clipping warning(s); the profile trains in a clipping regime (typed gap pgo_workload:clipping; see $PGO_WORKLOAD_LOG)."
+    else
+        echo -e "  ${GREEN}✓${NC} PGO workload profile is clipping-free (grep -c \"Output clipping\" = 0)."
+    fi
 
     PROFRAW_COUNT=$(find "$PROFRAW_DIR" -name "*.profraw" 2>/dev/null | wc -l)
     if [ "$PROFRAW_COUNT" -eq 0 ]; then
@@ -663,9 +781,29 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
         # Clean any stale fdata files and previous workload receipt before profiling
         rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.* "$BOLT_DIR/libnam_plug.merged.fdata" "$PROJECT_DIR/target/pgo-workload-receipt.json"
 
-        if NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
-            "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload"; then
-            
+        # Append the BOLT run to the same evidence log so a single SHA covers
+        # both training phases. The run is checked for clipping exactly like
+        # the PGO phase (fail-closed in strict/ceremony mode).
+        mkdir -p "$(dirname "$PGO_WORKLOAD_LOG")"
+        # Without the PGO phase, discard any stale log so the BOLT clipping
+        # count cannot be inflated by a previous run.
+        if [ "$PGO_WORKLOAD_RAN_PHASE1" != true ]; then
+            : > "$PGO_WORKLOAD_LOG"
+        fi
+        set +e
+        NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
+            "$PGO_BUILD_TARGET_DIR/dist/pgo_profiling_workload" 2>&1 | tee -a "$PGO_WORKLOAD_LOG"
+        BOLT_WORKLOAD_RC=${PIPESTATUS[0]}
+        set -e
+        PGO_WORKLOAD_RAN_BOLT=true
+        PGO_CLIPPING_TOTAL=$(grep -c "Output clipping" "$PGO_WORKLOAD_LOG" 2>/dev/null || true)
+        PGO_CLIPPING_BOLT=$(( ${PGO_CLIPPING_TOTAL:-0} - ${PGO_CLIPPING_PHASE1:-0} ))
+        if [ "${PGO_CLIPPING_BOLT:-0}" -lt 0 ]; then
+            PGO_CLIPPING_BOLT=0
+        fi
+
+        if [ "$BOLT_WORKLOAD_RC" -eq 0 ]; then
+
             # Verify workload completion receipt
             if [ -f "$PROJECT_DIR/target/pgo-workload-receipt.json" ] && grep -q '"status": "SUCCESS"' "$PROJECT_DIR/target/pgo-workload-receipt.json"; then
                 echo -e "  ${GREEN}✓${NC} CLAP profile collected and workload receipt verified."
@@ -684,6 +822,16 @@ if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
                 die "CLAP BOLT profiling workload failed in strict release mode."
             fi
             echo -e "${YELLOW}  Warning: Proceeding without BOLT optimization (partial fdata purged).${NC}"
+        fi
+
+        if [ "${PGO_CLIPPING_BOLT:-0}" -gt 0 ]; then
+            if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+                die "BOLT workload reported $PGO_CLIPPING_BOLT output-clipping warning(s); refusing to certify in a clipping regime (see $PGO_WORKLOAD_LOG)."
+            fi
+            GATE_SKIPS+=("pgo_workload:clipping")
+            warn "BOLT workload reported $PGO_CLIPPING_BOLT output-clipping warning(s); typed gap pgo_workload:clipping (see $PGO_WORKLOAD_LOG)."
+        else
+            echo -e "  ${GREEN}✓${NC} BOLT workload profile is clipping-free (grep -c \"Output clipping\" delta = 0)."
         fi
 
         # Merge fdata profiles
@@ -754,14 +902,21 @@ else
     echo -e "\n${YELLOW}[Phase 4/7] Skipping BOLT optimization.${NC}"
 fi
 
+# A claimed BOLT application must be backed by the optimized artifact. Losing
+# the file between phases would otherwise silently ship the pre-BOLT `.so`
+# while the receipt says `bolt_applied: true`.
+if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ ! -s "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
+    die "CLAP_BOLT_APPLIED=true but the optimized artifact is missing: $PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so (fail-closed)."
+fi
+
 # -----------------------------------------------------------------------------
-# PHASE 4.1: BOLT ceremony proof (S6-T3)
+# PHASE 4.1: BOLT ceremony proof
 # -----------------------------------------------------------------------------
-# A `PGO+BOLT` claim must be independently proven. Two accepted proofs:
-#   * the canonical `ab-opt-ceremony-receipt.json` with verdict `PGO+BOLT` over
-#     >= 3 runs (shared ceremony format), verified here;
-#   * this build's own measured performance gate (`PERF_GATE_STATUS=PASSED`),
-#     applied as a fallback after the perf phase.
+# A `PGO+BOLT` *win* must be independently proven. Only the canonical
+# `ab-opt-ceremony-receipt.json` (verdict `PGO+BOLT`, >= 3 runs, positive
+# measured gain) is accepted as `ab-opt-ceremony:<id>`. This build's measured
+# performance gate is recorded as `gate-pass-only`: it proves the shipped binary
+# meets the deadline envelope, not that BOLT beat PGO.
 # `bolt_profile_sha256` alone only proves a profile existed, not that the
 # transform won. Per-variant or stale `ab-opt-*.json` files are never accepted.
 BOLT_PROOF="MISSING"
@@ -785,6 +940,19 @@ except (TypeError, ValueError):
     runs = 0
 if runs < 3:
     sys.exit(0)
+# A ceremony may report a positive-gain confidence interval (`gain_ci_low > 0`)
+# or the canonical `bolt_gain_pct.mean` (negative percent = improvement).
+gain_ci = doc.get("gain_ci_low")
+try:
+    if gain_ci is not None:
+        if float(gain_ci) <= 0.0:
+            sys.exit(0)
+    else:
+        gain = (doc.get("bolt_gain_pct") or {}).get("mean")
+        if gain is None or float(gain) >= 0.0:
+            sys.exit(0)
+except (TypeError, ValueError):
+    sys.exit(0)
 with open(path, "rb") as fh:
     digest = hashlib.sha256(fh.read()).hexdigest()
 lbr = doc.get("bolt_lbr") or {}
@@ -794,12 +962,12 @@ print(digest[:16], lbr.get("samples") or "", lbr.get("fdata_sha256") or "")
         BOLT_PROOF="ab-opt-ceremony:$proof_id"
         BOLT_LBR_SAMPLES="$ceremony_lbr"
         BOLT_LBR_FDATA_SHA256="$ceremony_sha"
-        echo -e "  ${GREEN}✓${NC} BOLT ceremony proof: $BOLT_PROOF (verdict PGO+BOLT, >=3 runs)"
+        echo -e "  ${GREEN}✓${NC} BOLT ceremony proof: $BOLT_PROOF (verdict PGO+BOLT, >=3 runs, positive measured gain)"
     else
         warn "Ceremony receipt present but does not prove a BOLT win; BOLT proof MISSING."
     fi
 else
-    warn "No canonical ceremony receipt at $CEREMONY_RECEIPT; BOLT proof MISSING (perf-gate fallback may apply)."
+    warn "No canonical ceremony receipt at $CEREMONY_RECEIPT; BOLT win unproven (gate-pass label may apply)."
 fi
 
 # -----------------------------------------------------------------------------
@@ -809,6 +977,11 @@ echo -e "\n${BLUE}${BOLD}[Phase 4.5/7] Generating AI-ready assembly hotspot repo
 
 ASM_TARGET="$PROJECT_DIR/target/dsp_hotpath.asm"
 mkdir -p "$PROJECT_DIR/target"
+mkdir -p "$PROJECT_DIR/target/logs"
+CODEGEN_PRE_JSON="$PROJECT_DIR/target/logs/codegen-pre-bolt.json"
+CODEGEN_POST_JSON="$PROJECT_DIR/target/logs/codegen-post-bolt.json"
+CODEGEN_COMPARISON="not_run"
+rm -f "$CODEGEN_PRE_JSON" "$CODEGEN_POST_JSON"
 
 if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
     ASM_BIN="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so"
@@ -918,7 +1091,8 @@ PYEOF
     if [ -x "$SCRIPT_DIR/verify_rt_codegen.sh" ]; then
         if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
             echo -e "  ${BLUE}→ Enforcing real-time codegen static invariants on pre-BOLT libnam_plug.so...${NC}"
-            if ! "$SCRIPT_DIR/verify_rt_codegen.sh" "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so"; then
+            if ! "$SCRIPT_DIR/verify_rt_codegen.sh" "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" \
+                --json-out "$CODEGEN_PRE_JSON"; then
                 if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
                     die "RT codegen static gate failed on pre-BOLT artifact!"
                 else
@@ -927,11 +1101,95 @@ PYEOF
             fi
         fi
         echo -e "  ${BLUE}→ Enforcing real-time codegen static invariants on $(basename "$ASM_BIN")...${NC}"
-        if ! "$SCRIPT_DIR/verify_rt_codegen.sh" "$ASM_BIN"; then
+        if ! "$SCRIPT_DIR/verify_rt_codegen.sh" "$ASM_BIN" --json-out "$CODEGEN_POST_JSON"; then
             if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
                 die "RT codegen static gate failed on release artifact ($ASM_BIN)!"
             else
                 warn "RT codegen static gate reported violations (non-strict mode)."
+            fi
+        fi
+
+        # Post-BOLT coverage must not shrink silently: BOLT reorders functions and
+        # keeps cold/unmoved bodies in `.bolt.org.text`, so accepting suffixes and
+        # disassembling per symbol is what makes the post-link check meaningful.
+        CODEGEN_COMPARISON="$(python3 - "$CODEGEN_PRE_JSON" "$CODEGEN_POST_JSON" <<'PY'
+import json
+import sys
+
+
+def load(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+pre = load(sys.argv[1])
+post = load(sys.argv[2])
+if pre is None and post is None:
+    print("absent")
+elif pre is None:
+    print("post_only")
+elif post is None:
+    print("pre_only")
+else:
+    fewer_targets = int(post.get("targets_matched", 0)) < int(pre.get("targets_matched", 0))
+    fewer_symbols = int(post.get("symbols", 0)) < int(pre.get("symbols", 0))
+    if fewer_targets and fewer_symbols:
+        print("post_has_fewer_symbols_and_targets")
+    elif fewer_targets:
+        print("post_has_fewer_targets")
+    elif fewer_symbols:
+        print("post_has_fewer_symbols")
+    else:
+        print("match")
+PY
+)"
+        case "$CODEGEN_COMPARISON" in
+            match)
+                PRE_SUMMARY="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("{} symbols/{} instr, {}/{} targets".format(d["symbols"], d["instructions"], d["targets_matched"], d["targets_total"]))' "$CODEGEN_PRE_JSON")"
+                POST_SUMMARY="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("{} symbols/{} instr, {}/{} targets".format(d["symbols"], d["instructions"], d["targets_matched"], d["targets_total"]))' "$CODEGEN_POST_JSON")"
+                ok "Post-BOLT codegen coverage matches pre-BOLT (pre: ${PRE_SUMMARY}; post: ${POST_SUMMARY})."
+                ;;
+            post_has_fewer_*)
+                if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+                    die "Post-BOLT codegen coverage shrank ($CODEGEN_COMPARISON): the shipped binary lost hot-path symbols/targets verified before BOLT."
+                fi
+                GATE_SKIPS+=("codegen:$CODEGEN_COMPARISON")
+                warn "Post-BOLT codegen coverage shrank ($CODEGEN_COMPARISON) — typed gap recorded (non-strict mode)."
+                ;;
+            pre_only)
+                warn "No post-BOLT codegen metrics (BOLT not applied); nothing to compare against the pre-BOLT artifact."
+                ;;
+            post_only)
+                warn "No pre-BOLT codegen metrics; post-BOLT coverage cannot be compared (typed provenance gap)."
+                GATE_SKIPS+=("codegen:pre_metrics_absent")
+                ;;
+            absent)
+                warn "Codegen metrics absent for both artifacts; post-BOLT coverage comparison skipped."
+                GATE_SKIPS+=("codegen:metrics_absent")
+                ;;
+            *)
+                warn "Unexpected codegen comparison verdict '$CODEGEN_COMPARISON'; recording typed gap."
+                GATE_SKIPS+=("codegen:comparison_unknown")
+                ;;
+        esac
+
+        # S3.5: the post-BOLT regression script must be reachable from the
+        # codegen driver, not only from a manual invocation. It re-verifies the
+        # real pre/post pair and the synthetic fail-closed case.
+        if [ "${CLAP_BOLT_APPLIED:-false}" = true ]; then
+            echo -e "  ${BLUE}→ Running post-BOLT codegen regression (real pre/post pair + synthetic removal)...${NC}"
+            if ! "$SCRIPT_DIR/verify_rt_codegen.sh" "$ASM_BIN" --post-bolt-regression \
+                > "$PROJECT_DIR/target/logs/post-bolt-codegen-regression.log" 2>&1; then
+                if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+                    die "Post-BOLT codegen regression failed (see target/logs/post-bolt-codegen-regression.log)."
+                fi
+                GATE_SKIPS+=("codegen:post_bolt_regression")
+                warn "Post-BOLT codegen regression failed; typed gap codegen:post_bolt_regression."
+            else
+                ok "Post-BOLT codegen regression passed (real pre/post pair + synthetic removal)."
             fi
         fi
     fi
@@ -984,6 +1242,7 @@ else
 fi
 
 # Gate 3: NAMCore float parity test against distributed artifact
+model_fixture=""
 if [ -n "${NAM_FIXTURES_DIR:-}" ] && [ -f "$NAM_FIXTURES_DIR/wavenet_a1_standard.nam" ]; then
     model_fixture="$NAM_FIXTURES_DIR/wavenet_a1_standard.nam"
 elif [ -f "tests/fixtures/models/wavenet_a1_standard.nam" ]; then
@@ -997,6 +1256,13 @@ if [ -n "$model_fixture" ] && [ -f "$model_fixture" ]; then
     FIXTURE_SHA=$(sha256sum "$model_fixture" | cut -d' ' -f1)
 fi
 
+# Pre-build release integration test binaries without runtime timeout.
+# Cold release compilation (fat-LTO / 600+ targets) can take several minutes;
+# pre-building with --no-run ensures the 600s timeout in Gate 3 and Gate 4
+# guards only the test execution, measuring test behavior rather than the compiler.
+echo -e "  Pre-building release integration tests (clap) before certification gates..."
+cargo test --features testing --release --test clap --no-run
+
 # Gate 3: NAMCore float parity test against distributed artifact
 echo -e "  [Gate 3/5] Running NAMCore float parity test against distributed artifact..."
 if ORACLE_BIN=$(find_namcore_render); then
@@ -1007,12 +1273,32 @@ if ORACLE_BIN=$(find_namcore_render); then
             timeout 600 cargo test --features testing --release --test clap \
             test_clap_parity_multi_rate -- --ignored --nocapture
         ok "NAMCore float parity certified on distributed artifact."
+
+        # Gate 3b: artifact-level oversampling parity (2x/4x) on the exact
+        # installed bytes. Same oracle/artifact wiring as the matrix above.
+        echo -e "  [Gate 3b] Running artifact oversampling parity (2x/4x) against distributed artifact..."
+        if NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
+            timeout 600 cargo test --features testing --release --test clap \
+            test_clap_parity_oversample -- --ignored --nocapture; then
+            PARITY_OVERSAMPLE_STATUS="PASS"
+            ok "Artifact oversampling parity (2x/4x) certified on distributed artifact."
+        else
+            PARITY_OVERSAMPLE_STATUS="FAIL"
+            PARITY_OVERSAMPLE_REASON="divergence"
+            if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+                die "Artifact oversampling parity failed on the distributed artifact (NAMCore divergence)."
+            fi
+            GATE_SKIPS+=("parity_oversample:divergence")
+            warn "Artifact oversampling parity diverged from NAMCore; typed gap parity_oversample:divergence."
+        fi
     else
         if [ "$RELEASE_CEREMONY" = "true" ]; then
             die "Model fixture tests/fixtures/models/wavenet_a1_standard.nam missing in release ceremony mode!"
         fi
         warn "Model fixture missing. Skipping parity test."
         GATE_SKIPS+=("namcore_parity:missing_model_fixture")
+        PARITY_OVERSAMPLE_STATUS="SKIP"
+        PARITY_OVERSAMPLE_REASON="missing_model_fixture"
     fi
 else
     if [ "$RELEASE_CEREMONY" = "true" ]; then
@@ -1020,6 +1306,32 @@ else
     fi
     warn "NAMCore render binary missing. Skipping parity test."
     GATE_SKIPS+=("namcore_parity:missing_oracle_bin")
+    PARITY_OVERSAMPLE_STATUS="SKIP"
+    PARITY_OVERSAMPLE_REASON="missing_oracle_bin"
+    GATE_SKIPS+=("parity_oversample:missing_oracle_bin")
+fi
+
+# Gate 3c: artifact-level CabSim parity. The reference is an independent
+# direct convolution of the artifact's certified IR-free output, so no C++
+# oracle is required; it still targets the installed bytes.
+echo -e "  [Gate 3c] Running artifact CabSim parity against distributed artifact..."
+if [ -f "$model_fixture" ] && CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" \
+    timeout 600 cargo test --features testing --release --test clap \
+    test_clap_parity_cabsim -- --ignored --nocapture; then
+    PARITY_CABSIM_STATUS="PASS"
+    ok "Artifact CabSim parity certified on distributed artifact."
+else
+    PARITY_CABSIM_STATUS="FAIL"
+    if [ ! -f "$model_fixture" ]; then
+        PARITY_CABSIM_REASON="missing_model_fixture"
+    else
+        PARITY_CABSIM_REASON="divergence"
+    fi
+    if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+        die "Artifact CabSim parity failed on the distributed artifact ($PARITY_CABSIM_REASON)."
+    fi
+    GATE_SKIPS+=("parity_cabsim:$PARITY_CABSIM_REASON")
+    warn "Artifact CabSim parity failed ($PARITY_CABSIM_REASON); typed gap parity_cabsim:$PARITY_CABSIM_REASON."
 fi
 
 # Gate 4: CabSim IR test against distributed artifact
@@ -1035,8 +1347,45 @@ PERF_REPORT_PATH="$PROJECT_DIR/target/perf-certification-report.json"
 PERF_REPORT_SHA=""
 PERF_GATE_STATUS="SKIPPED"
 
+# The certification gate must measure under the same core/priority policy as the
+# regression gate (utils/tests-performance-regression.sh); otherwise its p50 is
+# not comparable with Criterion or .performance-baselines. pick_bench_core comes
+# from the shared _lib_core.sh already sourced above (NAM_BENCH_CORE → isolated
+# core → nproc/2).
+PERF_BENCH_CORE="$(pick_bench_core)"
+export NAM_BENCH_CORE="$PERF_BENCH_CORE"
+PERF_PIN_CMD=()
+if command -v taskset >/dev/null 2>&1; then
+    PERF_PIN_CMD=(taskset -c "$PERF_BENCH_CORE")
+else
+    warn "taskset not found — performance certification gate will run without core pinning."
+fi
+PERF_SCHED_CMD=()
+PERF_SCHED_LABEL="SCHED_OTHER"
+if command -v chrt >/dev/null 2>&1 && chrt -f 80 true 2>/dev/null; then
+    PERF_SCHED_CMD=(chrt -f 80)
+    PERF_SCHED_LABEL="SCHED_FIFO:80"
+else
+    warn "SCHED_FIFO unavailable — performance certification gate will run under the default scheduling policy."
+fi
+PERF_REFERENCE_ARGS=()
+if [ -n "${NAM_PERF_REFERENCE_REPORT:-}" ]; then
+    if [ ! -f "$NAM_PERF_REFERENCE_REPORT" ]; then
+        die "NAM_PERF_REFERENCE_REPORT does not exist: $NAM_PERF_REFERENCE_REPORT"
+    fi
+    # Relative ceiling activation is gated on the operator's 3-run pinned noise
+    # calibration; once calibrated, point this at the previous report to make the
+    # gate fail on relative p50 regression instead of only on the absolute deadline.
+    PERF_REFERENCE_ARGS=(--reference "$NAM_PERF_REFERENCE_REPORT" \
+        --p50-ratio-max "${NAM_PERF_REFERENCE_P50_RATIO_MAX:-1.5}")
+    echo -e "  ${BLUE}→ Relative p50 ceiling: ${NAM_PERF_REFERENCE_P50_RATIO_MAX:-1.5}× vs ${NAM_PERF_REFERENCE_REPORT}${NC}"
+fi
+echo -e "  ${BLUE}→ Benchmark core: ${PERF_BENCH_CORE}; scheduling: ${PERF_SCHED_LABEL}${NC}"
+
 set +e
-cargo run --locked --profile dist --features testing --bin nam_perf_guard -- certify --clap "$CLAP_TARGET" --out "$PERF_REPORT_PATH"
+"${PERF_PIN_CMD[@]}" "${PERF_SCHED_CMD[@]}" \
+    cargo run --locked --profile dist --features testing --bin nam_perf_guard -- \
+    certify --clap "$CLAP_TARGET" --out "$PERF_REPORT_PATH" "${PERF_REFERENCE_ARGS[@]}"
 PERF_EXIT_CODE=$?
 set -e
 
@@ -1184,61 +1533,196 @@ GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 GIT_DIRTY=false
 if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
     GIT_DIRTY=true
+    # A rewritten lockfile is a deliberate dependency change, not an anonymous
+    # dirty tree: name the cause so the operator knows the next step.
+    if [ -n "$(git status --porcelain -- Cargo.lock 2>/dev/null || true)" ]; then
+        GATE_SKIPS+=("git_dirty:Cargo.lock")
+        warn "Cargo.lock differs from the committed lockfile — receipt cannot certify until it is committed (typed gap git_dirty:Cargo.lock)."
+    else
+        GATE_SKIPS+=("git_dirty:worktree")
+        warn "Working tree is dirty — receipt cannot certify (typed gap git_dirty:worktree)."
+    fi
 fi
 
 # -----------------------------------------------------------------------------
-# PHASE 4.2: BOLT proof fallback via the measured performance gate (S6-T3)
+# PHASE 4.2: BOLT label fallback via the measured performance gate
 # -----------------------------------------------------------------------------
-# The Plug ships no ab-opt ceremony producer, so its own measured performance
-# gate is the independent BOLT-win evidence: a PASSED gate promotes the claim to
-# proven (`perf-gate:<sha>`). Without any proof, an applied BOLT is recorded as a
-# typed skipped gate under --strict instead of a silent PGO+BOLT assertion.
+# The Plug ships no ab-opt ceremony producer (docs/testing.md §5.4.1). A PASSED
+# performance gate proves the deadline envelope, not a BOLT win, so it is
+# recorded as `gate-pass-only`; it never promotes the claim to a proof. An
+# applied BOLT without ceremony proof and without a passing gate remains a typed
+# gap in EVERY mode, so it can never yield a CERTIFIED receipt.
 if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ "$BOLT_PROOF" = "MISSING" ] && [ "$PERF_GATE_STATUS" = "PASSED" ]; then
-    BOLT_PROOF="perf-gate:${PERF_REPORT_SHA:0:16}"
-    echo -e "  ${GREEN}✓${NC} BOLT proof from measured performance gate: $BOLT_PROOF"
+    BOLT_PROOF="gate-pass-only"
+    warn "BOLT win unproven; recording explicit label '$BOLT_PROOF' (performance gate PASSED)."
 fi
 if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ "$BOLT_PROOF" = "MISSING" ]; then
-    # T5.3 fail-closed decision: NAM-Plug ships no `ab-opt-ceremony` producer, so
-    # BOLT is opt-out here and the only accepted independent win proof is this
-    # build's measured performance gate (promoted above). An applied-but-unproven
-    # BOLT is a typed gap in EVERY mode — never a silently acceptable
-    # `BOLT proof: MISSING` — so it can never yield a CERTIFIED receipt.
     GATE_SKIPS+=("bolt_proof:missing_ceremony")
     warn "BOLT applied but unproven (no ab-opt-ceremony receipt; perf gate not PASSED): typed gap bolt_proof:missing_ceremony."
 fi
 
-# Determine typed certification status (CERTIFIED, FUNCTIONALLY_CERTIFIED, INCOMPLETE)
-RECEIPT_STATUS="CERTIFIED"
-if [ "$GIT_DIRTY" = "true" ] || [ "${CORE_GIT_DIRTY:-false}" = "true" ]; then
-    RECEIPT_STATUS="INCOMPLETE"
-fi
-
-if [ ${#GATE_SKIPS[@]} -gt 0 ] || [ "$PERF_GATE_STATUS" = "FAILED" ] || [ "$QUICK_QA_PASSED" != true ] || [ "$HEAP_AUDIT_PASSED" != true ]; then
-    RECEIPT_STATUS="INCOMPLETE"
-elif [ "$PERF_GATE_STATUS" = "INCONCLUSIVE" ] || [ "$USE_PGO" = false ] || [ "${CLAP_BOLT_APPLIED:-false}" = false ]; then
-    if [ "$RECEIPT_STATUS" = "CERTIFIED" ]; then
-        RECEIPT_STATUS="FUNCTIONALLY_CERTIFIED"
+# -----------------------------------------------------------------------------
+# Long-audit artifact consistency (E-A)
+# -----------------------------------------------------------------------------
+# The long receipt is the only phase evidence that exercises the installed
+# binary. Compare the artifact it declares with the binary this pipeline just
+# installed; a receipt from another session (different artifact) is `absent`,
+# never silently credited.
+LONG_RECEIPT_PATH="$PROJECT_DIR/target/logs/long-audit-receipt.jsonl"
+ARTIFACT_CONSISTENCY="absent"
+LONG_RECEIPT_ARTIFACT_SHA=""
+LONG_RECEIPT_SESSION="none"
+if [ -f "$LONG_RECEIPT_PATH" ]; then
+    set +e
+    ARTIFACT_VERDICT_OUT=$(cargo run --quiet --locked --features testing --bin plug_long_receipt -- \
+        verify-artifact --out "$LONG_RECEIPT_PATH" --artifact "$CLAP_TARGET" 2>/dev/null)
+    ARTIFACT_VERDICT_RC=$?
+    set -e
+    LONG_RECEIPT_ARTIFACT_SHA=$(printf '%s\n' "$ARTIFACT_VERDICT_OUT" | awk '/^ARTIFACT_SHA256: /{print $2; exit}')
+    [ "$LONG_RECEIPT_ARTIFACT_SHA" = "-" ] && LONG_RECEIPT_ARTIFACT_SHA=""
+    if [ "$ARTIFACT_VERDICT_RC" = "1" ]; then
+        ARTIFACT_CONSISTENCY="mismatch"
+    elif [ "$ARTIFACT_VERDICT_RC" = "0" ]; then
+        ARTIFACT_CONSISTENCY="match"
+    else
+        ARTIFACT_CONSISTENCY="absent"
+    fi
+    if [ -n "$INSTALLED_AT_START_SHA" ] && [ -n "$LONG_RECEIPT_ARTIFACT_SHA" ]; then
+        if [ "$LONG_RECEIPT_ARTIFACT_SHA" = "$INSTALLED_AT_START_SHA" ]; then
+            LONG_RECEIPT_SESSION="current"
+        else
+            LONG_RECEIPT_SESSION="stale"
+            ARTIFACT_CONSISTENCY="absent"
+        fi
+    elif [ -n "$LONG_RECEIPT_ARTIFACT_SHA" ]; then
+        LONG_RECEIPT_SESSION="current"
+    fi
+    if [ "$ARTIFACT_CONSISTENCY" = "match" ]; then
+        echo -e "  ${GREEN}✓${NC} Long-audit receipt certifies the installed artifact (sha256: ${LONG_RECEIPT_ARTIFACT_SHA:0:16}...)."
+    else
+        warn "Long-audit artifact consistency: $ARTIFACT_CONSISTENCY (session=$LONG_RECEIPT_SESSION, receipt_sha=${LONG_RECEIPT_ARTIFACT_SHA:-none}, installed_sha=${FINAL_CLAP_SHA:-unknown})."
     fi
 fi
+ARTIFACT_GAP=$(receipt_artifact_gap "$ARTIFACT_CONSISTENCY")
+if [ -n "$ARTIFACT_GAP" ]; then
+    GATE_SKIPS+=("$ARTIFACT_GAP")
+    warn "Long-audit provenance is '$ARTIFACT_CONSISTENCY' — typed gap $ARTIFACT_GAP (finalized by utils/finalize-release-receipt.sh after the long suite)."
+fi
 
-GATE_SKIPS_JOINED="${GATE_SKIPS[*]:-}"
+# Determine typed certification status (CERTIFIED, FUNCTIONALLY_CERTIFIED, INCOMPLETE).
+# The rule lives in lib/_lib.sh so the post-long-audit finalizer never drifts.
+NON_ARTIFACT_SKIP_COUNT=0
+for skip in "${GATE_SKIPS[@]}"; do
+    case "$skip" in
+        artifact_consistency:*) ;;
+        *) NON_ARTIFACT_SKIP_COUNT=$((NON_ARTIFACT_SKIP_COUNT + 1)) ;;
+    esac
+done
+RECEIPT_STATUS=$(receipt_derive_status \
+    "$GIT_DIRTY" "${CORE_GIT_DIRTY:-false}" "$PERF_GATE_STATUS" \
+    "$QUICK_QA_PASSED" "$HEAP_AUDIT_PASSED" "$USE_PGO" \
+    "${CLAP_BOLT_APPLIED:-false}" "$NON_ARTIFACT_SKIP_COUNT")
+RECEIPT_STATUS=$(receipt_apply_artifact_cap \
+    "$RECEIPT_STATUS" "$ARTIFACT_CONSISTENCY" "$STRICT_MODE")
+
+GATE_SKIPS_JOINED=""
+if [ ${#GATE_SKIPS[@]} -gt 0 ]; then
+    GATE_SKIPS_JOINED=$(IFS='|'; printf '%s' "${GATE_SKIPS[*]}")
+fi
 if [ "$RECEIPT_STATUS" = "INCOMPLETE" ]; then
     warn "Receipt status INCOMPLETE: git_dirty=$GIT_DIRTY core_git_dirty=$CORE_GIT_DIRTY skipped_gates=[${GATE_SKIPS_JOINED:-(none)}]"
 fi
 
 CARGO_LOCK_SHA=$(sha256sum Cargo.lock 2>/dev/null | cut -d' ' -f1 || echo "")
+
+# -----------------------------------------------------------------------------
+# PGO workload evidence (S3.2–S3.4)
+# -----------------------------------------------------------------------------
+# The receipt records what actually trained the profile: the excitation gain,
+# both clipping counts, the scenario/callback coverage and the SHA of the log
+# that backs them. Missing evidence is explicit (`not_run`/null), never a
+# silently green block.
+PGO_CLIPPING_TOTAL_ALL=$(( ${PGO_CLIPPING_PHASE1:-0} + ${PGO_CLIPPING_BOLT:-0} ))
+PGO_WORKLOAD_STATUS="not_run"
+if [ "$PGO_WORKLOAD_RAN_PHASE1" = true ] || [ "$PGO_WORKLOAD_RAN_BOLT" = true ]; then
+    if [ "$PGO_CLIPPING_TOTAL_ALL" -gt 0 ]; then
+        PGO_WORKLOAD_STATUS="CLIPPED"
+    elif [ -f "$PGO_WORKLOAD_RECEIPT" ] && grep -q '"status": "SUCCESS"' "$PGO_WORKLOAD_RECEIPT"; then
+        PGO_WORKLOAD_STATUS="SUCCESS"
+    else
+        PGO_WORKLOAD_STATUS="FAILED"
+    fi
+fi
+if [ -f "$PGO_WORKLOAD_RECEIPT" ]; then
+    PGO_WORKLOAD_VALUES=$(python3 - "$PGO_WORKLOAD_RECEIPT" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        doc = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    print("- - -")
+    raise SystemExit(0)
+gain = doc.get("excitation_gain")
+print(
+    "-" if gain is None else repr(float(gain)),
+    doc.get("total_scenarios", "-"),
+    doc.get("total_callbacks", "-"),
+)
+PY
+)
+    read -r PGO_WORKLOAD_GAIN PGO_WORKLOAD_SCENARIOS PGO_WORKLOAD_CALLBACKS <<<"$PGO_WORKLOAD_VALUES"
+    [ "$PGO_WORKLOAD_GAIN" = "-" ] && PGO_WORKLOAD_GAIN=""
+    [ "$PGO_WORKLOAD_SCENARIOS" = "-" ] && PGO_WORKLOAD_SCENARIOS=""
+    [ "$PGO_WORKLOAD_CALLBACKS" = "-" ] && PGO_WORKLOAD_CALLBACKS=""
+fi
+PGO_WORKLOAD_LOG_SHA=""
+if [ -f "$PGO_WORKLOAD_LOG" ]; then
+    PGO_WORKLOAD_LOG_SHA=$(sha256sum "$PGO_WORKLOAD_LOG" | cut -d' ' -f1)
+fi
+
 RUSTC_VER=$(rustc --version 2>/dev/null || echo "unknown")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 RECEIPT_TMP="$(mktemp -t nam-plug-receipt.XXXXXX)"
-# S6-T3: pass the proof fields through the environment (not shell-interpolated
+# Pass the proof fields through the environment (not shell-interpolated
 # into the Python literal) so a filename/JSON-derived value can never break the
 # single-quoted literal or inject Python.
 export BOLT_PROOF BOLT_LBR_SAMPLES BOLT_LBR_FDATA_SHA256
+export CODEGEN_PRE_JSON CODEGEN_POST_JSON CODEGEN_COMPARISON
+export PGO_WORKLOAD_STATUS PGO_WORKLOAD_GAIN PGO_WORKLOAD_SCENARIOS PGO_WORKLOAD_CALLBACKS
+export PGO_CLIPPING_PHASE1 PGO_CLIPPING_BOLT PGO_WORKLOAD_LOG PGO_WORKLOAD_LOG_SHA
+export PARITY_OVERSAMPLE_STATUS PARITY_OVERSAMPLE_REASON
+export PARITY_CABSIM_STATUS PARITY_CABSIM_REASON
 python3 -c "
 import json, os, sys
 
 skipped_gates = [g for g in sys.argv[1].split('|') if g]
+
+def _load_codegen(path):
+    if not path:
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _int_or_none(value):
+    try:
+        return None if value in (None, '') else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value):
+    try:
+        return None if value in (None, '') else float(value)
+    except (TypeError, ValueError):
+        return None
+
 
 receipt = {
     'schema_version': '1.1',
@@ -1271,19 +1755,58 @@ receipt = {
         'status': 'PASSED' if bool('$QUICK_QA_PASSED' == 'true') else 'FAILED',
         'heap_audit_passed': bool('$HEAP_AUDIT_PASSED' == 'true'),
         'receipt_sha256': '$QUICK_RECEIPT_SHA' or None,
-        'heap_audit_log_sha256': '$HEAP_AUDIT_LOG_SHA' or None
+        'heap_audit_log_sha256': '$HEAP_AUDIT_LOG_SHA' or None,
+        # The quick suite exercises the pre-PGO/BOLT release `.so`; its observed
+        # hash and strictness must be explicit so a green OVERALL is never read
+        # as "strict run of the installed artifact".
+        'artifact_sha256': '$QUICK_RECEIPT_ARTIFACT_SHA' or None,
+        'strict': bool('$QUICK_RECEIPT_STRICT' == '1')
+    },
+    # Artifact-level parity gates (S3.1). Each entry names the exact installed
+    # bytes it exercised; a skipped oracle is explicit, never a PASS.
+    'gates': {
+        'parity_oversample': {
+            'status': os.environ.get('PARITY_OVERSAMPLE_STATUS', 'SKIP'),
+            'reason': os.environ.get('PARITY_OVERSAMPLE_REASON') or None,
+            'artifact_sha256': '$FINAL_CLAP_SHA'
+        },
+        'parity_cabsim': {
+            'status': os.environ.get('PARITY_CABSIM_STATUS', 'SKIP'),
+            'reason': os.environ.get('PARITY_CABSIM_REASON') or None,
+            'artifact_sha256': '$FINAL_CLAP_SHA'
+        }
     },
     'optimizations': {
         'pgo_applied': bool('$USE_PGO' == 'true'),
         'bolt_applied': bool('$CLAP_BOLT_APPLIED' == 'true'),
         'bolt_profile_sha256': '$BOLT_PROFILE_SHA' or None,
         'bolt_version': '$BOLT_VERSION' or None,
-        # S6-T3: independent proof that the BOLT transform actually won
-        # ('ab-opt-ceremony:<id>' | 'perf-gate:<id>'), or the explicit MISSING
-        # sentinel. Read from the environment to avoid literal injection.
+        # Independent win proof: only a valid `ab-opt-ceremony:<id>` receipt may
+        # claim a measured BOLT gain. A PASSED performance gate is labelled
+        # `gate-pass-only` and never promoted to a proof of a BOLT win.
         'bolt_proof': os.environ.get('BOLT_PROOF', 'MISSING') or 'MISSING',
         'bolt_lbr_samples': os.environ.get('BOLT_LBR_SAMPLES') or None,
-        'bolt_lbr_fdata_sha256': os.environ.get('BOLT_LBR_FDATA_SHA256') or None
+        'bolt_lbr_fdata_sha256': os.environ.get('BOLT_LBR_FDATA_SHA256') or None,
+        # Pre/post-link codegen coverage, so a post-BOLT verifier that silently
+        # inspects fewer targets is visible in the cryptographic receipt.
+        'codegen': {
+            'comparison': os.environ.get('CODEGEN_COMPARISON', 'not_run') or 'not_run',
+            'pre_bolt': _load_codegen(os.environ.get('CODEGEN_PRE_JSON')),
+            'post_bolt': _load_codegen(os.environ.get('CODEGEN_POST_JSON'))
+        },
+        # Flat convenience fields for the post-link coverage contract (S3.6).
+        'pre_bolt_symbols': (_load_codegen(os.environ.get('CODEGEN_PRE_JSON')) or {}).get('symbols'),
+        'post_bolt_symbols': (_load_codegen(os.environ.get('CODEGEN_POST_JSON')) or {}).get('symbols')
+    },
+    'pgo_workload': {
+        'status': os.environ.get('PGO_WORKLOAD_STATUS', 'not_run') or 'not_run',
+        'gain': _float_or_none(os.environ.get('PGO_WORKLOAD_GAIN')),
+        'scenarios': _int_or_none(os.environ.get('PGO_WORKLOAD_SCENARIOS')),
+        'callbacks': _int_or_none(os.environ.get('PGO_WORKLOAD_CALLBACKS')),
+        'clipping_count_phase1': _int_or_none(os.environ.get('PGO_CLIPPING_PHASE1')),
+        'clipping_count_bolt': _int_or_none(os.environ.get('PGO_CLIPPING_BOLT')),
+        'log_path': os.environ.get('PGO_WORKLOAD_LOG') or None,
+        'log_sha256': os.environ.get('PGO_WORKLOAD_LOG_SHA') or None
     },
     'performance_certification': {
         'gate_status': '$PERF_GATE_STATUS',
@@ -1293,6 +1816,11 @@ receipt = {
     'artifacts': {
         'clap_installed_path': '$CLAP_TARGET',
         'clap_installed_sha256': '$FINAL_CLAP_SHA',
+        'long_receipt_path': '$LONG_RECEIPT_PATH',
+        'long_receipt_artifact_sha256': '$LONG_RECEIPT_ARTIFACT_SHA' or None,
+        'long_receipt_session': '$LONG_RECEIPT_SESSION',
+        'artifact_consistency': '$ARTIFACT_CONSISTENCY',
+        'installed_sha256_at_build_start': '$INSTALLED_AT_START_SHA' or None,
         'tarball_path': '$TARBALL' if '$BUILD_TARBALL' == 'true' else None,
         'tarball_sha256': '$TARBALL_SHA' if '$BUILD_TARBALL' == 'true' else None,
         'flatpak_path': '$FLATPAK_BUNDLE' if '$BUILD_FLATPAK' == 'true' else None,

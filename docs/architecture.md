@@ -464,14 +464,14 @@ Host parameter automation and modulation (`ParamValueEvent` and `ParamModEvent`)
    - **Out-of-Bounds Events (`time >= n_samples`):** The event timestamp is clamped to `n_samples` and applied at the block close boundary before exiting `process_dsp_audio`, ensuring the parameter value is applied and never lost when `events.clear()` runs on the next cycle.
    - **RT Observability (`RT_STATUS_EVENT_TIMING_ANOMALY`):** Setting bit 32 (`1 << 32`) on `RtStatusFlags` provides lock-free, zero-alloc telemetry. The main thread detects and clears this bit in `emit_pending_logs()`, emitting structured diagnostics via `log::warn!` and `clap_host_log`. Zero I/O and zero logging occur in the audio callback.
 
-### 6.5 Two-Phase Non-Finite Containment (S6-T3 / F-UX-04)
+### 6.5 Two-Phase Non-Finite Containment (F-UX-04)
 
 A non-finite (NaN/Inf) host input sample would poison the recurrent model state
 and leak through the wet chain. The engine's input stage detects it at ~zero cost
 and raises `RT_STATUS_NON_FINITE_INPUT_DETECTED` (sanitizing only its own input
 slices). The **plugin-level containment** runs at the top of `process_dsp_audio`
 (`src/clap/processor/dsp/orchestrator.rs`) and is deliberately amortized like the
-seek/loop `reset()` (S6-T1), never a synchronous multi-millisecond `model.reset`:
+seek/loop `reset()`, never a synchronous multi-millisecond `model.reset`:
 
 1. **Consume once:** `check_flag` + `clear_flag` are performed together, so the
    containment runs **once per poisoning**, not once per block (the historical
@@ -634,7 +634,7 @@ before adoption (§3.3).
 - Lifetime: the worker owns an `Arc<GuiSharedState>` and is `alive_fence`-gated,
   so a load in progress can never dangle; teardown uses a bounded join with the
   `"nam-model-loader-reaper"` fallback.
-- **Adaptive structural rebuild offload (S6-T1 / F-UX-02):** the same worker
+- **Adaptive structural rebuild offload (F-UX-02):** the same worker
   also services the audio thread's two allocation-heavy structural refreshes —
   the WaveNet *slimmable* slice (`slice` + `prewarm` + `set_max_buffer_size`) and
   the *oversampling* engine pair (`OversampleEngine::new` ×2). Idle, the worker
@@ -645,7 +645,7 @@ before adoption (§3.3).
   command-ring push (`SetOversample`) and clears the flag — the fail-closed
   retain-on-full retry is unchanged, and a payload still awaiting consumption is
   never rebuilt. The flag→swap latency therefore no longer waits for the 250 ms
-  watchdog; a **fast watchdog cadence fallback (S6-T2)** re-arms the host timer at
+  watchdog; a **fast watchdog cadence fallback** re-arms the host timer at
   50 ms while a rebuild flag is still pending, restoring 250 ms once it clears.
 - Rollback: `NAM_SYNC_MODEL_LOAD=1` (read once at instance creation) forces the
   historical synchronous path. `NAM_SYNC_ADAPTIVE_REBUILD=1` reverts the
@@ -828,7 +828,7 @@ Enforces zero heap allocation on the audio thread:
 
 - Global memory interceptor (`CountingAllocator`) active under `--features "testing,heap-audit"`.
 - Static AST-light scanner (`utils/lib/verify_no_rt_alloc.sh`) parsing `src/clap/processor/` to verify zero `Box`, `Vec`, or `format!` invocations on the audio thread.
-- Static machine-code codegen guard (`utils/verify_rt_codegen.sh`) disassembling the compiled `.so` with `objdump` and running the unified NAM codegen filter (`utils/lib/dsp-hotpath-filter.py`) with the per-repo profile (`utils/codegen-profile.json`) to verify zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls.
+- Static machine-code codegen guard (`utils/verify_rt_codegen.sh`) disassembling the compiled `.so` with `objdump` and running the unified NAM codegen filter (`utils/lib/dsp-hotpath-filter.py`) with the per-repo profile (`utils/codegen-profile.json`) to verify zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls. Post-BOLT verification disassembles each matched symbol within its declared size and normalizes `.bolt.org.text*` to `.text*`, then `build-release.sh` compares pre/post coverage so a BOLT pass that silently verifies fewer targets fails strict/ceremony builds.
 
 ### 9.5 Headless GUI Testing (Xvfb)
 
@@ -847,6 +847,10 @@ CLI gate executing realistic inference workloads against the finalized, stripped
 - Validates real-time deadline margins against strict thresholds.
 - Detects host environmental noise / thermal anomalies, emitting a structured JSON certification report (`target/perf-certification-report.json`).
 - Requires a deterministic isolated CPU environment configured via GRUB kernel parameters (`isolcpus=managed_irq,domain,...`, `nohz_full`, `rcu_nocbs`, `clocksource=tsc`) and pinned execution via `taskset -c <core>` to eliminate environmental noise and guarantee reproducible baselines (detailed in [`docs/testing.md`](./testing.md#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset)).
+
+#### 9.7.1 BOLT Win-Proof Policy
+
+LLVM-BOLT is opt-out in `NAM-Plug`: there is no `ab-opt-ceremony` producer, so a measured BOLT *win* is never claimed from this repository. A passing performance gate is recorded as the explicit label `bolt_proof: "gate-pass-only"` and only proves that the shipped artifact meets the deadline envelope. BOLT applied without ceremony proof and without a passing gate records the typed gap `bolt_proof:missing_ceremony` in every mode and forces `INCOMPLETE`; a `CERTIFIED` receipt can therefore never sit next to a missing proof. The full policy is in [`docs/testing.md` §5.4.1](./testing.md#541-bolt-win-proof-ceremony--opt-out-decision-t53).
 
 ---
 

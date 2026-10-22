@@ -8,6 +8,7 @@
 //!   substring search (`grep -q -E "OVERALL: ..."`) in `utils/build-release.sh`
 //!   — a text that merely *contains* a green token must never certify a release.
 
+pub mod long_artifact;
 pub mod quick;
 
 /// Canonical phase roster of the NAM-Plug long audit suite: `phase1`..`phase4`

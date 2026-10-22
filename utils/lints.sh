@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-PHASE_TOTAL=8
+PHASE_TOTAL=9
 source "$(dirname "$0")/lib/_lib.sh"
 
 echo -e "${BLUE}${BOLD}========================================${NC}"
@@ -22,14 +22,14 @@ echo -e "${BLUE}${BOLD}========================================${NC}"
 SUITE_START=$(date +%s%N)
 
 # ---------------------------------------------------------------------------
-# [1/8] Code formatting (cargo fmt)
+# [1/9] Code formatting (cargo fmt)
 # ---------------------------------------------------------------------------
 phase "Applying code formatting (cargo fmt)..."
 cargo fmt --all
 ok "Code formatting applied ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
-# [2/8] Compilation checks (cargo check) — broad feature matrix
+# [2/9] Compilation checks (cargo check) — broad feature matrix
 # ---------------------------------------------------------------------------
 phase "Executing compilation checks (cargo check)..."
 
@@ -44,7 +44,7 @@ cargo check --all-targets --no-default-features
 ok "Compilation checks passed ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
-# [3/8] Static analysis (cargo clippy) — strict, broad feature matrix
+# [3/9] Static analysis (cargo clippy) — strict, broad feature matrix
 # ---------------------------------------------------------------------------
 phase "Executing strict static analysis (cargo clippy)..."
 
@@ -59,7 +59,7 @@ cargo clippy --all-targets --no-default-features -- -D warnings
 ok "Static analysis passed cleanly with zero warnings ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
-# [4/8] SPDX license header validation (deterministic, no external tooling)
+# [4/9] SPDX license header validation (deterministic, no external tooling)
 # ---------------------------------------------------------------------------
 phase "Validating SPDX license headers..."
 
@@ -113,7 +113,7 @@ fi
 ok "All files have valid SPDX headers (GPL-3.0-or-later, MIT) ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
-# [5/8] Anti-pattern check: #[test] in tests/common/
+# [5/9] Anti-pattern check: #[test] in tests/common/
 # ---------------------------------------------------------------------------
 phase "Checking anti-pattern #[test] in tests/common/..."
 if [ -d "tests/common" ] && grep -rnF "#[test]" tests/common/ > /dev/null 2>&1; then
@@ -124,7 +124,7 @@ fi
 ok "No '#[test]' in tests/common/ ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
-# [6/8] RT-path static allocation scan
+# [6/9] RT-path static allocation scan
 #
 # Verifies that the audio-thread code under `src/clap/processor/` contains no
 # `Box::new` or implicit heap allocations outside the documented off-RT sites
@@ -136,7 +136,7 @@ phase "Checking RT path for heap allocations (static scan)..."
 ok "RT-path static allocation scan passed ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
-# [7/8] Undocumented #[allow(clippy::)] check (enforce allow_attributes policy)
+# [7/9] Undocumented #[allow(clippy::)] check (enforce allow_attributes policy)
 #
 # The project sets `allow_attributes = "warn"` in [lints.clippy], meaning every
 # #[allow(clippy::...)] must carry a justification comment immediately above it
@@ -177,7 +177,7 @@ fi
 ok "All #[allow(clippy::)] suppressions are documented ($(phase_elapsed_str))."
 
 # ---------------------------------------------------------------------------
-# [8/8] AppStream metadata version sync check
+# [8/9] AppStream metadata version sync check
 # ---------------------------------------------------------------------------
 phase "Checking AppStream metainfo release version sync with Cargo.toml..."
 
@@ -192,6 +192,18 @@ if [ -f "$metainfo_file" ]; then
     fi
     ok "AppStream metainfo version matches Cargo.toml ($cargo_ver) ($(phase_elapsed_str))."
 fi
+
+# ---------------------------------------------------------------------------
+# [9/9] Shell contract tests (tests/scripts/test_*.sh)
+#
+# Keeps every script-level contract test on the normal verification path. The
+# aggregate runner discovers all test_*.sh files and requires the receipt,
+# performance-baseline, codegen and quick-harness guards to exist, so an
+# orphaned or silently skipped script fails the gate instead of disappearing.
+# ---------------------------------------------------------------------------
+phase "Executing shell contract tests (tests/scripts/test_*.sh)..."
+"$(dirname "$0")/test-scripts.sh"
+ok "Shell contract tests passed ($(phase_elapsed_str))."
 
 SUITE_END=$(date +%s%N)
 TOTAL_DUR_MS=$(( (SUITE_END - SUITE_START) / 1000000 ))

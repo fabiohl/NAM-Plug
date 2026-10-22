@@ -112,18 +112,16 @@ use std::sync::atomic::Ordering;
 /// margin), measured per fixture on a pinned isolated core:
 ///
 /// // Measured: 2026-10-06, release profile, pinned core 8, N=250 @ 48 kHz,
-/// // Block=64 (S6-T1 `test_reset_wall_clock_time_within_contract`, 4 runs):
+/// // Block=64 (`test_reset_wall_clock_time_within_contract`, 4 runs):
 /// // k=1024 keeps the amortized window inside the 1.33 ms callback budget
 /// // for every family as measured — window `prewarm_step(k)` + contained
 /// // 64-frame dry block p50 ≈ 69 µs (LSTM), ≈ 48 µs (WaveNet A1 one-shot),
 /// // ≈ 0.87–0.93 ms (A2: chained cascade inference ≈ 0.87 µs/sample,
-/// // structural engine cost — D6 forbids engine changes in S6). The A2
-/// // *phase-zero* `prewarm_reset` zeroes the cascade layer buffers in
-/// // place (measured ≈ 2.0–2.2 ms p50) and is covered by the D3 adendo
-/// // (budget scoped to LSTM/A1; A2 carried by its
-/// // own measured envelope — S2-T1's synchronous integral reset was
-/// // 3.29 ms p50 + 55.7 µs block, so the two-phase split still lowers the
-/// // worst-case callback for A2 as well).
+/// // structural engine cost). The A2 *phase-zero* `prewarm_reset` zeroes the
+/// // cascade layer buffers in place (measured ≈ 2.0–2.2 ms p50) and is covered
+/// // by the budget scoped to LSTM/A1 (A2 carried by its own measured envelope —
+/// // a synchronous integral reset was 3.29 ms p50 + 55.7 µs block, so the
+/// // two-phase split still lowers the worst-case callback for A2 as well).
 ///
 /// Multiple of 64 by contract (matches the engine's `WAVENET_MAX_NUM_FRAMES`
 /// and LSTM 512-sample chunking with no straggler partial chunks).
@@ -132,7 +130,7 @@ pub(crate) const PREWARM_STEP_SAMPLES_PER_CALLBACK: usize = prewarm_policy::PREW
 
 /// Converts a panic payload into `PluginError` for `catch_unwind` guards.
 ///
-/// In accordance with S2-T2 (zero memory leak in plugin binaries), the panic payload
+/// In accordance with the zero memory leak contract in plugin binaries, the panic payload
 /// is dropped without leaking heap memory. Detailed panic information and backtrace
 /// were already safely written by the panic hook (`common/diagnostics/panic_hook.rs`)
 /// to `~/.cache/neural-amp-modeler-rs/crash-*.txt`.
@@ -1334,7 +1332,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 self.apply_rt_thread_setup();
             }));
             if let Err(err) = result {
-                // S2-T1 / F-NP-02: latch poisoned state and signal to main
+                // Processor poisoning containment (F-NP-02): latch poisoned state and signal to main
                 // thread via atomic status flag.
                 self.poisoned = true;
                 self.rt_status
@@ -1366,7 +1364,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         mut audio: Audio,
         events: Events,
     ) -> Result<ProcessStatus, PluginError> {
-        // S2-T1 / F-NP-02: Fast O(1) containment path if processor is poisoned.
+        // Processor poisoning containment (F-NP-02): Fast O(1) containment path if processor is poisoned.
         // Zero allocations, zero I/O, zero log calls on the RT hot-path.
         if self.poisoned {
             silence_audio_ports(&mut audio);
@@ -1532,7 +1530,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         match result {
             Ok(r) => r,
             Err(err) => {
-                // S2-T1 / F-NP-02: Latch poisoned state and signal to main thread via atomic status flag.
+                // Processor poisoning containment (F-NP-02): Latch poisoned state and signal to main thread via atomic status flag.
                 self.poisoned = true;
                 self.rt_status
                     .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
@@ -1544,7 +1542,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     }
 
     fn reset(&mut self) {
-        // S2-T1: If already poisoned, avoid running DSP reset state transitions.
+        // If already poisoned, avoid running DSP reset state transitions.
         if self.poisoned {
             return;
         }
@@ -1570,7 +1568,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             //    freshly-built condition WITHOUT the stabilization feed
             //    (ring/cepstral clearing only: in-place, zero-alloc, O(state);
             //    the integral prewarm's inline zero feed measured 1.81 ms p99
-            //    for LSTM and 4.18 ms p99 for WaveNet A2 — cf. S2-T1 — moves
+            //    for LSTM and 4.18 ms p99 for WaveNet A2 — moves
             //    off the audio callback into the per-callback amortization
             //    window below `process()`). The latch arms that window: every
             //    following callback drains a fixed zeroed-sample budget and
@@ -1668,7 +1666,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.rt_thread_setup_done = false;
         }));
         if let Err(err) = result {
-            // S2-T1: Latch poisoned state and signal via atomic status flag.
+            // Latch poisoned state and signal via atomic status flag.
             self.poisoned = true;
             self.rt_status
                 .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Per-instance asynchronous model loader worker (Épico B / F-UX-01) and
-//! adaptive-rebuild offload (Épico C / F-UX-02, S6-T1).
+//! Per-instance asynchronous model loader worker (F-UX-01) and
+//! adaptive-rebuild offload (F-UX-02).
 //!
 //! The heavy, side-effect-free half of a model load
 //! ([`NmClapMainThread::prepare_model`](super::NamClapMainThread::prepare_model))
@@ -12,7 +12,7 @@
 //! ([`commit_prepared_model`](super::NamClapMainThread::commit_prepared_model))
 //! stays on the main thread.
 //!
-//! # Adaptive rebuild offload (S6-T1 / F-UX-02)
+//! # Adaptive rebuild offload (F-UX-02)
 //!
 //! The same worker also builds the two allocation-heavy structural refreshes
 //! requested by the audio thread — the WaveNet *slimmable* slice (`slice` +

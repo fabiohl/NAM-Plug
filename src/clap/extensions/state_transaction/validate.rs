@@ -38,7 +38,7 @@ pub(crate) struct ModelResources {
     pub(crate) output_mult_adj: f32,
     /// Negotiated host block size (frames) at validation time. Carried so the
     /// restore path can size the off-RT prewarm-cost calibration block without
-    /// exceeding the model's `max_buffer_size` (S6-T2/T3 review fix).
+    /// exceeding the model's `max_buffer_size`.
     pub(crate) buffer_size: u32,
     /// Native sample rate expected by the model architecture.
     pub(crate) model_rate: u32,

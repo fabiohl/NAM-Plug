@@ -479,6 +479,12 @@ fn bench_clap_inference(c: &mut Criterion) {
     }
 
     // ── 2.2 Sample Rate Variations (Resampling Overhead on WaveNet A1) ──
+    //
+    // A 64-sample host block at 96 kHz carries only 32 model-rate samples, so its
+    // inference cost is close to the 48 kHz/32-sample case plus resampling. The
+    // resampler is not bypassed (NamResampler::build_inner only bypasses when
+    // host_rate == nam_rate); compare ns/sample rather than raw ns/block across
+    // sample rates.
     {
         let mut group_rates = c.benchmark_group("CLAP_Inference_WaveNet_A1_SampleRates");
         let sample_rates: &[(&str, f64)] = &[
@@ -764,7 +770,7 @@ fn bench_clap_inference(c: &mut Criterion) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. Worst-Case Coverage (SP-P0.2: T-P0.2.1 – T-P0.2.4)
 //
-// Rules for this whole layer (from TODO-sprints.md §SP-P0.2): benches only in
+// Rules for this whole layer: benches only in
 // `benches/`; no `log::*` inside the measured body (R7); heavy scenarios stay
 // as normal Criterion benches (Criterion is off-RT by nature); determinism via
 // fixed seeds, never wall-clock in the metric.
@@ -1132,7 +1138,7 @@ fn bench_worstcase_event_flood(c: &mut Criterion) {
 // model-loading path of `CLAP_Inference_*` (WaveNet A1 and LSTM) over the same
 // densities (16/64/256/1024 + 1-per-sample) and blocks (64/128/512) to expose
 // the real cost curve. Measurement only — no semantic change.
-// Decision criterion for Sprint S7: cost > 2× the block without events.
+// Decision criterion: cost > 2× the block without events.
 
 fn bench_worstcase_event_flood_model(c: &mut Criterion) {
     const BLOCKS: &[usize] = &[64, 128, 512];

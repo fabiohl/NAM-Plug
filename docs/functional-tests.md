@@ -177,6 +177,34 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 
 ---
 
+### 3.5 Automated Parity Matrix (Release Artifact)
+
+Run against the distributed `.so` (or `~/.clap/nam_plug.clap` in its own harness) with the NAMCore render binary available:
+
+```bash
+export NAM_CORE_RENDER_BIN=/path/to/namcore_render/tools/render
+cargo test --features testing --release --test clap test_clap_parity_multi_rate -- --ignored --nocapture
+cargo test --features testing --release --test clap test_clap_parity_oversample -- --ignored --nocapture
+cargo test --features testing --release --test clap test_clap_parity_cabsim -- --ignored --nocapture
+```
+
+Gate for every cell: `ESR < 1e-8` and `SNR > 80 dB`. Measured 2026-10-22 on the quick-suite release `.so` (pre-PGO/BOLT); the certified artifact identity and gate verdicts are in `target/release-receipt.json` (`artifacts.clap_installed_sha256`, `gates.*`), not a hash frozen here:
+
+| Fixture / mode                 | 44.1 kHz              | 48 kHz                | 96 kHz                |
+|:------------------------------ |:--------------------- |:--------------------- |:--------------------- |
+| `wavenet_a1_standard`          | 9.01e-12 / 110.5 dB   | 7.98e-12 / 111.0 dB   | 8.13e-12 / 110.9 dB   |
+| `a2_example` (Slimmable)       | 2.77e-12 / 115.6 dB   | 2.75e-12 / 115.6 dB   | 2.76e-12 / 115.6 dB   |
+| `lstm`                         | 1.91e-11 / 107.2 dB   | 2.05e-11 / 106.9 dB   | 2.03e-11 / 106.9 dB   |
+| `wavenet_a1_standard` 2× OS    | —                     | 1.55e-11 / 108.1 dB   | —                     |
+| `wavenet_a1_standard` 4× OS    | —                     | 3.42e-11 / 104.7 dB   | —                     |
+| `wavenet_a1_standard` + CabSim | —                     | 8.41e-14 / 130.8 dB   | —                     |
+
+- [ ] **3.5.1** The log prints one `PASS` line per fixture × rate, plus `PASS oversample X2/X4` and `PASS cabsim`.
+- [ ] **3.5.2** No `GAP: oracle_unsupported:<fixture>` line appears; if one does, the render build lacks that topology and the matrix is incomplete.
+- [ ] **3.5.3** `tests-quick.sh` Phase 2 emits `CLAP_CPP_PARITY: PASS`, `CLAP_OS_PARITY: PASS` and `CABSIM_PARITY: PASS`.
+
+---
+
 ## Release Acceptance Criteria (RC)
 
 - [ ] **RC.1** Zero crashes, panics, or memory leaks across all test tiers.

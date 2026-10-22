@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! # Headless Tests for GUI Alert Status Pill (Sprint R3 / T-R3.2)
+//! # Headless Tests for GUI Alert Status Pill
 //!
 //! Validates that `SlintViewModel` reflects RT status flags in `MainWindow`:
 //! - Priority ordering across all 7 alert conditions.

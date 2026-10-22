@@ -5,7 +5,7 @@
 # Headless GUI test runner for NAM-Plug, backed by Xvfb.
 #
 # Allocates an isolated virtual X11 display, sets up software-rendering
-# environment variables, executes the four GUI/X11 integration tests that are
+# environment variables, executes the GUI/X11 integration tests that are
 # normally `#[ignore]`d (they require a dedicated display server), and tears
 # down the virtual display unconditionally via a trap — preserving the host's
 # DISPLAY and X11 state regardless of test outcome.
@@ -211,18 +211,18 @@ fi
 # linker memory for nothing.
 echo -e "\n${BLUE}→${NC} Pre-compiling test artifacts (--no-run)..."
 if [ "$DRY_RUN" = "0" ]; then
-    cargo test --features testing --release --no-run --lib \
+    cargo test --features testing --release --no-run --lib --jobs "${CARGO_BUILD_JOBS:-4}" \
         2>&1 | tee -a "$GUI_LOG"
     echo -e "  ${GREEN}✓${NC} Compile done."
 else
-    echo -e "  ${YELLOW}[dry-run]${NC} cargo test --features testing --release --no-run --lib"
+    echo -e "  ${YELLOW}[dry-run]${NC} cargo test --features testing --release --no-run --lib --jobs \"${CARGO_BUILD_JOBS:-4}\""
 fi
 
 # ── Test list ───────────────────────────────────────────────────────────────
 #
 # Each entry is: "<cargo_args_for_filter>"
 # Note: gui_embedded must run in isolation (Slint one-platform-per-process rule,
-# documented in docs/architecture.md §7.7). All four tests share one Xvfb
+# documented in docs/architecture.md §7.7). All tests share one Xvfb
 # session so they don't fight for the same display number, but they are
 # serialised by running them one at a time with --test-threads=1.
 
@@ -239,7 +239,7 @@ run_gui_test() {
     echo -e "\n  ${BLUE}→${NC} $label ..."
     if [ "$DRY_RUN" = "1" ]; then
         echo -e "  ${YELLOW}[dry-run]${NC} xvfb-run -a --server-args='-screen 0 1280x800x24' \\"
-        echo -e "      cargo test --features testing --release $cargo_target_flag $filter -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
+        echo -e "      cargo test --features testing --release --jobs \"${CARGO_BUILD_JOBS:-4}\" $cargo_target_flag $filter -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
         return 0
     fi
 
@@ -249,7 +249,7 @@ run_gui_test() {
     LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
     NAM_GUI_DEDICATED_X11=1 NAM_GUI_TIMEOUT_MS="${NAM_GUI_TIMEOUT_MS:-15000}" \
         xvfb-run -a --server-args="-screen 0 1280x800x24" \
-        cargo test --features testing --release $cargo_target_flag "$filter" \
+        cargo test --features testing --release --jobs "${CARGO_BUILD_JOBS:-4}" $cargo_target_flag "$filter" \
             -- --ignored --test-threads=1 $NOCAPTURE_FLAG \
         2>&1 | tee -a "$GUI_LOG" || test_rc=$?
 
@@ -261,32 +261,22 @@ run_gui_test() {
     fi
 }
 
-# gui_embedded must be the only test matching its prefix to respect the
-# one-platform-per-process invariant (see docs/architecture.md §7.7).
-run_gui_test \
-    "gui_embedded_x11_open_close_cycles_no_leak" \
-    "gui_embedded_x11_open_close_cycles_no_leak" \
-    "--lib"
+# Single source of truth for the GUI/X11 gate: every test listed here is both
+# executed below and declared in the receipt, so the receipt can never claim a
+# test that did not run. Each entry runs in its own process (one platform per
+# process invariant, docs/architecture.md §7.7). `tests/ignored_tests_gate_test.rs`
+# fails when an X11/Xvfb `#[ignore]`d test is missing from this list.
+GUI_TESTS=(
+    gui_embedded_x11_open_close_cycles_no_leak
+    gui_lifecycle_hide_after_show_with_real_window
+    gui_lifecycle_x11_embedded_set_parent_honest
+    test_headless_clipboard_works
+    test_headless_gui_floating_window_lifecycle
+)
 
-run_gui_test \
-    "gui_lifecycle_hide_after_show_with_real_window" \
-    "gui_lifecycle_hide_after_show_with_real_window" \
-    "--lib"
-
-run_gui_test \
-    "test_headless_clipboard_works" \
-    "test_headless_clipboard_works" \
-    "--lib"
-
-run_gui_test \
-    "test_headless_gui_floating_window_lifecycle" \
-    "test_headless_gui_floating_window_lifecycle" \
-    "--lib"
-
-run_gui_test \
-    "gui_lifecycle_x11_embedded_set_parent_honest" \
-    "gui_lifecycle_x11_embedded_set_parent_honest" \
-    "--lib"
+for gui_test in "${GUI_TESTS[@]}"; do
+    run_gui_test "$gui_test" "$gui_test" "--lib"
+done
 
 # ── Receipt ─────────────────────────────────────────────────────────────────
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -297,7 +287,7 @@ GUI_STATUS="PASS"
 {
     echo "gui_test_suite status=$GUI_STATUS timestamp=$TIMESTAMP"
     echo "  log=$GUI_LOG"
-    echo "  tests=gui_embedded_x11_open_close_cycles_no_leak,gui_lifecycle_hide_after_show_with_real_window,test_headless_clipboard_works,test_headless_gui_floating_window_lifecycle,gui_lifecycle_x11_embedded_set_parent_honest"
+    echo "  tests=$(IFS=,; echo "${GUI_TESTS[*]}")"
 } | tee "$GUI_RECEIPT"
 
 # Post-write fail-closed verification

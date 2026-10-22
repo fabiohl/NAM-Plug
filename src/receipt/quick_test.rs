@@ -20,6 +20,19 @@ fn clean_receipt() -> String {
         .to_string()
 }
 
+fn receipt_with_evidence(line: &str) -> String {
+    format!(
+        "SUITE: tests-quick\n\
+         STRICT: 1\n\
+         PHASE1: PASS log=x\n\
+         PHASE2: PASS log=x\n\
+         {line}\n\
+         PHASE3: PASS log=x\n\
+         HEAP_AUDIT=RAN\n\
+         OVERALL: PASSED\n"
+    )
+}
+
 #[test]
 fn parses_clean_receipt_and_audits() {
     let r = parse_quick_receipt(&clean_receipt()).unwrap();
@@ -61,6 +74,43 @@ fn parses_receipt_with_telemetry_lines() {
                              PHASE3: PASS log=x\n\
                              OVERALL: PASSED\n";
     assert!(parse_quick_receipt(invalid_telemetry).is_err());
+}
+
+#[test]
+fn accepts_producer_evidence_with_numeric_metrics() {
+    // Exact line emitted by utils/tests-quick.sh for the static codegen guard
+    // (seen in target/logs/quick-receipt.txt).
+    let text = receipt_with_evidence(
+        "RT_CODEGEN: PASS symbols=7 instructions=14115 vfmadd=14 targets_matched=7 targets_total=7 required_matched=3 required_total=3",
+    );
+    let r = parse_quick_receipt(&text).unwrap();
+    let metrics = r.evidence_metrics.get("RT_CODEGEN").expect("metrics");
+    assert_eq!(metrics.get("symbols"), Some(&7));
+    assert_eq!(metrics.get("instructions"), Some(&14115));
+    assert_eq!(metrics.get("required_total"), Some(&3));
+    assert!(r.verify_release_gate(true, true).is_ok());
+}
+
+#[test]
+fn rejects_malformed_evidence_metrics() {
+    let cases = [
+        ("RT_CODEGEN: PASS foo", "foo"),
+        ("RT_CODEGEN: PASS symbols=", "symbols="),
+        ("RT_CODEGEN: PASS symbols=7 junk", "junk"),
+        ("RT_CODEGEN: FAIL symbols=1", "FAIL"),
+        ("RT_CODEGEN: PASS symbols=7 symbols=8", "symbols=8"),
+    ];
+    for (line, offender) in cases {
+        let err = parse_quick_receipt(&receipt_with_evidence(line)).unwrap_err();
+        assert!(
+            err.contains("line 5"),
+            "missing line number for {line:?}: {err}"
+        );
+        assert!(
+            err.contains(offender),
+            "missing offending token {offender:?} for {line:?}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -165,4 +215,139 @@ fn mixed_pass_and_gap_for_one_phase_is_inconsistent() {
                 PHASE3: PASS log=x\n\
                 OVERALL: COMPLETED_WITH_GAPS\n";
     assert!(parse_quick_receipt(text).is_err());
+}
+
+#[test]
+fn parses_receipt_with_bolt_symbols_provenance() {
+    let text = "SUITE: tests-quick\n\
+                STRICT: 1\n\
+                PHASE1: PASS log=x\n\
+                PHASE2: PASS log=x\n\
+                RT_CODEGEN: PASS\n\
+                PRE_BOLT_SYMBOLS: 7\n\
+                POST_BOLT_SYMBOLS: n/a\n\
+                PHASE3: PASS log=x\n\
+                HEAP_AUDIT=RAN\n\
+                OVERALL: PASSED\n";
+    let r = parse_quick_receipt(text).expect("parsed");
+    assert_eq!(r.pre_bolt_symbols.as_deref(), Some("7"));
+    assert_eq!(r.post_bolt_symbols.as_deref(), Some("n/a"));
+    assert!(r.verify_release_gate(true, true).is_ok());
+
+    let text_both_numeric = "SUITE: tests-quick\n\
+                             STRICT: 1\n\
+                             PHASE1: PASS log=x\n\
+                             PHASE2: PASS log=x\n\
+                             RT_CODEGEN: PASS\n\
+                             PRE_BOLT_SYMBOLS: 7\n\
+                             POST_BOLT_SYMBOLS: 7\n\
+                             PHASE3: PASS log=x\n\
+                             HEAP_AUDIT=RAN\n\
+                             OVERALL: PASSED\n";
+    let r2 = parse_quick_receipt(text_both_numeric).expect("parsed");
+    assert_eq!(r2.pre_bolt_symbols.as_deref(), Some("7"));
+    assert_eq!(r2.post_bolt_symbols.as_deref(), Some("7"));
+}
+
+#[test]
+fn rejects_invalid_and_duplicate_bolt_symbols() {
+    let invalid_pre = "SUITE: tests-quick\n\
+                       STRICT: 1\n\
+                       PHASE1: PASS log=x\n\
+                       PHASE2: PASS log=x\n\
+                       PRE_BOLT_SYMBOLS: invalid\n\
+                       PHASE3: PASS log=x\n\
+                       HEAP_AUDIT=RAN\n\
+                       OVERALL: PASSED\n";
+    let err = parse_quick_receipt(invalid_pre).unwrap_err();
+    assert!(err.contains("invalid PRE_BOLT_SYMBOLS value"));
+
+    let invalid_post = "SUITE: tests-quick\n\
+                        STRICT: 1\n\
+                        PHASE1: PASS log=x\n\
+                        PHASE2: PASS log=x\n\
+                        POST_BOLT_SYMBOLS: -1\n\
+                        PHASE3: PASS log=x\n\
+                        HEAP_AUDIT=RAN\n\
+                        OVERALL: PASSED\n";
+    let err = parse_quick_receipt(invalid_post).unwrap_err();
+    assert!(err.contains("invalid POST_BOLT_SYMBOLS value"));
+
+    let duplicate_pre = "SUITE: tests-quick\n\
+                         STRICT: 1\n\
+                         PHASE1: PASS log=x\n\
+                         PHASE2: PASS log=x\n\
+                         PRE_BOLT_SYMBOLS: 7\n\
+                         PRE_BOLT_SYMBOLS: 8\n\
+                         PHASE3: PASS log=x\n\
+                         HEAP_AUDIT=RAN\n\
+                         OVERALL: PASSED\n";
+    let err = parse_quick_receipt(duplicate_pre).unwrap_err();
+    assert!(err.contains("duplicate PRE_BOLT_SYMBOLS: line"));
+}
+
+#[test]
+fn verifies_producer_contract_with_tests_quick_script() {
+    // Contract test: every line key emitted via `emit "KEY: ..."` or `emit "KEY=..."`
+    // in `utils/tests-quick.sh` must be recognized by `parse_quick_receipt` so that
+    // producer and consumer never drift apart silently.
+    let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("utils/tests-quick.sh");
+    let script = std::fs::read_to_string(&script_path).expect("read tests-quick.sh");
+
+    let mut emitted_keys = std::collections::BTreeSet::new();
+    for line in script.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("emit \"") {
+            let token = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('"');
+            if let Some((k, _)) = token.split_once(':') {
+                emitted_keys.insert(k.to_string());
+            } else if let Some((k, _)) = token.split_once('=') {
+                emitted_keys.insert(k.to_string());
+            }
+        }
+    }
+
+    // Known dynamic prefixes handled by pattern matching in the parser:
+    // e.g. PHASE${PHASE_NUM:-?}, PHASE${PHASE_NUM:-?}_COMPILE_S, PHASE${PHASE_NUM:-?}_RUN_S
+    for key in &emitted_keys {
+        let is_known = match key.as_str() {
+            "SUITE" | "STRICT" | "PHASE1" | "PHASE2" | "PHASE3" | "ORACLE_SHA256"
+            | "FIXTURE_SHA256" | "ARTIFACT_SHA256" | "CLAP_CPP_PARITY" | "CLAP_OS_PARITY"
+            | "CABSIM_IR" | "CABSIM_PARITY" | "RT_CODEGEN" | "PRE_BOLT_SYMBOLS"
+            | "POST_BOLT_SYMBOLS" | "HEAP_AUDIT" | "GAP" | "OVERALL" => true,
+            k if k.starts_with("PHASE") => true,
+            _ => false,
+        };
+        assert!(
+            is_known,
+            "Key {key:?} is emitted by utils/tests-quick.sh but not recognized in the parser contract!"
+        );
+    }
+}
+
+#[test]
+fn accepts_build_and_codegen_telemetry_lines() {
+    let text = "SUITE: tests-quick\n\
+                STRICT: 1\n\
+                PHASE1_BUILD_S: 190\n\
+                PHASE1: PASS log=x\n\
+                PHASE2_BUILD_S: 550\n\
+                PHASE2_CODEGEN_S: 3\n\
+                PHASE2: PASS log=x\n\
+                PHASE3: PASS log=x\n\
+                HEAP_AUDIT=RAN\n\
+                OVERALL: PASSED\n";
+    let r = parse_quick_receipt(text).expect("parsed");
+    assert!(r.verify_release_gate(true, true).is_ok());
+
+    let bad = text.replace("PHASE2_CODEGEN_S: 3", "PHASE2_CODEGEN_S: soon");
+    assert!(
+        parse_quick_receipt(&bad)
+            .unwrap_err()
+            .contains("invalid telemetry duration")
+    );
 }

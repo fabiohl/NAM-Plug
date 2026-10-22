@@ -11,9 +11,15 @@
 //! telemetry uses to flag a DSP overload), and detects host environmental noise / thermal
 //! anomalies.
 //!
+//! The report also records the host measurement context (pinned core, scheduling
+//! policy, governor, boost, online/isolated CPUs and IRQ isolation) so a number is
+//! always attributable to the environment that produced it, and can optionally be
+//! compared against a previous certification report (`--reference`) with a relative
+//! p50 ceiling.
+//!
 //! Exit codes:
 //!   0 — Performance certification PASSED.
-//!   1 — Performance certification FAILED (deadline overrun or fatal error).
+//!   1 — Performance certification FAILED (deadline overrun, reference ratio breach, or fatal error).
 //!   2 — Performance certification INCONCLUSIVE (excessive host CPU jitter / noise).
 
 #![cfg(feature = "testing")]
@@ -25,6 +31,7 @@ use neural_amp_modeler_rs::common::params::{ActivationPrecision, ProcessingParam
 use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -66,6 +73,74 @@ pub struct PerfCertificationReport {
     pub environment_stable: bool,
     pub total_scenarios: usize,
     pub scenarios: Vec<ScenarioPerfMetrics>,
+    /// Measurement environment that produced the numbers above.
+    ///
+    /// `serde(default)` keeps pre-1.2 reports (and reference reports produced by
+    /// them) readable: an old report simply has no host block.
+    #[serde(default)]
+    pub host: HostEnvironment,
+    /// Relative p50 comparison against a `--reference` report, when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_check: Option<ReferenceCheck>,
+}
+
+/// Host context captured at measurement time.
+///
+/// The certification gate is only meaningful when it runs under the same
+/// core/priority policy as the regression gate; recording the policy in the
+/// report makes a pipeline number comparable (or explicitly known not to be)
+/// with `.performance-baselines` and with a manual pinned run.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct HostEnvironment {
+    /// CPU selected by the affinity mask (or `NAM_BENCH_CORE`), if resolvable.
+    pub bench_core: Option<usize>,
+    /// `/proc/self/status:Cpus_allowed_list` of the measuring process.
+    pub cpus_allowed_list: String,
+    /// Kernel scheduling policy of the measuring thread (`SCHED_FIFO`, ...).
+    pub sched_policy: String,
+    /// `scaling_governor` of the benchmark core, when exposed by cpufreq.
+    pub governor: Option<String>,
+    /// CPU boost state (`1` enabled, `0` disabled), when exposed.
+    pub boost: Option<String>,
+    /// `/sys/devices/system/cpu/online`.
+    pub cpu_online: String,
+    /// `/sys/devices/system/cpu/isolated`.
+    pub cpu_isolated: String,
+    /// `isolated` when no IRQ affinity mask includes the benchmark core.
+    pub irq_isolation: String,
+    /// IRQ numbers whose affinity currently includes the benchmark core.
+    pub irqs_sharing_bench_core: Vec<String>,
+}
+
+/// Relative p50 ceiling against a previous certification report.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReferenceCheck {
+    pub reference_path: String,
+    pub reference_sha256: String,
+    pub p50_ratio_max: f64,
+    pub worst_ratio: f64,
+    pub passed: bool,
+    pub comparisons: Vec<ReferenceComparison>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReferenceComparison {
+    pub name: String,
+    pub reference_p50_ns: f64,
+    pub measured_p50_ns: f64,
+    pub ratio: f64,
+    pub passed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceReport {
+    scenarios: Vec<ReferenceScenario>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceScenario {
+    name: String,
+    p50_ns: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -95,6 +170,251 @@ fn sha256_of(path: &Path) -> Result<String, String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+fn read_trim(path: &str) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Expands the kernel CPU-list syntax (`0-3,8-9`) into individual CPU ids.
+fn parse_cpu_list(raw: &str) -> Vec<usize> {
+    let mut cpus = Vec::new();
+    for part in raw.trim().split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.split_once('-') {
+            Some((start, end)) => {
+                if let (Ok(start), Ok(end)) =
+                    (start.trim().parse::<usize>(), end.trim().parse::<usize>())
+                    && start <= end
+                {
+                    cpus.extend(start..=end);
+                }
+            }
+            None => {
+                if let Ok(cpu) = part.parse::<usize>() {
+                    cpus.push(cpu);
+                }
+            }
+        }
+    }
+    cpus.sort_unstable();
+    cpus.dedup();
+    cpus
+}
+
+fn read_proc_status_field(field: &str) -> Option<String> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    status.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == field).then(|| value.trim().to_string())
+    })
+}
+
+fn read_sched_policy() -> String {
+    let Some(sched) = fs::read_to_string("/proc/self/sched").ok() else {
+        return "unknown".to_string();
+    };
+    for line in sched.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() != "policy" {
+            continue;
+        }
+        let Ok(policy) = value.trim().parse::<u32>() else {
+            return "unknown".to_string();
+        };
+        return match policy {
+            0 => "SCHED_OTHER",
+            1 => "SCHED_FIFO",
+            2 => "SCHED_RR",
+            3 => "SCHED_BATCH",
+            5 => "SCHED_IDLE",
+            6 => "SCHED_DEADLINE",
+            other => return format!("SCHED_UNKNOWN({other})"),
+        }
+        .to_string();
+    }
+    "unknown".to_string()
+}
+
+/// Resolves the core the measurement is actually running on.
+///
+/// Priority: explicit `NAM_BENCH_CORE` → a single CPU in the affinity mask
+/// (the `taskset` case) → the first isolated CPU allowed by the mask, preferring
+/// core 8 exactly like `pick_bench_core`.
+fn resolve_bench_core(
+    allowed: &[usize],
+    isolated: &[usize],
+    override_core: Option<usize>,
+) -> Option<usize> {
+    if let Some(core) = override_core {
+        return Some(core);
+    }
+    if allowed.len() == 1 {
+        return allowed.first().copied();
+    }
+    if isolated.contains(&8) && allowed.contains(&8) {
+        return Some(8);
+    }
+    isolated.iter().copied().find(|core| allowed.contains(core))
+}
+
+fn irqs_sharing_core(core: usize) -> Vec<String> {
+    let Ok(entries) = fs::read_dir("/proc/irq") else {
+        return Vec::new();
+    };
+    let mut sharing = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let affinity_path = entry.path().join("smp_affinity_list");
+        let Ok(affinity) = fs::read_to_string(&affinity_path) else {
+            continue;
+        };
+        let affinity = affinity.trim();
+        if parse_cpu_list(affinity).contains(&core) {
+            sharing.push(name.to_string());
+        }
+    }
+    sharing.sort_by_key(|irq| irq.parse::<usize>().unwrap_or(usize::MAX));
+    sharing
+}
+
+fn probe_host() -> HostEnvironment {
+    let cpus_allowed_list =
+        read_proc_status_field("Cpus_allowed_list").unwrap_or_else(|| "unknown".to_string());
+    let allowed = parse_cpu_list(&cpus_allowed_list);
+    let cpu_isolated = read_trim("/sys/devices/system/cpu/isolated").unwrap_or_default();
+    let isolated = parse_cpu_list(&cpu_isolated);
+    let override_core = env::var("NAM_BENCH_CORE")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok());
+    let bench_core = resolve_bench_core(&allowed, &isolated, override_core);
+
+    let governor = bench_core
+        .and_then(|core| {
+            read_trim(&format!(
+                "/sys/devices/system/cpu/cpu{core}/cpufreq/scaling_governor"
+            ))
+        })
+        .or_else(|| read_trim("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"));
+    let boost = read_trim("/sys/devices/system/cpu/cpufreq/boost").or_else(|| {
+        read_trim("/sys/devices/system/cpu/intel_pstate/no_turbo")
+            .map(|no_turbo| if no_turbo == "1" { "0" } else { "1" }.to_string())
+    });
+
+    let (irq_isolation, irqs_sharing_bench_core) = match bench_core {
+        Some(core) => {
+            let sharing = irqs_sharing_core(core);
+            let status = if sharing.is_empty() {
+                "isolated"
+            } else {
+                "shared"
+            };
+            (status.to_string(), sharing)
+        }
+        None => ("unknown".to_string(), Vec::new()),
+    };
+
+    HostEnvironment {
+        bench_core,
+        cpus_allowed_list,
+        sched_policy: read_sched_policy(),
+        governor,
+        boost,
+        cpu_online: read_trim("/sys/devices/system/cpu/online").unwrap_or_default(),
+        cpu_isolated,
+        irq_isolation,
+        irqs_sharing_bench_core,
+    }
+}
+
+fn evaluate_reference_series(
+    measured: &[(String, f64)],
+    reference: &ReferenceReport,
+    p50_ratio_max: f64,
+    reference_path: &str,
+    reference_sha256: &str,
+) -> Result<ReferenceCheck, String> {
+    if !p50_ratio_max.is_finite() || p50_ratio_max <= 0.0 {
+        return Err(format!(
+            "invalid --p50-ratio-max '{p50_ratio_max}': must be a positive finite number"
+        ));
+    }
+    let reference_p50: BTreeMap<&str, f64> = reference
+        .scenarios
+        .iter()
+        .map(|scenario| (scenario.name.as_str(), scenario.p50_ns))
+        .collect();
+
+    let mut comparisons = Vec::with_capacity(measured.len());
+    let mut worst_ratio = 0.0_f64;
+    for (name, measured_p50_ns) in measured {
+        let Some(&reference_p50_ns) = reference_p50.get(name.as_str()) else {
+            return Err(format!(
+                "reference report '{reference_path}' has no scenario '{name}'"
+            ));
+        };
+        if !reference_p50_ns.is_finite() || reference_p50_ns <= 0.0 {
+            return Err(format!(
+                "reference p50 for scenario '{name}' is not a positive finite value: {reference_p50_ns}"
+            ));
+        }
+        let ratio = measured_p50_ns / reference_p50_ns;
+        worst_ratio = worst_ratio.max(ratio);
+        comparisons.push(ReferenceComparison {
+            name: name.clone(),
+            reference_p50_ns,
+            measured_p50_ns: *measured_p50_ns,
+            ratio,
+            passed: ratio <= p50_ratio_max,
+        });
+    }
+
+    Ok(ReferenceCheck {
+        reference_path: reference_path.to_string(),
+        reference_sha256: reference_sha256.to_string(),
+        p50_ratio_max,
+        worst_ratio,
+        passed: comparisons.iter().all(|comparison| comparison.passed),
+        comparisons,
+    })
+}
+
+fn load_reference_check(
+    reference_path: &Path,
+    measured: &[(String, f64)],
+    p50_ratio_max: f64,
+) -> Result<ReferenceCheck, String> {
+    let bytes = fs::read(reference_path).map_err(|e| {
+        format!(
+            "cannot read reference report {}: {e}",
+            reference_path.display()
+        )
+    })?;
+    let reference: ReferenceReport = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid reference report {}: {e}", reference_path.display()))?;
+    let reference_sha256: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    evaluate_reference_series(
+        measured,
+        &reference,
+        p50_ratio_max,
+        &reference_path.to_string_lossy(),
+        &reference_sha256,
+    )
 }
 
 /// Fixture root for the model assets the gate needs.
@@ -332,7 +652,10 @@ fn measure_scenario(
 }
 
 fn usage() -> ! {
-    eprintln!("Usage: nam_perf_guard certify --clap <path-to-.clap> [--out <output.json>]");
+    eprintln!(
+        "Usage: nam_perf_guard certify --clap <path-to-.clap> [--out <output.json>] \
+         [--reference <previous-report.json>] [--p50-ratio-max <ratio>]"
+    );
     std::process::exit(1);
 }
 
@@ -346,6 +669,8 @@ fn main() -> ExitCode {
 
     let mut clap_path: Option<PathBuf> = None;
     let mut out_path: Option<PathBuf> = None;
+    let mut reference_path: Option<PathBuf> = None;
+    let mut p50_ratio_max = 1.5_f64;
 
     let mut i = 1;
     while i < args.len() {
@@ -363,6 +688,29 @@ fn main() -> ExitCode {
                     usage();
                 }
                 out_path = Some(PathBuf::from(&args[i]));
+            }
+            "--reference" => {
+                i += 1;
+                if i >= args.len() {
+                    usage();
+                }
+                reference_path = Some(PathBuf::from(&args[i]));
+            }
+            "--p50-ratio-max" => {
+                i += 1;
+                if i >= args.len() {
+                    usage();
+                }
+                p50_ratio_max = match args[i].parse::<f64>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!(
+                            "❌ FATAL: invalid --p50-ratio-max '{}': expected a number",
+                            args[i]
+                        );
+                        return ExitCode::from(1);
+                    }
+                };
             }
             _ => usage(),
         }
@@ -478,7 +826,26 @@ fn main() -> ExitCode {
         }
     }
 
-    let overall_status = if !all_deadlines_passed {
+    let host = probe_host();
+    let reference_check = match reference_path.as_deref() {
+        Some(path) => {
+            let measured: Vec<(String, f64)> = results
+                .iter()
+                .map(|scenario| (scenario.name.clone(), scenario.p50_ns))
+                .collect();
+            match load_reference_check(path, &measured, p50_ratio_max) {
+                Ok(check) => Some(check),
+                Err(err) => {
+                    eprintln!("❌ FATAL: {err}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        None => None,
+    };
+    let reference_failed = reference_check.as_ref().is_some_and(|check| !check.passed);
+
+    let overall_status = if !all_deadlines_passed || reference_failed {
         "FAIL"
     } else if !environment_stable {
         "INCONCLUSIVE"
@@ -494,10 +861,33 @@ fn main() -> ExitCode {
     );
     println!("Host Environment Stable:    {environment_stable}");
     println!("All Scenarios Passed Gate:  {all_deadlines_passed}");
+    println!(
+        "Host: core={:?} policy={} governor={:?} boost={:?} irq_isolation={}",
+        host.bench_core, host.sched_policy, host.governor, host.boost, host.irq_isolation
+    );
+    if let Some(check) = &reference_check {
+        println!(
+            "Reference Check:            {} (worst p50 ratio {:.3} <= {:.3}, ref={})",
+            if check.passed { "PASS" } else { "FAIL" },
+            check.worst_ratio,
+            check.p50_ratio_max,
+            check.reference_path
+        );
+        for comparison in &check.comparisons {
+            println!(
+                "  {} p50={:.1}µs ref={:.1}µs ratio={:.3} {}",
+                comparison.name,
+                comparison.measured_p50_ns / 1000.0,
+                comparison.reference_p50_ns / 1000.0,
+                comparison.ratio,
+                if comparison.passed { "PASS" } else { "FAIL" }
+            );
+        }
+    }
     println!("========================================================================");
 
     let report = PerfCertificationReport {
-        schema_version: "1.1".to_string(),
+        schema_version: "1.2".to_string(),
         timestamp_utc: chrono_free_timestamp(),
         clap_artifact_path: clap_target.to_string_lossy().to_string(),
         clap_artifact_sha256: clap_sha,
@@ -505,6 +895,8 @@ fn main() -> ExitCode {
         environment_stable,
         total_scenarios: results.len(),
         scenarios: results,
+        host,
+        reference_check,
     };
 
     let target_out =
@@ -531,4 +923,98 @@ fn chrono_free_timestamp() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("{now}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_cpu_list_ranges_and_singletons() {
+        assert_eq!(parse_cpu_list("0-3,8,10-11"), vec![0, 1, 2, 3, 8, 10, 11]);
+        assert_eq!(parse_cpu_list("8"), vec![8]);
+        assert_eq!(parse_cpu_list(""), Vec::<usize>::new());
+        assert_eq!(parse_cpu_list("9-8"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn resolves_pinned_core_before_isolated_fallback() {
+        assert_eq!(resolve_bench_core(&[8], &[8, 9], None), Some(8));
+        assert_eq!(resolve_bench_core(&[0, 1, 2, 3], &[8, 9], None), None);
+        assert_eq!(
+            resolve_bench_core(&[0, 1, 2, 3, 8, 9], &[8, 9], None),
+            Some(8)
+        );
+        assert_eq!(
+            resolve_bench_core(&[0, 1, 2, 3, 10], &[10, 11], None),
+            Some(10)
+        );
+        assert_eq!(resolve_bench_core(&[0, 1, 2, 3], &[8, 9], Some(3)), Some(3));
+    }
+
+    fn reference_report(reference_p50_ns: f64) -> ReferenceReport {
+        ReferenceReport {
+            scenarios: vec![
+                ReferenceScenario {
+                    name: "WaveNet_A1_64_samp".to_string(),
+                    p50_ns: reference_p50_ns,
+                },
+                ReferenceScenario {
+                    name: "LSTM_64_samp".to_string(),
+                    p50_ns: reference_p50_ns,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn reference_check_passes_within_ratio_and_fails_above() {
+        let measured = vec![
+            ("WaveNet_A1_64_samp".to_string(), 45_000.0),
+            ("LSTM_64_samp".to_string(), 5_000.0),
+        ];
+        let pass = evaluate_reference_series(
+            &measured,
+            &reference_report(30_000.0),
+            1.5,
+            "ref.json",
+            "sha",
+        )
+        .expect("reference evaluation");
+        assert!(pass.passed);
+        assert!((pass.worst_ratio - 1.5).abs() < 1e-9);
+
+        let fail = evaluate_reference_series(
+            &measured,
+            &reference_report(20_000.0),
+            1.5,
+            "ref.json",
+            "sha",
+        )
+        .expect("reference evaluation");
+        assert!(!fail.passed);
+        assert!(fail.worst_ratio > 1.5);
+    }
+
+    #[test]
+    fn reference_check_rejects_missing_scenario_and_invalid_ratio() {
+        let measured = vec![("WaveNet_A1_64_samp".to_string(), 45_000.0)];
+        let incomplete = ReferenceReport {
+            scenarios: vec![ReferenceScenario {
+                name: "LSTM_64_samp".to_string(),
+                p50_ns: 5_000.0,
+            }],
+        };
+        assert!(evaluate_reference_series(&measured, &incomplete, 1.5, "ref.json", "sha").is_err());
+        assert!(
+            evaluate_reference_series(
+                &measured,
+                &reference_report(30_000.0),
+                0.0,
+                "ref.json",
+                "sha"
+            )
+            .is_err()
+        );
+    }
 }

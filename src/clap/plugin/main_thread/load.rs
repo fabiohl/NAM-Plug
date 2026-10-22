@@ -92,7 +92,7 @@ pub(crate) struct PreparedModel {
     buffer_size: usize,
 }
 
-// `PreparedModel` crosses the main/worker thread boundary (Épico B), so its
+// `PreparedModel` crosses the main/worker thread boundary, so its
 // `Send`-ness is pinned at compile time.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
@@ -107,7 +107,7 @@ impl<'a> NamClapMainThread<'a> {
     /// host handle or `shared.cold`: every shared value is an explicit
     /// parameter. Diagnostics are emitted against the provided `sys` snapshot.
     /// The returned [`PreparedModel`] is `Send`, so this half can be moved to a
-    /// non-RT worker (Épico B) while the main thread stays responsive.
+    /// non-RT worker while the main thread stays responsive.
     pub(crate) fn prepare_model(
         path: &Path,
         host_rate: u32,
@@ -879,7 +879,7 @@ impl<'a> NamClapMainThread<'a> {
     }
 }
 
-/// Off-thread entry point to the pure `prepare_model` phase (Épico B).
+/// Off-thread entry point to the pure `prepare_model` phase.
 ///
 /// A free function so the loader worker can call it without an instance of
 /// [`NamClapMainThread`] — every input is an explicit parameter.

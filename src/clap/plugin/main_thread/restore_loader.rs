@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Opt-in asynchronous state-restore loader (Épico B / F-UX-01, T4.3).
+//! Opt-in asynchronous state-restore loader (F-UX-01).
 //!
 //! When enabled (`NAM_ASYNC_RESTORE`) on an interactive host that is already
 //! active, the expensive validation phase of a state restore — file hashing,

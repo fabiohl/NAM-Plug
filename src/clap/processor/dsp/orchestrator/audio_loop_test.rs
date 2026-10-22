@@ -45,7 +45,7 @@ fn reference_ramp_apply(
 
 #[test]
 fn test_apply_iir_gain_ramp_instant_jump_beta_zero() {
-    // S3-T1: ParamSmoother constructed with sample_rate <= 0 forces alpha = 1.0.
+    // Invariant: ParamSmoother constructed with sample_rate <= 0 forces alpha = 1.0.
     // In this case, beta = 1 - alpha = 0.0.
     let mut smoother = ParamSmoother::new(1.0, 0.0, 20.0);
     assert_eq!(
@@ -148,7 +148,7 @@ fn test_apply_iir_gain_ramp_instant_jump_mono_path() {
 
 #[test]
 fn test_apply_iir_gain_ramp_bit_identity_equivalence() {
-    // S3-T2: Invariant: bit-identidade with reference algorithm over random gain trajectories
+    // Invariant: bit-identity with reference algorithm over random gain trajectories
     // Fixed-seed LCG deterministic PRNG for 100% reproducible tests without external dependencies.
     let mut rng_state = 0x853c49e6748fea9b_u64;
     let mut next_f32 = |min: f32, max: f32| -> f32 {

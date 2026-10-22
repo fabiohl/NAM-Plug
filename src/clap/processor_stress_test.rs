@@ -540,7 +540,7 @@ mod tests {
             None,
         );
 
-        // F-RA-04 / Sprint R4: transparent slicing allows processing blocks > max_frames_count
+        // F-RA-04: transparent slicing allows processing blocks > max_frames_count
         // without silence/mute or Err, asserting RT_STATUS_HOST_CONTRACT_VIOLATION for diagnostics.
         assert!(
             result.is_ok(),

@@ -53,12 +53,75 @@ fi
 
 # 3. Update Cargo.lock
 phase "Updating resolved versions in Cargo.lock..."
+LOCK_SNAPSHOT=""
+if [ -f Cargo.lock ]; then
+    LOCK_SNAPSHOT="$(mktemp -t nam-plug-cargo-lock.XXXXXX)"
+    cp Cargo.lock "$LOCK_SNAPSHOT"
+fi
 if cargo update --verbose; then
     STATUS_CARGO_UPDATE="UPDATED"
     ok "Cargo.lock updated."
 else
     STATUS_CARGO_UPDATE="FAILED"
     echo -e "${RED}${BOLD}Error: cargo update failed.${NC}" >&2
+fi
+
+# Record exactly which packages changed in the lockfile. A rewritten lock is a
+# deliberate dependency change: the release receipt must not report an
+# anonymous `git_dirty` with no trace of what moved.
+DEP_LOCK_CHANGED=0
+if [ -n "$LOCK_SNAPSHOT" ] && [ -f "$LOCK_SNAPSHOT" ]; then
+    mkdir -p target/logs
+    if python3 - "$LOCK_SNAPSHOT" Cargo.lock target/logs/dep-lock-change.txt <<'PY'
+import sys
+import tomllib
+
+old_path, new_path, out_path = sys.argv[1:4]
+try:
+    with open(old_path, "rb") as handle:
+        old = tomllib.load(handle)
+    with open(new_path, "rb") as handle:
+        new = tomllib.load(handle)
+except (OSError, tomllib.TOMLDecodeError) as exc:
+    print(f"cannot compare Cargo.lock snapshots: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+def versions(lock):
+    return {
+        pkg.get("name", "?"): pkg.get("version", "?")
+        for pkg in lock.get("package", [])
+    }
+
+old_versions = versions(old)
+new_versions = versions(new)
+lines = []
+for name in sorted(set(old_versions) | set(new_versions)):
+    before = old_versions.get(name)
+    after = new_versions.get(name)
+    if before != after:
+        lines.append(f"{name}: {before or '-'} -> {after or '-'}")
+with open(out_path, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines))
+    if lines:
+        handle.write("\n")
+print(len(lines))
+PY
+    then
+        DEP_LOCK_CHANGED=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('target/logs/dep-lock-change.txt').read_text(encoding='utf-8').splitlines()
+print(sum(1 for line in lines if '->' in line))
+PY
+)
+        if [ "$DEP_LOCK_CHANGED" -gt 0 ]; then
+            warn "DEP_LOCK_CHANGED: ${DEP_LOCK_CHANGED} pacotes — see target/logs/dep-lock-change.txt; commit Cargo.lock before certification or the receipt will be INCOMPLETE (git_dirty:Cargo.lock)."
+        else
+            rm -f target/logs/dep-lock-change.txt
+        fi
+    else
+        warn "Could not compare Cargo.lock snapshots; dependency changes are not itemized."
+    fi
+    rm -f "$LOCK_SNAPSHOT"
 fi
 
 # ---------------------------------------------------------------------------

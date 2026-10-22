@@ -13,13 +13,22 @@
 //! The phase roster of this suite is `phase1`..`phase4` + terminal `overall`.
 //!
 //! Subcommands:
-//! - `append`:  validate one phase outcome and append its JSONL line.
+//! - `append`:  validate one phase outcome and append its JSONL line. Plug-local
+//!   keys `artifact_path` and `artifact_exercised` record provenance and whether
+//!   the phase actually loaded the shared object.
 //! - `summary`: read the receipt, derive and append the terminal `overall` line.
 //! - `validate`: fail-closed semantic verification against the Plug roster
 //!   (canonical roster + declared/derived `OVERALL` consistency); `--strict`
 //!   additionally rejects any declared gap or failure.
+//! - `verify-artifact`: verify that every receipt line declares the installed
+//!   CLAP artifact (`match`/`mismatch`/`absent`/`incomplete`).
+//! - `artifact-status`: reconcile a receipt's declared hash against the hash
+//!   recorded by the build receipt (no file re-hashing).
 //!
 //! Exit codes: 0 success; 1 I/O or verification error; 2 usage error.
+//! `verify-artifact` additionally exits 3 when the receipt declares no artifact
+//! (`absent`) and 4 when only some lines declare one (`incomplete`), so the build
+//! receipt can record the typed gap without dying in non-strict mode.
 
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -29,6 +38,10 @@ use std::process::exit;
 use std::str::FromStr;
 
 use nam_plug::receipt::LONG_ROSTER;
+use nam_plug::receipt::long_artifact::{
+    ARTIFACT_EXERCISED_KEY, ARTIFACT_PATH_KEY, ARTIFACT_SHA256_KEY, ArtifactConsistency,
+    declared_artifact, verify_receipt_artifact, verify_receipt_declared_sha,
+};
 use neural_amp_modeler_rs::testing::receipt::{
     LongAuditReceipt, LongPhaseReceipt, LongPhaseStatus, count_tests_executed_from_log,
     detect_gap_markers, now_iso8601,
@@ -49,6 +62,8 @@ fn main() {
         "append" => cmd_append(&args[1..]),
         "summary" => cmd_summary(&args[1..]),
         "validate" => cmd_validate(&args[1..]),
+        "verify-artifact" => cmd_verify_artifact(&args[1..]),
+        "artifact-status" => cmd_artifact_status(&args[1..]),
         "-h" | "--help" => {
             print_help();
             exit(0);
@@ -67,8 +82,12 @@ fn print_help() {
     println!("  plug_long_receipt append --phase-id <id> --name <name> --status <STATUS>");
     println!("                        --duration-ms <ms> [--tests-executed <n>] [--log <path>]");
     println!("                        [--gaps <a,b,...>] [--out <file>]");
+    println!("                        [--artifact-path <path>] [--artifact-sha256 <hex>]");
+    println!("                        [--artifact-exercised true|false]");
     println!("  plug_long_receipt summary [--out <file>]");
     println!("  plug_long_receipt validate [--out <file>] [--strict]");
+    println!("  plug_long_receipt verify-artifact --out <file> --artifact <path>");
+    println!("  plug_long_receipt artifact-status --out <file> --expected-sha256 <hex>");
     println!();
     println!(
         "Status values: PASSED, FAILED, SKIPPED, INCONCLUSIVE, SKIP_CAPABILITY, NOT_RUN, SIMULATED"
@@ -178,7 +197,33 @@ fn cmd_append(args: &[String]) {
         }
     }
 
-    let receipt = LongPhaseReceipt {
+    let artifact_path = flags.get("artifact-path").cloned();
+    let artifact_sha256 = flags.get("artifact-sha256").cloned();
+    if artifact_path.is_some() != artifact_sha256.is_some() {
+        die_usage(
+            "append",
+            "--artifact-path and --artifact-sha256 must be supplied together",
+        );
+    }
+    let artifact_exercised = match flags.get("artifact-exercised") {
+        None => false,
+        Some(v) => match v.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => die_usage(
+                "append",
+                "--artifact-exercised must be exactly 'true' or 'false'",
+            ),
+        },
+    };
+    if artifact_exercised && artifact_sha256.is_none() {
+        die_usage(
+            "append",
+            "--artifact-exercised true requires --artifact-path and --artifact-sha256",
+        );
+    }
+
+    let mut receipt = LongPhaseReceipt {
         phase_id,
         name,
         status,
@@ -188,7 +233,9 @@ fn cmd_append(args: &[String]) {
         timestamp: now_iso8601(),
         ..Default::default()
     };
-    if let Err(e) = append_line(&out, &receipt.render_jsonl_line()) {
+    receipt.artifact_sha256 = artifact_sha256;
+    let line = render_with_plug_fields(&receipt, artifact_path.as_deref(), artifact_exercised);
+    if let Err(e) = append_line(&out, &line) {
         eprintln!("append: failed to write receipt to {out}: {e}");
         exit(1);
     }
@@ -208,7 +255,7 @@ fn cmd_summary(args: &[String]) {
         .get("out")
         .cloned()
         .unwrap_or_else(|| DEFAULT_OUT.to_string());
-    let mut audit = match LongAuditReceipt::parse_jsonl_file(Path::new(&out)) {
+    let audit = match LongAuditReceipt::parse_jsonl_file(Path::new(&out)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("summary: cannot build summary from {out}: {e}");
@@ -219,25 +266,148 @@ fn cmd_summary(args: &[String]) {
         eprintln!("summary: no phase entries in {out} — nothing to summarize");
         exit(1);
     }
-    audit.push_summary();
-    let overall = audit
-        .phases
-        .last()
-        .expect("push_summary always appends the overall line");
-    if let Err(e) = write_file(&out, &audit.render_jsonl()) {
+
+    // Preserve the raw phase lines verbatim: the engine schema is the single
+    // source of truth for the verdict, while `artifact_path` is a Plug-local
+    // provenance key that the engine type does not model. Re-rendering the
+    // parsed structs would silently drop it.
+    let raw = match fs::read_to_string(&out) {
+        Ok(raw) => raw,
+        Err(e) => {
+            eprintln!("summary: cannot read {out}: {e}");
+            exit(1);
+        }
+    };
+    let mut kept_lines: Vec<String> = Vec::new();
+    let mut raw_entries: Vec<serde_json::Value> = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("summary: invalid JSON line in {out}: {e}");
+                exit(1);
+            }
+        };
+        if value.get("phase_id").and_then(|v| v.as_str()) == Some("overall") {
+            continue;
+        }
+        kept_lines.push(trimmed.to_string());
+        raw_entries.push(value);
+    }
+
+    let summary = audit.summary_receipt();
+    let declared = match declared_artifact(&raw_entries) {
+        Ok(declared) => Some(declared),
+        Err(nam_plug::receipt::long_artifact::DeclaredArtifactError::Conflicting) => {
+            eprintln!("summary: receipt declares conflicting artifacts — refusing to summarize");
+            exit(1);
+        }
+        Err(_) => None,
+    };
+    let mut summary_value = match serde_json::to_value(&summary) {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("summary: cannot serialize overall line: {e}");
+            exit(1);
+        }
+    };
+    if let Some(declared) = declared {
+        summary_value[ARTIFACT_SHA256_KEY] = serde_json::Value::String(declared.sha256);
+        if let Some(path) = declared.path {
+            summary_value[ARTIFACT_PATH_KEY] = serde_json::Value::String(path);
+        }
+    }
+    let summary_line = match serde_json::to_string(&summary_value) {
+        Ok(line) => line,
+        Err(e) => {
+            eprintln!("summary: cannot render overall line: {e}");
+            exit(1);
+        }
+    };
+    kept_lines.push(summary_line);
+
+    let mut content = kept_lines.join("\n");
+    content.push('\n');
+    if let Err(e) = write_file(&out, &content) {
         eprintln!("summary: failed to write overall line to {out}: {e}");
         exit(1);
     }
     eprintln!(
         "✓ plug long-audit receipt: overall {} ({} tests, {} ms, {} gaps)",
-        overall.status,
-        overall.tests_executed,
-        overall.duration_ms,
-        overall.gaps.len()
+        summary.status,
+        summary.tests_executed,
+        summary.duration_ms,
+        summary.gaps.len()
     );
     // Machine-readable verdict on stdout for the shell runner (single line).
-    println!("OVERALL: {}", overall.status.as_str());
+    println!("OVERALL: {}", summary.status.as_str());
     exit(0);
+}
+
+fn cmd_verify_artifact(args: &[String]) {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => die_usage("verify-artifact", &e),
+    };
+    let out = match required(&flags, "out") {
+        Ok(v) => v.clone(),
+        Err(e) => die_usage("verify-artifact", &e),
+    };
+    let artifact = match required(&flags, "artifact") {
+        Ok(v) => PathBuf::from(v),
+        Err(e) => die_usage("verify-artifact", &e),
+    };
+
+    let verdict = verify_receipt_artifact(Path::new(&out), &artifact);
+    println!("ARTIFACT_CONSISTENCY: {}", verdict.as_str());
+    println!(
+        "ARTIFACT_SHA256: {}",
+        verdict.declared_sha256().unwrap_or("-")
+    );
+    if let Some(reason) = verdict.reason() {
+        eprintln!("verify-artifact: {reason}");
+    }
+    match verdict {
+        ArtifactConsistency::Match { .. } => exit(0),
+        ArtifactConsistency::Mismatch { .. } => exit(1),
+        ArtifactConsistency::Absent { .. } => exit(3),
+        ArtifactConsistency::Incomplete { .. } => exit(4),
+    }
+}
+
+fn cmd_artifact_status(args: &[String]) {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => die_usage("artifact-status", &e),
+    };
+    let out = match required(&flags, "out") {
+        Ok(v) => v.clone(),
+        Err(e) => die_usage("artifact-status", &e),
+    };
+    let expected = match required(&flags, "expected-sha256") {
+        Ok(v) => v.clone(),
+        Err(e) => die_usage("artifact-status", &e),
+    };
+
+    let verdict = verify_receipt_declared_sha(Path::new(&out), &expected);
+    println!("ARTIFACT_CONSISTENCY: {}", verdict.as_str());
+    println!(
+        "ARTIFACT_SHA256: {}",
+        verdict.declared_sha256().unwrap_or("-")
+    );
+    if let Some(reason) = verdict.reason() {
+        eprintln!("artifact-status: {reason}");
+    }
+    match verdict {
+        ArtifactConsistency::Match { .. } => exit(0),
+        ArtifactConsistency::Mismatch { .. } => exit(1),
+        ArtifactConsistency::Absent { .. } => exit(3),
+        ArtifactConsistency::Incomplete { .. } => exit(4),
+    }
 }
 
 fn cmd_validate(args: &[String]) {
@@ -287,6 +457,23 @@ fn cmd_validate(args: &[String]) {
         overall.status.as_str()
     );
     exit(0);
+}
+
+fn render_with_plug_fields(
+    receipt: &LongPhaseReceipt,
+    artifact_path: Option<&str>,
+    artifact_exercised: bool,
+) -> String {
+    match serde_json::to_value(receipt) {
+        Ok(mut value) => {
+            if let Some(path) = artifact_path {
+                value[ARTIFACT_PATH_KEY] = serde_json::Value::String(path.to_string());
+                value[ARTIFACT_EXERCISED_KEY] = serde_json::Value::Bool(artifact_exercised);
+            }
+            serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+        }
+        Err(_) => "{}".to_string(),
+    }
 }
 
 fn append_line(out: &str, line: &str) -> std::io::Result<()> {

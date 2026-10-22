@@ -36,7 +36,7 @@ use std::sync::atomic::Ordering;
 /// Nominal main-thread watchdog period (ms): RT poison recovery, latency/PDC
 /// sync and the Tier-1 GC ring drain.
 pub(crate) const WATCHDOG_PERIOD_MS: u32 = 250;
-/// Accelerated watchdog period (ms) armed by S6-T2 while a structural rebuild
+/// Accelerated watchdog period (ms) armed while a structural rebuild
 /// flag (`RT_STATUS_NEEDS_SLIMMABLE_REBUILD` / `RT_STATUS_NEEDS_OS_REBUILD`) is
 /// still pending, so the retry cadence shortens on hosts where the worker's
 /// `request_callback` is ineffective. Restored to [`WATCHDOG_PERIOD_MS`] once the
@@ -148,10 +148,10 @@ pub struct NamClapMainThread<'a> {
     /// Watchdog timer ID registered with the host for periodic housekeeping ticks (if supported).
     pub watchdog_timer: Cell<Option<clack_extensions::timer::TimerId>>,
     /// Currently armed watchdog period in milliseconds. Tracks the cadence so the
-    /// adaptive-rebuild fallback (S6-T2 / F-UX-02) only reprograms the host timer
+    /// adaptive-rebuild fallback (F-UX-02) only reprograms the host timer
     /// on an actual change.
     pub(crate) watchdog_period_ms: Cell<u32>,
-    /// Persistent per-instance asynchronous model loader (Épico B / F-UX-01).
+    /// Persistent per-instance asynchronous model loader (F-UX-01).
     /// Spawned lazily on the first asynchronous load; `None` in the synchronous
     /// fallback mode or before the first load.
     pub(crate) model_loader: RefCell<Option<model_loader::ModelLoader>>,
@@ -169,7 +169,7 @@ pub struct NamClapMainThread<'a> {
     /// request invalidates it (last-wins); presets are always honoured FIFO.
     pub(crate) dispatched_model_is_gui: Cell<bool>,
     /// Adaptive-rebuild delivery slots written by the loader worker and drained
-    /// by the main thread on each `housekeeping()` tick (S6-T1 / F-UX-02).
+    /// by the main thread on each `housekeeping()` tick (F-UX-02).
     /// Off-RT only.
     pub(crate) rebuild_slots: model_loader::RebuildSlots,
     /// Whether the adaptive structural rebuilds (slimmable slice + oversampling

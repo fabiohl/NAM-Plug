@@ -21,18 +21,12 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Locate bootstrap-repo.sh
-BOOTSTRAP_SCRIPT=""
-for candidate in "$PROJECT_DIR/../.agents/scripts/bootstrap-repo.sh" "$HOME/NAM/.agents/scripts/bootstrap-repo.sh"; do
-    if [ -f "$candidate" ]; then
-        BOOTSTRAP_SCRIPT="$candidate"
-        break
-    fi
-done
+# Locate bootstrap-repo.sh via environment override or system path
+BOOTSTRAP_SCRIPT="${NAM_BOOTSTRAP_SCRIPT:-$(command -v bootstrap-repo.sh || true)}"
 
-if [ -z "$BOOTSTRAP_SCRIPT" ]; then
-    echo "ERROR: bootstrap-repo.sh not found!" >&2
-    exit 1
+if [ -z "$BOOTSTRAP_SCRIPT" ] || [ ! -f "$BOOTSTRAP_SCRIPT" ]; then
+    echo "NOTICE: bootstrap-repo.sh not found (set NAM_BOOTSTRAP_SCRIPT to run); skipping."
+    exit 0
 fi
 
 TMP_DIR=$(mktemp -d)

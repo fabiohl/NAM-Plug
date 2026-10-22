@@ -38,6 +38,21 @@ use std::time::Instant;
 
 pub const MANIFEST_VERSION: &str = "1.0.0";
 
+/// Excitation gain applied to the synthetic stress signal before it enters the
+/// profiling scenarios.
+///
+/// Measured: (2026-10-22) the engine's default stress signal peaks at 0.95
+/// (−0.45 dBFS) and, together with the dense ±12 dB input-gain automation,
+/// drove four `Output clipping detected!` warnings. A first attempt at −12 dB
+/// (gain 0.25) still produced one clipping event in `lstm_live_48k`, whose
+/// dense automation reaches +11 dB input gain on a model with a 9.8× loudness
+/// output multiplier. The measured clipping-free point is **−18 dB**
+/// (gain 0.125, peak ≈0.119 ≈ −18.5 dBFS), verified both in-process and against
+/// the release artifact with zero warnings. Lower this value (never raise it)
+/// if a new topology/scenario clips; the point is profile coverage, not
+/// loudness.
+const PGO_EXCITATION_GAIN: f32 = 0.125;
+
 /// Describes a mandatory profiling scenario executed by the workload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestScenario {
@@ -59,6 +74,9 @@ pub struct WorkloadReceipt {
     pub manifest_version: String,
     pub status: String,
     pub timestamp_utc: String,
+    /// Linear excitation gain applied before the scenario matrix. Recorded so
+    /// the release receipt can prove which profile was trained.
+    pub excitation_gain: f32,
     pub total_scenarios: usize,
     pub total_callbacks: u64,
     pub total_samples_processed: u64,
@@ -126,14 +144,21 @@ fn main() {
     let samples_48k =
         neural_amp_modeler_rs::testing::stress::generate_stress_signal_v2_default(48000);
     // Slice to 48,000 samples (1 full second of diverse signal) for balanced profiling coverage
-    let signal_48k = if samples_48k.len() > 48000 {
+    let raw_signal = if samples_48k.len() > 48000 {
         &samples_48k[..48000]
     } else {
         &samples_48k[..]
     };
+    // E-D (A-2): keep the workload out of the clipping regime. The stress
+    // generator is frozen upstream; the attenuation belongs to the profiler.
+    let signal_48k: Vec<f32> = raw_signal.iter().map(|s| s * PGO_EXCITATION_GAIN).collect();
+    let peak = signal_48k.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
     log::info!(
-        "  Generated test signal: {} samples at 48000 Hz",
-        signal_48k.len()
+        "  Generated test signal: {} samples at 48000 Hz (gain {:.3}, peak {:.4} ≈ {:.1} dBFS)",
+        signal_48k.len(),
+        PGO_EXCITATION_GAIN,
+        peak,
+        20.0 * (peak.max(f32::MIN_POSITIVE) as f64).log10()
     );
 
     // 6. Build the versioned manifest
@@ -178,7 +203,7 @@ fn main() {
             } else {
                 None
             },
-            signal_48k,
+            &signal_48k,
         ) {
             Ok(res) => res,
             Err(err) => {
@@ -203,7 +228,7 @@ fn main() {
     ] {
         log::info!("🚀 Executing Standalone DSP Scenario [{name}]");
         let model_path = Path::new(&fixture_map[*fixture_key].path);
-        let result = match run_standalone_scenario(name, model_path, &sys, signal_48k) {
+        let result = match run_standalone_scenario(name, model_path, &sys, &signal_48k) {
             Ok(res) => res,
             Err(err) => {
                 log::error!(
@@ -231,6 +256,7 @@ fn main() {
         manifest_version: MANIFEST_VERSION.to_string(),
         status: "SUCCESS".to_string(),
         timestamp_utc: iso8601_now(),
+        excitation_gain: PGO_EXCITATION_GAIN,
         total_scenarios: scenario_results.len(),
         total_callbacks,
         total_samples_processed,

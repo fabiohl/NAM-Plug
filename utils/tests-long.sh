@@ -35,10 +35,17 @@
 #                     (conditional: skipped with a gap warning if xvfb-run absent)
 #
 # Usage:
-#   ./utils/tests-long.sh [--strict-pre-release] [--nocapture] [--dry-run] [--gui]
+#   ./utils/tests-long.sh [--artifact PATH] [--strict-pre-release] [--nocapture] [--dry-run] [--gui]
 #   chrt -f 80 ./utils/tests-long.sh --strict-pre-release  # official pre-release ceremony
 #
+# Every phase runs against ONE resolved artifact (`CLAP_PLUGIN_UNDER_TEST`),
+# defaulting to the installed `~/.clap/nam_plug.clap`; the script records its
+# path and SHA-256 in every receipt line. In `--strict-pre-release` mode it also
+# exports `CLAP_STRICT_ARTIFACT=1` so the artifact validator fails closed.
+#
 # Environment variables:
+#   CLAP_PLUGIN_UNDER_TEST      Artifact under test (overrides the default install;
+#                               `--artifact PATH` takes precedence over it)
 #   NAM_BENCH_CORE              CPU core for affinity pinning (default: isolated core or nproc/2)
 #   NAM_THERMAL_COOLDOWN_S      Seconds to idle after pre-compilation (default: 0)
 #   NAM_GUI_PHASE_AUTO          Set to 0 to suppress auto-trigger of GUI phase (default: 1)
@@ -49,9 +56,10 @@ STRICT_PRE_RELEASE=0
 NOCAPTURE=0
 DRY_RUN=0
 RUN_GUI=0
+CLI_ARTIFACT=""
 
-for arg in "$@"; do
-    case "$arg" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --strict-pre-release)
             STRICT_PRE_RELEASE=1
             ;;
@@ -64,19 +72,32 @@ for arg in "$@"; do
         --gui)
             RUN_GUI=1
             ;;
+        --artifact)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                echo "--artifact requires a path" >&2
+                exit 1
+            fi
+            CLI_ARTIFACT="$2"
+            shift
+            ;;
+        --artifact=*)
+            CLI_ARTIFACT="${1#--artifact=}"
+            ;;
         --help|-h)
-            echo "Usage: $(basename "$0") [--strict-pre-release] [--nocapture] [--dry-run] [--gui]"
+            echo "Usage: $(basename "$0") [--artifact PATH] [--strict-pre-release] [--nocapture] [--dry-run] [--gui]"
             echo ""
             echo "Long audit suite for NAM-Plug — runs heavy #[ignore] stress tests."
             echo ""
             echo "Options:"
+            echo "  --artifact PATH       Artifact under test (default: ~/.clap/nam_plug.clap)"
             echo "  --strict-pre-release  Fail closed on any gap or inconclusive phase (rejects --dry-run)"
-            echo "  --nocapture           Pass --nocapture to cargo test for verbose output"
+            echo "  --nocapture           Pass --nocapture to cargo test for verbose output (phases 1-3 always do)"
             echo "  --dry-run             Print planned commands and write SIMULATED receipts to target/logs/long-audit-receipt.dryrun.jsonl"
             echo "  --gui                 Run the GUI/Xvfb phase (Phase 4) explicitly"
             echo "  -h, --help            Show this help and exit"
             echo ""
             echo "Environment variables:"
+            echo "  CLAP_PLUGIN_UNDER_TEST    Artifact under test (overrides the default install)"
             echo "  NAM_BENCH_CORE            CPU core for affinity pinning (default: isolated core or nproc/2)"
             echo "  NAM_THERMAL_COOLDOWN_S    Idle seconds after pre-compilation (default: 0)"
             echo "  NAM_GUI_PHASE_AUTO        Set 0 to suppress auto GUI trigger (default: 1)"
@@ -85,11 +106,12 @@ for arg in "$@"; do
             exit 0
             ;;
         *)
-            echo "Unknown option: $arg" >&2
-            echo "Usage: $(basename "$0") [--strict-pre-release] [--nocapture] [--dry-run] [--gui]" >&2
+            echo "Unknown option: $1" >&2
+            echo "Usage: $(basename "$0") [--artifact PATH] [--strict-pre-release] [--nocapture] [--dry-run] [--gui]" >&2
             exit 1
             ;;
     esac
+    shift
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -135,6 +157,23 @@ if [ "${NAM_LIB_NO_CD:-0}" != "1" ]; then
     cd "$PROJECT_DIR" || exit 1
 fi
 
+# ── Artifact under test (E-A: provenance chain) ─────────────────────────────
+# Every phase must test the SAME binary that the operator installed. Resolve it
+# once, fail closed when it is absent, and export it to every cargo invocation.
+RESOLVED_ARTIFACT="${CLI_ARTIFACT:-${CLAP_PLUGIN_UNDER_TEST:-$HOME/.clap/nam_plug.clap}}"
+if [ ! -f "$RESOLVED_ARTIFACT" ]; then
+    echo -e "${RED}${BOLD}❌ CLAP artifact not found: $RESOLVED_ARTIFACT${NC}" >&2
+    echo "  Build and install it first (utils/build-release.sh --install) or pass --artifact PATH." >&2
+    exit 1
+fi
+ARTIFACT_PATH="$(readlink -f -- "$RESOLVED_ARTIFACT" 2>/dev/null || printf '%s' "$RESOLVED_ARTIFACT")"
+ARTIFACT_SHA256="$(sha256sum "$ARTIFACT_PATH" | cut -d' ' -f1)"
+export CLAP_PLUGIN_UNDER_TEST="$ARTIFACT_PATH"
+export ARTIFACT_PATH ARTIFACT_SHA256
+if [ "$STRICT_PRE_RELEASE" = "1" ]; then
+    export CLAP_STRICT_ARTIFACT=1
+fi
+
 # ── Memory guard (OOM containment) ──────────────────────────────────────────
 # Phase 0 pre-compiles every test binary in release (fat LTO). Re-exec inside a
 # transient, memory-capped systemd scope so that peak is contained in its own
@@ -142,6 +181,9 @@ fi
 # unavailable; tune with NAM_MEM_GUARD_MAX on larger hosts.
 if [ "${NAM_MEM_GUARD:-0}" != "1" ] && [ "${NAM_NO_MEM_GUARD:-0}" != "1" ] && [ "$DRY_RUN" = "0" ]; then
     export NAM_MEM_GUARD=1
+    export NAM_MEM_GUARD_HIGH="${NAM_MEM_GUARD_HIGH:-6G}"
+    export NAM_MEM_GUARD_MAX="${NAM_MEM_GUARD_MAX:-8G}"
+    export NAM_MEM_GUARD_SWAP_MAX="${NAM_MEM_GUARD_SWAP_MAX:-8G}"
     exec "$SCRIPT_DIR/mem-guard.sh" "$SCRIPT_PATH" "$@"
 fi
 
@@ -172,15 +214,17 @@ trap 'rc=$?; if [ $rc -ne 0 ]; then echo -e "\n${RED}${BOLD}❌ Unexpected error
 trap cleanup EXIT
 
 BENCH_CORE="$(pick_bench_core)"
+NUM_CORES="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
 HAS_TASKSET=0
 if command -v taskset >/dev/null 2>&1; then
     HAS_TASKSET=1
 fi
 
-NOCAPTURE_FLAG=""
-if [ "$NOCAPTURE" = "1" ]; then
-    NOCAPTURE_FLAG="--nocapture"
-fi
+# Phases 1-3 always run with `--nocapture`: the artifact validator prints the
+# `=== CLAP Artifact ===` provenance block through `eprintln!`, which libtest
+# would otherwise swallow. Keeping it in `long-phase*.log` is the evidence that
+# the phase tested the resolved artifact.
+NOCAPTURE_FLAG="--nocapture"
 
 mkdir -p target/logs target/test_crashes
 export NAM_CRASH_DIR="${PROJECT_DIR}/target/test_crashes"
@@ -220,6 +264,10 @@ emit_receipt() {
     local status="$3"
     local duration_ms="$4"
     local log_file="${5:-}"
+    # Declared vs exercised: phases 1/2/4 run only `--lib` tests that never load
+    # the shared object; phase 3 includes `cargo test --test clap`, whose
+    # multi-instance test `dlopen`s the installed artifact.
+    local artifact_exercised="${6:-false}"
     local mapped="$status"
     local gaps_arg=""
     # The engine vocabulary has no GAP phase status: a declared gap is a
@@ -233,7 +281,9 @@ emit_receipt() {
         return 0
     fi
     local -a args=(append --phase-id "$phase_id" --name "$name" --status "$mapped"
-                   --duration-ms "$duration_ms" --out "$RECEIPT_FILE")
+                   --duration-ms "$duration_ms" --out "$RECEIPT_FILE"
+                   --artifact-path "$ARTIFACT_PATH" --artifact-sha256 "$ARTIFACT_SHA256"
+                   --artifact-exercised "$artifact_exercised")
     [ -n "$log_file" ] && [ -f "$log_file" ] && args+=(--log "$log_file")
     [ -n "$gaps_arg" ] && args+=(--gaps "$gaps_arg")
     if ! "$PLUG_RECEIPT_BIN" "${args[@]}"; then
@@ -279,8 +329,10 @@ run_cargo_test() {
 echo -e "${BLUE}${BOLD}=============================================================${NC}"
 echo -e "${BLUE}${BOLD}     NAM-Plug Long-Duration Stress & Audit Suite             ${NC}"
 echo -e "${BLUE}${BOLD}=============================================================${NC}"
-echo -e "  Strict pre-release: ${BOLD}$STRICT_PRE_RELEASE${NC}  Nocapture: ${BOLD}$NOCAPTURE${NC}  Dry-run: ${BOLD}$DRY_RUN${NC}  GUI: ${BOLD}$RUN_GUI${NC}"
+echo -e "  Strict pre-release: ${BOLD}$STRICT_PRE_RELEASE${NC}  Nocapture (phases 1-3): ${BOLD}1${NC}  Dry-run: ${BOLD}$DRY_RUN${NC}  GUI: ${BOLD}$RUN_GUI${NC}"
 echo -e "  Bench core: ${BOLD}$BENCH_CORE${NC} (of $NUM_CORES, HAS_TASKSET=$HAS_TASKSET)  Receipt: ${CYAN}$RECEIPT_FILE${NC}"
+echo -e "  Artifact under test: ${BOLD}$ARTIFACT_PATH${NC}"
+echo -e "  Artifact SHA-256: ${BOLD}$ARTIFACT_SHA256${NC}  Strict artifact: ${BOLD}${CLAP_STRICT_ARTIFACT:-0}${NC}"
 echo -e "  xvfb-run available: ${BOLD}$HAVE_XVFB_RUN${NC}  Thermal cooldown: ${BOLD}${NAM_THERMAL_COOLDOWN_S:-0}s${NC}"
 if [ "$ORIG_PARANOID" != "2" ] || [ "$STRICT_PRE_RELEASE" = "1" ]; then
     echo -e "  kernel.perf_event_paranoid: ${BOLD}$ORIG_PARANOID${NC}"
@@ -313,13 +365,25 @@ if [ "$DRY_RUN" != "1" ]; then
     : > "$PREBUILD_LOG" 2>/dev/null || true
 fi
 
+# Release test artifacts never need the shipped fat-LTO profile: disabling LTO
+# and restoring parallel codegen keeps the build's peak memory bounded and ensures
+# consistent cache reuse across all phases (including Phase 4 tests-gui.sh).
+export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-false}"
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}"
+
 echo -e "\n${BLUE}${BOLD}[0/4] Pre-build — compiling all test artefacts (--no-run)...${NC}"
+TARGET_PREBUILD_ARGS=(--lib --test heap_audit --test clap)
+COMPILE_CMD=(cargo test --features testing --release --no-run --jobs "${CARGO_BUILD_JOBS:-4}" "${TARGET_PREBUILD_ARGS[@]}")
 if [ "$DRY_RUN" = "1" ]; then
-    echo -e "  ${YELLOW}[dry-run]${NC} cargo test --features testing --release --no-run --lib --tests 2>&1 | tee $PREBUILD_LOG"
+    echo -e "  ${YELLOW}[dry-run]${NC} ${COMPILE_CMD[*]} 2>&1 | tee $PREBUILD_LOG"
 else
     PREBUILD_START=$(date +%s%N)
-    echo -e "  ${BLUE}→${NC} cargo test --features testing --release --no-run --lib --tests"
-    if cargo test --features testing --release --no-run --lib --tests 2>&1 | tee "$PREBUILD_LOG"; then
+    echo -e "  ${BLUE}→${NC} ${COMPILE_CMD[*]}"
+    NORM_PREFIX=()
+    if command -v chrt >/dev/null 2>&1 && [ "$(chrt -p $$ 2>/dev/null | grep -o 'SCHED_[A-Z]*' || true)" = "SCHED_FIFO" ]; then
+        NORM_PREFIX=(chrt -o 0)
+    fi
+    if "${NORM_PREFIX[@]}" "${COMPILE_CMD[@]}" 2>&1 | tee "$PREBUILD_LOG"; then
         PREBUILD_END=$(date +%s%N)
         PREBUILD_DUR_MS=$(( (PREBUILD_END - PREBUILD_START) / 1000000 ))
         prebuild_str=$(format_duration_ms "$PREBUILD_DUR_MS")
@@ -365,6 +429,7 @@ if [ "$DRY_RUN" = "1" ]; then
     echo -e "    cargo test --features testing --release --lib test_gc_stress_1000_swaps -- --ignored $NOCAPTURE_FLAG"
     echo -e "    cargo test --features testing --release --lib test_gc_drain_on_destroy_no_leak -- --ignored $NOCAPTURE_FLAG"
     echo -e "    cargo test --features testing --release --test heap_audit prop_gc_swap_idempotence -- --ignored $NOCAPTURE_FLAG"
+    echo -e "    cargo test --features testing --release --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
 else
     set +e
     echo -e "  ${BLUE}→ Running test_gc_stress_1000_swaps...${NC}"
@@ -428,6 +493,26 @@ else
         fi
     fi
 
+    # Heap-stability soak: its allocation accounting is TLS-scoped, so it must
+    # run alone on a single test thread (it is #[ignore]d in the default suite).
+    echo -e "  ${BLUE}→ Running test_corrupted_states_10000_heap_stable (heap soak)...${NC}"
+    TMP_LOG="target/logs/long-phase1d.log"
+    if [ -n "$NOCAPTURE_FLAG" ]; then
+        run_cargo_test "$TMP_LOG" --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1 --nocapture
+    else
+        run_cargo_test "$TMP_LOG" --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1
+    fi
+    RC4=$?
+    cat "$TMP_LOG" >> "$PHASE1_LOG" 2>/dev/null || true
+    rm -f "$TMP_LOG"
+    if [ $RC4 -ne 0 ] || ! grep -q "test_corrupted_states_10000_heap_stable.*ok" "$PHASE1_LOG" 2>/dev/null; then
+        PHASE1_STATUS="FAILED"
+        OVERALL_FAILED=1
+        echo -e "  ${RED}✗ test_corrupted_states_10000_heap_stable failed or did not run (rc=$RC4)${NC}"
+    else
+        echo -e "  ${GREEN}✓ test_corrupted_states_10000_heap_stable passed${NC}"
+    fi
+
     set -e
     PHASE1_END=$(date +%s%N)
     PHASE1_DUR_MS=$(( (PHASE1_END - PHASE1_START) / 1000000 ))
@@ -439,7 +524,7 @@ else
     fi
 fi
 
-emit_receipt "phase1" "GC Stress — 1000 swaps, drain-on-destroy & property soak" "$PHASE1_STATUS" "$PHASE1_DUR_MS" "$PHASE1_LOG"
+emit_receipt "phase1" "GC Stress — 1000 swaps, drain-on-destroy & property soak" "$PHASE1_STATUS" "$PHASE1_DUR_MS" "$PHASE1_LOG" false
 PHASE_STATUS+=("$PHASE1_STATUS")
 PHASE_DURATIONS+=("$PHASE1_DUR_MS")
 
@@ -485,7 +570,7 @@ else
     fi
 fi
 
-emit_receipt "phase2" "Teardown — RT parking lot drain off-RT" "$PHASE2_STATUS" "$PHASE2_DUR_MS" "$PHASE2_LOG"
+emit_receipt "phase2" "Teardown — RT parking lot drain off-RT" "$PHASE2_STATUS" "$PHASE2_DUR_MS" "$PHASE2_LOG" false
 PHASE_STATUS+=("$PHASE2_STATUS")
 PHASE_DURATIONS+=("$PHASE2_DUR_MS")
 
@@ -596,7 +681,7 @@ else
     fi
 fi
 
-emit_receipt "phase3" "RT Priority & Micro-Latency Certification" "$PHASE3_STATUS" "$PHASE3_DUR_MS" "$PHASE3_LOG"
+emit_receipt "phase3" "RT Priority & Micro-Latency Certification" "$PHASE3_STATUS" "$PHASE3_DUR_MS" "$PHASE3_LOG" true
 PHASE_STATUS+=("$PHASE3_STATUS")
 PHASE_DURATIONS+=("$PHASE3_DUR_MS")
 
@@ -647,7 +732,7 @@ else
     fi
 fi
 
-emit_receipt "phase4" "GUI/X11 Headless — Xvfb lifecycle, XEmbed cycles, clipboard" "$PHASE4_STATUS" "$PHASE4_DUR_MS" "$PHASE4_LOG"
+emit_receipt "phase4" "GUI/X11 Headless — Xvfb lifecycle, XEmbed cycles, clipboard" "$PHASE4_STATUS" "$PHASE4_DUR_MS" "$PHASE4_LOG" false
 PHASE_STATUS+=("$PHASE4_STATUS")
 PHASE_DURATIONS+=("$PHASE4_DUR_MS")
 
@@ -662,6 +747,15 @@ fi
 
 if [ "$LONG_RECEIPT_FAILED" -ne 0 ]; then
     echo -e "${RED}${BOLD}❌ Long-audit receipt emission failed — $RECEIPT_FILE is missing or incomplete.${NC}" >&2
+    exit 1
+fi
+
+# Fail closed if the receipt and the resolved artifact disagree. The script
+# emits the hash it computed at startup, so a mismatch means the artifact was
+# replaced mid-audit; an absent declaration means a writer bug. Neither may be
+# promoted to a PASSED audit.
+if ! "$PLUG_RECEIPT_BIN" verify-artifact --out "$RECEIPT_FILE" --artifact "$ARTIFACT_PATH"; then
+    echo -e "${RED}${BOLD}❌ Long-audit receipt does not certify $ARTIFACT_PATH (artifact provenance mismatch).${NC}" >&2
     exit 1
 fi
 

@@ -62,7 +62,7 @@ pub(crate) struct SubBlockScratch<'a> {
 /// The crossfade and tail-drain transitions are `#[cold]` callees: they are rare
 /// (bypass toggles, gate ring-out) and must not inflate the steady-state body of
 /// `process` (L1i/uop-cache pressure, register allocation of the hot path).
-#[inline]
+#[inline(never)]
 #[expect(
     clippy::too_many_arguments,
     reason = "explicit scalar tail beside the grouped SubBlockScratch: ctx/engine borrows and control scalars stay outside the plugin-owned scratch struct by design"

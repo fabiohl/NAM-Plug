@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! # Integration Tests for the Adaptive Telemetry Timer (Sprint S2 / F-UX-08)
+//! # Integration Tests for the Adaptive Telemetry Timer (F-UX-08)
 //!
-//! Covers the telemetry-timer hygiene work of Sprint S2 (Épico E):
+//! Covers the telemetry-timer hygiene invariants:
 //!
 //! 1. Suspension: after `hide` (dispatched through the `set_telemetry_active`
 //!    bridge) no telemetry tick is scheduled at all; `show` re-arms the timer.

@@ -136,6 +136,9 @@ fn test_concurrent_logging_during_repeated_instance_lifecycle() {
     for thread_idx in 0..4 {
         let is_running = Arc::clone(&running);
         workers.push(thread::spawn(move || {
+            let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
+                999_000 + thread_idx as u64,
+            );
             let mut count = 0;
             while is_running.load(Ordering::Relaxed) {
                 log::info!("Worker {} iteration {}", thread_idx, count);
@@ -148,7 +151,7 @@ fn test_concurrent_logging_during_repeated_instance_lifecycle() {
     }
 
     // Repeatedly instantiate and drop plugin instances while workers log concurrently
-    // 1000 cycles stress test per S3-T1 acceptance criteria.
+    // 1000 cycles stress test acceptance validation.
     for _ in 0..1000 {
         let (_entry, _host_info, plugin_instance) = test_util::make_test_plugin();
         log::info!("Plugin lifecycle in-flight log");

@@ -13,7 +13,7 @@
 //!   (within the LSTM Kahan shadow bound)** to a freshly-initialized instance
 //!   with the same configuration (model, IR, oversampling) — both with the
 //!   conv engine and with the recurrent (LSTM) neural model.
-//! * **Two-phase reset (S6-T1):** the reset itself is phase zero —
+//! * **Two-phase reset:** the reset itself is phase zero —
 //!   `NamModel::prewarm_reset` only, no stabilization feed — and the
 //!   following callbacks drain a fixed zeroed-sample budget while holding
 //!   their blocks on the latency-compensated dry path (bypass-leg
@@ -298,7 +298,7 @@ mod tests {
         let _ = process_block(&mut started, &silence);
 
         // The adaptive-compute FSM is not part of the two-phase reset
-        // contract (quiescent scope, S6-T0 D4): with it on, the debug-build
+        // contract (quiescent scope): with it on, the debug-build
         // drain callbacks exceed the block budget and the FSM's Minimal
         // state skips the LSTM model entirely, masking the containment and
         // parity semantics under test. The flip goes through the sanctioned
@@ -370,7 +370,7 @@ mod tests {
         );
     }
 
-    // ── S6-T1: two-phase reset — containment, parity and deterministic
+    // ── Two-phase reset: containment, parity and deterministic
     //    convergence across all three neural model families. ──
 
     #[test]
@@ -508,7 +508,7 @@ mod tests {
         }
     }
 
-    // ── Acceptance: NaN containment in two phases (S6-T3 / F-UX-04). ──
+    // ── Acceptance: NaN containment in two phases. ──
 
     /// A non-finite block must raise the flag; the *next* clean callback must
     /// clear it exactly once and hold the block on the raw dry path (bypass-leg),
@@ -736,14 +736,14 @@ mod tests {
     /// p99 while its median stayed at 3.19 ms), whereas the median is
     /// insensitive to isolated bolts and still fails closed on any real
     /// regression of the phase-zero reset or the amortized feed. Both A2
-    /// costs are engine-side (engine frozen for this sprint by D6); shrinking
+    /// costs are engine-side (engine frozen by D6 contract); shrinking
     /// this envelope requires engine work (cascade double-zeroing backlog).
     const RT_BUDGET_A2_NS: u128 = 4_000_000; // 25% headroom over 3.2 ms p50
 
     /// Micro-latency and wall-clock certification for `PluginAudioProcessor::reset()`
     /// across all supported neural model families (LSTM, WaveNet A1 standard, WaveNet A2 slimmable).
     ///
-    /// Validates the two-phase reset amortization (S6-T1):
+    /// Validates the two-phase reset amortization:
     /// - **RT Budget Contract (fail-closed):** The combined wall-clock time of the phase-zero
     ///   `reset()` + the immediate first post-reset audio block — the first amortized drain
     ///   callback (`64` samples @ 48 kHz) — is `assert!`ed per fixture: the LSTM/WaveNet A1
@@ -973,19 +973,19 @@ mod tests {
             let p99_block = p99(&block_times);
             let max_block = max_val(&block_times);
 
-            // Measured — S2-T1 baseline BEFORE S6-T1 (synchronous integral
+            // Measured baseline before two-phase reset (synchronous integral
             // prewarm reset, 2026-10-04, release profile, pinned isolated core 8, N=250 @ 48 kHz, Block=64):
             // - lstm.nam:                 reset p50=1624.02 µs, p99=1800.23 µs, max=1827.47 µs | block p50= 6.63 µs, p99=12.85 µs | total p50=1631.78 µs, p99=1813.22 µs [EXCEEDED: 1.81 ms vs 1.33 ms budget]
             // - wavenet_a1_standard.nam:  reset p50=  23.95 µs, p99=  63.35 µs, max=  80.39 µs | block p50=40.44 µs, p99=52.66 µs | total p50=  63.91 µs, p99= 109.09 µs [PASS: 0.11 ms vs 1.33 ms budget]
             // - a2_example.nam:           reset p50=3287.37 µs, p99=4140.13 µs, max=5125.04 µs | block p50=37.78 µs, p99=55.73 µs | total p50=3324.66 µs, p99=4178.97 µs [EXCEEDED: 4.18 ms vs 1.33 ms budget]
-            // Measured — S6-T1 two-phase reset (phase zero + first drained
+            // Measured — two-phase reset (phase zero + first drained
             // block), same profile, 2026-10-06, four runs (binaries
             // pre-fix + post-parity-fix); representative run:
             // lstm.nam: reset p50=  45.61 µs, p99=  781.32 µs, max=  896.90 µs | block p50= 69.28 µs, p99=  86.95 µs | total p50= 117.54 µs, p99=  852.90 µs, max=  978.76 µs [PASS: 0.85 ms vs 1.33 ms budget]
             //   (range across runs: reset p50 40.86–69.63 µs; total p50 110–139 µs; a quiet-window run measured reset p50=28.22 µs, p99=131.23 µs, total p99=207.92 µs)
             // - wavenet_a1_standard.nam:  reset p50=  20.18 µs, p99=  496.78 µs, max= 1049.72 µs | block p50= 47.98 µs, p99= 137.66 µs | total p50=  69.77 µs, p99=  602.45 µs, max= 1645.88 µs [PASS: 0.60 ms vs 1.33 ms budget]
             //   (range across runs: total p50 69–101 µs; phase-zero one-shot drain, no amortization window)
-            // - a2_example.nam:           reset p50=2185.62 µs, p99=5733.29 µs, max= 8362.75 µs | block p50=900.54 µs, p99= 1835.15 µs | total p50=3185.61 µs, p99= 6756.88 µs, max= 9190.65 µs [EXCEEDED: 6.76 ms vs 1.33 ms — see the S6-T0 D3 adendo]
+            // - a2_example.nam:           reset p50=2185.62 µs, p99=5733.29 µs, max= 8362.75 µs | block p50=900.54 µs, p99= 1835.15 µs | total p50=3185.61 µs, p99= 6756.88 µs, max= 9190.65 µs [EXCEEDED: 6.76 ms vs 1.33 ms — see the A2 adendo below]
             //   (range across runs: reset p50 2033–2186 µs, block p50 873–901 µs, total p50 3010–3186 µs across all four)
             // The sub-millisecond p99 spikes on all fixtures (~0.5–1 ms) are
             // ambient scheduler noise on the shared machine, not per-callback
@@ -995,8 +995,7 @@ mod tests {
             // buffers in place (engine `a2_prewarm_common` + per-array
             // `set_max_buffer_size` in-place re-zero — `prewarm_step`'s
             // chained inference adds ≈0.87–0.93 ms per amortized callback on
-            // top). Both costs are engine-side (D6: no engine changes in
-            // S6), so the 1.33 ms universal budget is enforced for the
+            // top). Both costs are engine-side, so the 1.33 ms universal budget is enforced for the
             // LSTM/A1 families; the A2 family is gated by this test against
             // its own measured envelope (RT_BUDGET_A2_NS).
             let p50_total = p50(&total_times);

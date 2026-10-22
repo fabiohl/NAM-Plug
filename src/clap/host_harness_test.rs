@@ -889,7 +889,7 @@ fn baselined_housekeeping_load_blocking_time() {
     instance.call_on_main_thread_callback();
     let elapsed = start.elapsed();
 
-    // S4 gate (T4.4): the timed callback only *accepts and dispatches* the load
+    // Non-blocking gate: the timed callback only *accepts and dispatches* the load
     // to the `nam-model-loader` worker, so the main-thread `housekeeping()`
     // tick must stay far below the 2 ms budget. The heavy `prepare_model`
     // phase no longer runs on the main thread.
@@ -897,13 +897,13 @@ fn baselined_housekeeping_load_blocking_time() {
         shared.cold.model_load_counter.load(Ordering::Relaxed),
         0,
         "the timed callback must not have loaded the model synchronously — \
-         the async loader (Épico B) must own the prepare phase \
+         the async loader must own the prepare phase \
          (NAM_SYNC_MODEL_LOAD must not be set)"
     );
 
     let ms = elapsed.as_secs_f64() * 1e3;
     eprintln!(
-        "[S4 gate] housekeeping() during async model load (a2_example.nam): {ms:.3} ms \
+        "[Load gate] housekeeping() during async model load (a2_example.nam): {ms:.3} ms \
          (target < 2.000 ms)"
     );
     assert!(
