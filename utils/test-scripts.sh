@@ -29,6 +29,8 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 
 REQUIRED_SCRIPTS=(
     test_bootstrap_perf_policy.sh
+    test_ceremony_fail_closed.sh
+    test_ceremony_reuse_binary.sh
     test_perf_confirmation.sh
     test_receipt_artifact_consistency.sh
     test_rt_codegen_post_bolt.sh

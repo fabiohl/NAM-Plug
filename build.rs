@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 //
 // Fix + permanent regression guard for an ELF symbol-interposition hang —
-// see docs/postmortem-libm-symbol-interposition.md and
+// see docs/architecture.md §2.1 (and the canonical postmortem in
+// NeuralAmpModeler-rs/docs/postmortem-libm-symbol-interposition.md) alongside
 // .cargo/hide-libm-shadow.map for the full, GDB-verified root-cause
 // analysis. Some part of the dependency graph pulls in libm-shaped
 // fallback symbols (`log10f`, `atan2f`, `acosf`, ...) that end up compiled

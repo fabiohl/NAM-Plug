@@ -47,12 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     window.set_gate_active(false);
     window.set_clip_active(false);
     window.set_sample_rate_text("48000 Hz".into());
+    window.set_buffer_size_text("64 spl".into());
     window.set_latency_text("0 spl (0.0 ms)".into());
-    window.set_dsp_load_text("1.4% DSP (Preview)".into());
+    window.set_dsp_load_text("3.1% DSP".into());
     window.set_xrun_active(false);
     window.set_oversample_text("1x (Off)".into());
     window.set_simd_badge("AVX2+FMA".into());
-    window.set_backend_text("Wayland Native".into());
+    window.set_backend_text("X11 Embedded".into());
 
     // Connect Callbacks for interactive knob manipulation
     {

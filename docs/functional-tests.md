@@ -7,16 +7,16 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 **Audience:** Developers, QA Testers, and End Users.
 **Target DAWs:** Bitwig Studio 6+ and Reaper / Fender Studio Pro 8+ (Linux, Flatpak / Native).
-**Preparation:** `~/.clap/nam_plug.clap` installed (Release build via `utils/build-release.sh` or `target/release/libnam_plug.so`), ≥1 valid `.nam` model, 1 invalid file, 1 `.wav` IR file, Guitar DI / signal generator on track, `pw-top` open to monitor XRUNs (Recommended: 128 samples @ 48 kHz).
+**Preparation:** `~/.clap/nam_plug.clap` installed (Release build via `export CARGO_BUILD_JOBS=4; utils/build-release.sh` or `target/release/libnam_plug.so`), ≥1 valid `.nam` model, 1 invalid file, 1 `.wav` IR file, Guitar DI or audio signal generator on track, and `pw-top` open to monitor XRUNs (Recommended: 128 samples @ 48 kHz).
 
 > [!NOTE]
-> This guide covers manual human QA workflows. For automated unit/integration tests (`cargo test`), property testing, allocation auditing, and Criterion performance benchmarks (`cargo bench`), refer to [`testing.md`](testing.md).
+> This guide covers manual human QA workflows. For automated unit and integration tests (`cargo test`), property testing, allocation auditing, and Criterion performance benchmarks (`cargo bench`), refer to [`testing.md`](testing.md).
 
 ---
 
 ## Executive Summary & Testing Strategy
 
-To prevent manual QA from being skipped due to friction ("philosophy of zero laziness"), this testing guide is structured into **3 progressive tiers**:
+To ensure comprehensive testing without unnecessary friction, this guide is organized into **3 progressive tiers**:
 
 | Tier       | Name                         | Target Duration | When to Run                            | Scope / Objective                                                     |
 |:---------- |:---------------------------- |:--------------- |:-------------------------------------- |:--------------------------------------------------------------------- |
@@ -31,15 +31,15 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 *Objective: Run these 5 actions immediately after building to verify core plugin stability.*
 
 - [ ] **T1.1 Load Model & CabSim IR:** Click `[📂 Load Model]` → select a valid `.nam` model → Click `[📂 Load IR]` → select a valid `.wav` IR.
-  *Expected:* Both load without host UI freeze or audio dropouts. Audible amp modeling and IR convolution active immediately. Active model name and IR filename update in Zone 1.
+  *Expected:* Both load without host UI freeze or audio dropouts. Amp modeling and IR convolution become audible immediately. Active model name and IR filename update in Zone 1.
 - [ ] **T1.2 Knobs & Double-Click Reset:** Drag **INPUT** knob to +6.0 dB, drag **GATE** to −50.0 dB → Double-click **INPUT**.
   *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to −90.0 dB (off by default).
 - [ ] **T1.3 Bypass & Adaptive VU Meter:** Insert plugin on a mono track (1 bar), then move to a stereo track (2 bars L/R) → Toggle **BYPASS**.
-  *Expected:* VU layout adapts dynamically (1 centered bar mono vs 2 bars L/R). Bypass toggle instantly silences DSP processing via a 64-sample click-free crossfade, yielding bit-transparent dry signal without clicks.
+  *Expected:* VU layout adapts dynamically (1 centered bar for mono vs. 2 bars L/R for stereo). Bypass toggle instantly silences DSP processing via a 64-sample click-free crossfade, yielding a bit-transparent dry signal without audible clicks.
 - [ ] **T1.4 Host Parameter Automation (`[Bitwig]`):** Draw a quick automation ramp for `input_gain_db` or `output_gain_db` in DAW → start playback.
-  *Expected:* GUI knob arc pulses/animates smoothly in sync with host automation; audio adjusts without zipper noise.
+  *Expected:* GUI knob arc pulses/animates smoothly in sync with host automation; audio volume adjusts smoothly without zipper noise.
 - [ ] **T1.5 Telemetry & Diagnostic Export:** Hover over status bar `"ℹ"` icon → click `"ℹ"` → paste (Ctrl+V) into a text editor.
-  *Expected:* Status bar shows real-time telemetry (SR, Latency, DSP Load %, Cycles, Last N, RT Prio, Overloads, Flags). Visual toast confirmation (`"Diagnostic copied · file in ~/.cache/neural-amp-modeler-rs/"`) appears; pasted text contains complete diagnostic dump.
+  *Expected:* Status bar displays real-time telemetry (SR, Latency, DSP Load %, Cycles, Last N, RT Prio, Overloads, Flags). A visual toast confirmation (`"Diagnostic copied · file in ~/.cache/neural-amp-modeler-rs/"`) appears; pasted text contains the complete diagnostic dump.
 
 ---
 
@@ -52,9 +52,9 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 - [ ] **2A.1 SPSC Non-Blocking Load:** Load a different `.nam` model while playing an audio track.
   *Expected:* DAW UI remains 100% responsive. Audio engine swaps models seamlessly without stopping playback or causing XRUNs in `pw-top`. Dropped model allocations are safely collected off-RT via SPSC GC.
 - [ ] **2A.2 Invalid File Robustness:** Select a corrupted or 0-byte `.nam` / `.wav` file in the file picker.
-  *Expected:* Red error toast/label (`"⚠ Load failed"` / `"⚠ IR load failed"`) displays for ~3s. Previous valid model/IR remains active; plugin never crashes or silences audio.
+  *Expected:* Red error toast (`"⚠ Load failed"` / `"⚠ IR load failed"`) displays for ~3s. Previous valid model/IR remains active; plugin never crashes or silences audio.
 - [ ] **2A.3 CabSim IR Management:** With an IR loaded, click `[🗑 Clear IR]`.
-  *Expected:* IR display reverts to `"No IR loaded"`, audio transitions cleanly back to post-model output without cab simulation. Clear button disappears.
+  *Expected:* IR display reverts to `"No IR loaded"`, audio transitions cleanly back to post-model output without cab simulation, and the clear button disappears.
 - [ ] **2A.4 Oversampling & Activation Engine Modes:** Switch Oversampling from `"Off"` to `"2×"` to `"4×"`, and Activation Precision from `"Standard"` to `"Fast"`.
   *Expected:* Resampler adjusts seamlessly; reported latency in status bar updates dynamically to reflect filter delay (`0 spl` @ Off, `32 spl` @ 2×, `96 spl` @ 4×); zero audio dropouts.
 - [ ] **2A.5 Slimmable A2 Container & Adaptive Compute:** Load a slimmable container model → change host parameter `"Slim Override"` from `"Auto"` to `"Force Lite"` to `"Force Full"` (or adjust `"Adaptive Compute"` mode).
@@ -67,23 +67,23 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 ### Domain 2B: UI Controls & Dynamic Feedback
 
 - [ ] **2B.1 Knob Tooltips & Fine-Tune:** Hover over knobs → hold **Ctrl + Drag** (or Ctrl + Scroll).
-  *Expected:* Tooltips display exact values with 2 decimals (e.g. `"3.50 dB"`). Ctrl key modifies parameter ~10× slower for precision tuning.
+  *Expected:* Tooltips display exact values with 2 decimals (e.g. `"3.50 dB"`). Holding Ctrl adjusts parameters ~10× slower for precision tuning.
 - [ ] **2B.2 Interactive Knob Glow:** Drag any knob.
-  *Expected:* Semi-transparent halo glow appears on the active arc while dragging and fades immediately upon release.
+  *Expected:* A subtle halo glow appears on the active arc while dragging and fades immediately upon release.
 - [ ] **2B.3 Segmented Controls (Oversampling & Activation):** Click `"Off"`, `"2×"`, `"4×"` under Oversampling, and `"Standard"`, `"Fast"` under Activation.
   *Expected:* Active option highlights crisply. Changes dispatch discrete CLAP parameter events to host and update DSP state instantly.
 - [ ] **2B.4 VU Peak Hold & Clipping:** Feed a high-gain signal to induce clipping (>0 dBFS) → stop audio → click clipped meter bar.
-  *Expected:* Peak hold bar pauses ~2s before decaying smoothly. Red clip LED at the top of the meter persists until manually clicked to reset.
+  *Expected:* Peak hold bar pauses ~2s before decaying smoothly. Red clip LED at the top persists until manually clicked to reset.
 - [ ] **2B.5 VU Meter L/R Channel Independence (`[Stereo Track]`):** On a stereo track, test 4 signal scenarios:
-  - (a) Signal **only on L** (hard-pan L or L-only generator) → only the L bar moves; R remains at minimum.
+  - (a) Signal **only on L** (hard-pan L) → only the L bar moves; R remains at minimum.
   - (b) Signal **only on R** → only the R bar moves; L remains at minimum.
-  - (c) **Symmetric signal** (equal on L and R) → L and R bars move to equal levels.
-  - (d) **Asymmetric signal** (different levels) → L and R bars move independently.
-  *Failure:* If L-only signal causes both bars to move equally, the test fails — `vu_l_state` and `vu_r_state` are not isolated.
+  - (c) **Symmetric signal** (equal L and R) → both bars move to equal levels.
+  - (d) **Asymmetric signal** (different levels) → bars move independently.
+  *Expected:* L and R channels operate independently without cross-talk or shared state leakage.
 - [ ] **2B.6 Drag & Drop Model Loading:** Drag a `.nam` model file from the host browser or desktop file manager and drop it onto the plugin GUI.
   *Expected:* `"Drop NAM Model Here ⬇️"` overlay appears on hover; releasing mouse loads the model cleanly.
 - [ ] **2B.7 Keyboard Navigation & Accessibility:** Press **Tab** / **Shift+Tab** to navigate controls → use **Up/Down** (or Left/Right) arrows on knobs → **Space/Enter** on buttons and segmented controls.
-  *Expected:* Clear focus ring cycles through interactive controls in sequence (`INPUT → OUTPUT → GATE → Oversampling → Activation → BYPASS → Load Model → Load IR → Clear IR`). Arrow keys increment/decrement values (with Ctrl for 0.1 dB fine steps vs 1.0 dB standard steps).
+  *Expected:* Focus ring cycles sequentially (`INPUT → OUTPUT → GATE → Oversampling → Activation → BYPASS → Load Model → Load IR → Clear IR`). Arrow keys increment/decrement values (Ctrl provides 0.1 dB fine steps vs. 1.0 dB standard steps).
 
 ---
 
@@ -91,24 +91,21 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 
 - [ ] **2C.1 Bitwig Track Color Sync (`[Bitwig]`):** Change DAW track color (e.g., Red, Blue, Green).
   *Expected:* Knob arcs and active LEDs update to match track color in <100ms (VU meters maintain standard tricolor gradient).
-- [ ] **2C.2 MIDI Learn Mapping Halo (`[Bitwig]`):** Activate MIDI Learn on the **INPUT**, **OUTPUT**, **GATE**, **Oversampling**, or **Activation** controls in the host.
-  *Expected:* A ring of 6 small dots appears around the knob arc (or 4 corner dots on segmented controls) using color provided by host (typically `#5e81ac`). The halo disappears when MIDI Learn is deactivated. VU meters are unaffected. (Tests `INDICATION_MAPPED` bit in `param_indication.rs`.)
-- [ ] **2C.3 Automation Arc Pulse & Override (`[Bitwig]`):** Play back active automation on `output_gain_db` → then manually drag the same knob while automation is playing.
-  *Expected:* (a) Arc pulses smoothly (alpha 0.3→1.0, ~1s cycle) while automation is active. (b) Manual touch temporarily turns arc amber (`#F5A623`) until released. (Tests `INDICATION_AUTOMATING` and `INDICATION_OVERRIDING` bits.)
+- [ ] **2C.2 MIDI Learn Mapping Halo (`[Bitwig]`):** Activate MIDI Learn on **INPUT**, **OUTPUT**, **GATE**, **Oversampling**, or **Activation** controls in the host.
+  *Expected:* A ring of 6 small dots appears around the knob arc (or 4 corner dots on segmented controls) using the color provided by the host. Halo disappears when MIDI Learn is deactivated.
+- [ ] **2C.3 Automation Arc Pulse & Override (`[Bitwig]`):** Play back active automation on `output_gain_db` → manually drag the knob while automation is playing.
+  *Expected:* (a) Arc pulses smoothly while automation is active. (b) Manual touch temporarily turns arc amber until released.
 - [ ] **2C.4 Full Project State Reload:** Set custom gain, gate, oversampling, activation, model, and IR → save DAW project → close DAW → reopen project.
   *Expected:* All parameters, model path, and IR path restore perfectly with identical audio output. Missing model files degrade cleanly to `"No model loaded"`.
 - [ ] **2C.5 Preset Discovery Browser:** Open the host's preset browser for NAM-Plug → inspect entries → load one.
-  *Expected:* Each entry displays the model name, creator (`modeled_by`), and gear model (if present in the `.nam` metadata). Loading the preset changes the active model (audible model change) and the model name updates in Zone 1.
+  *Expected:* Each entry displays the model name, creator, and gear model (from `.nam` metadata). Loading the preset applies the model cleanly.
 - [ ] **2C.6 Preset Portability (`clap.state-context`):** Move `.nam` model file to a different directory → load saved DAW device preset.
-  *Expected:* Plugin locates model via search paths / basename and restores full state.
-- [ ] **2C.7 Floating GUI Fallback Window:** Test plugin on a host requesting floating GUI mode → open and close the window 10+ times.
-  *Expected:* GUI opens as a standalone top-level window. All 10+ cycles complete without crashes, zombie windows, or RSS growth (>5 MB would indicate a leak).
-- [ ] **2C.7a X11 Embedded GUI (`[X11]`):** On an X11 session (or XWayland), leave the host in its **default** GUI negotiation (embedded — `is_floating=false`) → open and close the plugin GUI 10+ times.
-  *Expected:* the GUI renders **inside** the host's plugin panel (a native X11 child of the host `Window` — XEmbed), not as a separate top-level window; keyboard input works when the host panel has focus; all cycles complete without crashes, zombie/orphan windows, or RSS growth. *(Automated equivalent: `DISPLAY=:99 cargo test --features testing -- --ignored gui_embedded` under Xvfb/Xephyr.)*
-- [ ] **2C.7b Embedded→Floating Honest Fallback (`[X11]`):** Force the host to request an unsupported embedded configuration (e.g. run without an X11 display server reachable, or check the host's "floating editor" option if available) → the plugin must **not** show a silently-floating window for an embedded contract: `create()` is rejected and the host reports the GUI failure / falls back.
-  *Expected:* no second top-level window, no invisible GUI, no FSM anomaly; the status bar shows the negotiated backend (`"X11 (Embedded)"`, `"X11 (Floating)"`, or `"Wayland (Floating)"`).
-- [ ] **2C.7c GUI Reopen After destroy (`[X11]`):** With an X11 embedded GUI open, close the host's plugin editor window (host calls `destroy()`) and re-open it — repeat 5+ times on the same plugin instance.
-  *Expected:* the window re-embeds into the host panel every time (persistent per-instance GUI worker); no "The Slint platform was initialized in another thread" failures in the log.
+  *Expected:* Plugin locates model via fallback search paths or basename and restores full state.
+- [ ] **2C.7 GUI Window Negotiation (Embedded & Floating):**
+  - **Embedded mode (default):** GUI renders inside the host plugin window as an X11/Wayland child without orphan windows or memory growth.
+  - **Floating mode:** GUI opens as a clean standalone window when requested by the host.
+  - **Honest fallback:** An unsupported embedded request fails gracefully at `create()` rather than silently opening an orphan floating window.
+  - **Reopen cycles:** Closing and reopening the GUI window 5+ times on the same instance re-embeds cleanly with zero crashes or platform re-initialization errors.
 - [ ] **2C.8 Bitwig Device Panel Pages (`[Bitwig]`):** Open Bitwig Device Panel → navigate between pages.
   *Expected:* 2 pages present: **"Main"** (INPUT, OUTPUT, BYPASS) and **"Gate"** (GATE). Moving a slider in the Device Panel updates the corresponding knob in the GUI, and vice versa.
 - [ ] **2C.9 Category & Search Indexing:** Search host plugin browser for `"distortion"`, `"gate"`, or `"mono"`.
@@ -121,13 +118,13 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 - [ ] **2D.1 Status Bar Cadence & Metrics:** Observe status bar for ≥20s during steady playback.
   *Expected:* Real-time telemetry (`SR: {sr} kHz | Lat: {lat} ms ({spl} spl) | DSP: {load}% | Cycles: {cycles} | Last N: {n} | RT Prio: {prio} | Overloads: {overloads} | Flags: {flags}`) and model metadata update smoothly at ~1 Hz without UI flickering.
 - [ ] **2D.2 Diagnostic Clipboard & File Export:** Click status bar `"ℹ"` icon.
-  *Expected:* Toast displays `"Diagnostic copied · file in ~/.cache/neural-amp-modeler-rs/"`. Diagnostic file created under `~/.cache/neural-amp-modeler-rs/diagnostic-{unix_ts}.txt` with `0o600` permissions.
-- [ ] **2D.3 Diagnostic Folder Open (`[xdg-open]`):** Click `"Open Folder"` next to toast → test fallback by removing `xdg-open` or unsetting `HOME`.
-  *Expected:* Opens `~/.cache/neural-amp-modeler-rs/` in system file manager; missing `xdg-open` or headless server degrades gracefully without host crash.
+  *Expected:* Toast displays confirmation. Diagnostic file is created under `~/.cache/neural-amp-modeler-rs/diagnostic-{unix_ts}.txt` with `0o600` permissions and complete diagnostic dump.
+- [ ] **2D.3 Diagnostic Folder Open (`[xdg-open]`):** Click `"Open Folder"` next to toast → test fallback by unsetting `HOME` or removing `xdg-open`.
+  *Expected:* Opens cache directory in system file manager; missing `xdg-open` degrades gracefully without host crash.
 - [ ] **2D.4 Dynamic Sample Rate & PDC Recalculation:** With NAM-Plug active and audio playing, change the project sample rate (e.g., 44.1 kHz → 96 kHz).
-  *Expected:* Status bar updates to the new sample rate (e.g., `"SR: 96.0 kHz"`). Reported latency updates immediately. The host (Bitwig) recalculates Plugin Delay Compensation without audio desync. No XRUNs in `pw-top`.
+  *Expected:* Status bar updates to the new sample rate. Reported latency updates immediately. Host recalculates Plugin Delay Compensation (PDC) without audio desync or XRUNs.
 - [ ] **2D.5 Bypass & Resampling PDC Update:** Toggle bypass or switch oversampling (e.g. Off → 4×) while audio is playing.
-  *Expected:* Reported latency in the status bar changes to reflect the new resampling state. Host PDC updates immediately with no dropout.
+  *Expected:* Reported latency in status bar updates to reflect the new resampling state. Host PDC updates immediately with zero audio dropouts.
 
 ---
 
@@ -140,7 +137,7 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 - [ ] **3.1.1 GUI Open/Close Spam:** Rapidly open and close GUI window 20+ times in <30s during active playback.
   *Expected:* Zero audio glitches, zero XRUNs in `pw-top`, no lingering window threads.
 - [ ] **3.1.2 Model & IR Reload Flood:** Load 10 different `.nam` models and 10 `.wav` IRs in <1 minute while audio is running.
-  *Expected:* Memory RSS remains stable (growth < 2 MB after 10 reloads). GC cascade frees dropped allocations properly without memory leaks.
+  *Expected:* Memory RSS remains stable (growth < 2 MB after 10 reloads). SPSC GC safely frees dropped allocations without memory leaks.
 - [ ] **3.1.3 Bypass Spam:** Toggle **BYPASS** 20+ consecutive times via GUI and host automation.
   *Expected:* Zero audio artifacts, no clicks, zero DAW crashes.
 
@@ -148,12 +145,12 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 
 ### 3.2 Concurrent Modulation & Multi-Instance
 
-- [ ] **3.2.1 High-Frequency LFO Sweep:** Modulate `input_gain_db` AND `output_gain_db` with dual independent LFOs — first at 5 Hz & 13 Hz for ≥2 min, then push to 20–100 Hz for ≥5 min. 128 sample buffer throughout.
+- [ ] **3.2.1 High-Frequency LFO Sweep:** Modulate `input_gain_db` and `output_gain_db` with dual independent LFOs (5–13 Hz for ≥2 min, then 20–100 Hz for ≥5 min with 128-sample buffer).
   *Expected:* Smooth gain interpolation, zero zipper noise, zero XRUNs in `pw-top`.
 - [ ] **3.2.2 Gate FSM Silence Test:** Feed signal → stop playback for 10s → resume signal.
-  *Expected:* Output enters clean silence (no denormals / residual noise). Resuming signal produces no transient clicks.
+  *Expected:* Output enters clean silence (no denormals or residual noise). Resuming signal produces no transient clicks.
 - [ ] **3.2.3 1-Hour Endurance Audit:** Run 4 instances (2× WaveNet, 2× LSTM) with continuous LFO modulation for **60 minutes**. Monitor RSS, file descriptors, thread count, and XRUNs every 30 seconds.
-  *Expected:* Zero crashes, RSS variation < 5 MB after initial warmup (first 2 min), zero FD/thread leaks, zero XRUNs for the entire session.
+  *Expected:* Zero crashes, RSS variation < 5 MB after initial warmup, zero FD/thread leaks, zero XRUNs across the entire session.
 
 ---
 
@@ -168,40 +165,23 @@ To prevent manual QA from being skipped due to friction ("philosophy of zero laz
 
 ### 3.4 GUI Engine & Resource Hygiene
 
-- [ ] **3.4.1 GUI Idle CPU Reduction:** Stop audio and leave GUI window open & untouched for 30s.
+- [ ] **3.4.1 GUI Idle CPU Reduction:** Stop audio and leave GUI window open and untouched for 30s.
   *Expected:* CPU usage of DAW process drops noticeably. Moving mouse or playing audio instantly resumes smooth GUI rendering.
 - [ ] **3.4.2 OpenGL / FemtoVG Resource Leak Audit:** Open and close GUI editor 30+ times in <60s while monitoring stderr / DAW log.
-  *Expected:* No OpenGL or FemtoVG resource leak warnings. Graphic textures, knob arcs, and text render perfectly on reopening.
-- [ ] **3.4.3 HiDPI & Scale Factor Correctness:** Open plugin on HiDPI display (scale factor 1.5× or 2.0×) and 1.0× 1080p display.
-  *Expected:* First-frame renders at crisp native resolution without late resizing jumps or blurriness.
+  *Expected:* No OpenGL or FemtoVG resource leak warnings. Textures, arcs, and text render cleanly on every reopening.
+- [ ] **3.4.3 HiDPI & Scale Factor Correctness:** Open plugin on HiDPI display (scale factor 1.5× or 2.0×) and standard 1.0× display.
+  *Expected:* First frame renders at crisp native resolution without late resizing jumps or blurriness.
 
 ---
 
-### 3.5 Automated Parity Matrix (Release Artifact)
+### 3.5 Automated Parity & Release Gate Verification
 
-Run against the distributed `.so` (or `~/.clap/nam_plug.clap` in its own harness) with the NAMCore render binary available:
+Before signing off on manual QA, verify that the automated release gates and mathematical parity checks have passed:
 
-```bash
-export NAM_CORE_RENDER_BIN=/path/to/namcore_render/tools/render
-cargo test --features testing --release --test clap test_clap_parity_multi_rate -- --ignored --nocapture
-cargo test --features testing --release --test clap test_clap_parity_oversample -- --ignored --nocapture
-cargo test --features testing --release --test clap test_clap_parity_cabsim -- --ignored --nocapture
-```
-
-Gate for every cell: `ESR < 1e-8` and `SNR > 80 dB`. Measured 2026-10-22 on the quick-suite release `.so` (pre-PGO/BOLT); the certified artifact identity and gate verdicts are in `target/release-receipt.json` (`artifacts.clap_installed_sha256`, `gates.*`), not a hash frozen here:
-
-| Fixture / mode                 | 44.1 kHz              | 48 kHz                | 96 kHz                |
-|:------------------------------ |:--------------------- |:--------------------- |:--------------------- |
-| `wavenet_a1_standard`          | 9.01e-12 / 110.5 dB   | 7.98e-12 / 111.0 dB   | 8.13e-12 / 110.9 dB   |
-| `a2_example` (Slimmable)       | 2.77e-12 / 115.6 dB   | 2.75e-12 / 115.6 dB   | 2.76e-12 / 115.6 dB   |
-| `lstm`                         | 1.91e-11 / 107.2 dB   | 2.05e-11 / 106.9 dB   | 2.03e-11 / 106.9 dB   |
-| `wavenet_a1_standard` 2× OS    | —                     | 1.55e-11 / 108.1 dB   | —                     |
-| `wavenet_a1_standard` 4× OS    | —                     | 3.42e-11 / 104.7 dB   | —                     |
-| `wavenet_a1_standard` + CabSim | —                     | 8.41e-14 / 130.8 dB   | —                     |
-
-- [ ] **3.5.1** The log prints one `PASS` line per fixture × rate, plus `PASS oversample X2/X4` and `PASS cabsim`.
-- [ ] **3.5.2** No `GAP: oracle_unsupported:<fixture>` line appears; if one does, the render build lacks that topology and the matrix is incomplete.
-- [ ] **3.5.3** `tests-quick.sh` Phase 2 emits `CLAP_CPP_PARITY: PASS`, `CLAP_OS_PARITY: PASS` and `CABSIM_PARITY: PASS`.
+- [ ] **3.5.1 Automated Quick Verification:** Run `export CARGO_BUILD_JOBS=4; ./utils/tests-quick.sh` (or inspect `target/logs/quick-receipt.txt`).
+  *Expected:* Output confirms `CLAP_CPP_PARITY: PASS`, `CLAP_OS_PARITY: PASS`, `CABSIM_PARITY: PASS`, and `RT_CODEGEN: PASS`. Overall result must be `PASSED`.
+- [ ] **3.5.2 Parity Standards:** Confirm that multi-rate C++ NAMCore parity, oversampling (2×/4×), and CabSim IR convolution satisfy `ESR < 1e-8` and `SNR > 80 dB` across certification rates (44.1, 48, and 96 kHz). For detailed oracle methodology and baseline figures, see [`testing.md`](testing.md#321-multi-rate-resampling-reference-oracle).
+- [ ] **3.5.3 Release Receipt:** For production builds (`utils/build-release.sh`), inspect `target/release-receipt.json` to verify `status: "CERTIFIED"` with zero unapproved skipped gates.
 
 ---
 

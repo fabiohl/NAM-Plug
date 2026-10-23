@@ -94,3 +94,30 @@ fi
 echo -e "  ${GREEN}✓${NC} incomplete receipt (incomplete, rc=$RC)"
 
 echo -e "\n${GREEN}${BOLD}✓ Artifact provenance gate rejects divergent receipts.${NC}"
+
+# ---------------------------------------------------------------------------
+# S3/F-CER-01: the ceremony reuse gate must bind the long-receipt SHA to the
+# installed binary and to the certified copy. Extends the E-A verifier above
+# with the shared identity helper consumed by utils/build-release.sh.
+# ---------------------------------------------------------------------------
+NAM_LIB_NO_CD=1 source "$PROJECT_DIR/utils/lib/_lib.sh"
+CERT_DIR="$TMP_DIR/certified"
+mkdir -p "$CERT_DIR"
+cp "$ARTIFACT" "$CERT_DIR/nam_plug.clap"
+printf '%s\n' "$ARTIFACT_SHA" > "$CERT_DIR/nam_plug.clap.sha256"
+
+REUSE_OK=$(ceremony_certified_verdict "$CERT_DIR" "$ARTIFACT" "$ARTIFACT_SHA")
+if [ "$REUSE_OK" != "ok" ]; then
+    echo -e "${RED}[FAIL] ceremony reuse helper rejected a coherent chain: $REUSE_OK${NC}" >&2
+    exit 1
+fi
+REUSE_MISMATCH=$(ceremony_certified_verdict "$CERT_DIR" "$ARTIFACT" \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+if [ "$REUSE_MISMATCH" != "long_receipt_mismatch" ]; then
+    echo -e "${RED}[FAIL] ceremony reuse helper accepted a divergent long receipt: $REUSE_MISMATCH${NC}" >&2
+    exit 1
+fi
+echo -e "  ${GREEN}✓${NC} ceremony reuse binds long-receipt SHA to installed/certified bytes (F-CER-01)"
+
+
+echo -e "\n${GREEN}${BOLD}✓ Artifact provenance gate rejects divergent receipts.${NC}"

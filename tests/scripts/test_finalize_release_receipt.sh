@@ -167,4 +167,16 @@ assert_eq "waiver idempotent" "$BEFORE" "$AFTER"
 assert_eq "phase1 artifact_exercised" "false" "$(jq -r 'select(.phase_id=="phase1") | .artifact_exercised' "$TMP_DIR/exercised.jsonl")"
 assert_eq "phase3 artifact_exercised" "true" "$(jq -r 'select(.phase_id=="phase3") | .artifact_exercised' "$TMP_DIR/exercised.jsonl")"
 
+# ── 8. Long-audit exercise summary in the release receipt ──────────────────
+write_receipt "$TMP_DIR/receipt.json" false
+write_long "$TMP_DIR/long.jsonl" "$ARTIFACT_SHA" "2026-10-22T12:30:00Z"
+finalize >/dev/null
+assert_eq "exercise summary any" "true" "$(field '.artifacts.long_audit_artifact_exercised')"
+assert_eq "exercise summary phases" "phase3" "$(field '.artifacts.long_audit_phases_exercising_artifact | join(",")')"
+assert_eq "non-exercising phases" "phase1,phase2,phase4" "$(field '.artifacts.long_audit_phases_not_exercising_artifact | join(",")')"
+BEFORE=$(sha256sum "$TMP_DIR/receipt.json" | cut -d' ' -f1)
+finalize >/dev/null
+AFTER=$(sha256sum "$TMP_DIR/receipt.json" | cut -d' ' -f1)
+assert_eq "exercise summary idempotent" "$BEFORE" "$AFTER"
+
 echo -e "\n${GREEN}${BOLD}✓ Release-receipt finalization reconciles and never silently certifies.${NC}"

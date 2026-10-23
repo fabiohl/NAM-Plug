@@ -191,6 +191,8 @@ with open(receipt_path, encoding="utf-8") as handle:
     receipt = json.load(handle)
 
 long_audit_session = None
+exercised_phases = []
+declared_phases = []
 if long_path:
     try:
         with open(long_path, encoding="utf-8") as handle:
@@ -201,14 +203,37 @@ if long_path:
                 break
         if long_audit_session is None and entries:
             long_audit_session = entries[-1].get("timestamp")
+        for entry in entries:
+            phase_id = entry.get("phase_id")
+            if not phase_id or phase_id == "overall":
+                continue
+            declared_phases.append(phase_id)
+            if entry.get("artifact_exercised") is True:
+                exercised_phases.append(phase_id)
     except (OSError, json.JSONDecodeError):
         long_audit_session = None
+        exercised_phases = []
+        declared_phases = []
 
 artifacts = receipt.setdefault("artifacts", {})
 artifacts["artifact_consistency"] = consistency
 artifacts["long_receipt_artifact_sha256"] = declared_sha or None
 artifacts["long_receipt_session"] = long_session
 artifacts["long_audit_session"] = long_audit_session
+# A long-audit phase may cite the artifact hash while running only library
+# tests that never dlopen the shared object. Record which phases actually
+# exercised the installed bytes so "45 tests passed" cannot be read as
+# "45 tests ran against the shipped .clap".
+if declared_phases:
+    artifacts["long_audit_artifact_exercised"] = bool(exercised_phases)
+    artifacts["long_audit_phases_exercising_artifact"] = sorted(set(exercised_phases))
+    artifacts["long_audit_phases_not_exercising_artifact"] = sorted(
+        set(declared_phases) - set(exercised_phases)
+    )
+else:
+    artifacts["long_audit_artifact_exercised"] = None
+    artifacts["long_audit_phases_exercising_artifact"] = []
+    artifacts["long_audit_phases_not_exercising_artifact"] = []
 if quick_sha:
     artifacts["quick_receipt_sha256"] = quick_sha
 

@@ -70,7 +70,21 @@ pub struct PerfCertificationReport {
     pub clap_artifact_path: String,
     pub clap_artifact_sha256: String,
     pub overall_status: String,
+    /// Whether the measurement series itself was stable (low coefficient of
+    /// variation). This is a noise statistic, not an isolation claim.
     pub environment_stable: bool,
+    /// Whether the host was less isolated than the certification policy expects
+    /// (no `isolcpus`/`nohz_full`, shared IRQ affinity, non-RT scheduling,
+    /// non-performance governor, boost enabled, or an unpinned affinity mask).
+    ///
+    /// A degraded host does not by itself fail the deadline gate: the measured
+    /// p99 is still valid evidence for *this* host. It is recorded separately so
+    /// the number is never read as if it came from a fully isolated machine.
+    #[serde(default)]
+    pub environment_degraded: bool,
+    /// Typed, machine-readable reasons behind `environment_degraded`.
+    #[serde(default)]
+    pub environment_degraded_reasons: Vec<String>,
     pub total_scenarios: usize,
     pub scenarios: Vec<ScenarioPerfMetrics>,
     /// Measurement environment that produced the numbers above.
@@ -337,6 +351,53 @@ fn probe_host() -> HostEnvironment {
         irq_isolation,
         irqs_sharing_bench_core,
     }
+}
+
+/// Lists every way the host is less isolated than the certification policy in
+/// `docs/testing.md` §5.4 assumes. An empty list means the measurement ran on a
+/// dedicated core with real-time scheduling and no IRQ contention.
+fn host_degradation_reasons(host: &HostEnvironment) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    match host.bench_core {
+        Some(core) => {
+            let isolated = parse_cpu_list(&host.cpu_isolated);
+            if !isolated.contains(&core) {
+                reasons.push(format!("bench_core_not_isolated:{core}"));
+            }
+            if host.irq_isolation == "shared" {
+                reasons.push(format!(
+                    "irq_isolation_shared:{}:{}",
+                    core,
+                    host.irqs_sharing_bench_core.len()
+                ));
+            }
+        }
+        None => reasons.push("bench_core_unresolved".to_string()),
+    }
+
+    if host.sched_policy != "SCHED_FIFO" && host.sched_policy != "SCHED_RR" {
+        reasons.push(format!("sched_policy_not_realtime:{}", host.sched_policy));
+    }
+    match host.governor.as_deref() {
+        Some("performance") => {}
+        Some(other) => reasons.push(format!("governor_not_performance:{other}")),
+        None => reasons.push("governor_unknown".to_string()),
+    }
+    match host.boost.as_deref() {
+        Some("1") => reasons.push("cpu_boost_enabled".to_string()),
+        Some(_) => {}
+        None => reasons.push("boost_unknown".to_string()),
+    }
+    let allowed = parse_cpu_list(&host.cpus_allowed_list);
+    if allowed.len() > 1 {
+        reasons.push(format!(
+            "affinity_not_single_core:{}",
+            host.cpus_allowed_list
+        ));
+    }
+
+    reasons
 }
 
 fn evaluate_reference_series(
@@ -827,6 +888,8 @@ fn main() -> ExitCode {
     }
 
     let host = probe_host();
+    let degradation_reasons = host_degradation_reasons(&host);
+    let environment_degraded = !degradation_reasons.is_empty();
     let reference_check = match reference_path.as_deref() {
         Some(path) => {
             let measured: Vec<(String, f64)> = results
@@ -859,7 +922,18 @@ fn main() -> ExitCode {
         "Deadline Gate Threshold:    p99 < {:.0}% of block budget (RT overload threshold)",
         DEADLINE_GATE_FRACTION * 100.0
     );
-    println!("Host Environment Stable:    {environment_stable}");
+    println!("Host Measurement Stable:    {environment_stable}");
+    println!(
+        "Host Isolation:             {}",
+        if environment_degraded {
+            "degraded"
+        } else {
+            "dedicated"
+        }
+    );
+    for reason in &degradation_reasons {
+        println!("  degraded: {reason}");
+    }
     println!("All Scenarios Passed Gate:  {all_deadlines_passed}");
     println!(
         "Host: core={:?} policy={} governor={:?} boost={:?} irq_isolation={}",
@@ -887,12 +961,14 @@ fn main() -> ExitCode {
     println!("========================================================================");
 
     let report = PerfCertificationReport {
-        schema_version: "1.2".to_string(),
-        timestamp_utc: chrono_free_timestamp(),
+        schema_version: "1.3".to_string(),
+        timestamp_utc: now_iso8601(),
         clap_artifact_path: clap_target.to_string_lossy().to_string(),
         clap_artifact_sha256: clap_sha,
         overall_status: overall_status.to_string(),
         environment_stable,
+        environment_degraded,
+        environment_degraded_reasons: degradation_reasons,
         total_scenarios: results.len(),
         scenarios: results,
         host,
@@ -916,105 +992,48 @@ fn main() -> ExitCode {
     }
 }
 
-fn chrono_free_timestamp() -> String {
-    use std::time::SystemTime;
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+/// UTC timestamp in ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`), the same shape the rest
+/// of the release artifacts use, so reports can be compared and sorted as text.
+fn now_iso8601() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format!("{now}")
+    format_iso8601(secs)
+}
+
+fn format_iso8601(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
+/// Converts days since 1970-01-01 to a proleptic Gregorian date.
+///
+/// Howard Hinnant's `civil_from_days` algorithm. Kept in-tree (instead of a
+/// date crate) because the guard only needs one UTC timestamp and the release
+/// binary must not grow a new dependency.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_cpu_list_ranges_and_singletons() {
-        assert_eq!(parse_cpu_list("0-3,8,10-11"), vec![0, 1, 2, 3, 8, 10, 11]);
-        assert_eq!(parse_cpu_list("8"), vec![8]);
-        assert_eq!(parse_cpu_list(""), Vec::<usize>::new());
-        assert_eq!(parse_cpu_list("9-8"), Vec::<usize>::new());
-    }
-
-    #[test]
-    fn resolves_pinned_core_before_isolated_fallback() {
-        assert_eq!(resolve_bench_core(&[8], &[8, 9], None), Some(8));
-        assert_eq!(resolve_bench_core(&[0, 1, 2, 3], &[8, 9], None), None);
-        assert_eq!(
-            resolve_bench_core(&[0, 1, 2, 3, 8, 9], &[8, 9], None),
-            Some(8)
-        );
-        assert_eq!(
-            resolve_bench_core(&[0, 1, 2, 3, 10], &[10, 11], None),
-            Some(10)
-        );
-        assert_eq!(resolve_bench_core(&[0, 1, 2, 3], &[8, 9], Some(3)), Some(3));
-    }
-
-    fn reference_report(reference_p50_ns: f64) -> ReferenceReport {
-        ReferenceReport {
-            scenarios: vec![
-                ReferenceScenario {
-                    name: "WaveNet_A1_64_samp".to_string(),
-                    p50_ns: reference_p50_ns,
-                },
-                ReferenceScenario {
-                    name: "LSTM_64_samp".to_string(),
-                    p50_ns: reference_p50_ns,
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn reference_check_passes_within_ratio_and_fails_above() {
-        let measured = vec![
-            ("WaveNet_A1_64_samp".to_string(), 45_000.0),
-            ("LSTM_64_samp".to_string(), 5_000.0),
-        ];
-        let pass = evaluate_reference_series(
-            &measured,
-            &reference_report(30_000.0),
-            1.5,
-            "ref.json",
-            "sha",
-        )
-        .expect("reference evaluation");
-        assert!(pass.passed);
-        assert!((pass.worst_ratio - 1.5).abs() < 1e-9);
-
-        let fail = evaluate_reference_series(
-            &measured,
-            &reference_report(20_000.0),
-            1.5,
-            "ref.json",
-            "sha",
-        )
-        .expect("reference evaluation");
-        assert!(!fail.passed);
-        assert!(fail.worst_ratio > 1.5);
-    }
-
-    #[test]
-    fn reference_check_rejects_missing_scenario_and_invalid_ratio() {
-        let measured = vec![("WaveNet_A1_64_samp".to_string(), 45_000.0)];
-        let incomplete = ReferenceReport {
-            scenarios: vec![ReferenceScenario {
-                name: "LSTM_64_samp".to_string(),
-                p50_ns: 5_000.0,
-            }],
-        };
-        assert!(evaluate_reference_series(&measured, &incomplete, 1.5, "ref.json", "sha").is_err());
-        assert!(
-            evaluate_reference_series(
-                &measured,
-                &reference_report(30_000.0),
-                0.0,
-                "ref.json",
-                "sha"
-            )
-            .is_err()
-        );
-    }
-}
+#[path = "nam_perf_guard/tests.rs"]
+mod tests;

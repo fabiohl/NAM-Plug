@@ -62,7 +62,7 @@ rtrb = "0.4.0"
 # rt-hardening (opt-in, Linux-only, never default): NOT activated in NAM-Plug.
 # The plugin runs inside the DAW host process (cdylib); mlockall, SCHED_FIFO,
 # CPU affinity and PM-QoS are host-level responsibilities delegated to the DAW
-# and to NAM-Audio-Pipe (which consumes rt-hardening). See docs/rt-hardening-evaluation.md.
+# and to NAM-Audio-Pipe (which consumes rt-hardening). See docs/architecture.md §1.2.
 libc = "0.2"
 sha2 = "0.11"
 clap-sys = "0.5"

@@ -13,6 +13,9 @@
 
 set -euo pipefail
 
+# Host memory guard: cap parallel rustc jobs to 4 to prevent OOM
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+
 PHASE_TOTAL=9
 source "$(dirname "$0")/lib/_lib.sh"
 

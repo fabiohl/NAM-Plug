@@ -30,23 +30,12 @@ body:
     validations:
       required: true
 
-  - type: dropdown
+  - type: input
     id: daw_host
     attributes:
-      label: DAW / Host Application
-      description: Which Digital Audio Workstation or CLAP host are you using?
-      options:
-        - "Bitwig Studio"
-        - "Reaper (Native Linux)"
-        - "Ardour"
-        - "Carla Plugin Host"
-        - "Harrison Mixbus"
-        - "Tracktion Waveform"
-        - "PreSonus Studio One / Fender Studio Pro (Linux)"
-        - "Renoise"
-        - "Zrythm"
-        - "CLAP Validator / Test Host"
-        - "Other (Specify in environment details)"
+      label: DAW / Host Application & Version
+      description: Enter the name and version of your Digital Audio Workstation or CLAP host.
+      placeholder: "e.g. Bitwig Studio 5.2.1, REAPER 7.15 (Native Linux), Fender Studio Pro 8.2"
     validations:
       required: true
 
@@ -54,11 +43,10 @@ body:
     id: environment
     attributes:
       label: Environment & System Details
-      description: Provide details about your DAW version, OS, desktop session, and CPU.
+      description: Provide details about your OS, desktop session, and CPU.
       placeholder: |
-        - NAM-Plug version / commit: 0.4.0 (or commit hash)
-        - DAW version: Reaper 7.15 (64-bit Linux) / Bitwig 5.2
-        - OS & Kernel: Ubuntu 24.04 / Arch Linux (kernel 6.8.0-lowlatency)
+        - NAM-Plug Release v1.0.0 (or commit hash)
+        - OS & Kernel: Ubuntu 26.04 / Arch Linux (kernel 6.8.0-lowlatency)
         - Display Server: Wayland / X11
         - CPU Model: AMD Ryzen 7 5800X / Intel Core i7-12700K
     validations:

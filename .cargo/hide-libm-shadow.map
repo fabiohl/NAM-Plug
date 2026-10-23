@@ -3,8 +3,8 @@
 #
 # Linker version script — permanent fix + regression guard for an ELF
 # symbol-interposition hang. Full writeup, root-cause mechanism, and the
-# lessons learned from diagnosing it:
-# docs/postmortem-libm-symbol-interposition.md
+# lessons learned from diagnosing it: docs/architecture.md §2.1 and
+# NeuralAmpModeler-rs/docs/postmortem-libm-symbol-interposition.md
 #
 # Root cause (summary): some part of the crate's dependency graph can pull
 # in libm-shaped fallback symbols (`log10f`, `atan2f`, `acosf`, ...) that

@@ -14,7 +14,7 @@ Fixes #
 <!-- Check all that apply -->
 - [ ] **CLAP Protocol & Extensions** (`src/clap/`, parameter automation, state context, latency reporting)
 - [ ] **Real-Time Audio Processing** (`src/audio/`, audio callback, SPSC parameter & model sync)
-- [ ] **GUI & User Interface** (`src/clap/gui/`, Slint 1.17 controls, visual meters, FemtoVG/OpenGL rendering)
+- [ ] **GUI & User Interface** (`src/clap/gui/`, Slint 1.18 controls, visual meters, FemtoVG/OpenGL rendering, X11 XEmbed & Wayland)
 - [ ] **Preset & Model Management** (`src/presets/`, IR loading, state serialization)
 - [ ] **Benchmarks & Quality Gates** (`benches/`, `tests/`)
 - [ ] **Documentation & Assets** (`docs/`, `README.md`)
@@ -45,6 +45,7 @@ Fixes #
 <!-- Run these verification scripts from the repository root before opening or marking PR ready for review: -->
 
 ```bash
+export CARGO_BUILD_JOBS=4
 utils/lints.sh        # Static analysis, fmt, clippy (-D warnings), SPDX validation
 utils/tests-quick.sh  # Agile testing, host integration tests, CLAP validation
 ```

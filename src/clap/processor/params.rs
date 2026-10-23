@@ -28,6 +28,13 @@ use std::sync::atomic::Ordering;
 impl<'a> NamClapProcessor<'a> {
     // ── Write helpers (Host Events path) ──────────────────────────
 
+    /// Sets the input gain in decibels.
+    ///
+    /// Sanitizes the value against `PARAM_INPUT_GAIN` range ([-20.0, +20.0] dB),
+    /// stores the updated value in processor params, publishes the raw float bits
+    /// to `ui_to_rt.param_input_gain` using `Ordering::Relaxed` for UI telemetry,
+    /// and recalculates the linear input smoother target via `gain_lut` including
+    /// any active host parameter modulation.
     pub(crate) fn set_input_gain(&mut self, db: f32) {
         let db = sanitize_param_value(PARAM_INPUT_GAIN, db);
         self.params.input_gain_db = db;
@@ -39,6 +46,13 @@ impl<'a> NamClapProcessor<'a> {
             .set_target(self.gain_lut.db_to_linear(db + self.mod_input_gain));
     }
 
+    /// Sets the output gain in decibels.
+    ///
+    /// Sanitizes the value against `PARAM_OUTPUT_GAIN` range ([-40.0, +40.0] dB),
+    /// stores the updated value in processor params, publishes the raw float bits
+    /// to `ui_to_rt.param_output_gain` using `Ordering::Relaxed` for UI telemetry,
+    /// and recalculates the linear output smoother target via `gain_lut` including
+    /// any active host parameter modulation.
     pub(crate) fn set_output_gain(&mut self, db: f32) {
         let db = sanitize_param_value(PARAM_OUTPUT_GAIN, db);
         self.params.output_gain_db = db;
@@ -50,6 +64,12 @@ impl<'a> NamClapProcessor<'a> {
             .set_target(self.gain_lut.db_to_linear(db + self.mod_output_gain));
     }
 
+    /// Sets the noise gate threshold in decibels.
+    ///
+    /// Sanitizes the value against `PARAM_GATE_THRESH` range ([-100.0, 0.0] dB),
+    /// stores the updated value, publishes to `ui_to_rt.param_gate_thresh` via
+    /// `Ordering::Relaxed`, and marks `gate_dirty = true` to trigger lazy
+    /// recalculation of gate envelope coefficients and linear threshold.
     pub(crate) fn set_gate_threshold(&mut self, db: f32) {
         let db = sanitize_param_value(PARAM_GATE_THRESH, db);
         self.params.gate_threshold_db = db;
@@ -60,6 +80,11 @@ impl<'a> NamClapProcessor<'a> {
         self.gate_dirty = true;
     }
 
+    /// Sets the plugin processing bypass state.
+    ///
+    /// Sanitizes the float representation (0.0 = active, 1.0 = bypassed), converts
+    /// to boolean, updates processor params, and stores the atomic state in
+    /// `ui_to_rt.param_bypass` with `Ordering::Relaxed`.
     pub(crate) fn set_bypass(&mut self, val: f32) {
         let val = sanitize_param_value(PARAM_BYPASS, val);
         let bypass = bypass_f32_to_bool(val);
@@ -70,6 +95,12 @@ impl<'a> NamClapProcessor<'a> {
             .store(bypass_bool_to_u32(bypass), Ordering::Relaxed);
     }
 
+    /// Sets the adaptive compute mode.
+    ///
+    /// Sanitizes the float representation, parses the `AdaptiveComputeMode` enum,
+    /// publishes the enum integer to `ui_to_rt.param_adaptive_compute` with
+    /// `Ordering::Relaxed`, and updates the adaptive compute controller while
+    /// binding real-time status reporting.
     pub(crate) fn set_adaptive_compute(&mut self, val: f32) {
         let val = sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, val);
         let mode = neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(val);
@@ -81,6 +112,11 @@ impl<'a> NamClapProcessor<'a> {
         self.adaptive_compute.set_mode(mode, &self.rt_status);
     }
 
+    /// Sets the slimmable neural model layer override.
+    ///
+    /// Sanitizes the float value, parses the `SlimOverride` enum (`Auto`, `Full`,
+    /// `Half`, `Quarter`), publishes to `ui_to_rt.param_slim_override` with
+    /// `Ordering::Relaxed`, and updates the controller.
     pub(crate) fn set_slim_override(&mut self, val: f32) {
         let val = sanitize_param_value(PARAM_SLIM_OVERRIDE, val);
         let ov = neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(val);
@@ -92,6 +128,12 @@ impl<'a> NamClapProcessor<'a> {
         self.adaptive_compute.set_slim_override(ov);
     }
 
+    /// Sets the DSP oversampling factor (`Off`, `2x`, `4x`).
+    ///
+    /// Sanitizes the float value and converts to `OversampleFactor`. If the factor
+    /// differs from current configuration, updates processor params, stores the
+    /// atomic value in `ui_to_rt.param_oversample` with `Ordering::Relaxed`, and
+    /// invokes `apply_oversample` to enforce CLAP latency and restart policies.
     pub(crate) fn set_oversample(&mut self, val: f32) {
         let val = sanitize_param_value(PARAM_OVERSAMPLE, val);
         let factor = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(val);
@@ -105,6 +147,11 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Sets the neural network activation function precision (`Fast` or `Accurate`).
+    ///
+    /// Sanitizes the float value and converts to `ActivationPrecision`. If changed,
+    /// updates processor params, publishes to `ui_to_rt.param_activation` with
+    /// `Ordering::Relaxed`, and configures the thread-local storage activation mode.
     pub(crate) fn set_activation(&mut self, val: f32) {
         let val = sanitize_param_value(PARAM_ACTIVATION, val);
         let mode = neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(val);
@@ -135,6 +182,11 @@ impl<'a> NamClapProcessor<'a> {
 
     // ── GUI sync helpers ──────────────────────────────────────────
 
+    /// Synchronizes input gain parameter from the GUI/UI thread.
+    ///
+    /// Atomically loads the shared float bits via `Ordering::Relaxed`, sanitizes the
+    /// value against `PARAM_INPUT_GAIN`, and if changed, updates local params and
+    /// retargets the input smoother including active modulation.
     pub(super) fn sync_input_gain_from_gui(&mut self) {
         let raw_db = f32::from_bits(
             self.shared
@@ -150,6 +202,11 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes output gain parameter from the GUI/UI thread.
+    ///
+    /// Atomically loads the shared float bits via `Ordering::Relaxed`, sanitizes the
+    /// value against `PARAM_OUTPUT_GAIN`, and if changed, updates local params and
+    /// retargets the output smoother including active modulation.
     pub(super) fn sync_output_gain_from_gui(&mut self) {
         let raw_db = f32::from_bits(
             self.shared
@@ -165,6 +222,11 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes noise gate threshold from the GUI/UI thread.
+    ///
+    /// Atomically loads the shared float bits via `Ordering::Relaxed`, sanitizes the
+    /// value against `PARAM_GATE_THRESH`, and if changed, updates local params and
+    /// flags `gate_dirty = true` for lazy coefficient recalculation.
     pub(super) fn sync_gate_thresh_from_gui(&mut self) {
         let raw_db = f32::from_bits(
             self.shared
@@ -179,6 +241,10 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes bypass state from the GUI/UI thread.
+    ///
+    /// Atomically loads the bypass flag via `Ordering::Relaxed` and updates local
+    /// params if changed.
     pub(super) fn sync_bypass_from_gui(&mut self) {
         let shared_bypass =
             bypass_u32_to_bool(self.shared.ui_to_rt.param_bypass.load(Ordering::Relaxed));
@@ -187,6 +253,10 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes adaptive compute mode from the GUI/UI thread.
+    ///
+    /// Atomically loads the mode integer via `Ordering::Relaxed`, sanitizes the value,
+    /// and if changed, updates local params and configures the controller mode.
     pub(super) fn sync_adaptive_compute_from_gui(&mut self) {
         let raw = self
             .shared
@@ -203,6 +273,10 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes slimmable neural model override from the GUI/UI thread.
+    ///
+    /// Atomically loads the override integer via `Ordering::Relaxed`, sanitizes the value,
+    /// and if changed, updates local params and the controller override.
     pub(super) fn sync_slim_override_from_gui(&mut self) {
         let raw = self
             .shared
@@ -218,6 +292,10 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes oversampling factor from the GUI/UI thread.
+    ///
+    /// Atomically loads the oversample factor integer via `Ordering::Relaxed`, sanitizes
+    /// the value, and if changed, applies the factor under the CLAP latency restart policy.
     pub(super) fn sync_oversample_from_gui(&mut self) {
         let raw = self
             .shared
@@ -233,6 +311,10 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes activation function precision from the GUI/UI thread.
+    ///
+    /// Atomically loads the activation mode integer via `Ordering::Relaxed`, sanitizes
+    /// the value, and if changed, updates local params and TLS activation mode.
     pub(super) fn sync_activation_from_gui(&mut self) {
         let raw = self
             .shared

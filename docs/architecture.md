@@ -5,17 +5,17 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # NAM-Plug Architecture: CLAP Plugin
 
-This document is the primary architecture bible and source of truth for **NAM-Plug**, a Neural Amp Modeler (NAM) audio plugin built on the CLAP (CLever Audio Plug-in) specification for Linux.
+This document is the primary architecture reference and source of truth for **NAM-Plug**, a Neural Amp Modeler (NAM) audio plugin built on the CLAP (CLever Audio Plug-in) specification for Linux.
 
-NAM-Plug wraps the low-latency DSP neural inference engine provided by the [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) library crate into a production-grade CLAP plugin. It handles plugin lifecycle, DAW parameter automation, lock-free real-time audio processing, state persistence, host extension compliance, and an immediate-mode graphical user interface.
+NAM-Plug wraps the low-latency DSP neural inference engine provided by the [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) library crate into a production-grade CLAP plugin. It manages plugin lifecycle, DAW parameter automation, lock-free real-time audio processing, state persistence, host extension compliance, and an immediate-mode graphical user interface.
 
-For deep microarchitectural details on neural model execution (WaveNet, LSTM, ConvNet, Linear), SIMD (production AVX2 `x86-64-v3`), resampler sinc math, oversampling half-band FIR filters, or model loading formats (`.nam`/`.namb`), see the core engine documentation in [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) (`docs/architecture.md`).
+> **Scope Boundary:** For microarchitectural details on neural model execution (WaveNet, LSTM, ConvNet, Linear), SIMD kernels (AVX2 `x86-64-v3`), polyphase resamplers, half-band FIR filters, or model loading formats (`.nam`/`.namb`), see the core engine documentation in [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) (`docs/architecture.md`).
 
 ---
 
 ## 1. System Topology & Thread Model
 
-NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety during audio processing while supporting interactive UI rendering and host DAW commands.
+NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety during audio processing while providing responsive UI rendering and host DAW coordination.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -27,7 +27,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 │        Main Thread          │  │    Audio Thread (RT)    │  │       GUI Thread       │
 │  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - Slint Event Loop    │
 │  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - "nam-slint-gui"     │
-│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.18 FemtoVG│
+│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.18 FemtoVG │
 │  - nam-model-loader Offload │  │  - Zero Blocking I/O    │  │  - Wayland & X11       │
 │  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - Async rfd FileDialog│
 │                             │  │                         │  │  - 5-Zone UI Layout    │
@@ -39,33 +39,70 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 ### 1.1 Thread Roles & Hard Contracts
 
-- **Main Thread (Host)** — Plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, DAW project state save/load, model (`.nam`/`.namb`) loading dispatched to the per-instance `nam-model-loader` worker (`housekeeping()` only accepts/dispatches the job and commits the short result — see §7.4), IR reading via `src/clap/plugin/main_thread/load.rs` (using `neural_amp_modeler_rs::dsp::cabsim::loader`), and Tier 1 Garbage Collection disposal. Under CLAP timer support (`clap_plugin_timer_support`), the main thread registers a periodic 250 ms watchdog timer with the host, driving autonomous `housekeeping()` (RT processor poisoning containment recovery via `request_restart()`, dynamic PDC latency announcements via `HostLatency::changed()`, and Tier 1 GC SPSC queue draining) without depending on sporadic GUI events or user interactions. On hosts lacking timer support, it degrades gracefully to event-driven housekeeping.
+- **Main Thread (Host):**
 
-- **Audio Thread (RT)** — Driven by the host `process()` callback (`PluginAudioProcessor::process` in `src/clap/processor/mod.rs`).
+  - **Lifecycle & State:** Handles plugin lifecycle (`init`, `activate`, `deactivate`, `destroy`), parameter scanning, and DAW project state serialization/restoration (`clap_plugin_state`).
+  - **Worker Offloading:** Dispatches asynchronous `.nam`/`.namb` model loading to `"nam-model-loader"` and CabSim IR reading via `cabsim::loader`.
+  - **Garbage Collection:** Drains the Tier 1 SPSC deallocation queue (`gc_tx`).
+  - **Autonomous Housekeeping:** When `clap_plugin_timer_support` is available, registers a periodic 250 ms watchdog timer with the host. This timer executes `housekeeping()` (recovering poisoned RT processors via `request_restart()`, announcing dynamic PDC latency changes via `HostLatency::changed()`, and draining GC queues) independently of GUI events. Falls back to event-driven housekeeping on hosts without timer support.
 
+- **Audio Thread (RT):**
+
+  - Driven exclusively by the host `process()` callback (`PluginAudioProcessor::process` in `src/clap/processor/mod.rs`).
+
+  > [!IMPORTANT]
   > **Hard Real-Time Contract:** Zero heap allocations, zero mutex locks, zero blocking I/O, zero panics. Operates directly on host audio buffers using host-driven single-callback processing.
 
-- **GUI Thread** — Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.18 (FemtoVG / winit backend). Fully isolated from the audio thread, synchronizing telemetry at 60 Hz via `SlintViewModel`.
+- **GUI Thread:**
+
+  - Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.18 (FemtoVG / winit backend).
+  - Fully isolated from the audio thread, synchronizing peak telemetry, DSP load, and parameter changes at 60 Hz via `SlintViewModel`.
+
+### 1.2 Host vs. Plugin Real-Time Boundary & `rt-hardening` Delegation
+
+The underlying DSP engine (`NeuralAmpModeler-rs`) provides an optional `rt-hardening` feature with Linux system utilities for memory locking (`mlockall`), thread scheduling (`SCHED_FIFO`), CPU core affinity, and PM-QoS (`/dev/cpu_dma_latency`).
+
+**Architectural Decision:** `NAM-Plug` **strictly disables** `rt-hardening`. Process-level real-time hardening is the exclusive responsibility of the DAW host:
+
+1. **Address Space Isolation (`mlockall`):** As a dynamic shared library (`cdylib`), calling `mlockall(MCL_CURRENT | MCL_FUTURE)` from inside a plugin would lock all virtual pages belonging to the host and sibling plugins, risking immediate `ENOMEM` in production sessions with large sample libraries.
+2. **Thread Scheduling & Affinity (`sched_setscheduler`, `pthread_setaffinity_np`):** Audio threads are created and scheduled by the DAW host. Forcing `SCHED_FIFO` or thread pinning from within a plugin disrupts host multicore load-balancing and violates the CLAP specification.
+3. **Global System Resources (`PM-QoS`):** `/dev/cpu_dma_latency` is a system-wide resource; individual plugins must not contend for global DMA latency locks.
+
+**Local RT Safety Invariants:** While delegating host-level thread policy to the DAW, `NAM-Plug` enforces strict real-time discipline internally:
+
+- **Thread-Local FTZ / DAZ:** Configured on the audio thread upon first execution (`_MM_SET_FLUSH_ZERO_MODE` / `_MM_SET_DENORMALS_ZERO_MODE`) via thread-local SSE control registers without modifying global host state.
+- **Strict Audio Callback Contract:** Zero heap allocations (enforced via `heap-audit`), zero mutex locks, zero blocking I/O, and zero panics.
+- **Passive RT Telemetry:** Thread scheduling, CPU affinity, and processing health are passively reported through lock-free atomic bitmasks (`RtStatusFlags`).
 
 ---
 
 ## 2. Compilation Strategy & Feature Flags
 
-`NAM-Plug` is a dedicated CLAP plugin crate (`nam-plug` v1.0.0). It compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing and certification binaries (`pgo_profiling_workload` and `nam_perf_guard` under `src/bin/`, both gated behind the `testing` feature). Standalone PipeWire hosting is handled separately by the sibling subproject `NAM-Audio-Pipe`.
+`NAM-Plug` compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing binaries (`pgo_profiling_workload` and `nam_perf_guard` under `src/bin/`, gated behind `testing`). Standalone PipeWire hosting is handled separately by `NAM-Audio-Pipe`.
 
-The crate feature flags defined in `Cargo.toml` are:
-
-- **`dual-mono` (default):** Enables two independent, identical L/R inference chains with no interaction between channels, plus dynamic adaptive stereo VU metering.
-- **`testing`:** Enables internal test utilities, harness helpers, fixture resolution, the `nam_perf_guard` certification binary, and the `pgo_profiling_workload` binary.
-- **`heap-audit`:** Activates the allocation counting allocator interceptor (`CountingAllocator`) for RT-safety heap audits.
+| Feature Flag | Default | Description                                                                                                                    |
+|:------------ |:------- |:------------------------------------------------------------------------------------------------------------------------------ |
+| `dual-mono`  | Yes     | Enables two independent, identical L/R inference chains with zero channel crosstalk, plus dynamic adaptive stereo VU metering. |
+| `testing`    | No      | Enables internal test harnesses, fixture resolution, `nam_perf_guard`, and `pgo_profiling_workload`.                           |
+| `heap-audit` | No      | Activates the global allocation counting allocator (`CountingAllocator`) for RT-safety verification.                           |
 
 ```bash
 # Standard release build (produces target/release/libnam_plug.so)
+export CARGO_BUILD_JOBS=4
 cargo build --release
 
-# Development and testing build
+# Development build with testing harness
+export CARGO_BUILD_JOBS=4
 cargo build --features testing
 ```
+
+### 2.1 Link-Time Symbol Hardening & ELF Interposition Defense
+
+To prevent fatal runtime CPU spin loops in Linux release builds caused by dynamic linker (`ld.so`) symbol interposition:
+
+- **The ELF Interposition Hazard:** When third-party dependencies define bare C-ABI fallback routines for standard math functions (`log10f`, `atan2f`, `acosf`, etc.) with global visibility, `ld.so` resolves dynamic `JUMP_SLOT` relocations back to the local plugin binary instead of system `libm.so.6`. This creates a self-referential `trampoline -> PLT -> GOT -> trampoline` infinite loop (100% CPU spin, zero syscalls).
+- **Hardening Guard (`build.rs`):** `NAM-Plug` links all binaries and the CLAP `cdylib` with a linker version script ([`.cargo/hide-libm-shadow.map`](../.cargo/hide-libm-shadow.map)) via `-Wl,--version-script=...` and `-Wl,--undefined-version`. This demotes shadowed `libm` symbols to `local` binding, ensuring dynamic calls resolve strictly to the system's `libm.so.6`.
+- **Reference:** For the in-depth disassembly trace and relocation analysis, see [`NeuralAmpModeler-rs/docs/postmortem-libm-symbol-interposition.md`](https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/postmortem-libm-symbol-interposition.md).
 
 ---
 
@@ -87,7 +124,7 @@ Core DSP neural inference is mono by definition. Buffer extraction and VU meteri
 
 ### 3.2 Parameter Surface Catalog
 
-Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `neural_amp_modeler_rs::common::params::RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–8):
+Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–8):
 
 | Parameter                | ID                         | Type    | Range / Options                                                 | Description                                                |
 |:------------------------ |:-------------------------- |:------- |:--------------------------------------------------------------- |:---------------------------------------------------------- |
@@ -99,81 +136,68 @@ Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/process
 | **Adaptive Compute**     | `adaptive_compute` (5)     | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                         |
 | **Slim Override**        | `slim_override` (6)        | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                 |
 | **Oversampling**         | `oversample` (7)           | Stepped | `0` (`Off` / default), `1` (`2x`), `2` (`4x`)                   | Activation oversampling factor.                            |
-| **Activation Precision** | `activation_precision` (8) | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact-grade / `Fast` Padé-minimax).  |
+| **Activation Precision** | `activation_precision` (8) | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact / `Fast` Padé-minimax).        |
 
-Model file paths (`.nam`/`.namb`) and Cabsim IR file paths (`.wav`) are managed as **DAW State Properties** (`clap_plugin_state`), enabling project-level serialization and restoration.
+Model file paths (`.nam`/`.namb`) and CabSim IR file paths (`.wav`) are managed as **DAW State Properties** (`clap_plugin_state`), enabling project-level serialization and restoration.
 
 ### 3.3 Mandatory Asset Identity (SHA-256)
 
-Every asset reference persisted in state **must** carry its SHA-256 hex digest
-(`model_hash` / `ir_hash`, exactly 64 hex characters) — the content-based
-portable identity of the file. The invariant:
+Every asset reference persisted in state **must** carry its SHA-256 hex digest (`model_hash` / `ir_hash`, exactly 64 characters) — representing the content-based portable identity of the file.
 
-> **No asset is adopted without a valid digest that was verified in the same
-> restore cycle** — except an explicit user override, which is always logged.
+> **Asset Verification Invariant:** No asset is adopted without a valid digest verified in the same restore cycle, preventing silent corruption across different machines.
 
-| Path                                           | Policy                                                                                                                                                                                                                                                                                                                                         |
-|:---------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Full restore** (project / duplicate)         | `model_path` exists: the digest is mandatory and must match the file at restore time. Missing, malformed or divergent digest rejects that path; the basename fallback only runs when the *expected* digest exists and matches a candidate. Full state without any expected digest ⇒ explicit failure — the previously active DSP stays intact. |
-| **Basename search** (portable / cross-machine) | A candidate is adopted only when its computed digest equals the saved `model_hash`. A reference without a saved hash is rejected outright — the first candidate is never accepted silently.                                                                                                                                                    |
-| **IR**                                         | The same rule applies: an `ir_path` without a valid `ir_hash` never loads the WAV.                                                                                                                                                                                                                                                             |
-| **Presets without hash** (legacy)              | Single documented policy: **rejected in automatic restore**; the migration path is the explicit GUI action — re-load the model/IR file via the dialog, which recomputes the digest from the file the user picked and re-saves the preset. There is no silent fail-open.                                                                        |
-| **Save**                                       | `state.save` / `state-context.save` refuse to persist any asset reference lacking a well-formed digest (defensive guard; every adoption path already computes it).                                                                                                                                                                             |
+| Path Context                           | Verification Policy                                                                                                                                                                                                                                                                                                                                                 |
+|:-------------------------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Full Restore** (Project / Duplicate) | If `model_path` exists, the digest is mandatory and must match the file at restore time. A missing, malformed, or divergent digest rejects that path. The basename fallback executes only when the expected digest exists and matches a candidate. Full state without an expected digest results in an explicit failure — leaving the previously active DSP intact. |
+| **Basename Search** (Cross-Machine)    | A candidate file is adopted only when its computed digest equals the saved `model_hash`. A reference without a saved hash is rejected outright.                                                                                                                                                                                                                     |
+| **CabSim IR**                          | The same rule applies: an `ir_path` without a matching `ir_hash` never loads the WAV file.                                                                                                                                                                                                                                                                          |
+| **Legacy Presets (No Hash)**           | Rejected during automatic restore. Users migrate presets via the explicit GUI action — loading the model/IR file via the dialog recomputes the digest and saves an updated preset.                                                                                                                                                                                  |
+| **State Save**                         | `state.save` and `state-context.save` refuse to persist any asset reference lacking a well-formed digest.                                                                                                                                                                                                                                                           |
 
-All adoption paths (GUI model/IR load, preset-load extension, transactional
-restore) compute the digest up-front and **fail closed** if it cannot be
-computed (e.g. file exceeding the 256 MiB streaming-hash limit) — an asset
-without a digest is never adopted, and therefore never persisted.
+All adoption paths compute the digest up-front and **fail closed** if it cannot be computed (e.g., file exceeding the 256 MiB streaming-hash limit). An asset without a digest is never adopted and never persisted.
 
 ---
 
 ## 4. CLAP Extensions Framework
 
-Registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-extensions`:
+Extensions are registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-extensions`:
 
-| Extension                            | Reference File                                  | Purpose                                                                                                           |
-|:------------------------------------ |:----------------------------------------------- |:----------------------------------------------------------------------------------------------------------------- |
-| `clap_plugin_audio_ports`            | `src/clap/extensions/audio_ports.rs`            | Mono input/output audio ports, in-place processing pair enabled.                                                  |
-| `clap_plugin_audio_ports_activation` | `src/clap/extensions/audio_ports_activation.rs` | Dynamic channel deactivation (e.g. right channel on mono tracks) saving gain/copy compute.                        |
-| `clap_plugin_params`                 | `src/clap/extensions/params/`                   | Parameter mapping, DAW automation, gesture tracking, and `flush()`.                                               |
-| `clap_plugin_state`                  | `src/clap/extensions/state.rs`                  | DAW project state serialization (parameters + model path + IR path).                                              |
-| `clap_plugin_state_context`          | `src/clap/extensions/state_context.rs`          | Context-aware state restore (distinguishes portable preset vs project duplicate).                                 |
-| `clap_plugin_latency`                | `src/clap/extensions/latency.rs`                | Dynamic latency reporting (resampler + oversample + cabsim total delay).                                          |
-| `clap_plugin_track_info`             | `src/clap/extensions/track_info.rs`             | Host track color synchronization to GUI accent theme.                                                             |
-| `clap_plugin_remote_controls`        | `src/clap/extensions/remote_controls.rs`        | "Main" and "Gate" control pages for hardware controllers / device panels.                                         |
-| `clap_plugin_param_indication`       | `src/clap/extensions/param_indication.rs`       | GUI visual cues for mapped/automated/overridden parameter status.                                                 |
-| `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                                                   |
-| `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision.                        |
-| `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining cab-sim IR ring-out frames.                                                   |
-| `clap_plugin_timer_support`          | `src/clap/extensions/timer.rs`                  | Periodic 250 ms watchdog timer driving autonomous housekeeping and RT recovery via `clap_host_timer_support`.     |
-| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint declarative GUI with **native X11 XEmbed embedding** and X11/Wayland floating support. |
+| Extension                            | Reference File                                  | Purpose                                                                                     |
+|:------------------------------------ |:----------------------------------------------- |:------------------------------------------------------------------------------------------- |
+| `clap_plugin_audio_ports`            | `src/clap/extensions/audio_ports.rs`            | Mono input/output audio ports, in-place processing pair enabled.                            |
+| `clap_plugin_audio_ports_activation` | `src/clap/extensions/audio_ports_activation.rs` | Dynamic channel deactivation (e.g., right channel on mono tracks) saving gain/copy compute. |
+| `clap_plugin_params`                 | `src/clap/extensions/params/`                   | Parameter mapping, DAW automation, gesture tracking, and `flush()`.                         |
+| `clap_plugin_state`                  | `src/clap/extensions/state.rs`                  | DAW project state serialization (parameters + model path + IR path).                        |
+| `clap_plugin_state_context`          | `src/clap/extensions/state_context.rs`          | Context-aware state restore (distinguishes portable presets vs. project duplicates).        |
+| `clap_plugin_latency`                | `src/clap/extensions/latency.rs`                | Dynamic latency reporting (resampler + oversample + CabSim total delay).                    |
+| `clap_plugin_track_info`             | `src/clap/extensions/track_info.rs`             | Host track color synchronization to GUI accent theme.                                       |
+| `clap_plugin_remote_controls`        | `src/clap/extensions/remote_controls.rs`        | "Main" and "Gate" control pages for hardware controllers / DAW device panels.               |
+| `clap_plugin_param_indication`       | `src/clap/extensions/param_indication.rs`       | GUI visual cues for mapped/automated/overridden parameter status.                           |
+| `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                             |
+| `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision.  |
+| `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining CabSim IR ring-out frames.                              |
+| `clap_plugin_timer_support`          | `src/clap/extensions/timer.rs`                  | Periodic 250 ms watchdog timer driving autonomous housekeeping and RT recovery.             |
+| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint GUI with native X11 XEmbed embedding and floating fallback.      |
 
-> **Host Compatibility Note:** Native Wayland and X11 window negotiation (`CLAP_WINDOW_API_WAYLAND` and `CLAP_WINDOW_API_X11`) is verified across Bitwig Studio, REAPER (Native Linux), Ardour, Carla, Harrison Mixbus, and Tracktion Waveform. PreSonus Studio One / Fender Studio Pro for Linux is supported via floating window mode with bounded join teardown (`nam-gui-reaper`).
+### 4.1 Windowing Support Matrix
 
-### 4.10 Windowing Support Matrix
+| Negotiation (`is_floating`)         | Wayland Session (`WAYLAND_DISPLAY`)                                                                | X11 Session / XWayland                                       |
+|:----------------------------------- |:-------------------------------------------------------------------------------------------------- |:------------------------------------------------------------ |
+| `CLAP_WINDOW_API_X11`, **embedded** | `create` rejected unless `DISPLAY` reachable (XWayland); forces X11 loop → **Native XEmbed child** | **Native XEmbed child** of the host `Window` (preferred API) |
+| `CLAP_WINDOW_API_X11`, floating     | X11 floating window via XWayland                                                                   | Plugin-owned top-level X11 window                            |
+| `CLAP_WINDOW_API_WAYLAND`, floating | Native Wayland top-level window (preferred API)                                                    | Wayland window if compositor is present; else rejected       |
+| `CLAP_WINDOW_API_WAYLAND`, embedded | **Rejected** (no XEmbed equivalent on Wayland per CLAP spec)                                       | **Rejected**                                                 |
 
-| Negotiation (`is_floating`)         | Wayland session (`WAYLAND_DISPLAY`)                                                                                          | X11 session / XWayland                                                               |
-|:----------------------------------- |:---------------------------------------------------------------------------------------------------------------------------- |:------------------------------------------------------------------------------------ |
-| `CLAP_WINDOW_API_X11`, **embedded** | `create` rejected unless `DISPLAY` reachable (XWayland); X11 event loop forced → **native XEmbed child** (embed-at-creation) | **Native XEmbed child** of the host `Window` (preferred API)                         |
-| `CLAP_WINDOW_API_X11`, floating     | X11-floating window via XWayland (first window forces X11 loop)                                                              | Plugin-owned top-level X11 window                                                    |
-| `CLAP_WINDOW_API_WAYLAND`, floating | Native Wayland top-level window (preferred API)                                                                              | Wayland window only if a Wayland compositor is present; else rejected by negotiation |
-| `CLAP_WINDOW_API_WAYLAND`, embedded | **Rejected** (no XEmbed equivalent on Wayland; CLAP spec)                                                                    | **Rejected**                                                                         |
+**Guarantees:**
 
-Guarantees: an embedded request is honored **only** when embedding actually
-happens (create-time viability gate + strict `set_parent` error path); the
-plugin never silently delivers a floating window for an embedded contract and
-never creates two windows. Repeated `create`/`destroy` cycles reuse the
-persistent per-instance GUI worker (Slint 1.18 pins the platform to the
-initializing thread); a *second plugin instance's* GUI in the same process is
-limited to one platform per process (documented Slint constraint).
-
-A separate **Preset Discovery Factory** (`src/clap/factory/preset_discovery.rs`) indexes local models in `~/.nam/models` with extracted metadata so hosts can list them natively.
+- An embedded request is honored **only** when true embedding succeeds (create-time viability gate + strict `set_parent` error path). The plugin never silently delivers a floating window for an embedded request and never creates two windows.
+- Repeated `create`/`destroy` cycles reuse the persistent per-instance GUI worker.
 
 ---
 
 ## 5. Lock-Free Communication & RT Safety Architecture
 
-Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/shared.rs`). The audio thread hot-path uses **zero mutexes, zero locks, and zero allocations** — relying exclusively on atomics and lock-free SPSC channels (`rtrb`).
+Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/shared.rs`). The audio thread hot path uses **zero mutexes, zero locks, and zero allocations**, relying on atomic primitives and lock-free SPSC channels (`rtrb`).
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -192,9 +216,11 @@ Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/share
 
 ### 5.1 Cache-Line Isolation (`#[repr(align(128))]`)
 
-To eliminate CPU cache-line bouncing (False Sharing) between the high-frequency audio thread (reading/writing every block) and the UI/Main threads:
+To eliminate CPU cache bouncing (False Sharing) between the high-frequency audio thread and the UI/Main threads:
 
-- **`RtToUi`** — Dedicated 128-byte aligned cache line for telemetry communicated from RT to UI (`ui_peak_l`, `ui_peak_r`, `ui_clipped`, `ui_clip_indicator`, `ui_gate_active`, `current_latency`, `cabsim_tail_samples`, `active_channel_count`). Telemetry is primarily unidirectional RT->UI with two lock-free handshake exceptions: (1) peak levels are accumulated across audio blocks by RT via `AtomicU32::fetch_max` and read/cleared by UI via `swap(0.0f32.to_bits())` without TOCTOU races; (2) `ui_clipped` sticky flag is set by RT and cleared by UI upon acknowledgement.
+- **`RtToUi`** — Dedicated 128-byte aligned cache line for telemetry communicated from RT to UI (`ui_peak_l`, `ui_peak_r`, `ui_clipped`, `ui_clip_indicator`, `ui_gate_active`, `current_latency`, `cabsim_tail_samples`, `active_channel_count`).
+  - Peak levels are accumulated across audio blocks by RT via `AtomicU32::fetch_max` and read/cleared by UI via `swap(0.0f32.to_bits())` without TOCTOU races.
+  - The `ui_clipped` sticky flag is set by RT and cleared by UI upon acknowledgement.
 - **`UiToRt`** — Dedicated 128-byte aligned cache line for parameters written by UI (`input_gain_db`, `output_gain_db`, etc.) and the `gui_param_generation` counter.
 - **`ColdShared`** — Dedicated 128-byte aligned structure for low-frequency channels and lifecycle flags (`alive_fence`, pending payloads).
 
@@ -207,7 +233,7 @@ To prevent loading 8 atomic floats on every audio block when parameters are stat
 
 ### 5.3 Three-Tier Real-Time Garbage Collection Cascade
 
-Deallocating complex DSP structures (`Box<StaticModel>`, `Box<NamResampler>`, `ConvEngine`, `OversampleEngine`) on the audio thread causes kernel allocator locks and priority inversion. Disposal cascades through three lock-free tiers (`gc_cascade` in `neural_amp_modeler_rs::common::spsc::gc`):
+Deallocating complex DSP structures (`Box<StaticModel>`, `Box<NamResampler>`, `ConvEngine`, `OversampleEngine`) on the audio thread causes allocator locks and priority inversion. Disposal cascades through three lock-free tiers (`gc_cascade` in `neural_amp_modeler_rs::common::spsc::gc`):
 
 ```text
 RT Thread (Replaced Asset)
@@ -223,140 +249,51 @@ RT Thread (Replaced Asset)
 [Tier 3: GcOverflowBuffer Atomic Ring] ────► Controlled Leak + Sets RT_STATUS_GC_OVERFLOW
 ```
 
-1. **Tier 1 (SPSC GC Queue):** Push to `gc_tx` (32 slots). Main thread drains and drops objects during periodic `housekeeping()` via `drain_gc_channels(consumer, overflow, parking_lot, rt_status)`.
-2. **Tier 2 (Processor Parking Lot):** Fixed array `[Option<GcItem>; 16]` inside `PluginAudioProcessor`. `gc_cascade` flushes items parked in previous cycles back to the SPSC whenever capacity frees, and the processor retries once per audio block (`drain_parking_lot`), so parked items reach the off-RT drain during normal operation. At teardown the lot is never dropped with the processor: `deactivate()` hands `&mut parking_lot` to `drain_gc_final()` (single-owner handoff after the audio thread stopped), so one canonical drain releases SPSC + overflow + the 16 slots on the main thread.
-3. **Tier 3 (`GcOverflowBuffer`):** Atomic ring buffer (`SPSC_CAPACITY`). Overwrites oldest slot if completely saturated, setting `RT_STATUS_GC_OVERFLOW` to preserve RT deadline execution.
+1. **Tier 1 (SPSC GC Queue):** Push to `gc_tx` (32 slots). The main thread drains and drops objects during periodic `housekeeping()`.
+2. **Tier 2 (Processor Parking Lot):** Fixed array `[Option<GcItem>; 16]` inside `PluginAudioProcessor`. Flushed back to SPSC whenever capacity frees. At plugin teardown, `deactivate()` passes `&mut parking_lot` to `drain_gc_final()` for single-owner disposal on the main thread.
+3. **Tier 3 (`GcOverflowBuffer`):** Atomic ring buffer. Overwrites the oldest slot if completely saturated, setting `RT_STATUS_GC_OVERFLOW` to preserve hard real-time deadlines.
 
 ### 5.4 Poison-Resilient Activation Rollback Guard (`ActivateRollbackGuard`)
 
-During plugin `activate()`, channel receivers (`param_rx`, `slimmable_rx`), `gc_tx`, and `deactivated_dsp` are transferred to the audio processor under the protection of `ActivateRollbackGuard` (`src/clap/processor/rollback.rs`). If activation panics or fails midway, `Drop` recovers poisoned mutexes via `.unwrap_or_else(|e| e.into_inner())` and restores all resources back into `ColdShared` without dropping them on the audio thread.
+During plugin `activate()`, channel receivers (`param_rx`, `slimmable_rx`), `gc_tx`, and `deactivated_dsp` are transferred to the audio processor under `ActivateRollbackGuard` (`src/clap/processor/rollback.rs`). If activation panics or fails midway, `Drop` recovers poisoned mutexes and restores all resources back into `ColdShared` without dropping them on the audio thread.
 
 ### 5.5 Cold-Path Latency Caching (`cached_effective_latency`)
 
-Recomputing effective latency (resampler latency + oversample latency + cabsim IR latency) involves division and multiple structure queries. Effective latency is cached in `cached_effective_latency` (`src/clap/processor/state.rs`) and recomputed strictly during cold swap routines (`cold_load_model`, `cold_load_cabsim`, `cold_load_os` / `apply_oversample`), completely eliminating latency computation from the hot `process_events` per-block path while driving instant host PDC updates via `clap_plugin_latency`.
+Recomputing effective latency (resampler latency + oversample latency + CabSim IR latency) requires arithmetic and multiple structure queries. Effective latency is cached in `cached_effective_latency` (`src/clap/processor/state.rs`) and recomputed strictly during cold swap routines (`cold_load_model`, `cold_load_cabsim`, `apply_oversample`), eliminating latency math from the hot `process_events` path while driving instant PDC updates via `clap_plugin_latency`.
 
 ### 5.6 FFI Lifetime Safety, Panic Guard & Multi-Instance Isolation
 
-**GUI state is reference-counted, not raw.** `NamClapShared` owns the plugin
-shared state through `Arc<GuiSharedState>` (`src/clap/plugin/shared.rs`), so
-GUI windows, background `rfd` file-picker threads, and the `nam-gui-reaper`
-join thread all hold refcounted access to the same state. Memory lifetime is
-therefore managed by the `Arc` — there is no scenario in which a GUI or dialog
-thread can dereference freed plugin state.
-
-- **`alive_fence` (`Arc<AtomicBool>`, lowered in `NamClapShared::drop`):** the
-  fence is a **logical validity** gate, *not* a memory-lifetime
-  mechanism. During teardown the main thread lowers the fence and bounded-joins
-  every GUI/dialog thread *before* the instance's shared state is released;
-  window event loops and file-picker callbacks are fence-gated no-ops while
-  destruction is in progress, so a background thread can never **publish** a
-  host callback after `destroy()`. The `Arc` already keeps the memory alive;
-  the fence keeps the *interaction* with the host inside the plugin's lifetime.
-- **`GuiHostBridge` (`src/clap/gui/mod.rs`):** safe wrapper storing the raw
-  host pointer as `NonNull<()>` and reconstructing `HostSharedHandle<'static>`
-  on demand, reflecting the CLAP spec guarantee that the host outlives the
-  plugin. GUI threads dereference it only while `alive_fence` is up.
-- **C-ABI Panic Guard & Processor Poisoning Latch (`F-NP-02`):** `profile.release` and `profile.dist` compile with
-  `panic = "unwind"` (`Cargo.toml`), and every CLAP entry point — `activate`,
-  `process`, `deactivate`, GUI `create`/window callbacks, and parameter
-  `flush()` — wraps its body in `catch_unwind(AssertUnwindSafe(..))`
-  (`src/clap/processor/mod.rs`, `src/clap/extensions/gui.rs`,
-  `src/clap/extensions/params/audio.rs`). If a panic occurs on the audio thread (`process()` or `reset()`),
-  it is caught without crossing the C-ABI boundary:
-  1. The panic payload is dropped without leaking heap memory (`panic_to_error` uses static catalog messages from `plugin::errors::processor::AUDIO_CALLBACK_PANICKED`, enforcing the project-wide zero `Box::leak` contract).
-  2. The processor latches `self.poisoned = true`, immediately zeroes output audio ports, and asserts the atomic status bit `RT_STATUS_PROCESSOR_POISONED` on `rt_status`.
-  3. All subsequent audio blocks execute a fast O(1) containment branch, maintaining output silence and returning `Ok(ProcessStatus::Continue)` with zero allocations and zero I/O, strictly preventing panic cascades, crash loops, and acoustic spikes.
-  4. Off-RT, the main thread detects the poisoned bit during `housekeeping()` and triggers a single `host.request_restart()` call.
-  5. Upon `deactivate()`, corrupted DSP state is discarded (`deactivated_dsp = None`), preventing state resurrection. A subsequent `activate()` clears the latch and status bit to cleanly resume audio processing.
-- **Multi-instance isolation (`instance_id`):** every plugin instance receives
-  a unique `ColdShared::instance_id` (`next_instance_id()`). Diagnostics are
-  scoped per instance via `scope_instance(instance_id)`, and the global
-  `NamLogger` registers a per-instance host-log sink keyed by `instance_id`, so
-  concurrent instances keep their logs and state separate
-  (`processor_multi_instance_isolation_test`). The panic hook tracks
-  `ACTIVE_INSTANCES` and raises the global shutdown signal only when the
-  *last* instance is destroyed.
+- **Refcounted Shared State (`Arc<GuiSharedState>`):** `NamClapShared` owns plugin shared state through `Arc<GuiSharedState>` (`src/clap/plugin/shared.rs`). Windows, background file pickers, and teardown reaper threads all hold refcounted references, preventing use-after-free conditions.
+- **Logical Validity Gate (`alive_fence`):** An `Arc<AtomicBool>` lowered in `NamClapShared::drop`. During teardown, the main thread lowers the fence and joins background threads before releasing state. Callbacks gated by the fence become no-ops, preventing callbacks to the host after `destroy()`.
+- **Safe Host Bridge (`GuiHostBridge`):** Stores the raw host pointer as `NonNull<()>` and reconstructs `HostSharedHandle<'static>` on demand, reflecting the CLAP guarantee that the host outlives the plugin.
+- **C-ABI Panic Guard & Processor Poisoning Latch:** All CLAP entry points wrap execution in `catch_unwind(AssertUnwindSafe(..))`. If a panic occurs on the audio thread:
+  1. The panic payload is dropped without allocation (`panic_to_error` uses static catalog messages).
+  2. The processor latches `self.poisoned = true`, zeroes output audio ports, and asserts `RT_STATUS_PROCESSOR_POISONED`.
+  3. Subsequent audio blocks execute an $O(1)$ containment branch, maintaining silence and returning `Ok(ProcessStatus::Continue)` without allocations or I/O, preventing panic cascades and acoustic spikes.
+  4. Off-RT, the main thread detects the poisoned bit during `housekeeping()` and triggers `host.request_restart()`.
+  5. Upon `deactivate()`, corrupted DSP state is discarded (`deactivated_dsp = None`). Subsequent activation cleanly resumes processing.
+- **Multi-Instance Isolation:** Every instance receives a unique `instance_id` (`next_instance_id()`). Diagnostics and logging sinks are scoped per instance, preventing crosstalk in multi-track DAW sessions.
 
 ### 5.7 Deferred Model Load (`pending_model`)
 
-When DAW state is restored prior to `activate()`, the host buffer size (`max_frames_count`) is unknown. The model payload is cached in `ColdShared::pending_model` and flushed via `flush_pending_model()` during `activate()` (primary) or initial `housekeeping()` before the audio thread processes frames.
+When DAW state is restored prior to `activate()`, the host buffer size (`max_frames_count`) is unknown. The model payload is cached in `ColdShared::pending_model` and flushed via `flush_pending_model()` during `activate()` or initial `housekeeping()`.
 
-**S1 contract — "UI only advances with the retained/delivered model"**
-(`src/clap/plugin/main_thread/load.rs::finish_commit_ui`,
-`src/clap/plugin/main_thread/mod.rs::flush_pending_model`):
+**UI Synchronization Invariant:**
 
-- `commit_prepared_model` publishes the identity (`params.model_path/hash`)
-  up-front, but the display commit — `ui_model_metadata`/`ui_model_info`,
-  `ui_model_name`, `model_load_counter`, param rescan, stale-error clear
-  (`ui_load_error`/`ui_load_error_msg`) and host `mark_dirty` — lands together
-  in `finish_commit_ui`, which runs in **every** retaining outcome: SPSC-ok,
-  staged-restart, pending/`Full` deferral and pre-activation deferral. The UI
-  advances because the model is retained, never ahead of it.
-- `flush_pending_model` holds the taken `PendingModel` in an RAII
-  restore-guard: any `Err`/early-return (resampler build, stream build,
-  `set_max_buffer_size`) puts the model back in `pending_model` for retry
-  instead of dropping it. Every failure path sets
-  `RT_STATUS_MODEL_LOAD_FAILED` and fills `ui_load_error`/`ui_load_error_msg`
-  with an actionable message; the error is logged once per flag transition
-  (`debug` on repeats, since housekeeping retries every 250 ms).
-- `housekeeping()` propagates the flush `Err` to a `debug` log line; the
-  visible error state above is the contract, not the return value.
+- `commit_prepared_model` publishes identity (`params.model_path/hash`) up-front, but display telemetry (`ui_model_metadata`, `ui_model_name`, `model_load_counter`, and error clearing) lands together in `finish_commit_ui`. The UI advances only after the model is retained.
+- `flush_pending_model` uses an RAII restore guard: any error re-inserts the model into `pending_model` for retry instead of dropping it, setting `RT_STATUS_MODEL_LOAD_FAILED` and populating `ui_load_error_msg`.
 
 ### 5.8 Channel Preservation on `deactivate()`
 
-Calling `deactivate()` returns SPSC channel consumers (`param_rx`, `gc_tx`, `slimmable_rx`) back into `ColdShared`, allowing hosts to stop and restart audio processing without instance recreation or memory reallocation. Before the processor drops, `deactivate()` also performs the GC parking-lot handoff (see §5.3): the 16-slot RT array is passed by mutable reference to `drain_gc_final()` so every in-flight `GcItem` is released off-RT through the canonical drain.
+Calling `deactivate()` returns SPSC channel consumers (`param_rx`, `gc_tx`, `slimmable_rx`) back into `ColdShared`, allowing hosts to stop and restart audio processing without reconstructing channels or reallocating memory.
 
-### 5.9 Transactional State Restore (Stage/Commit/Ack)
+### 5.9 Transactional State Restore (Stage / Commit / Ack)
 
-State restoration (`clap_plugin_state`, `clap_plugin_state_context`, and the
-preset-load extension) is applied through a transactional **Stage → Commit →
-Ack** protocol that keeps UI, disk and audio observing the *same* generation.
-The invariant is **"old-complete or
-new-complete"**: no observer ever sees a hybrid of two restore generations.
+State restoration (`clap_plugin_state`, `clap_plugin_state_context`, and preset loading) follows a 3-phase **Stage → Commit → Ack** protocol ensuring atomic transitions where no observer ever sees a hybrid of two restore generations:
 
-1. **Stage** — `build_restore_package(validated, current_params, host_rate, mode)`
-   (`src/clap/extensions/state_transaction/commit.rs`, pre-validated via
-   `src/clap/extensions/state_transaction/validate.rs`): validates the requested state
-   (asset digests, resampler feasibility), derives the effective parameters
-   (Full = everything; ForPreset = identity subset incl. oversample/activation),
-   clones the lightweight metadata into a publish payload, and moves the heavy
-   resources (model, IR adapter) **by value** into the transaction. Nothing is
-   published yet; a validation failure aborts the commit with the previously
-   active DSP intact.
-2. **Commit (RT)** — the whole package is pushed as a **single**
-   `ClapParamPayload::RestoreTxn` item (`generation`, `model`, `ir`, `params`)
-   into the SPSC command ring (`atomic_commit` → `deliver_pending_restore` in `commit.rs`). A
-   single item guarantees the audio block that drains it applies the entire
-   package atomically — three separate commands could interleave a `Full`
-   between model and IR, producing the forbidden hybrid. If the ring is full,
-   the full package (txn + publish) is retained in
-   `NamClapMainThread::pending_restore` and `request_callback()` schedules a
-   retry (fail-closed — never dropped).
-3. **Ack** — `flush_pending_restore()` (in `src/clap/extensions/state_transaction/commit.rs`) retries the push
-   and, once the audio thread has acknowledged the sequence number
-   (`is_acked(seq)`), calls `publish_restore()`: it publishes
-   `full_wavenet_model`, `ui_model_*`, `model_sample_rate`, IR path/samples,
-   the main-thread params (incl. `model_path`/`basename`/`hash`/`search_paths`),
-   the parameter atomics, `bump_generation()` and `mark_dirty`. UI and disk
-   observe the new state **only after** the audio thread applied it.
-   **Latest-wins**: a newer restore replaces the pending one; an older txn
-   already in the ring still applies atomically, but its publication is dropped.
-4. **Observability** — the audio thread records the applied generation in
-   `ColdShared::last_applied_generation` (concrete observable for tests).
-   `model_load_counter` advances **on push** (delivery), not on ack — it is
-   telemetry, and the synchronous contract expected by load-stress tests is
-   preserved.
-5. **Local commit (pre-activate)** — when `buffer_size == 0` there is no
-   audio thread to desynchronize: everything is published immediately and the
-   model is retained in `pending_model` (or the clear is retained as
-   `PendingModel { model: None }` so `flush_pending_model()` emits
-   `LoadModel { None }` on reactivation, preventing `deactivated_dsp` from
-   resurrecting a cleared model).
-
-The RT drain (`cold_apply_restore_txn` in `src/clap/processor/events.rs`,
-`#[cold]`) applies model → IR → params and records the generation in the same
-block; heavy resources travel **by value**, so the RT thread only moves
-pointers into the GC cascade — zero heap allocation (heap-audit verified).
+1. **Stage:** `build_restore_package()` validates asset digests, resampler feasibility, and parameter subsets. Heavy resources (model, IR adapter) are moved **by value** into the transaction without modifying active DSP state.
+2. **Commit (RT):** The package is pushed as a single `ClapParamPayload::RestoreTxn` item into the SPSC command ring. The audio thread applies model, IR, and parameters atomically in a single audio block without heap allocation.
+3. **Ack:** Once the audio thread acknowledges the sequence number (`is_acked(seq)`), `publish_restore()` updates UI metadata, parameter atomics, and host state flags. UI and disk observe the new state only after the audio thread has committed it.
 
 ---
 
@@ -393,135 +330,84 @@ graph TD
 ### 6.1 Execution Sequence
 
 1. **Subnormal & Denormal Setup:** First block enables Flush-To-Zero (FTZ) and Denormals-Are-Zero (DAZ) via SSE control registers.
-2. **Event & Command Draining (`process_events()`):** Drains the mixed command ring and the dedicated slimmable ring through the engine `RtSwapDrain` schedulers (`cmd_drain`, `slimmable_drain`; shared `SwapBudget`, at most one structural apply per callback), then updates local parameter targets from GUI atomics. Host sample-accurate parameter events are applied later via block-splitting in `process_dsp_audio`.
-3. **Channel Extraction (`extract_channels()`):** Maps host input buffers into contiguous working scratch buffers. Counts active channels (`1` or `2`) for adaptive metering.
-4. **Input Gain & Stage:** Applies user input gain (SIMD + `ParamSmoother`), injects `-220 dBFS` anti-subnormal dither, and evaluates the Noise Gate FSM.
-5. **Neural Inference Execution (`run_inference()`):**
-   - Upsamples host rate to 48 kHz native via minimum-phase polyphase `NamResampler` (bypassed if host rate is 48 kHz).
-   - Executes `NamModel::process()` (with optional 2x/4x oversampling around neural activations).
-   - Downsamples 48 kHz back to host sample rate via `NamResampler`.
-6. **Output Stage & Degradation Check:** Compensates dither, applies linear gate fade-in/out ramps, and checks audio block deadlines for `AdaptiveCompute` CPU fallback.
-7. **Cabsim IR Stage (Optional):** Executes Uniform-Partitioned Overlap-Save (UPOLS) frequency-domain convolution (`ConvEngine::process()`) if an IR file is loaded.
-8. **Output Gain & Clipping:** Applies user output gain (SIMD + `ParamSmoother`), enforces hard clipping at `+0 dBFS` if enabled, and writes peak telemetry to `RtToUi` atomics.
+2. **Event & Command Draining (`process_events()`):** Drains command and slimmable rings via `RtSwapDrain` schedulers (at most one structural swap per callback), then updates local parameter targets from GUI atomics.
+3. **Channel Extraction (`extract_channels()`):** Maps host input buffers into contiguous working scratch buffers and detects active channel count (`1` or `2`) for adaptive metering.
+4. **Input Gain & Stage:** Applies user input gain (SIMD + `ParamSmoother`), injects anti-subnormal dither (`-220 dBFS`), and evaluates the Noise Gate FSM.
+5. **Neural Inference (`run_inference()`):**
+   - Upsamples host sample rate to native 48 kHz via minimum-phase polyphase `NamResampler` (bypassed if host rate is 48 kHz).
+   - Runs `NamModel::process()` (with optional 2x/4x oversampling around neural activations).
+   - Downsamples 48 kHz back to host sample rate.
+6. **Output Stage & Degradation Check:** Compensates dither, applies linear gate fade ramps, and checks block deadlines for `AdaptiveCompute` CPU fallback.
+7. **CabSim IR Stage (Optional):** Runs Uniform-Partitioned Overlap-Save (UPOLS) frequency-domain convolution (`ConvEngine::process()`) if an IR is loaded.
+8. **Output Gain & Clipping:** Applies output gain (SIMD + `ParamSmoother`), enforces hard clipping at `+0 dBFS` if configured, and updates peak telemetry atomics.
 
-### 6.2 Branchless FMA-Optimized Bypass Crossfader (`process_crossfade_sub_block`)
+### 6.2 Branchless FMA Bypass Crossfader (`process_crossfade_sub_block`)
 
-To prevent audible clicks, pops, or abrupt phase shifts when toggling the plugin bypass state during live performance or automated sessions:
+To prevent clicks, pops, or phase artifacts when toggling plugin bypass:
 
-- **Branchless Scalar FMA Loop:** Inner blend loop executes across `n_xfade` samples without internal branching (`wet[i] = dry[i] + (wet[i] - dry[i]) * mix`) using scalar FMA instructions. Under strict IEEE-754 semantics (without non-compliant `-ffast-math`, prohibited by R1), sequential scalar recurrence (`mix += step`) precludes auto-vectorization across lanes; given that bypass transitions are rare (`#[cold]`) and the loop runs for at most `n_xfade` samples (~20–30 ns, < 1% of non-model overhead), scalar execution avoids unnecessary complexity and preserves exact numerical determinism.
-- **Cardinality Defensive Guard:** with the strict-cardinality streaming adapter `n_out == n_samples == dry_n` always; the legacy overflow region (`n_xfade..n_xfade_raw`, wet count exceeding the dry capture) remains as a cheap defensive guard with dry=0.0 semantics.
-- **Mix Value Clamping:** Mix parameters are clamped to `[0.0, 1.0]` at each step, ensuring saturation cannot overflow even with extreme buffer sizes.
+- **Branchless Scalar FMA Loop:** The inner blend loop executes across `n_xfade` samples without internal branching (`wet[i] = dry[i] + (wet[i] - dry[i]) * mix`) using scalar FMA instructions. Under strict IEEE-754 semantics (avoiding non-compliant fast-math), scalar recurrence guarantees deterministic transitions.
+- **Mix Clamping:** Mix parameters are clamped to `[0.0, 1.0]` at each step, preventing saturation artifacts.
 
 #### 6.2.1 Latency-Compensated Dry Path (`DryDelayLine`)
 
-The wet DSP chain applies a fixed algorithmic latency (`cached_effective_latency` =
-streaming resampler + oversampling half-band delay + cab-sim partition, in
-host-rate samples). The dry path is latency-compensated:
-the crossfade blends signals representing the exact same temporal instant of the input,
-preventing comb filtering or transient cancellation, and the fully-bypassed
-state matches the declared plugin latency for seamless host PDC.
+The wet DSP chain introduces algorithmic latency (`cached_effective_latency` = resampler delay + oversampling filter delay + CabSim partition delay). The dry path is latency-compensated to match this delay exactly:
 
-- **Pre-allocated circular delay line:** `DryDelayLine` (`src/clap/processor/dsp/dry_delay.rs`)
-  is a thin stereo wrapper over two engine `DelayLine<f32>` rings (one per
-  channel), allocated once in `activate()` (capacity =
-  `max(max_frames_count, MAX_RESAMP_BUF) + DRY_DELAY_MAX_EXTRA`, covering the
-  cab-sim partition plus the worst-case resampler/oversampler group delay).
-  The hot path (`process_block`) is zero-alloc.
-- **Single dry source:** `process_sub_block` feeds the raw (pre-gain) host
-  input into the ring **every sub-block** — even during wet-only processing,
-  so the ring always holds the full latency history when a bypass/crossfade
-  transition starts — and stages the `delay`-delayed dry into
-  `buf_xfade_dry_l/r`. Both the bypass output (`copy_delayed_dry_to_output`)
-  and the crossfade blend consume this compensated dry; no dry is captured
-  from the current (undelayed) input anymore.
-- **Latency synchronization:** `recompute_effective_latency()` (cold
-  resource-swap handlers) calls `dry_delay.set_delay()` at the exact instant
-  the new wet resources land; `activate()` initializes the delay from
-  `initial_latency`. A staged + restart swap keeps the old delay until
-  `activate()` consumes it (strict restart policy). Non-finite input containment
-  resets the ring (see §6.5).
-- **Bypass keeps the declared latency:** in the fully-bypassed state the
-  output is the input delayed by exactly the declared latency, so the plugin's
-  physical latency matches its PDC report and automation ramps through bypass
-  without temporal jumps.
+- **Pre-allocated Circular Ring:** `DryDelayLine` (`src/clap/processor/dsp/dry_delay.rs`) wraps two engine `DelayLine<f32>` rings allocated once in `activate()`.
+- **Single Dry Source:** `process_sub_block` feeds raw host input into the ring every sub-block. Both the bypass output (`copy_delayed_dry_to_output`) and the crossfade blend consume this compensated dry signal, preventing phase cancellation and comb filtering.
+- **Seamless Host PDC:** In the bypassed state, the output is delayed by the exact declared latency, ensuring host Plugin Delay Compensation (PDC) remains aligned without temporal jumps.
 
 ### 6.3 Model Gain Calibration Isolation
 
-NAM models supply embedded metadata (`input_level_dbu`, `loudness`). The loader computes calibration adjustments (`input_mult_adj`, `output_mult_adj`). In NAM-Plug, calibration multipliers are passed via `DspPipelineContext::input_gain_mult`/`output_gain_mult` separately from `smoother_in`/`smoother_out`. This ensures sample-accurate DAW user-gain automation never alters underlying static model loudness calibration.
+NAM models supply embedded metadata (`input_level_dbu`, `loudness`). Calibration adjustments (`input_mult_adj`, `output_mult_adj`) are passed separately via `DspPipelineContext` rather than multiplying user gain smoothers, ensuring DAW parameter automation never alters intrinsic model calibration.
 
-### 6.4 Host Event Scheduling, In-Block Slicing & Temporal Anomaly Containment
+### 6.4 Host Event Scheduling, In-Block Slicing & Anomaly Containment
 
-Host parameter automation and modulation (`ParamValueEvent` and `ParamModEvent`) are ingested by `PluginAudioProcessor::process` in `src/clap/processor/dsp/orchestrator.rs`. To guarantee sample-accurate automation while strictly preserving Real-Time safety:
+Host parameter automation and modulation events are processed in `src/clap/processor/dsp/orchestrator.rs`:
 
-1. **Bounded Event Collection (`MAX_SCHEDULED_EVENTS`):** Events from `input_events` are parsed into the pre-allocated buffer `self.scheduled_events` (static capacity `4096`, allocated once during `activate()`). If a host emits an event flood exceeding `MAX_SCHEDULED_EVENTS` in a single block, the loop truncates and asserts `RT_STATUS_SPSC_DRAIN_TRUNCATED` on `self.rt_status` for off-RT reporting, strictly avoiding reallocation on the audio thread.
-2. **Sample-Accurate Sub-Block Slicing:** The processing loop partitions `n_samples` into consecutive slices bounded by distinct event timestamps (`sub_end = scheduled_events[event_idx].time`). At each sub-block boundary:
-   - Sliced audio runs through the full DSP pipeline (`process_sub_block`).
-   - Events matching `time == sub_end` are applied via `worker::apply_scheduled_event`.
-   - Dependent caches (gain smoothers, gate open/close thresholds, bypass crossfader) are resynchronized.
-3. **Temporal Anomaly Containment Policy (F-NPPERF-10 / F-NPRES-01):**
-   DAW hosts occasionally emit out-of-order timestamps or timestamps beyond the current block boundary. NAM-Plug enforces an absolute **never silent discard** invariant through defensive clamping:
-   - **Out-of-Order / Jittered Events (`time < block_offset`):** The event timestamp is defensively clamped to `block_offset` and applied immediately before subsequent DSP processing.
-   - **Out-of-Bounds Events (`time >= n_samples`):** The event timestamp is clamped to `n_samples` and applied at the block close boundary before exiting `process_dsp_audio`, ensuring the parameter value is applied and never lost when `events.clear()` runs on the next cycle.
-   - **RT Observability (`RT_STATUS_EVENT_TIMING_ANOMALY`):** Setting bit 32 (`1 << 32`) on `RtStatusFlags` provides lock-free, zero-alloc telemetry. The main thread detects and clears this bit in `emit_pending_logs()`, emitting structured diagnostics via `log::warn!` and `clap_host_log`. Zero I/O and zero logging occur in the audio callback.
+1. **Bounded Event Buffer (`MAX_SCHEDULED_EVENTS`):** Input events are parsed into a pre-allocated buffer of 4096 entries. Floods exceeding capacity are truncated, asserting `RT_STATUS_SPSC_DRAIN_TRUNCATED` for off-RT logging.
+2. **Sample-Accurate Sub-Block Slicing:** The block is partitioned into consecutive slices bounded by distinct event timestamps (`sub_end = scheduled_events[event_idx].time`). Sliced audio is processed through the DSP chain, events are applied at slice boundaries, and smoothers resynchronize.
+3. **Temporal Anomaly Policy:**
+   - **Jittered Events (`time < block_offset`):** Clamped to `block_offset` and applied immediately before subsequent DSP processing.
+   - **Out-of-Bounds Events (`time >= n_samples`):** Clamped to `n_samples` and applied at the block close boundary, guaranteeing parameter values are never lost.
+   - **Telemetry:** Timing anomalies assert `RT_STATUS_EVENT_TIMING_ANOMALY` for off-RT diagnostic reporting via `log::warn!`.
 
-### 6.5 Two-Phase Non-Finite Containment (F-UX-04)
+### 6.5 Two-Phase Non-Finite Containment
 
-A non-finite (NaN/Inf) host input sample would poison the recurrent model state
-and leak through the wet chain. The engine's input stage detects it at ~zero cost
-and raises `RT_STATUS_NON_FINITE_INPUT_DETECTED` (sanitizing only its own input
-slices). The **plugin-level containment** runs at the top of `process_dsp_audio`
-(`src/clap/processor/dsp/orchestrator.rs`) and is deliberately amortized like the
-seek/loop `reset()`, never a synchronous multi-millisecond `model.reset`:
+Non-finite (NaN/Inf) host input samples poison recurrent neural network states. To contain poisoning without synchronous multi-millisecond resets:
 
-1. **Consume once:** `check_flag` + `clear_flag` are performed together, so the
-   containment runs **once per poisoning**, not once per block (the historical
-   path reset the model unthrottled on every block after a single fault).
-2. **Phase zero (O(1)):** `NamModel::prewarm_reset()` returns the model to the
-   freshly-built state without the stabilization feed, and `prewarm_pending` is
-   armed to drain the amortization window.
-3. **Latency/ramp hygiene:** `dry_delay.reset()` and the input/output smoother
-   `snap_to_target()` keep the dry path and parameter ramps free of pre-fault
-   history; the intermediate/scratch buffers are zeroed exactly as `reset()` does
-   so no pre-fault sample survives in a slot the wet path could read before
-   rewriting.
-4. **Held dry block:** the current callback returns
-   `process_dry_contained_block` (bypass-leg semantics, latency-compensated raw
-   input) and the following callbacks stay dry until the model reconverges; the
-   first wet block afterwards equals a fresh instance's first block.
+1. **Detection:** Input stage detects non-finite samples and asserts `RT_STATUS_NON_FINITE_INPUT_DETECTED`.
+2. **Fast Containment (O(1)):** At the start of the audio block, `NamModel::prewarm_reset()` restores model state without synchronous stabilization loops. Delay lines and parameter smoothers snap to target, clearing pre-fault history.
+3. **Held Dry Block:** The faulted callback outputs latency-compensated dry audio (`process_dry_contained_block`) while the model reconverges over an amortized window, avoiding heavy blocking resets (1.8–4.2 ms) on the audio thread.
 
-The heavy synchronous `model.reset` (measured 1.81 ms p99 LSTM / 4.18 ms p99
-WaveNet A2) is therefore removed from the poisoning callback.
+### 6.6 Transparent Oversize Block Slicing
 
-### 6.6 Transparent Oversize Block Slicing (F-RA-04)
+When DAW hosts deliver audio buffers exceeding internal design limits (`n_samples > MAX_RESAMP_BUF`, where `MAX_RESAMP_BUF = 2048` frames):
 
-DAW hosts occasionally deliver audio buffers whose frame count exceeds the internal processing limits (`n_samples > MAX_RESAMP_BUF`, where `MAX_RESAMP_BUF = 2048` frames). Rather than rejecting, truncating, or failing the callback, NAM-Plug handles oversize blocks transparently on the audio thread:
-
-1. **Cold-Path Delegation:** `process_sub_block` checks `n_samples > MAX_RESAMP_BUF` at its entry and branches via `core::hint::cold_path()` to `process_sub_block_chunked`.
-2. **Zero-Allocation Slicing:** The chunking loop partitions the oversize sub-block into successive slices of at most `MAX_RESAMP_BUF` frames using existing pre-allocated scratch buffers (`SubBlockScratch`). Zero heap allocations occur in this path.
-3. **Continuous DSP Continuity:** Internal DSP state — including the `DryDelayLine` ring buffer, `BypassCrossfader` crossfade progression, parameter smoother trajectories, streaming resampler state, and CabSim convolution partitions — advances continuously across slices without boundary clicks, latency mismatch, or state discontinuities.
+1. **Cold Path Chunking:** `process_sub_block` branches via `cold_path()` to `process_sub_block_chunked`.
+2. **Zero-Allocation Slicing:** Partitions the oversize block into successive slices of at most 2048 frames using pre-allocated scratch buffers (`SubBlockScratch`).
+3. **DSP Continuity:** All stateful components (delay rings, crossfaders, smoothers, resamplers, CabSim partitions) advance continuously across slices without boundary clicks or state resets.
 
 ---
 
 ## 7. Graphical User Interface (Slint GUI Architecture)
 
-The graphical interface is built using the declarative Slint UI framework (v1.18) under `src/clap/gui/`.
+The graphical interface is built using Slint (v1.18) under `src/clap/gui/`.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                       NAM-Plug Slint GUI Architecture                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  5-Zone UI Layout (main.slint)                                              │
-│    Zone 1: Identity Bar (Brand, ModelCard, IrCard, Load Buttons, Toasts)   │
-│    Zone 2: Controls Grid (Input/Output Gain, Gate Threshold, Oversample,     │
-│                           Activation Math SelectorButtons)                  │
+│    Zone 1: Identity Bar (Brand, ModelCard, IrCard, Load Buttons, Alerts)   │
+│    Zone 2: Controls Grid (Input/Output Gain, Gate, Oversample, Precision)   │
 │    Zone 3: Meters Section (Adaptive VuMeter: Mono / Stereo with IEC PPM)    │
-│    Zone 4: Bypass Toggle (ToggleSwitch with active glow & crossfader sync)  │
-│    Zone 5: Status Bar (Sample Rate, Latency, DSP Load, Oversample, XRuns)   │
+│    Zone 4: Bypass Toggle (ToggleSwitch with active glow & crossfade sync)   │
+│    Zone 5: Status Bar (Sample Rate, Latency, DSP Load, Backend, SIMD)       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Rendering Pipeline: Slint v1.18 ──► FemtoVG / OpenGL backend via winit     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Windowing: X11 embedded (native XEmbed) + X11/Wayland floating fallback   │
-│             Persistent per-instance GUI worker + bounded teardown reaper   │
+│  Windowing: X11 embedded (native XEmbed) + X11/Wayland floating fallback    │
+│             Persistent per-instance GUI worker + bounded teardown reaper    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Async File Picker: rfd (Background Worker File Dialog, Non-Blocking)       │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -529,249 +415,83 @@ The graphical interface is built using the declarative Slint UI framework (v1.18
 
 ### 7.1 Module Organization
 
-- `src/clap/gui/mod.rs` — GUI entry point, window dimensions (`600x275`), `GuiHostBridge`.
-- `src/clap/gui/worker.rs` — persistent per-instance GUI worker thread (`GuiWorker`): owns the Slint platform + event loop for the instance lifetime, so repeated `create`/`destroy` cycles (and the X11 embed hook) keep working.
-- `src/clap/gui/x11_embed.rs` — process-global X11 XEmbed embed-at-creation engine: dynamic `with_winit_window_attributes_hook`, backend pin bookkeeping, embed target by value.
-- `src/clap/gui/lifecycle.rs` — `GuiLifecycle` finite state machine for window visibility (`Hidden`/`ShowRequested`/`Active`/`HideRequested`/`Destroyed`).
-- `src/clap/gui/slint/main.slint` — 5-Zone declarative UI layout (`MainWindow`).
-- `src/clap/gui/slint/` — Modular Slint component definitions (`RotaryKnob`, `VuMeter`, `ToggleSwitch`, `LedIndicator`, `SelectorButton`, `ModelCard`, `IrCard`).
-- `src/clap/gui/slint_view_model.rs` — `SlintViewModel`: bridges Slint properties with plugin atomics (`NamClapShared`), drives the 60 Hz telemetry polling timer, applies IEC 60268-10 ballistics, and handles user interaction callbacks (`on_param_changed`, `on_bypass_toggled`, `on_load_model_clicked`, etc.).
-- `src/clap/gui/file_dialogs.rs` — `spawn_model_file_dialog`, `spawn_ir_file_dialog`: async background file selection via `rfd::AsyncFileDialog`.
-- `src/clap/gui/dialog_state.rs` — Lock-free state synchronization for file loading dialogs.
-- `src/bin/ui_preview.rs` — Standalone binary for instantaneous visual inspection and GUI prototyping without DAW hosting.
+- `src/clap/gui/mod.rs` — GUI entry point, default window dimensions (`600x275`), and `GuiHostBridge`.
+- `src/clap/gui/worker.rs` — Persistent per-instance GUI worker thread (`GuiWorker`) owning the Slint platform and event loop.
+- `src/clap/gui/x11_embed.rs` — X11 XEmbed embed-at-creation engine and backend selection hooks.
+- `src/clap/gui/lifecycle.rs` — `GuiLifecycle` finite state machine for window visibility.
+- `src/clap/gui/slint/main.slint` — Declarative 5-Zone UI layout (`MainWindow`).
+- `src/clap/gui/slint/` — Modular Slint components (`RotaryKnob`, `VuMeter`, `ToggleSwitch`, `ModelCard`, `IrCard`).
+- `src/clap/gui/slint_view_model.rs` — `SlintViewModel`: bridges Slint properties with plugin atomics, drives 60 Hz polling, and applies IEC 60268-10 ballistics.
+- `src/clap/gui/file_dialogs.rs` — Asynchronous background file pickers using `rfd::AsyncFileDialog`.
+- `src/clap/gui/dialog_state.rs` — Lock-free state synchronization for file dialogs.
+- `src/bin/ui_preview.rs` — Standalone binary for rapid visual inspection without a DAW host.
 
 ### 7.2 Telemetry Synchronization & IEC 60268-10 Ballistics
 
-To provide smooth metering without degrading the audio thread:
-
-- A dedicated 60 Hz Slint `Timer` (`slint::Timer`) runs inside `"nam-slint-gui"`.
-- Polling reads atomic telemetry (`NamClapShared::rt_to_ui`, `sample_rate`, `effective_latency_samples`).
-- Peak levels are processed with standard IEC 60268-10 Type I (DIN) ballistics:
-  - **Attack:** Immediate (single block peak capture).
+- A dedicated 60 Hz Slint timer polls atomic telemetry from `NamClapShared::rt_to_ui`.
+- Peak levels follow standard IEC 60268-10 Type I (DIN) ballistics:
+  - **Attack:** Immediate (single-block peak capture).
   - **Decay:** 1700 ms fallback to -20 dBFS.
-  - **Peak-hold indicator:** 1.5 seconds retention before release.
-- **Dynamic track configuration (`active_channel_count`):** Automatically adapts the meter between centered mono bar and independent stereo L/R bars.
+  - **Peak-Hold Indicator:** 1.5-second retention before release.
+- **Adaptive Track Configuration:** Adapts automatically between a centered mono bar and independent stereo L/R bars based on `active_channel_count`.
 
-#### 7.2.1 Status-Bar Badges: Live vs. Static-per-Window
+#### 7.2.1 Status-Bar Badges
 
-The status bar exposes four informational strings that are **never** hard-coded design-time placeholders in production:
+- **`model_arch` (Live):** Displays loaded model architecture (e.g., WaveNet A1, LSTM) from `ui_model_metadata`. Shows `"No model loaded"` when inactive.
+- **`simd_badge` (Static):** Displays detected SIMD baseline (`"AVX2+FMA"`), evaluated once per window creation.
+- **`backend_text` (Static):** Displays active window backend (`"X11 (Embedded)"`, `"X11 (Floating)"`, `"Wayland (Floating)"`).
+- **`dsp_load_text` (Live):** Formatted as `"{pct}% DSP"` from `rt_to_ui.dsp_load_permille`, with a 2-second peak-hold alert indicator for audio dropouts (XRUNs).
 
-- **`model_arch`** — live: sourced from `ColdShared::ui_model_metadata` (`NamModelMetadata::architecture`/`topology`), diffed every 60 Hz tick with the same echo-guard pattern as `model_name`/`ir_name`. Shows `"No model loaded"` when no model is active, never a stale architecture after a swap or clear.
-- **`simd_badge`** — static-per-window: the runtime-detected SIMD backend (`neural_amp_modeler_rs::math::common::SIMD_MATH.instruction_set`) never changes for the lifetime of a process, so it is read and set once in `SlintViewModel::new()` rather than every tick. Reads `"AVX2+FMA"` in every standard build (the opt-in `avx512` feature is not enabled by `NAM-Plug`).
-- **`backend_text`** — static-per-window: the negotiated windowing backend (`"X11 (Embedded)"` / `"X11 (Floating)"` / `"Wayland (Floating)"` / `"Floating"`) is computed once in `spawn_gui()` from the CLAP host's `Window::api_type()` and the negotiated mode, and passed into `SlintViewModel::new()`.
-- **`dsp_load_text`** — live telemetry: reads atomic `rt_to_ui.dsp_load_permille` (permille / 10 = integer percentage) published lock-free by the audio processor callback. Formatted as `"{pct}% DSP"` with change-detection gating to eliminate redundant Slint string allocations. Paired with `xrun_epoch` monitoring that triggers a 2.0-second (120 UI frames @ 60 Hz) peak-hold indicator for audio dropouts.
+#### 7.2.2 Status Alert Banner
 
-#### 7.2.2 Status Alert Banner / Pill (R3 / F-RA-03)
+Operational warnings are derived off-RT from `ColdShared::ui_alert_bits` and displayed as status bar pills with tooltips:
 
-Critical operational warnings and degraded states are derived off-RT from `ColdShared::ui_alert_bits` (updated via `housekeeping.rs::update_alert_bits()` and evaluated every 60 Hz tick):
-
-- **Bitmask Alert Sources:** Captures processor poisoning (`UI_ALERT_POISONED`), host contract violations (`UI_ALERT_HOST_CONTRACT`), CabSim violations (`UI_ALERT_CABSIM_CONTRACT`), resampler rebuild failures (`UI_ALERT_RESAMPLER_FAILED`), structural degradation states (`UI_ALERT_DEGRADE_MINIMAL`, `UI_ALERT_DEGRADE_REDUCED`), and a 3-second monotonic hold window for non-finite input events (`UI_ALERT_NON_FINITE`).
-- **Visual Presentation:** Displayed as an active alert pill badge in the status bar with color coding and contextual tooltip messages, informing the user of internal health without any RT-thread logging or I/O.
+- Captures processor poisoning, host contract violations, CabSim errors, resampler rebuild failures, dynamic CPU degradation, and non-finite input events (3-second hold).
 
 ### 7.3 Persistent GUI Worker & Bounded Teardown (`nam-gui-reaper`)
 
-**Why a persistent worker:** Slint 1.18 pins the platform — and
-with it the winit event loop and the X11 XEmbed hook — to the **thread that
-first initializes it**. A per-generation "one thread per window" model breaks
-the first `destroy()` + re-open cycle (the new thread gets
-`SetPlatformError("The Slint platform was initialized in another thread")`).
-`src/clap/gui/worker.rs` therefore hosts **one** `"nam-slint-gui"` thread per
-plugin instance that outlives `gui.destroy()`: the platform is initialized on
-it exactly once, every window generation reuses the same event loop, and the
-dynamic embed hook applies the negotiated parent id per generation.
+**Thread-Pinning Rationale:** Slint 1.18 binds its platform, event loop, and window hooks to the thread that first initializes it. Creating a new thread per window open/close cycle causes `SetPlatformError`. NAM-Plug therefore runs **one** persistent `"nam-slint-gui"` thread per plugin instance.
 
-Window closing and destruction follow a deterministic, leak-free protocol:
+**Teardown Protocol:**
 
-1. The DAW host invokes `gui.destroy()` or the user closes the window
-   (`on_close_requested`).
-2. The plugin closes the window (`close_current_window`: `slint::quit_event_loop()`
-   guarded by owning a worker, and clears `slint_window`). The worker keeps
-   running, ready for the next `create`.
-3. After the event loop exits, the worker releases the window in order —
-   `SlintViewModel` (strong clone), `Window::hide()` (drops the additional
-   strong component reference that `show()` maintains), and the `MainWindow`
-   handle — then runs **one drained loop iteration** so winit's queued
-   `XDestroyWindow` reaches the X server (winit only queues the destroy on
-   window drop, and the persistent connection never flushes otherwise — this
-   is what guarantees zero orphan children across cycles).
-4. Only at **instance destruction** the worker is shut down (job channel
-   closed) and joined with a bounded timeout `TEARDOWN_JOIN_TIMEOUT` (2000 ms).
-5. If the windowing backend takes longer to release resources, the handle is
-   handed off to a detached background thread named `"nam-gui-reaper"`
-   (`spawn_reaper`), guaranteeing that the DAW main thread is never blocked
-   while preventing thread abandonment and use-after-free conditions.
-
-**Multi-instance constraint (Slint 1.18):** one platform per process means a
-second plugin instance cannot open a GUI while a first instance's worker is
-alive (its window creation fails cleanly and the host sees the honest
-`create()` rejection). This is a documented Slint constraint, tracked
-separately from this delivery.
+1. The host invokes `gui.destroy()` or the user closes the window.
+2. The plugin closes the window (`slint::quit_event_loop()`), while the worker thread remains alive for subsequent `create()` calls.
+3. The worker releases UI components and executes one drained loop iteration to ensure winit's queued `XDestroyWindow` reaches the X server, preventing orphan windows.
+4. Upon **instance destruction**, the worker is joined with a bounded 2000 ms timeout. If the window backend delays release, the handle is handed off to a detached background thread (`"nam-gui-reaper"`), ensuring the DAW main thread is never blocked.
 
 ### 7.4 Asynchronous Model Loader (`nam-model-loader`)
 
-Model loading is split into a **pure prepare phase** (`prepare_model`) and a
-**short effectful commit** (`commit_prepared_model`), both in
-`src/clap/plugin/main_thread/load.rs`. The prepare phase — file I/O, TOCTOU
-re-check, `load_and_build_model`, SHA-256, slimmable clone, pre-warm cost
-measurement, stream adapter and resampler construction — runs on a dedicated
-**non-RT** thread (`"nam-model-loader"`, normal scheduling priority, never
-`SCHED_FIFO`), created lazily on the first load
-(`main_thread/model_loader.rs`). The commit runs on the main thread, so the
-audio thread never observes a partial swap and the SHA-256 identity is verified
-before adoption (§3.3).
+Model loading is divided into two phases:
 
-- `housekeeping()` **accepts** a queued request (`pending_model_requests`),
-  allocates its monotonic model generation, and **dispatches** one job at a time
-  to the worker. A later **GUI** request supersedes pending GUI requests and
-  invalidates an in-flight GUI load (last-wins); preset requests are honoured
-  FIFO and always acknowledged.
-- On completion the worker publishes a `PreparedModelResult` into an
-  `Arc<Mutex<…>>` slot and calls `host.request_callback()`; the next tick
-  commits it. A result whose generation was superseded is discarded and never
-  signals `notify_preset_loaded`.
-- `ui_loading` is raised while a job is in flight and cleared on commit or
-  error; a successful commit also clears any stale `ui_load_error`.
-- Lifetime: the worker owns an `Arc<GuiSharedState>` and is `alive_fence`-gated,
-  so a load in progress can never dangle; teardown uses a bounded join with the
-  `"nam-model-loader-reaper"` fallback.
-- **Adaptive structural rebuild offload (F-UX-02):** the same worker
-  also services the audio thread's two allocation-heavy structural refreshes —
-  the WaveNet *slimmable* slice (`slice` + `prewarm` + `set_max_buffer_size`) and
-  the *oversampling* engine pair (`OversampleEngine::new` ×2). Idle, the worker
-  re-reads `RT_STATUS_NEEDS_SLIMMABLE_REBUILD` / `RT_STATUS_NEEDS_OS_REBUILD`
-  with a 10 ms `park_timeout`, builds the payload off the main thread, publishes
-  it into a per-kind `RebuildSlots` slot and calls `host.request_callback()`. The
-  main thread's `housekeeping()` tick then performs the SPSC push (slimmable) or
-  command-ring push (`SetOversample`) and clears the flag — the fail-closed
-  retain-on-full retry is unchanged, and a payload still awaiting consumption is
-  never rebuilt. The flag→swap latency therefore no longer waits for the 250 ms
-  watchdog; a **fast watchdog cadence fallback** re-arms the host timer at
-  50 ms while a rebuild flag is still pending, restoring 250 ms once it clears.
-- Rollback: `NAM_SYNC_MODEL_LOAD=1` (read once at instance creation) forces the
-  historical synchronous path. `NAM_SYNC_ADAPTIVE_REBUILD=1` reverts the
-  structural rebuilds (slimmable + oversampling) to the main-thread inline path.
+1. **Prepare Phase (Off-RT):** File reading, JSON parsing, SHA-256 calculation, and model/resampler instantiation execute on a dedicated background thread (`"nam-model-loader"`).
+2. **Commit Phase (Main Thread):** The completed result is swapped atomically on the main thread and pushed to the audio thread via SPSC command queues.
+
+- **Adaptive Structural Rebuild Offload:** The model loader also offloads allocation-heavy tasks for the audio thread, including WaveNet slimmable slices and oversampling engine rebuilds. The main thread's housekeeping watchdog accelerates from 250 ms to 50 ms while a rebuild is pending.
+- **Rollback Switches:** Environment variables `NAM_SYNC_MODEL_LOAD=1` and `NAM_SYNC_ADAPTIVE_REBUILD=1` revert these operations to synchronous execution for debugging.
 
 ### 7.5 Opt-in Asynchronous State Restore (`nam-restore-loader`)
 
-State restore keeps its 3-phase atomic transaction (Prepare → Validate →
-Commit). When `NAM_ASYNC_RESTORE` is set on an **active, interactive** host
-(non-offline, `buffer_size > 0`), the expensive validation phase
-(`validate::validate_and_build`) runs on a dedicated `"nam-restore-loader"`
-worker while the atomic commit still runs on the main thread, preserving the
-fail-closed policy (digest required; previous DSP state intact on failure).
-Pre-activate restores, offline/render contexts, and the default configuration
-stay synchronous. The switch is opt-in because an asynchronous restore reports
-success to the host before validation has run.
+When `NAM_ASYNC_RESTORE=1` is enabled on an active host, state validation runs on a dedicated `"nam-restore-loader"` worker while the commit runs on the main thread, preserving the fail-closed policy. Default configurations remain synchronous.
 
-### 7.6 GUI Lifecycle FSM Feedback
+### 7.6 GUI Lifecycle State Machine
 
-`src/clap/gui/lifecycle.rs` models window visibility as `Hidden → ShowRequested →
-Active → HideRequested → Hidden` (plus the terminal `Destroyed`). The FSM is fed
-from two directions:
+Window visibility is governed by `GuiLifecycle` (`Hidden → ShowRequested → Active → HideRequested → Hidden`):
 
-- **Host-driven:** `create()`, `show()`, and `hide()` call `transition()` on the
-  main thread.
-- **Backend-driven:** the `"nam-slint-gui"` thread cannot mutate the main-thread
-  FSM directly, so it publishes signals that are drained off-RT:
-  - window creation confirmed in `spawn_gui()` promotes `ShowRequested → Active`
-    (`WindowReady`); `show()` applies the same promotion when the window already
-    exists (the common `set_parent`/`set_transient` before `show()` order);
-  - `on_close_requested` sets `ColdShared::gui_user_closed` (Release) and calls
-    `request_callback()`, so `housekeeping()` drains it (Acquire) and drives
-    `UserClosed → Hidden`.
+- **Host-driven:** `create()`, `show()`, and `hide()` initiate state transitions on the main thread.
+- **Backend-driven:** The GUI worker notifies the main thread upon window readiness (`WindowReady`) or user closure (`gui_user_closed`), advancing the state machine off-RT.
 
-Because Slint exposes no asynchronous "unmapped" notification, `hide()` treats
-the dispatched `Window::hide()` as the completion of the request and drives
-`HideRequested → Hidden` synchronously. `Hide` is accepted from `ShowRequested`
-as well, so a host that hides before `WindowReady` never leaves a window stuck
-visible.
+### 7.7 X11 Embedding Architecture
 
-### 7.7 X11 Embedding — Architecture & Implementation
+NAM-Plug supports native X11 window embedding (XEmbed) under Linux using Slint's `with_winit_window_attributes_hook` (`unstable-winit-030` feature).
 
-> **Status:** Production implementation in `src/clap/gui/x11_embed.rs`
-> (process-global embed engine) + `src/clap/gui/worker.rs` (persistent GUI
-> worker). Validated by headless unit tests and the display-backed Xvfb/X11 test
-> `gui_embedded_x11_open_close_cycles_no_leak` (10 open/close cycles, zero
-> orphan children).
+**Architectural Decision: Embed-at-Creation:**
 
-**Go/no-go verdict: GO.** Slint 1.18 can create a window as a native X11 child
-(XEmbed) **without forking Slint**, using the officially exposed
-`unstable-winit-030` feature.
-
-**Spike evidence (read-only, Slint 1.18.1 / winit 0.30.13 / clack-extensions 0.2.0):**
-
-| Question                                                                                      | Finding                                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| (a) Can a custom `slint::platform::WindowAdapter`/`Platform` inject an existing X11 `Window`? | Not required. Slint 1.18 exposes `slint::BackendSelector::with_winit_window_attributes_hook(Fn(WindowAttributes) -> WindowAttributes)` (feature `unstable-winit-030`), invoked in `i-slint-backend-winit::Backend::create_window_adapter` on **every** window creation. A custom `WindowAdapter` is therefore unnecessary for embedding.                                                       |
-| (b) How to extract the host X11 `Window` id from CLAP?                                        | `clack_extensions::gui::Window::as_x11_handle() -> Option<XlibHandle>` returns the host `Window` directly (the `raw-window-handle_06` feature is **not** needed). Fallbacks: `Window::to_standard_api_type()` + the rwh-0.6 `HasWindowHandle` impl (`XlibWindowHandle`).                                                                                                                       |
-| (c) Does `winit` expose the X11 window id for `XReparentWindow`/`xcb_reparent_window`?        | Yes, and better: `winit::platform::x11::WindowAttributesExtX11::with_embed_parent_window(XWindow)` sets `platform_specific.x11.embed_window`; the X11 backend then creates the window as a child (`create_window(..., parent=embed_window, ...)`, `platform_impl/linux/x11/window.rs:305`) and sets the `_XEMBED` property `[0,1]` (version 0, mapped) via `embed_window()` (`window.rs:368`). |
-| (d) Is `build.rs` affected?                                                                   | No. `slint_build::compile("src/clap/gui/slint/main.slint")` stays untouched; the feature flag and backend selection are runtime-only.                                                                                                                                                                                                                                                          |
-
-**Selected design (decision): embed-at-creation (option i).**
-
-- **(i) Embed-at-creation** — enable `slint` feature `unstable-winit-030`, then,
-  before the first Slint component is created, select the backend with
-  `BackendSelector::new().backend_name("winit").with_winit_window_attributes_hook(|attrs| attrs.with_embed_parent_window(parent_id)).select()`.
-  The host `parent_id` is obtained from `Window::as_x11_handle()` cast to
-  `winit::platform::x11::XWindow` (`u32`). winit creates the window already
-  parented and sets `_XEMBED` — no reparent race, no WM interference, no extra
-  X11 connection of our own.
-- **(ii) Reparent-after-creation** (rejected) — `WinitWindowAccessor::with_winit_window(|w| ...)`
-  yields the winit window only **after** the event loop has mapped it as a
-  top-level; a subsequent `xcb_reparent_window`/`XReparentWindow` would fight the
-  WM (which may already frame/focus the window) and requires a direct
-  `x11rb`/`xcb` dependency plus our own X11 connection.
-- **(iii) Custom `WindowAdapter`/`Platform`** (rejected) — heavyweight, re-implements
-  the window lifecycle Slint already provides, when (i) is a first-class hook.
-
-**Implications for `GuiHostBridge` / `alive_fence` (child must not outlive the host `Window`):**
-
-- The embed hook captures the host `Window` id by value (`XWindow` is a `u32`),
-  so no raw pointer escapes to the GUI thread — the existing `GuiHostBridge`
-  fence protocol is unchanged and remains the sole owner of host lifetime.
-- The child window is created *inside* the host's window tree; if the host
-  closes its panel without `destroy()`, the child is destroyed by X11
-  automatically (it is a descendant), so no orphan top-level remains. The
-  plugin still drives `on_close_requested`/`gui_user_closed` unchanged.
-
-**Order of `set_parent` vs `show` (design constraint):**
-
-- The embed hook runs at `create_window_adapter`, i.e. when `MainWindow::new()`
-  is called on the GUI worker thread. The host `Window` is only known from
-  `set_parent` (`spawn_gui(Some(window))`), so the main thread resolves the
-  embed target *before* the worker creates the window: it extracts the parent
-  id (by value) into the process-global `EMBED_TARGET` atomic, and the worker's
-  select-once backend (`ensure_backend_on_gui_thread`) installs the **dynamic**
-  hook that reads that atomic on every window creation. `show()` then maps the
-  already-child window; the existing FSM (`WindowReady` promotion) is unaffected.
-- The backend selection happens **on the worker thread** (Slint pins the
-  platform to the initializing thread), exactly once per process
-  (`BACKEND_ONCE`). The first GUI window of the process decides the winit
-  event-loop kind: X11 (forced via `with_x11()`) or native Wayland.
-- `set_transient` (floating fallback) clears the embed target — the dynamic
-  hook becomes a no-op and the window is a regular top-level.
-
-**Honesty: fallback floating (never "two windows"):**
-
-- clack 0.2.0's FFI wrapper propagates the plugin's `set_parent`/`set_transient`
-  result to the host, and the honest fallback also happens at **`create()`**:
-  the *embedded viability gate* rejects an X11-embedded configuration when the
-  process can no longer embed (non-X11 loop pinned) or when no X11 display is
-  reachable (`DISPLAY` unset — pure Wayland without XWayland). `create()` *does*
-  propagate, so a conforming host falls back to a floating negotiation.
-- `is_api_supported(X11, embedded) == true` is guaranteed behind
-  that gate. Defense-in-depth: `set_parent` still returns `Err` (logged loudly,
-  `gui_host.closed()` notified) without creating a window on any embedding
-  failure — never a silently-floating embedded contract, never two windows.
-- `raw-window-handle = "0.6"` is reintroduced in `Cargo.toml` and used by the
-  rwh-0.6 fallback extraction path in `spawn_gui` (clack's `HasWindowHandle`
-  impl behind the `raw-window-handle_06` feature); the primary path remains
-  `Window::as_x11_handle()`.
-
-**Stability caveat:** `unstable-winit-030` is a normal Cargo feature on the stable
-toolchain (not nightly); the "unstable" prefix flags that its API may change in
-future minor Slint releases as winit majors evolve. Slint upgrades must pin the
-winit minor and re-validate the hook signature.
+- **Mechanism:** Before creating the window, `BackendSelector` registers a hook that applies `.with_embed_parent_window(parent_id)`. Winit creates the window as a direct child of the host window and sets the `_XEMBED` property at creation time.
+- **Alternative Rationale:**
+  - *Reparent-after-creation (Rejected):* Reparenting after mapping causes race conditions with Window Managers and requires an external X11 connection.
+  - *Custom WindowAdapter (Rejected):* Re-implements complex window management already handled by Slint.
+- **Parent ID Passing:** The host window ID is passed by value (`u32`) through an atomic variable (`EMBED_TARGET`), preventing raw pointers from escaping to the GUI thread.
+- **Viability Gate & Honest Fallback:** The plugin checks display reachability at `create()`. If X11 embedding is unavailable (e.g., pure Wayland without XWayland), `create()` rejects the embedded request cleanly, prompting conforming hosts to negotiate a floating window.
 
 ---
 
@@ -791,76 +511,69 @@ NAM-Plug utilizes typed diagnostic codes (`NamErrorCode` in `neural_amp_modeler_
 
 ## 9. Test Infrastructure & Contract Validation
 
-Automated CLAP integration testing, static analysis, and specification validation are implemented across seven dedicated testing and certification layers:
+Validation is implemented across dedicated testing and certification layers:
 
 ### 9.1 Host Harness (`src/clap/host_harness.rs`)
 
-A fully functional simulated DAW host environment built within library unit tests:
+Simulated DAW host environment within library unit tests:
 
-- `CompleteHostState` — Shared event log (`Arc<Mutex<Vec<HostEvent>>>`) and assertion flags.
-- `CompleteHostShared` / `CompleteHostMainThread` / `CompleteHostAudioProcessor` — Implements all standard CLAP host extensions (`audio-ports`, `params`, `state`, `latency`, `track-info`, `render`).
-- Helper utilities (`make_test_plugin_with_harness()`, `process_block_harness()`, `perform_restart()`) test deactivate/activate cycles, state migration, and parameter automation directly in Rust unit tests.
+- Implements standard CLAP host extensions (`audio-ports`, `params`, `state`, `latency`, `track-info`, `render`).
+- Provides helpers (`make_test_plugin_with_harness()`, `process_block_harness()`) to test activation cycles, parameter automation, and state migration.
 
 ### 9.2 Dynamic Artifact Validator (`tests/clap/artifact_validator.rs`)
 
-Integration tests dynamic-link against the compiled `.so` binary using `PluginEntry::load(&artifact.path)` rather than static linking, asserting ABI symbol compliance and recording SHA256 binary hashes for CI traceability.
+Dynamic-links against the compiled `.so` binary using `PluginEntry::load(&artifact.path)` to assert ABI symbol compliance and verify release binary hashes.
 
 ### 9.3 SIMD Segregation & Hardware Baseline (x86-64-v3)
 
-Adherence to the baseline `x86-64-v3` (AVX2/FMA/BMI2) architecture is contractual, not enforced by post-link binary scanning:
+Adherence to the baseline `x86-64-v3` (AVX2/FMA/BMI2) architecture is contractual:
 
-- `NAM-Plug` links against `NeuralAmpModeler-rs` on the contractual `x86-64-v3` (AVX2/FMA/BMI2) baseline without exposing the engine's opt-in `avx512` feature, so all default and release builds compile zero EVEX code into `.text` by construction.
-- The compile-time feature matrix in `utils/lints.sh` (`--no-default-features`, default, `--all-features`) compiles cleanly.
-- The five release gates certify the distributed artifact's exported symbols, host validation, NAMCore float parity, CabSim IR behavior, and real-time performance (`docs/testing.md` §5.4; performance gate detailed in §9.7).
+- Compiles without enabling the engine's opt-in `avx512` feature, ensuring zero EVEX instructions in `.text`.
+- Verified across compile-time feature matrices in `utils/lints.sh`.
 
-#### 9.3.1 Entry-Time CPU Feature Validation Gate (`F-NP-10`)
+#### 9.3.1 Entry-Time CPU Feature Validation Gate
 
-To protect legacy x86-64 CPUs (e.g. pre-Haswell systems lacking AVX2, FMA, or BMI2) from violent crashes with `SIGILL` (illegal instruction) upon plugin loading, `NAM-Plug` implements an architectural validation gate at the very first entry point:
+To protect legacy CPUs from crashing with `SIGILL` upon plugin load:
 
-- **Verification at `clap_entry.init`:** `NamEntry::new()` calls `check_cpu_requirements()` before creating factories or allocating plugin resources.
-- **Checked Extensions:** Runtime validation asserts the presence of `avx2`, `fma`, and `bmi2` via CPUID feature detection (`is_x86_feature_detected!`).
-- **Graceful Rejection:** If any required extension is absent, `NamEntry::new()` logs the failure (`log::error!`), writes a fatal diagnostic message directly to `stderr`, and returns `Err(EntryLoadError)`. This causes `clap_entry.init` to return `false` cleanly to the DAW host, allowing the host to handle incompatible hardware gracefully.
-- **Pre-Init Binary Safety:** Disassembly verification of ELF dynamic initialization sections (`.init_array`) confirms that only baseline `x86-64-v1` instructions execute prior to `clap_entry.init`, ensuring that execution is guaranteed to reach the validation gate before any compiled AVX2/FMA instructions are reached.
+- `NamEntry::new()` calls `check_cpu_requirements()` during `clap_entry.init` before allocating plugin resources.
+- Verifies `avx2`, `fma`, and `bmi2` via CPUID (`is_x86_feature_detected!`).
+- If features are missing, logs an error to `stderr` and returns `false` cleanly, allowing the host to handle hardware incompatibility gracefully.
+- Dynamic initialization sections (`.init_array`) contain only baseline `x86-64-v1` instructions, ensuring execution reaches the validation gate safely.
 
-### 9.4 Real-Time Heap Allocation Audit (`CountingAllocator` / `tests/clap.rs`, `src/clap/processor/heap_audit.rs`)
+### 9.4 Real-Time Heap Allocation Audit
 
 Enforces zero heap allocation on the audio thread:
 
 - Global memory interceptor (`CountingAllocator`) active under `--features "testing,heap-audit"`.
-- Static AST-light scanner (`utils/lib/verify_no_rt_alloc.sh`) parsing `src/clap/processor/` to verify zero `Box`, `Vec`, or `format!` invocations on the audio thread.
-- Static machine-code codegen guard (`utils/verify_rt_codegen.sh`) disassembling the compiled `.so` with `objdump` and running the unified NAM codegen filter (`utils/lib/dsp-hotpath-filter.py`) with the per-repo profile (`utils/codegen-profile.json`) to verify zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls. Post-BOLT verification disassembles each matched symbol within its declared size and normalizes `.bolt.org.text*` to `.text*`, then `build-release.sh` compares pre/post coverage so a BOLT pass that silently verifies fewer targets fails strict/ceremony builds.
+- Static AST scanner (`utils/lib/verify_no_rt_alloc.sh`) asserting zero `Box`, `Vec`, or `format!` calls in `src/clap/processor/`.
+- Codegen verifier (`utils/verify_rt_codegen.sh`) disassembling the `.so` with `objdump` to verify zero `malloc`/`free`, zero `div`/`idiv` in hot loops, and zero `__tls_get_addr` calls.
 
 ### 9.5 Headless GUI Testing (Xvfb)
 
-Floating window lifecycle (`create` $\to$ `set_transient` $\to$ `destroy`) and clipboard integration (`arboard`) are validated under a headless virtual X11 display (`Xvfb :99`) with Mesa software rendering (`llvmpipe`), executed on-demand (manually or in extended CI) since they require the Xvfb headless display stack.
+Floating window lifecycles and clipboard integration are validated under a virtual X11 display (`Xvfb :99`) with Mesa software rendering (`llvmpipe`).
 
-### 9.6 E2E CLAP vs NAMCore Parity & CabSim IR Test (`tests/clap/clap_parity_multi_sr.rs`, `tests/clap/clap_cabsim_ir.rs`)
+### 9.6 E2E CLAP vs. NAMCore Parity & CabSim IR Test
 
-- **NAMCore Float Parity:** Loads `.so`, loads target models via CLAP state, processes stress signals across irregular buffer sizes, and compares output against the reference C++ NAMCore oracle with conservative gates `ESR < 1e-8`, `SNR > 80 dB` (typical measured baseline: ESR ≈ 7.9e-12 / 111 dB). Runs under `utils/tests-quick.sh` Phase 2 when prerequisites are present.
-- **CabSim IR Artifact Test:** `dlopen`s the release `.so` to prove a loaded `.wav` impulse response actively transforms audio output.
+- **NAMCore Parity (`tests/clap/clap_parity_multi_sr.rs`):** Loads `.so`, loads models via CLAP state, and compares processed output against the reference C++ NAMCore oracle (`ESR < 1e-8`, `SNR > 80 dB`).
+- **CabSim IR Test (`tests/clap/clap_cabsim_ir.rs`):** Dynamically loads release `.so` to verify that impulse responses transform audio output accurately.
 
-### 9.7 Distributed Artifact Performance Certification Gate (`src/bin/nam_perf_guard.rs`)
+### 9.7 Performance Certification Gate (`src/bin/nam_perf_guard.rs`)
 
-CLI gate executing realistic inference workloads against the finalized, stripped, and post-BOLT `.so` binary:
-
-- Measures statistical latency distributions (p50, p95, p99, max, mean, ns/sample) across core topologies (WaveNet A1 Standard, WaveNet A2 Slimmable, LSTM) and block sizes (64 and 128 samples).
-- Validates real-time deadline margins against strict thresholds.
-- Detects host environmental noise / thermal anomalies, emitting a structured JSON certification report (`target/perf-certification-report.json`).
-- Requires a deterministic isolated CPU environment configured via GRUB kernel parameters (`isolcpus=managed_irq,domain,...`, `nohz_full`, `rcu_nocbs`, `clocksource=tsc`) and pinned execution via `taskset -c <core>` to eliminate environmental noise and guarantee reproducible baselines (detailed in [`docs/testing.md`](./testing.md#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset)).
+Measures statistical latency distributions (p50, p95, p99, ns/sample) across core topologies (WaveNet A1, WaveNet A2 Slimmable, LSTM) and block sizes (64 and 128 samples), validating real-time deadline margins against strict thresholds.
 
 #### 9.7.1 BOLT Win-Proof Policy
 
-LLVM-BOLT is opt-out in `NAM-Plug`: there is no `ab-opt-ceremony` producer, so a measured BOLT *win* is never claimed from this repository. A passing performance gate is recorded as the explicit label `bolt_proof: "gate-pass-only"` and only proves that the shipped artifact meets the deadline envelope. BOLT applied without ceremony proof and without a passing gate records the typed gap `bolt_proof:missing_ceremony` in every mode and forces `INCOMPLETE`; a `CERTIFIED` receipt can therefore never sit next to a missing proof. The full policy is in [`docs/testing.md` §5.4.1](./testing.md#541-bolt-win-proof-ceremony--opt-out-decision-t53).
+LLVM-BOLT is opt-out in `NAM-Plug`. Passing the performance gate certifies real-time deadline compliance under the label `bolt_proof: "gate-pass-only"`, without asserting unverified A/B optimization wins; the receipt names that limit explicitly in `optimizations.unproven_claims` (`["bolt_win"]`). See [`docs/testing.md` §5.4.1](./testing.md#541-bolt-win-proof-ceremony--opt-out-architectural-decision).
 
 ---
 
 ## 10. Flatpak Packaging & CLAP Discovery Architecture
 
-NAM-Plug supports distribution as a standalone Flatpak audio plugin extension, enabling seamless integration with containerized DAWs (such as Bitwig Studio, REAPER, and Ardour Flatpaks) without requiring insecure host filesystem sandbox holes (`--filesystem=host` or `--filesystem=home`):
+NAM-Plug supports distribution as a Flatpak audio plugin extension, enabling integration with containerized DAWs (Bitwig Studio, REAPER, Ardour Flatpaks) without host filesystem sandbox holes (`--filesystem=host`):
 
-### 10.1 Freedesktop LinuxAudio Extension Topology & Mounting Architecture
+### 10.1 Freedesktop LinuxAudio Extension Topology
 
-Freedesktop Flatpak audio applications utilize a standardized extension point architecture (`org.freedesktop.LinuxAudio.Plugins`):
+Freedesktop Flatpak audio applications utilize a standardized extension point (`org.freedesktop.LinuxAudio.Plugins`):
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -886,11 +599,11 @@ Freedesktop Flatpak audio applications utilize a standardized extension point ar
 - **Runtime Extension Ref:** `runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08`
 - **Base Extension:** `org.freedesktop.LinuxAudio.BaseExtension`
 - **Container Mount Path:** `/app/extensions/Plugins/clap/nam_plug.clap`
-- **Extension Priority:** Configured with `--extension-priority=100` during `flatpak build-finish`, ensuring predictable precedence when multiple plugin providers are registered.
+- **Extension Priority:** `--extension-priority=100` during `flatpak build-finish`.
 
-### 10.2 AppStream Addon Metadata & DAW Target Association
+### 10.2 AppStream Addon Metadata
 
-The metadata descriptor (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`) declares `<component type="addon">` and establishes direct discovery links (`<extends>`) with popular Linux DAWs:
+The metadata descriptor (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`) declares `<component type="addon">` and establishes discovery links with supported DAWs:
 
 ```xml
 <component type="addon">
@@ -902,15 +615,12 @@ The metadata descriptor (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.N
   <extends>com.fender.studioapp8</extends>
   <name>NAM Plug</name>
   <summary>Neural Amp Modeler CLAP audio plugin</summary>
-  ...
 </component>
 ```
 
-When a user installs `NAM-Plug` via Flatpak, software centers (GNOME Software, KDE Discover) recognize it as an add-on for installed DAWs, and containerized hosts immediately index `nam_plug.clap` upon next launch.
+### 10.3 Manifest Specification
 
-### 10.3 Manifest Specification (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml`)
-
-The Flatpak manifest defines an extension module targeting the `25.08` runtime branch:
+The Flatpak manifest (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml`) targets the `25.08` runtime branch:
 
 ```yaml
 id: org.freedesktop.LinuxAudio.Plugins.NAMPlug
@@ -933,70 +643,43 @@ modules:
 
 ### 10.4 Integrated Release Pipeline (`build-release.sh`)
 
-Flatpak bundle creation is integrated directly into Phase 7 of `utils/build-release.sh`:
+Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh`:
 
-1. **Environment Initialization:** Runs `flatpak build-init --type=extension --extension-tag=25.08` using `org.freedesktop.Sdk//25.08` (falling back to `org.freedesktop.Platform` if SDK is uninstalled).
-2. **Artifact Installation:** Installs optimized `nam_plug.clap` into `files/clap/`, AppStream XML into `files/share/metainfo/`, and GPL-3.0 license into `files/share/licenses/`.
-3. **Extension Finalization:** Applies `flatpak build-finish --extension-priority=100`.
-4. **OSTree Repository Export:** Executes `flatpak build-export --update-appstream` to create a transient OSTree repository.
-5. **Bundle Export:** Executes `flatpak build-bundle --runtime` producing the single-file deliverable `~/nam-plug-v<VERSION>-linux-x86_64-v3.flatpak`.
-6. **Automated User Installation:** If `--install` is supplied, runs `flatpak install --user --reinstall -y` automatically.
+1. **Initialize:** Runs `flatpak build-init --type=extension --extension-tag=25.08`.
+2. **Install:** Installs `nam_plug.clap` into `files/clap/` and AppStream XML into `files/share/metainfo/`.
+3. **Finish:** Runs `flatpak build-finish --extension-priority=100`.
+4. **Export OSTree:** Executes `flatpak build-export --update-appstream`.
+5. **Create Bundle:** Generates standalone bundle `nam-plug-v<VERSION>-linux-x86_64-v3.flatpak`.
+6. **Deploy:** Optionally installs bundle locally via `flatpak install --user --reinstall -y`.
 
-### 10.5 AppStream Catalog Dynamics, Bundle Semantics & Diagnostic Invariants
+### 10.5 AppStream Catalog Dynamics & Bundle Semantics
 
-When deploying and inspecting the Flatpak extension, several architectural behaviors govern how desktop environments, graphical software centers (such as Warehouse, GNOME Software, and KDE Discover), and the Flatpak CLI interact with metadata:
+1. **Local Bundles vs. Remote Repositories (Flathub):**
+   - Standalone `.flatpak` bundles encapsulate only the commit objects for the plugin ref. They do not contain repository-wide AppStream catalog branches (`appstream/x86_64`).
+   - Consequently, local bundle installations show generic icons and fallback names in graphical software centers (e.g., Warehouse).
+   - In production (Flathub), `flatpak build-update-repo` indexes the metainfo XML into the centralized AppStream branch, displaying full titles, release notes, and icons.
+2. **Semantic Versioning in `flatpak list`:**
+   - The `Versão` (Version) column in `flatpak list` is populated from the cached AppStream catalog. When installed from a standalone bundle without catalog indexing, this column remains blank while the `Ramo` (Branch) column displays `25.08`.
+3. **Sandbox Permissions:**
+   - Plugin extensions are shared libraries mounted into host containers, not standalone sandboxed applications. They declare zero independent sandbox permissions (`--filesystem`, `--device`) and inherit the security boundary of the host DAW. Running `flatpak info --show-permissions` legitimately displays zero lines.
 
-#### 1. Single-File Bundles (`.flatpak`) vs. Remote Repositories (Flathub)
-
-- **OSTree Commit Scope:** Single-file bundles generated by `flatpak build-bundle --runtime` encapsulate exclusively the OSTree commit objects for the targeted plugin ref (`runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08`).
-- **Absence of AppStream Branch:** Standalone `.flatpak` bundles do **not** bundle or unpack the auxiliary repository-wide AppStream catalog branches (`appstream/x86_64` or `appstream2/x86_64`).
-- **Unindexed Local Origins:** Installing a bundle locally via `flatpak install --user bundle.flatpak` creates an unindexed local origin (e.g., `namplug-origin`). Because this is a static local origin without an HTTP remote URL, no background AppStream synchronization occurs, leaving `~/.local/share/flatpak/appstream/` unpopulated for that ref.
-- **Software Center Impact:** Graphical managers (like Warehouse) query the centralized AppStream database (`/var/lib/flatpak/appstream/` or `~/.local/share/flatpak/appstream/`) rather than scanning unpacked XML files inside `files/share/metainfo/`. Consequently, locally installed bundles display as *"No metadata"* (*"Sem metadados"*), show fallback IDs, and display generic system gear icons.
-- **Production Resolution on Flathub:** When distributed via Flathub or a standard remote OSTree repository, the build pipeline executes `flatpak build-update-repo` (using `appstream-compose`), which indexes [`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml`](../packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml) into the `appstream/x86_64` branch. Software centers downloading from Flathub immediately display the full human-readable title (*"NAM Plug"*), release version (`0.8.0`), category, summary, URLs, and release notes.
-
-#### 2. Semantic Versioning in `flatpak list`
-
-- **Catalog-Derived Versioning:** In `flatpak list`, the `Versão` (Version) column is populated exclusively by extracting the `<releases><release version="...">` tag from the cached AppStream catalog. Flatpak's underlying OSTree layer tracks commit hashes and branch names (`25.08`), but does not maintain semantic versions internally.
-- **Blank Column Behavior:** When an extension is installed via a standalone bundle without a synchronized AppStream catalog, the `Versão` column legitimately remains blank, while the `Ramo` (Branch) column accurately reports `25.08`.
-
-#### 3. Extension Sandbox Permissions vs. Standalone Applications
-
-- **Inherited Context:** Audio plugin extensions (`type="addon"`, `build-extension: true`, `[ExtensionOf]`) are shared libraries mounted into host DAW containers, not standalone sandboxed applications (`[Application]`).
-- **Zero Standalone Permissions:** Extensions do not declare independent sandbox permissions (`--filesystem`, `--socket=pulseaudio`, `--device`). The plugin runs within the security boundary, IPC, and filesystem sandbox configured by the host DAW (e.g., Bitwig Studio or REAPER).
-- **`flatpak info --show-permissions` Behavior:** Running `flatpak info --show-permissions org.freedesktop.LinuxAudio.Plugins.NAMPlug` outputs zero lines and exits with code `0`. This is the intended and standard behavior for all Flatpak runtime extensions (including graphics drivers and shared codecs).
-
-#### 4. Warehouse UI Fallback Semantics
-
-- **Runtime Parent Attribution:** When an installed extension lacks an indexed AppStream summary, Warehouse inspects the `[ExtensionOf]` parent defined in the extension's metadata (`org.freedesktop.Platform`).
-- **Fallback Title & Description:** In this scenario, Warehouse falls back to displaying the upstream summary of `org.freedesktop.Platform` (*"Framework for applications"*), the OSTree branch (*"Versão 25.08"*), and the raw application ID (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`).
-
-### 10.6 Developer Build, Inspection & Diagnostic Commands
+### 10.6 Developer Commands
 
 ```bash
-# 1. Automated release build of optimized plugin and Flatpak bundle:
+# 1. Build release plugin and Flatpak bundle
+export CARGO_BUILD_JOBS=4
 ./utils/build-release.sh --install
 
-# 2. Standalone compilation using flatpak-builder (development manifest):
-cargo build --release
-flatpak-builder --user --install --force-clean \
-  --state-dir=target/flatpak-builder \
-  target/flatpak-build \
-  packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml
-
-# 3. Validate AppStream metainfo XML against specification:
+# 2. Validate AppStream metadata
 appstreamcli validate packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml
 
-# 4. Query installed extension metadata and runtime extension points:
+# 3. Query installed extension metadata
 flatpak info org.freedesktop.LinuxAudio.Plugins.NAMPlug
-flatpak info -m org.freedesktop.LinuxAudio.Plugins.NAMPlug
 
-# 5. Inspect installed plugin library inside the Flatpak user store:
-ls -la ~/.local/share/flatpak/runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08/active/files/clap/
-
-# 6. Verify mounting inside host Flatpak DAW container (e.g., Bitwig Studio):
+# 4. Verify mounting inside host Flatpak DAW (e.g., Bitwig Studio)
 flatpak run --command=ls com.bitwig.BitwigStudio -la /app/extensions/Plugins/clap/
 
-# 7. Remove installed extension:
+# 5. Remove installed extension
 flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 ```
 
@@ -1005,6 +688,6 @@ flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 ## 11. References
 
 - [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) — Neural Amp Modeler DSP engine library.
-- [CLAP (CLever Audio Plug-in) Specification](https://cleveraudio.org/) — Official CLAP plugin format documentation.
+- [CLAP (CLever Audio Plug-in) Specification](https://cleveraudio.org/) — Official CLAP plugin specification.
 - [Clack Framework](https://github.com/prokopyl/clack) — Safe Rust bindings for CLAP plugins and hosts.
 - [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore) — Reference C++ implementation of NAM.

@@ -31,7 +31,7 @@
 //! ## Running
 //!
 //! ```sh
-//! cargo bench --features testing --bench clap_bench
+//! export CARGO_BUILD_JOBS=4; cargo bench --features testing --bench clap_bench
 //! ```
 
 mod common;

@@ -10,9 +10,11 @@
 //!
 //! # Submodules
 //! - [`artifact_validator`]: Dynamic `.so` binary discovery and SHA256 hashing.
+//! - [`clap_cabsim_ir`]: CabSim impulse response convolution and partition size validation.
 //! - [`clap_cross_machine`]: Cross-platform float determinism and sample rate conversion.
 //! - [`clap_lifecycle_test`]: Plugin activation, audio config renegotiation, and lifecycle FSM.
 //! - [`clap_multi_instance`]: Multi-instance concurrency and SPSC queue isolation.
+//! - [`clap_multi_instance_isolation`]: Strict memory and state isolation across multiple concurrent plugin instances.
 //! - [`clap_parity_multi_sr`]: Multi-sample-rate output parity validation against `NeuralAmpModeler-rs` reference.
 //! - [`clap_state_migration`]: State persistence (`clap.state-context`) and preset restoring.
 //! - [`tail_semantics`]: CLAP tail extension (`clap_plugin_tail`) and silence flushing.

@@ -117,6 +117,153 @@ receipt_apply_artifact_cap() {
     esac
 }
 
+CEREMONY_FAIL_EXIT=3
+
+# ceremony_exit_code <receipt_status> <release_ceremony>
+#   Prints the exit code of the release gate. Outside ceremony mode the
+#   preliminary run always exits 0 (INCOMPLETE is reported, not fatal). In
+#   ceremony mode only CERTIFIED passes: any other status, including an empty
+#   one, prints CEREMONY_FAIL_EXIT (3, distinct from die=1).
+ceremony_exit_code() {
+    local status="$1" ceremony="${2:-false}"
+    if [ "$ceremony" = "true" ] && [ "$status" != "CERTIFIED" ]; then
+        printf '%s\n' "$CEREMONY_FAIL_EXIT"
+    else
+        printf '0\n'
+    fi
+}
+
+# codegen_compare_verdict <pre_bolt_json> <post_bolt_json>
+#   Prints the shared pre/post-link codegen coverage verdict used by the normal
+#   build path and by the ceremony reuse path. Kept here (instead of duplicated
+#   in both branches of build-release.sh) so the two can never drift.
+codegen_compare_verdict() {
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+
+def load(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+pre = load(sys.argv[1])
+post = load(sys.argv[2])
+if pre is None and post is None:
+    print("absent")
+elif pre is None:
+    print("post_only")
+elif post is None:
+    print("pre_only")
+else:
+    fewer_targets = int(post.get("targets_matched", 0)) < int(pre.get("targets_matched", 0))
+    fewer_symbols = int(post.get("symbols", 0)) < int(pre.get("symbols", 0))
+    if fewer_targets and fewer_symbols:
+        print("post_has_fewer_symbols_and_targets")
+    elif fewer_targets:
+        print("post_has_fewer_targets")
+    elif fewer_symbols:
+        print("post_has_fewer_symbols")
+    else:
+        print("match")
+PY
+}
+
+# ceremony_certified_verdict <certified_dir> <installed_path> <long_receipt_sha>
+#   F-CER-01 identity verdict for the release ceremony. The certified copy
+#   (`<certified_dir>/nam_plug.clap` + `.sha256`), the installed binary and the
+#   SHA declared by the long-audit receipt must all be the same bytes. Prints a
+#   typed token; the caller decides how to report/fail.
+ceremony_certified_verdict() {
+    local certified_dir="$1" installed="$2" long_receipt_sha="$3"
+    local certified="$certified_dir/nam_plug.clap"
+    local sha_file="$certified_dir/nam_plug.clap.sha256"
+    local recorded actual installed_sha
+
+    if [ ! -f "$certified" ] || [ ! -f "$sha_file" ]; then
+        printf 'missing_certified_binary\n'
+        return 0
+    fi
+
+    recorded=$(awk 'NR==1 {print $1}' "$sha_file" 2>/dev/null || true)
+    actual=$(sha256sum "$certified" 2>/dev/null | cut -d' ' -f1)
+    if [ -z "$recorded" ] || [ -z "$actual" ] || [ "$recorded" != "$actual" ]; then
+        printf 'certified_copy_tampered\n'
+        return 0
+    fi
+
+    if [ ! -f "$installed" ]; then
+        printf 'installed_missing\n'
+        return 0
+    fi
+    installed_sha=$(sha256sum "$installed" 2>/dev/null | cut -d' ' -f1)
+    if [ "$installed_sha" != "$actual" ]; then
+        printf 'installed_mismatch\n'
+        return 0
+    fi
+
+    if [ -z "$long_receipt_sha" ]; then
+        printf 'long_receipt_missing\n'
+        return 0
+    fi
+    if [ "$long_receipt_sha" != "$actual" ]; then
+        printf 'long_receipt_mismatch\n'
+        return 0
+    fi
+
+    printf 'ok\n'
+}
+
+# codegen_post_sha <post_bolt_json>
+#   Prints the SHA-256 recorded in a codegen receipt, or nothing when the field
+#   is absent/unparseable. Single owner of that parsing rule.
+codegen_post_sha() {
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        print(json.load(handle).get("sha256") or "")
+except Exception:
+    pass
+' "$1" 2>/dev/null || true
+}
+
+# ceremony_codegen_verdict <pre_bolt_json> <post_bolt_json>
+#   The ceremony does not rebuild, so it reuses the codegen evidence produced by
+#   the preliminary invocation. Both receipts must exist, be parseable and keep
+#   the post-BOLT coverage; a shrinking or missing pair is fail-closed.
+ceremony_codegen_verdict() {
+    local pre="$1" post="$2" verdict post_sha
+
+    if [ ! -f "$pre" ] || [ ! -f "$post" ]; then
+        printf 'codegen_metrics_missing\n'
+        return 0
+    fi
+
+    verdict=$(codegen_compare_verdict "$pre" "$post")
+    case "$verdict" in
+        match) : ;;
+        absent) printf 'codegen_metrics_invalid\n'; return 0 ;;
+        *) printf 'codegen_coverage_%s\n' "$verdict"; return 0 ;;
+    esac
+
+    post_sha=$(codegen_post_sha "$post")
+    if [ -z "$post_sha" ]; then
+        printf 'codegen_post_sha_missing\n'
+        return 0
+    fi
+    if ! [[ "$post_sha" =~ ^[0-9a-f]{64}$ ]]; then
+        printf 'codegen_post_sha_invalid\n'
+        return 0
+    fi
+
+    printf 'ok\n'
+}
+
 # ---------------------------------------------------------------------------
 # Mandatory test-target execution gate
 # ---------------------------------------------------------------------------

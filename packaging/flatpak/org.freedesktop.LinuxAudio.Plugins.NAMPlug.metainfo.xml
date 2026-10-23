@@ -18,17 +18,23 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
   </developer>
   <description>
     <p>
-      NAM-Plug is a high-performance Neural Amp Modeler audio plugin in CLAP
-      (CLever Audio Plug-in) format, engineered in pure Rust with strict real-time safety.
+      NAM-Plug is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin
+      for real-time Neural Amp Modeler (NAM) simulation on Linux DAWs (Bitwig Studio, REAPER, etc.).
     </p>
-    <p>Key features include:</p>
+    <p>
+      It embeds the NeuralAmpModeler-rs DSP engine, combining state-of-the-art neural guitar amplifier
+      and pedal modeling with strict zero-allocation real-time safety, SIMD AVX2/FMA vectorization, and
+      dual-oracle numerical parity (>136 dB SNR).
+    </p>
+    <p>Key highlights:</p>
     <ul>
-      <li>State-of-the-art neural emulation of guitar amplifiers, preamps, and pedals using WaveNet and LSTM topologies.</li>
-      <li>Hardware-accelerated SIMD AVX2/FMA vectorization with zero heap allocations on the audio thread.</li>
-      <li>Integrated CabSim Impulse Response (IR) loader and convolver.</li>
-      <li>Dual operational modes: Live (zero latency, adaptive compute) and HQ/Offline (4× oversampled linear-phase rendering).</li>
-      <li>Responsive hardware-accelerated declarative UI built with Slint (native Wayland and X11 support).</li>
-      <li>Extensive CLAP extension integration: Audio Ports, Latency, GUI, State, Track Info, and Tail.</li>
+      <li>Comprehensive neural architectures: WaveNet (A1/A2), LSTM, ConvNet, Linear FIR/FFT, and Sequential models.</li>
+      <li>Integrated speaker cabinet Impulse Response (.wav) loader with ultra-low latency UPOLS FFT partition convolution.</li>
+      <li>Native Minimum-Phase Polyphase Sinc Resampler (256 phases × 64 taps) seamlessly adapting 48 kHz models to 44.1, 96, and 192 kHz.</li>
+      <li>Hardware-accelerated Slint 1.18 GUI with native X11 XEmbed embedding into host plugin panels and Wayland/X11 floating windows.</li>
+      <li>Live (zero added latency, adaptive compute) and HQ/Offline modes with 2×/4× polyphase anti-aliasing oversampling.</li>
+      <li>Hard real-time audio thread determinism: zero heap allocations, zero mutex locks, and a 3-tier lock-free GC cascade.</li>
+      <li>IEC 60268-10 PPM adaptive mono/stereo VU metering, sample-accurate parameter automation, and dynamic Plugin Delay Compensation (PDC).</li>
     </ul>
   </description>
   <url type="homepage">https://github.com/fabiohl/NAM-Plug</url>
@@ -53,13 +59,18 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
     <keyword>plugin</keyword>
   </keywords>
   <releases>
-    <release version="1.0.0" date="2026-10-06">
-    </release>
-    <release version="0.8.1" date="2026-10-04">
-    </release>
-    <release version="0.8.0" date="2026-09-08">
-    </release>
-    <release version="0.7.0" date="2026-08-24">
+    <release version="1.0.0" date="2026-10-22">
+      <description>
+        <p>Inaugural production release of NAM-Plug (v1.0.0):</p>
+        <ul>
+          <li>CLAP 1.2+ Host Integration: Native plugin built on clack, sample-accurate parameter automation, dynamic PDC, and full state persistence with SHA-256 asset hashing.</li>
+          <li>Neural DSP Engine: Powered by NeuralAmpModeler-rs with 24 model variants (WaveNet A1/A2, LSTM, ConvNet, Linear), dual-oracle parity validation, and binary .namb v2 container support.</li>
+          <li>SIMD &amp; DSP Stack: x86-64-v3 (AVX2/FMA) baseline, native 256-phase minimum-phase sinc resampler, UPOLS FFT CabSim convolver, and 2×/4× anti-aliasing oversampling.</li>
+          <li>Strict RT Safety: Hard real-time audio callback contract (0 heap allocs/drops, 0 locks, 0 blocking I/O), 3-tier SPSC GC cascade, and denormal/subnormal armor.</li>
+          <li>Declarative Slint GUI: Native X11 XEmbed host embedding, Wayland/X11 floating fallbacks, 5-zone modular layout, 60 Hz lock-free telemetry, and keyboard accessibility.</li>
+          <li>Distribution &amp; Tooling: Standalone Flatpak extension (org.freedesktop.LinuxAudio.BaseExtension 25.08) and 5-phase PGO + LLVM-BOLT release optimization pipeline.</li>
+        </ul>
+      </description>
     </release>
   </releases>
 </component>

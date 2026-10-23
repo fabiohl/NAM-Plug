@@ -55,6 +55,9 @@
 
 set -euo pipefail
 
+# Host memory guard: cap parallel rustc jobs to 4 to prevent OOM
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/_lib.sh"
 

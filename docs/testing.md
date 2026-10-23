@@ -5,10 +5,10 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # Automated Test Suite & Benchmark Architecture - `NAM-Plug`
 
-This document details the automated test suite, integration harness, property-based testing, allocation auditing, and Criterion benchmark targets for the `NAM-Plug` CLAP plugin subproject ([`../`](../)).
+This document outlines the architecture, execution workflows, memory invariants, and benchmark methodologies of the automated test suite for the `NAM-Plug` CLAP plugin.
 
 > [!NOTE]
-> For manual QA procedures and DAW-specific human testing workflows (Bitwig, Fender Studio Pro), see [functional-tests.md](./functional-tests.md). For overall plugin architecture and internal design, see [architecture.md](./architecture.md).
+> For manual QA procedures and host-specific functional workflows (Bitwig Studio, Reaper / Fender Studio Pro), see [functional-tests.md](./functional-tests.md). For overall plugin architecture and internal component design, see [architecture.md](./architecture.md).
 
 ---
 
@@ -16,9 +16,9 @@ This document details the automated test suite, integration harness, property-ba
 
 `NAM-Plug` testing relies on Cargo feature flags defined in [`Cargo.toml`](../Cargo.toml):
 
-| Feature Flag     | Description                                                        | Test/Bench Usage Scope                                                                                |
+| Feature Flag     | Description                                                        | Test / Bench Usage Scope                                                                              |
 |:---------------- |:------------------------------------------------------------------ |:----------------------------------------------------------------------------------------------------- |
-| **`testing`**    | Enables engine test utilities, generators, and fixture resolution. | Mandatory feature flag when running `NAM-Plug` integration tests and benches.                         |
+| **`testing`**    | Enables engine test utilities, generators, and fixture resolution. | Mandatory feature flag when running `NAM-Plug` integration tests and Criterion benchmarks.            |
 | **`heap-audit`** | Intercepts memory allocations via `CountingAllocator`.             | Used by RT-safety tests to ensure zero heap allocations occur on the audio thread during `process()`. |
 | **`stereo`**     | Enables dual-channel L/R processing.                               | Default feature enabled across standard builds and test runs.                                         |
 
@@ -26,330 +26,214 @@ This document details the automated test suite, integration harness, property-ba
 
 ## 2. Integration Harness & Dynamic Artifact Validation
 
-The `NAM-Plug` test suite simulates a real CLAP host environment using [`clack-host`](https://crates.io/crates/clack-host).
+The `NAM-Plug` test suite simulates real CLAP host environments using [`clack-host`](https://crates.io/crates/clack-host).
 
-### 2.1 Dynamic Artifact Validation ([`tests/clap/artifact_validator.rs`](../tests/clap/artifact_validator.rs))
+### 2.1 Dynamic Artifact Validation
+
+*Source: [`tests/clap/artifact_validator.rs`](../tests/clap/artifact_validator.rs)*
 
 Integration tests execute against the dynamically compiled `.so` plugin binary rather than in-process static links where applicable. The `ArtifactValidator` helper:
 
-1. Locates the compiled target artifact (`target/debug/libnam_plug.so` or `target/release/libnam_plug.so`).
-2. Computes the SHA-256 fingerprint of the `.so` binary to ensure test traceability.
-3. Loads the plugin entrypoint dynamically via `PluginEntry::load(&artifact.path)`.
+1. **Locates the compiled artifact:** Resolves `target/debug/libnam_plug.so` or `target/release/libnam_plug.so` (honoring `CLAP_PLUGIN_UNDER_TEST`).
+2. **Fingerprints the binary:** Computes the cryptographic SHA-256 hash of the `.so` to ensure complete traceability.
+3. **Loads via CLAP entrypoint:** Dynamically binds and executes plugin symbols through `PluginEntry::load(&artifact.path)`.
 
 ### 2.2 RT Heap Allocation Audit & Static Guards
 
-RT memory and machine code safety is enforced via a three-layer defense-in-depth approach:
+Real-time audio processing strictly prohibits dynamic memory allocations, blocking I/O, and non-deterministic locks. Safety is enforced across three defensive layers:
 
-- **Dynamic Interceptor ([`tests/common/alloc_audit.rs`](../tests/common/alloc_audit.rs)):** When compiled with `--features "testing heap-audit"`, `tests/clap.rs` registers `CountingAllocator` as the `#[global_allocator]`. The test harness captures allocation counters before and after calling `started_processor.process()`, enforcing **zero heap allocations** on the audio thread.
-- **Static AST-Light Scanner ([`utils/lib/verify_no_rt_alloc.sh`](../utils/lib/verify_no_rt_alloc.sh) / [`utils/lib/rt_alloc_scan.awk`](../utils/lib/rt_alloc_scan.awk)):** Runs during static analysis (`lints.sh`). Parses `src/clap/processor/` Rust sources, tracks brace depth while stripping comments and string literals, excludes whitelisted off-RT lifecycle hooks (`activate`, `deactivate`, panic handlers, test modules), and flags any illegal heap allocation or dynamic collection types (`Box::new`, `Vec::new`, `format!`, `Arc::new`, `HashMap`, etc.).
-- **Static Machine-Code Codegen Guard ([`utils/verify_rt_codegen.sh`](../utils/verify_rt_codegen.sh)):** Runs during release verification (`tests-quick.sh` Phase 2) and release packaging (`build-release.sh` Phase 4.5). Disassembles the compiled `.so` with `objdump` and runs the unified NAM codegen filter ([`utils/lib/dsp-hotpath-filter.py`](../utils/lib/dsp-hotpath-filter.py)) with the per-repo symbol profile ([`utils/codegen-profile.json`](../utils/codegen-profile.json)) to verify machine code invariants in hot-path DSP routines (`process`, `process_sub_block`, `process_sub_block_chunked`, `process_crossfade_sub_block`, `process_tail_drain`, `drain_tail_into`, `process_dry_contained_block`), enforcing zero `malloc`/`free`, zero `div`/`idiv` in the core DSP loop, and zero illegal `__tls_get_addr` calls. The driver emits `RT_CODEGEN_METRICS:` plus optional JSON (`--json-out`) with symbol/instruction/target counts. For post-BOLT artifacts it disassembles one symbol at a time (honoring symbol sizes) and normalizes `.bolt.org.text*` to `.text*`, so dead bytes left by function reordering are never attributed to a live function; `build-release.sh` compares pre- and post-BOLT coverage and fails strict/ceremony builds when the shipped binary has fewer verified symbols or targets. When BOLT is applied, the driver also runs `tests/scripts/test_rt_codegen_post_bolt.sh` through `--post-bolt-regression` (real pre/post pair plus a synthetic `.bolt.so` with a required target removed), and `build-release.sh` refuses to ship a claimed BOLT artifact whose `.bolt.so` file disappeared; if BOLT was not applied the regression reports `SKIP: bolt_not_applied` explicitly. The filter/profile pair is byte-identical (filter) or per-repo (profile) with the engine's `verify-kernel-codegen.sh` and the Pipe's `build-release.sh` Phase 4.5.
+- **Dynamic Interceptor ([`tests/common/alloc_audit.rs`](../tests/common/alloc_audit.rs)):**
+  When compiled with `--features "testing,heap-audit"`, `tests/clap.rs` registers `CountingAllocator` as the global memory allocator. The test harness samples allocation counters before and after `process()`, asserting **zero heap allocations** on the audio thread.
+- **Static AST-Light Scanner ([`utils/lib/verify_no_rt_alloc.sh`](../utils/lib/verify_no_rt_alloc.sh) / [`utils/lib/rt_alloc_scan.awk`](../utils/lib/rt_alloc_scan.awk)):**
+  Executes during static analysis (`lints.sh`). Scans `src/clap/processor/` sources, tracks brace scoping while ignoring comments and string literals, excludes authorized off-RT lifecycle hooks (`activate`, `deactivate`, panic handlers), and flags forbidden heap patterns (`Box::new`, `Vec::new`, `format!`, `Arc::new`, `HashMap`).
+- **Static Machine-Code Codegen Guard ([`utils/verify_rt_codegen.sh`](../utils/verify_rt_codegen.sh)):**
+  Executes during release verification (`tests-quick.sh` Phase 2) and packaging (`build-release.sh`). Disassembles the compiled `.so` using `objdump` and runs the unified filter ([`utils/lib/dsp-hotpath-filter.py`](../utils/lib/dsp-hotpath-filter.py)) with the repository symbol profile ([`utils/codegen-profile.json`](../utils/codegen-profile.json)) to verify:
+  - **Zero heap calls:** No `malloc`, `free`, or `realloc` instructions.
+  - **Zero integer divisions:** No `div` or `idiv` in the core DSP loop.
+  - **Bounded TLS access:** No illegal `__tls_get_addr` calls.
+  - **Post-BOLT resilience:** Disassembles symbol-by-symbol and normalizes `.bolt.org.text*` sections to prevent false positives from dead bytes left by binary reordering.
 
 ---
 
 ## 3. Automated Test Inventory
 
-The automated test targets under [`../tests/`](../tests/) are structured into root test files and modular sub-suites.
+Test targets reside in [`tests/`](../tests/) and test modules within `src/`.
 
-### 3.1 Main Harness Entrypoint ([`tests/clap.rs`](../tests/clap.rs))
+### 3.1 Main Harness Entrypoint
 
-`tests/clap.rs` acts as the root harness declaring common utilities and submodules under `tests/clap/`.
+*Source: [`tests/clap.rs`](../tests/clap.rs)*
 
-### 3.2 Modular Sub-Suites ([`tests/clap/`](../tests/clap/))
+`tests/clap.rs` acts as the primary harness, binding test configuration, shared allocators, and submodules under `tests/clap/`.
 
-The root harness declares modular sub-suites covering: dynamic artifact discovery and SHA256 integrity (`artifact_validator`), cross-machine determinism and float consistency across frame boundaries (`clap_cross_machine`), plugin lifecycle transitions and audio configuration renegotiation (`clap_lifecycle_test`), multi-instance concurrency and thread-safety (`clap_multi_instance`), CLAP × NAMCore C++ oracle parity with ESR/SNR gates across three topologies and the 44.1/48/96 kHz certification rates plus artifact-level 2×/4× oversampling and CabSim parity (`clap_parity_multi_sr`), state persistence and version migration (`clap_state_migration`), and CLAP tail extension semantics (`tail_semantics`). Individual thresholds are defined at the top of each module and summarized in section 6, rather than duplicated in an inventory table.
+### 3.2 Modular Sub-Suites
 
-#### 3.2.1 Multi-Rate Resampling Reference Oracle ([`tests/clap/clap_parity_multi_sr.rs`](../tests/clap/clap_parity_multi_sr.rs))
+*Directory: [`tests/clap/`](../tests/clap/)*
 
-`test_clap_parity_multi_rate` exercises the plugin at **44.1 kHz**, **48 kHz** (native) and **96 kHz** with irregular buffers against the C++ NAMCore oracle. For `host_sr ≠ model_sr` the expected host-rate curve is produced by the reference-resampling oracle:
+| Submodule / Test Target                                             | Scope & Invariants Verified                                                                                        |
+|:------------------------------------------------------------------- |:------------------------------------------------------------------------------------------------------------------ |
+| **[`artifact_validator`](../tests/clap/artifact_validator.rs)**     | Dynamic artifact discovery, `dlopen` loading, and SHA-256 fingerprint verification.                                |
+| **[`clap_cross_machine`](../tests/clap/clap_cross_machine.rs)**     | Cross-machine determinism, buffer chunk boundary invariance, and numerical float consistency.                      |
+| **[`clap_lifecycle_test`](../tests/clap/clap_lifecycle_test.rs)**   | Lifecycle transitions (`init`, `activate`, `deactivate`, `reset`) and dynamic audio configuration changes.         |
+| **[`clap_multi_instance`](../tests/clap/clap_multi_instance.rs)**   | Multi-instance concurrency, thread safety, and resource isolation across parallel instances.                       |
+| **[`clap_parity_multi_sr`](../tests/clap/clap_parity_multi_sr.rs)** | CLAP × NAMCore C++ oracle parity across topologies and rates (44.1, 48, 96 kHz), oversampling, and CabSim IR path. |
+| **[`clap_state_migration`](../tests/clap/clap_state_migration.rs)** | State serialization, parameter persistence, backward compatibility, and corrupt payload recovery.                  |
+| **[`tail_semantics`](../tests/clap/tail_semantics.rs)**             | CLAP tail extension semantics, CabSim ring-out decay, and zero-allocation tail drain.                              |
 
-1. The stress signal is generated at the model's native rate (48 kHz) and rendered by the C++ oracle at that rate.
-2. The plugin input is the reference resample of the native stress (`model_sr → host_sr`).
-3. The oracle model input is the reference resample of that host input back to `model_sr` — the exact round-trip signal the plugin's input resampler presents to the model — so the input-stage group delay is embedded in the oracle input and cancels.
-4. The expected host-rate curve is the reference resample of the oracle output (`model_sr → host_sr`) using the `NeuralAmpModeler-rs` `NamResampler` (minimum-phase polyphase sinc FIR, the same filter family the plugin's `StreamingResampleBuffer` embeds).
-5. Group-delay compensation: both curves are content-aligned at equal host indices after the plugin's declared resampler latency (`latency_samples()`, zero-primed by the streaming adapter) is skipped; ESR/SNR are computed on the steady-state window.
+#### 3.2.1 Multi-Rate Resampling Reference Oracle
 
-Re-rendering the oracle over the round-trip model input cancels the sinc interpolation error, so the resampled rates sit on the same cross-implementation float floor as native 48 kHz.
+*Source: [`tests/clap/clap_parity_multi_sr.rs`](../tests/clap/clap_parity_multi_sr.rs)*
 
-The test is a **fixture × rate matrix**: `wavenet_a1_standard.nam`, `a2_example.nam` (Slimmable container) and `lstm.nam`, each at 44.1/48/96 kHz. The renderer is probed once per fixture, so an unsupported topology produces the typed gap `oracle_unsupported:<fixture>` rather than an ambiguous crash. Measured on 2026-10-22 on the quick-suite release `.so` (pre-PGO/BOLT); the table is a session snapshot, not a fixed artifact identity. The artifact actually certified and its SHA-256 live in `target/release-receipt.json` (`artifacts.clap_installed_sha256`), and only that receipt's `gates.*` verdicts certify the distributed build:
+`test_clap_parity_multi_rate` exercises the plugin at **44.1 kHz**, **48 kHz** (native), and **96 kHz** with irregular buffers against the C++ NAMCore oracle. For `host_sr ≠ model_sr`, the expected host-rate curve is generated by a 5-step reference-resampling pipeline:
 
-| Fixture                 | 44.1 kHz ESR / SNR     | 48 kHz ESR / SNR       | 96 kHz ESR / SNR       |
-|:----------------------- |:---------------------- |:---------------------- |:---------------------- |
-| `wavenet_a1_standard`   | 9.01e-12 / 110.5 dB    | 7.98e-12 / 111.0 dB    | 8.13e-12 / 110.9 dB    |
-| `a2_example` (Slimmable)| 2.77e-12 / 115.6 dB    | 2.75e-12 / 115.6 dB    | 2.76e-12 / 115.6 dB    |
-| `lstm`                  | 1.91e-11 / 107.2 dB    | 2.05e-11 / 106.9 dB    | 2.03e-11 / 106.9 dB    |
+```text
+Stress Signal (48 kHz) ───► [C++ Oracle @ 48k] ───► [Reference Resampler 48k→host_sr] ───► Expected Curve
+         │                                                                                       ▲
+         ▼                                                                                       │
+[Reference Resampler 48k→host_sr]                                                          ESR / SNR Gate
+         │                                                                                       │
+         ▼                                                                                       ▼
+   Plugin Input ──────────► [NAM-Plug (StreamingResampler + DSP)] ────────────────────────► Actual Curve
+```
 
-All cells pass the unchanged gate `ESR < 1e-8, SNR > 80 dB`; no threshold was relaxed for A2 or LSTM.
+1. **Native Stress Generation:** Input is generated at the model's native rate (48 kHz) and rendered by the C++ oracle.
+2. **Host Input Formulation:** Native stress is reference-resampled (`model_sr → host_sr`) to form the plugin input.
+3. **Roundtrip Oracle Input:** The host input is resampled back (`host_sr → model_sr`), presenting the C++ oracle with the identical sinc group delay the plugin's internal resampler presents to the model.
+4. **Expected Output Resampling:** The oracle's output is reference-resampled (`model_sr → host_sr`) using `NamResampler` (minimum-phase polyphase sinc FIR).
+5. **Group Delay Alignment:** Both output curves are aligned after skipping the declared resampler latency (`latency_samples()`), calculating ESR and SNR over steady state.
+
+##### Certified Baseline Parity Matrix
+
+The matrix evaluates three topologies (`wavenet_a1_standard.nam`, `a2_example.nam`, `lstm.nam`) across all three rates:
+
+| Fixture                  | 44.1 kHz ESR / SNR  | 48 kHz ESR / SNR    | 96 kHz ESR / SNR    | Gate Standard        |
+|:------------------------ |:------------------- |:------------------- |:------------------- |:-------------------- |
+| `wavenet_a1_standard`    | 9.01e-12 / 110.5 dB | 7.98e-12 / 111.0 dB | 8.13e-12 / 110.9 dB | ESR < 1e-8, SNR > 80 |
+| `a2_example` (Slimmable) | 2.77e-12 / 115.6 dB | 2.75e-12 / 115.6 dB | 2.76e-12 / 115.6 dB | ESR < 1e-8, SNR > 80 |
+| `lstm`                   | 1.91e-11 / 107.2 dB | 2.05e-11 / 106.9 dB | 2.03e-11 / 106.9 dB | ESR < 1e-8, SNR > 80 |
+
+All configurations pass the uniform gate `ESR < 1e-8, SNR > 80 dB`. The definitive certified artifact hash is recorded in `target/release-receipt.json`.
 
 #### 3.2.2 Artifact-Level Oversampling and CabSim Parity
 
-`test_clap_parity_oversample` exercises the `.so` selected by `CLAP_PLUGIN_UNDER_TEST` at 48 kHz with `OversampleFactor::X2` and `X4`. The C++ renderer rejects a WAV whose rate differs from the model's expected rate, so the reference keeps the oracle at the native rate and feeds it the exact sequence the plugin's half-band upsampler presents to the model, then decimates the oracle output with the same `OversampleEngine`. Only the half-band filters are shared; the neural model remains C++ (oracle) vs Rust (artifact), so this is cross-implementation parity of the production oversampling branch. Measured on 2026-10-22 (`wavenet_a1_standard`, quick-suite release `.so`, pre-PGO/BOLT): X2 ESR ≈ 1.55e-11 / SNR ≈ 108.1 dB (latency 12); X4 ESR ≈ 3.42e-11 / SNR ≈ 104.7 dB (latency 18).
+- **Oversampling Parity (`test_clap_parity_oversample`):**
+  Tests the release `.so` at 48 kHz with `OversampleFactor::X2` and `X4`. The reference feeds the native C++ oracle the identical half-band upsampled sequence produced by the plugin, then decimates the oracle output using the shared `OversampleEngine`.
+  *Baseline:* X2 ESR ≈ 1.55e-11 / SNR ≈ 108.1 dB; X4 ESR ≈ 3.42e-11 / SNR ≈ 104.7 dB.
+- **CabSim Convolution Parity (`test_clap_parity_cabsim`):**
+  Convolves the artifact's dry model output with an impulse response using an independent direct time-domain FIR, comparing it against the artifact's internal convolution output (`max_frames_count = 1024`).
+  *Baseline:* ESR ≈ 8.41e-14 / SNR ≈ 130.8 dB.
 
-`test_clap_parity_cabsim` convolves the artifact's IR-free output with the same IR using an independent direct time-domain FIR and compares it against the IR-enabled output of the same artifact. Host blocks equal the CabSim partition (`max_frames_count = 1024`), so delivery is in-call and no steady-state quantum latency remains; the first and last partitions are excluded as activation/tail boundaries. Measured on 2026-10-22: ESR ≈ 8.4e-14 / SNR ≈ 130.8 dB. The IR-free curve is itself certified against NAMCore by the matrix above, so this isolates the convolution path of the artifact under test. Whether the distributed PGO/BOLT artifact ran these gates — and with which SHA-256 — is recorded in `target/release-receipt.json` under `gates.parity_oversample`/`gates.parity_cabsim` and `artifacts.clap_installed_sha256`.
+---
 
-### 3.3 Regression Containment Suite ([`tests/clap_e0_containment_test.rs`](../tests/clap_e0_containment_test.rs))
+### 3.3 Additional Automated Test Suites
 
-TDD red/green containment suite guarding against specific architectural regression cases:
-
-- **CabSim Participation:** Ensures loaded impulse responses participate directly in audio processing and latency calculations.
-- **Parameter State Fidelity:** Asserts parameter changes remain faithful through save/restore cycles.
-- **Reset Semantics:** Validates DSP internal state clear during `reset()`.
-- **Sample Rate Negotiation:** Confirms DSP pipeline re-initializes upon host sample rate changes.
-- **State Deserialization:** Guarantees corrupt or partial state payloads recover gracefully.
-
-### 3.4 Property-Based Testing ([`tests/clap_e2_proptest.rs`](../tests/clap_e2_proptest.rs))
-
-Uses `proptest` to generate random audio buffer lengths, parameter value sequences, and event queues to stress test CLAP event handling and boundary condition handling.
-
-### 3.5 Processor Bypass Test ([`tests/processor_bypass_test.rs`](../tests/processor_bypass_test.rs))
-
-Tests plugin bypass processing, verifying bit-transparent phase cancellation (< -120 dBFS) when bypassed and smooth crossfade transitions during bypass state toggles.
-
-### 3.6 Real-Time Fault Containment & Poisoning Suite ([`src/clap/processor_poisoning_test.rs`](../src/clap/processor_poisoning_test.rs))
-
-Guards against real-time panic cascades and memory corruption (`F-NP-02`, `F-NP-09`):
-
-- **Single Panic per Activation:** Injected panics in `process()` or `reset()` are safely caught and latch `poisoned = true` without crashing the host or causing panic loops.
-- **Zero-Alloc O(1) Containment:** Once poisoned, subsequent `process()` calls execute an early O(1) branch that immediately silences output audio ports and returns `Ok(ProcessStatus::Continue)` with zero allocations and zero I/O.
-- **Static Error Catalog & Zero Leaks:** Catches convert to `PluginError::Message(errors::processor::AUDIO_CALLBACK_PANICKED)` without `Box::leak`.
-- **Atomic Telemetry & Off-RT Restart:** Panics raise `RT_STATUS_PROCESSOR_POISONED` on the atomic bitmask; the main thread polls this in `housekeeping()` and triggers a single `host.request_restart()`.
-- **Corrupt State Discard & Clean Resumption:** Deactivating a poisoned processor discards `deactivated_dsp`, and reactivation clears the latch and status bit.
-
-### 3.7 Fixtures Freshness Gate ([`tests/fixtures_freshness.rs`](../tests/fixtures_freshness.rs))
-
-Validates schema version, model configurations, and file integrity of test audio fixtures, neural models (`.nam`), and impulse response WAV files before test execution.
-
-### 3.8 Receipt Semantics Test ([`tests/receipt_semantics_test.rs`](../tests/receipt_semantics_test.rs))
-
-Validates parsed structure, strict pre-release validation invariants, and JSON/receipt parsing semantics for both quick and long QA receipt schemas (`quick-receipt.txt`, `long-audit-receipt.jsonl`).
-
-### 3.9 Runtime Heap Audit Harness ([`tests/heap_audit.rs`](../tests/heap_audit.rs))
-
-Exercises the plugin and processor under the allocation interceptor, confirming that zero heap allocation occurs during audio processing and state query hot paths.
-
-### 3.10 Slint View Model Lifecycle & Bindings ([`tests/slint_view_model_test.rs`](../tests/slint_view_model_test.rs))
-
-Tests declarative Slint UI view model updates, parameter reflection, VU meter levels, and reactive state synchronization with the plugin backend.
-
-### 3.11 Slint Widget Component Tests ([`tests/slint_widgets_test.rs`](../tests/slint_widgets_test.rs))
-
-Tests declarative UI component properties, slider ranges, layout bounds, and rendering callbacks under headless Slint test backends.
-
-### 3.12 Common Test Utilities ([`tests/common/`](../tests/common/))
-
-- **[`alloc_audit.rs`](../tests/common/alloc_audit.rs):** Global memory allocation counting interceptor.
-- **[`metrics.rs`](../tests/common/metrics.rs):** Off-RT audio fidelity metrics: Peak, RMS, SNR (Signal-to-Noise Ratio), and ESR (Error-to-Signal Ratio).
-- **[`perceptual.rs`](../tests/common/perceptual.rs):** Spectral and perceptual comparison helpers.
-- **[`wav.rs`](../tests/common/wav.rs):** WAV file reading/writing helpers for fixture comparison.
+- **Regression Containment ([`tests/clap_e0_containment_test.rs`](../tests/clap_e0_containment_test.rs)):** Guards against architectural regressions (CabSim participation, parameter fidelity, reset semantics, sample rate negotiation, corrupt state recovery).
+- **Property-Based Testing ([`tests/clap_e2_proptest.rs`](../tests/clap_e2_proptest.rs)):** Uses `proptest` to fuzz buffer lengths, parameter sequences, and event queues.
+- **Processor Bypass Test ([`tests/processor_bypass_test.rs`](../tests/processor_bypass_test.rs)):** Verifies bit-transparent phase cancellation (< −120 dBFS) and smooth 64-sample crossfades.
+- **Fault Containment & Poisoning ([`src/clap/processor_poisoning_test.rs`](../src/clap/processor_poisoning_test.rs)):** Ensures audio-thread panics latch `poisoned = true`, silence output via an $O(1)$ zero-alloc branch, raise `RT_STATUS_PROCESSOR_POISONED`, and safely trigger host restarts without crashing the DAW.
+- **Fixtures Freshness Gate ([`tests/fixtures_freshness.rs`](../tests/fixtures_freshness.rs)):** Validates schema versions and cryptographic hashes of test models and audio fixtures.
+- **Receipt Semantics ([`tests/receipt_semantics_test.rs`](../tests/receipt_semantics_test.rs)):** Validates JSON schema rules for `quick-receipt.txt` and `long-audit-receipt.jsonl`.
+- **Runtime Heap Audit ([`tests/heap_audit.rs`](../tests/heap_audit.rs)):** Enforces zero dynamic memory allocations during active processing.
+- **Slint UI View Model & Widgets ([`tests/slint_view_model_test.rs`](../tests/slint_view_model_test.rs), [`tests/slint_widgets_test.rs`](../tests/slint_widgets_test.rs)):** Verifies declarative Slint view models, VU meter synchronization, and headless widget rendering.
 
 ---
 
 ## 4. Benchmark Suite Architecture — `benches/clap_bench.rs`
 
-The benchmark suite under [`../benches/`](../benches/) uses [Criterion.rs](https://bheisler.github.io/criterion.rs/book/index.html) to measure host process block throughput, parameter modulation overhead, neural model inference across topologies, sample rate transitions, quality modes, and CabSim IR convolution.
+Benchmarks measure throughput, parameter modulation overhead, neural inference across topologies, sample rate conversion, and CabSim convolution using [Criterion.rs](https://bheisler.github.io/criterion.rs/book/index.html).
 
 ### 4.1 Measured Execution Groups
 
 1. **`CLAP_Infrastructure` (Zero-Inference Base Overheads):**
+   - `Passthrough`: Baseline execution across block sizes (32, 64, 128, 256, 512, 1024 samples).
+   - `ParamModulation`: Cost of handling continuous automation events queued at sub-buffer intervals.
+   - `Bypass`: Latency-compensated bit-transparent dry path throughput.
+2. **`CLAP_Inference` (Neural Model Processing):**
+   - Architectural sweeps across `WaveNet_A1_Standard`, `WaveNet_A2_Slimmable`, and `LSTM`.
+   - Sample rate conversions: 44.1 kHz (polyphase upsampling), 48.0 kHz (native), and 96.0 kHz (downsampling).
+   - Quality modes: `Oversample_Off`, `2×`, `4×`, and `RenderMode_Offline_HQ`.
+   - CabSim convolution: Partitioned time-domain SIMD FIR convolution (512-sample IR).
+3. **`CLAP_WorstCase` (Pathological & Boundary Scenarios):**
+   - `SmallBlocks`: Fixed overhead analysis on 16/32-sample buffers.
+   - `DryDelay`: Pure delay line push/pop performance.
+   - `EventFlood` / `EventFloodModel`: Dense parameter modulation up to 1 event per sample, evaluating sub-block splitting vs. vectorization.
+   - `MonoDualMono`, `Crossfade`, `RingOut`, `ThreadHop`: Stereo divergence, crossfading ramps, ring-out tail drainage, and worker thread migration penalties.
+4. **`CLAP_Evidence_InferenceE2E`:** End-to-end regression anchor matrix for continuous baseline tracking.
 
-   - **`Passthrough`**: Measures baseline CLAP `process()` execution duration with empty event queues across buffer sizes:
-     - **32, 64 samples** (ultra-low latency mode)
-     - **128 samples** (standard Live mode)
-     - **256, 512, 1024 samples** (DAW mixing/mastering buffers)
-   - **`ParamModulation`**: Measures `process()` execution duration when handling continuous CLAP parameter automation events (`ParamValueEvent`) queued at sub-buffer intervals across block sizes (32..1024).
-   - **`Bypass`**: Measures latency-compensated bit-transparent dry-path processing time at block size 64.
+### 4.2 Benchmark Fixtures & Real-Time Isolation
 
-2. **`CLAP_Inference` (Real Neural Model Processing Matrix):**
+*Source: [`benches/common.rs`](../benches/common.rs)*
 
-   - **Neural Architecture Sweeps (Block Sizes 32..1024)**:
-     - **`WaveNet_A1_Standard`**: Deep dilated convolution network (`wavenet_a1_standard.nam`).
-     - **`WaveNet_A2_Slimmable`**: Slimmable dilated convolution container (`a2_example.nam`).
-     - **`LSTM`**: Recurrent neural network topology (`lstm.nam`).
-   - **Sample Rate Conversions**: Compares throughput at **44.1 kHz** (44.1→48k polyphase resampling), **48.0 kHz** (native rate), and **96.0 kHz** (96→48k downsampling). A 64-sample host block at 96 kHz carries only 32 model-rate samples, so its inference cost is roughly the 48 kHz/32-sample case plus resampling; `NamResampler` is not bypassed (the bypass only applies when host and model rates match). Compare ns/sample rather than raw ns/block across rates.
-   - **Quality Modes & Oversampling Factors**: Measures execution across **`Oversample_Off`** (Live default), **`Oversample_2x`**, **`Oversample_4x`**, and **`RenderMode_Offline_HQ`** (HQ offline mastering mode).
-   - **CabSim IR Convolution**: Measures incremental cost of real-time time-domain / partitioned IR convolution (**`CabSim_Off`** vs **`CabSim_On`** with 512-sample IR).
-
-3. **`CLAP_WorstCase` (Worst-Case Coverage):**
-
-   - **`SmallBlocks_{Passthrough,Bypass,Wet_LSTM}`**: 16/32-sample worst-case fixed cost (+ 64/128 as the anchor to the existing matrix), ns/sample via `Throughput::Elements`, p50/p99/max from the Criterion distribution.
-   - **`DryDelay_{Mono,DualMono}`**: Pure engine `DelayLine<f32>` push/pop path (same per-sample pattern as `DryDelayLine::process_block`, no model), sweeping delay 0/12/256/max over 32/64/128/512 blocks.
-   - **`EventFlood`**: Dense `ParamValueEvent`/`ParamModEvent` floods (16/64/256/1024 events over 64/128/512 blocks, plus the degenerate 1-event-per-sample case); ns/sample × event-density curves in the Criterion summary.
-   - **`EventFloodModel`**: Same flood densities/blocks as `EventFlood` but with a loaded **WaveNet A1 / LSTM** model (`CLAP_WorstCase_EventFloodModel`), exposing the real sub-block fragmentation cost — an event per sample forces a 1-sample inference call, losing the per-call vectorization the empty pipeline never pays (F-UX-03, D1). The decision criterion is cost **> 2×** the same block without events (gate met; see §5.10).
-   - **`MonoDualMono` / `Crossfade` / `RingOut` / `ThreadHop`**: Real mono (L==R) vs. stereo (L!=R) content; bypass crossfade in flight (`PARAM_BYPASS` at offset 0, 64-sample ramp active); gate-closed CabSim ring-out drain; 2-worker `process` alternation harness measuring TLS/MXCSR re-priming cost.
-
-4. **`CLAP_Evidence_InferenceE2E` (End-to-End Regression Matrix):**
-
-   - End-to-end inference matrix model × block (LSTM / WaveNet-A1 / WaveNet-A2 × 64/128/512 host samples), ns/sample via `Throughput::Elements` serving as the block-size evidence anchor for regression baselines.
-
-### 4.2 Benchmark Fixtures & Real-Time Isolation ([`benches/common.rs`](../benches/common.rs))
-
-- **Deterministic Fixtures**: All neural models and impulse responses are resolved and validated via cryptographic SHA-256 hashes prior to benchmark execution. Missing fixtures fail-closed immediately.
-- **Off-Measurement Pre-Warming**: Models are instantiated, state-loaded, activated, and pre-warmed for 2048 samples *prior* to `b.iter(|| ...)` to eliminate cold cache and off-RT initialization bias.
-- **Zero Audio-Thread Heap Allocation**: Inner iteration closures strictly operate on pre-allocated, 64-byte aligned buffers (`AlignedVec<f32>`).
-- **Deterministic Execution Environment**: Inner loops and Criterion measurements require isolated CPU core execution (via `isolcpus` and `taskset`) to avoid scheduler jitter; see [Section 5.5](#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset).
+- **Deterministic Fixtures:** Pre-validated via SHA-256 hashes prior to benchmark execution.
+- **Pre-Warming:** Models are pre-warmed for 2048 samples prior to `b.iter()` to avoid cache-cold bias.
+- **Zero Heap Allocations:** Iteration loops operate strictly on pre-allocated, 64-byte aligned buffers (`AlignedVec<f32>`).
+- **CPU Core Isolation:** Benchmarks are pinned to isolated physical cores via `taskset` (see [§5.5](#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset)).
 
 ### 4.3 Performance Regression Gate & Baseline Discipline
 
-[`utils/tests-performance-regression.sh`](../utils/tests-performance-regression.sh) is the unified performance gate. It runs the Criterion `clap_bench` suite pinned to a dedicated core and delegates every interpretation to the engine binary `nam_perf_gate` — the single statistical authority shared with `NeuralAmpModeler-rs` and `NAM-Audio-Pipe` — for the environment fingerprint, baseline persistence, per-benchmark coverage and the machine regression verdict over Criterion `change/estimates.json`.
+[`utils/tests-performance-regression.sh`](../utils/tests-performance-regression.sh) executes the automated performance gate, delegating statistical interpretation to the unified `nam_perf_gate` binary:
 
-- **Expected coverage:** [`benches/clap_bench.manifest`](../benches/clap_bench.manifest) declares the mandatory Criterion groups (trailing-`*` patterns). A group that did not run, or an executed benchmark without a saved baseline series, fails closed (`BASELINE_COVERAGE_GAP`).
-- **Modes:** `--check` (default, read-only) and `--bootstrap-baseline` (**human operator only**, on a calibrated host). The legacy rollback gate has been fully retired in favor of `nam_perf_gate`.
-- **Gate resolution:** `NAM_PERF_GATE` (prebuilt binary) → `nam_perf_gate` on `PATH` (`cargo install NeuralAmpModeler-rs --features testing --bin nam_perf_gate`) → a sibling engine checkout (`NAM_ENGINE_DIR`, default `../NeuralAmpModeler-rs`). A gate that cannot be resolved fails closed.
-- **Environment:** `NAM_BENCH_CORE`, `NAM_BASELINE_NAME` (default `ci-baseline`), `NAM_BENCH_MANIFEST`, `NAM_THERMAL_COOLDOWN_S` (default 180 s).
-- **Governor guard:** before delegating to the shared gate, the wrapper reads `/sys/devices/system/cpu/cpu${NAM_BENCH_CORE}/cpufreq/scaling_governor` (core resolved by the canonical `pick_bench_core`). A governor other than `performance`, or an unreadable governor file, aborts both `--check` and `--bootstrap-baseline` with a fail-closed error. A log captured under a governor other than `performance` is **invalid** as evidence and must not be compared or persisted.
-
-Baselines live in `.performance-baselines/` (gitignored). A missing baseline is `MISSING_BASELINE`; a fingerprint drift (CPU model, ISA, toolchain, governor, pinned core, producing commit) is `INCOMPARABLE_ENVIRONMENT`. Both fail closed — baselines are **never** silently re-created; renewal is an explicit human operation under a calibrated environment (see the engine's `docs/benchmarks.md` §4).
-
-> [!NOTE]
-> **Baseline durability across bootstrap:** the shared `lib/_lib_core.sh` hardcodes `baseline_dir=".performance-baselines"` inside the working tree, so `git clean -fdx` would destroy it. The workspace bootstrap (`.agents/scripts/bootstrap-repo.sh`) now copies `.performance-baselines/` to `~/.cache/nam-plug/perf-baselines/previous` before the clean, logs `BASELINE PRESERVED`, and — after generating the fresh baseline — restores the previous series when the environment fingerprint is compatible (ignoring session-volatile `git_commit`, `git_dirty` and `cargo_lock_sha256`). The fresh series is kept at `~/.cache/nam-plug/perf-baselines/current`. The post-bootstrap `--check` then compares against the preserved baseline (real regression) instead of only self-consistency; if the fingerprint is incompatible the bootstrap emits `WARN GAP: perf_baseline_fingerprint_incompatible` and keeps the fresh baseline. On abort, the EXIT trap restores the preserved directory if it is missing.
+- **Coverage Validation:** Asserts that all mandatory Criterion groups defined in [`benches/clap_bench.manifest`](../benches/clap_bench.manifest) are present.
+- **Operating Modes:** `--check` (read-only verification) and `--bootstrap-baseline` (human operator baseline capture on calibrated hardware).
+- **Governor Gating:** Fails closed if the benchmark CPU core governor is not locked to `performance`.
+- **Baseline Durability:** Stored under `.performance-baselines/` and backed up to `~/.cache/nam-plug/perf-baselines/` during workspace bootstrap cleanups.
 
 ### 4.4 Engine DSP vs. CLAP Plugin Boundary Differentiation
 
-A fundamental question when auditing performance is whether `NAM-Plug`'s benchmark suite is simply a redundant extension of `NeuralAmpModeler-rs` engine benchmarks. The two suites measure entirely distinct architectural boundaries:
+The benchmark suite differentiates between core neural math and plugin host integration overhead:
 
-| Architectural Layer | Core Engine (`NeuralAmpModeler-rs`) | CLAP Plugin (`NAM-Plug`) |
-| :------------------- | :----------------------------------- | :------------------------ |
-| **Measurement Target** | Raw DSP math kernels (GEMM, Conv1D, WaveNet dilations, fast math activations like Pwl/FastTanh). | End-to-end CLAP plugin boundary, C ABI dispatch (`clack`), buffer slicing, and audio/event routing. |
-| **Memory Topology** | Pre-allocated, contiguous, SIMD-aligned Rust slices. | Raw host pointer arrays (`*const *const f32`), non-contiguous channel buffers, and dynamic slice wrapping via `AudioPorts`. |
-| **Automation & Events** | Static parameters passed directly as scalar values to DSP kernels. | Sample-accurate event demultiplexing from `InputEvents`, sub-buffer slicing, parameter smoothing interpolation, and MIDI CC mapping. |
-| **State & Lifecycle** | Pure stateless or stateful mathematical models executed sequentially. | State transitions, dynamic plugin delay compensation (PDC), bypass crossfade ramping, and CabSim ring-out drain. |
-| **Thread Topology** | Deterministic single-thread execution in a controlled benchmark harness. | Multi-thread worker migration (`ThreadHop`), evaluating L1/L2 cache invalidation, TLS access, and SIMD MXCSR register state restoration. |
-
-The core engine benchmark proves that the neural network math is optimal. The `NAM-Plug` benchmark proves that the host integration layer does not squander that efficiency through wrapper overhead, memory fragmentation, or ABI translation costs.
-
-### 4.5 Insights for CLAP Hosts & DAW Integrators
-
-The `clap_bench` suite provides concrete telemetry and design constraints for DAW developers, host integrators, and live audio engineers:
-
-1. **Ultra-Low Buffer Viability (`CLAP_WorstCase_SmallBlocks`):**
-   - Evaluates performance down to 16 and 32 samples (at 96 kHz, 16 samples represents a strict ~166 µs total time budget per block).
-   - Isolates the fixed invocation overhead of entering/exiting the CLAP ABI from the linear per-sample DSP cost, revealing the minimum practical buffer size before per-block overhead dominates CPU consumption.
-2. **Parameter Automation Scalability (`CLAP_WorstCase_EventFlood`):**
-   - Sweeps automation density from 16 to 1024 events per block, concluding with the pathological worst-case scenario of 1 event per sample.
-   - Measures whether the plugin's event scheduling (`schedule_input_events`) and sub-block partitioning (`process_sub_block`) introduce nonlinear or quadratic CPU scaling when a host streams continuous modulation curves (e.g., LFOs or envelope followers).
-3. **Work-Stealing Thread Pool Migration (`CLAP_WorstCase_ThreadHop`):**
-   - Alternates `process()` calls across two distinct worker threads, simulating DAWs that utilize dynamic work-stealing thread pools (e.g., Bitwig Studio, Reaper).
-   - Quantifies the cache line bouncing, TLS access overhead, and CPU pipeline flush penalty incurred when an audio task shifts between CPU cores across successive audio cycles.
-4. **Resampling & Oversampling Trade-offs (`CLAP_Inference`):**
-   - Quantifies the CPU budget differential between native processing (48 kHz) and streaming sample rate conversion (44.1 kHz, 96 kHz) via `StreamingResampleBuffer`.
-   - Empirically contrasts `Oversample_Off` with `2x`, `4x`, and `RenderMode_Offline_HQ`, allowing hosts to provide accurate DSP load estimations to users.
-
-### 4.6 Evaluation Methodology: Statistical Rigor & Real-Time Boundaries
-
-[`utils/tests-performance-regression.sh`](../utils/tests-performance-regression.sh) executes a hardened statistical pipeline, but must be understood within the boundary of statistical throughput vs. hard real-time execution:
-
-#### 1. Methodological Rigor & Guard Rails
-
-- **Governor Gating (`guard_governor`):** Fails closed if the benchmark core's scaling governor is not set to `performance` (preventing DVFS transition jitter from polluting baseline comparisons).
-- **Core Affinity (`pick_bench_core` & `taskset`):** Enforces execution on an isolated physical core to minimize OS scheduler preemption.
-- **Thermal Stabilization (`PERF_GATE_COOLDOWN_SECS`):** Applies a mandatory 180s cooldown timer prior to measurement runs to prevent dynamic thermal throttling from distorting tails.
-- **Fail-Closed Coverage (`clap_bench.manifest`):** Validates that all four required group patterns (`CLAP_Infrastructure_*`, `CLAP_Inference_*`, `CLAP_WorstCase_*`, `CLAP_Evidence_*`) executed and produced valid data before running comparison logic.
-- **Null-Hypothesis Machine Verdict (`nam_perf_gate`):** Evaluates regression significance using Criterion's bootstrapping distributions (`change/estimates.json`) rather than simplistic wall-clock averages, discarding measurement noise.
-
-#### 2. Real-Time Boundaries & Blind Spots
-
-- **Statistical Throughput vs. Hard-RT Determinism:**
-  Criterion benchmarks execute in user-space under standard Linux scheduling (`SCHED_OTHER`). They measure asymptotic throughput, median execution times, and statistical tail percentiles (p50/p95/p99). They **do not** prove hard real-time deadline guarantees under `SCHED_FIFO` priority, nor do they detect hardware interrupt (IRQ) jitter or kernel preemption spikes.
-- **Synthetic Host Environment:**
-  `clack-host` provides a clean, synthetic execution harness with perfectly pre-allocated buffers. In a production DAW session, dozens of audio tracks, virtual instruments, and GPU GUI rendering pipelines compete for shared L3 cache and memory bus bandwidth.
-- **Complementary Verification:**
-  To bridge this gap, performance regression gating must be complemented by:
-  1. `utils/tests-quick.sh` Phase 3 (`heap-audit`): Verifying zero audio-thread dynamic memory allocations.
-  2. `utils/verify_rt_codegen.sh`: Verifying disassembly invariants (zero `malloc`, zero `div`/`idiv`, bounded TLS).
-  3. `utils/tests-long.sh` Phase 3: Auditing real-time execution under elevated thread priorities and real-time scheduling.
+| Architectural Layer     | Core Engine (`NeuralAmpModeler-rs`)                                   | CLAP Plugin (`NAM-Plug`)                                                                                 |
+|:----------------------- |:--------------------------------------------------------------------- |:-------------------------------------------------------------------------------------------------------- |
+| **Measurement Target**  | Raw DSP kernels (GEMM, Conv1D, WaveNet dilations, fast activations).  | Full CLAP plugin boundary, C ABI dispatch, buffer slicing, and audio/event routing.                      |
+| **Memory Topology**     | Pre-allocated, contiguous, SIMD-aligned Rust slices.                  | Raw host pointer arrays (`*const *const f32`), non-contiguous channel buffers, dynamic `AudioPorts`.     |
+| **Automation & Events** | Static parameters passed directly as scalar values to DSP kernels.    | Sample-accurate event demultiplexing, sub-block slicing, parameter smoothing ramps, and MIDI CC mapping. |
+| **State & Lifecycle**   | Pure stateless or stateful mathematical models executed sequentially. | Lifecycle state transitions, dynamic delay compensation (PDC), bypass crossfading, CabSim ring-out.      |
+| **Thread Topology**     | Deterministic single-thread execution in controlled test harnesses.   | Multi-thread worker migration (`ThreadHop`), evaluating L1/L2 cache invalidation and MXCSR restoration.  |
 
 ---
 
 ## 5. Execution Commands & Developer Workflow
 
-All test and benchmark execution commands **must be executed inside `./NAM-Plug/`**:
-
-### 5.1 Verification Scripts (`utils/` & `utils/lib/`)
-
-Top-level workflow entrypoints reside in `utils/`, while shared libraries and modular guard utilities reside in `utils/lib/` (`_lib.sh`, `rt_alloc_scan.awk`, `verify_no_rt_alloc.sh`):
-
-```bash
-# 1. Static analysis quality gate (formatting, SPDX headers, cargo check, cargo clippy, static RT scan, AppStream metadata sync)
-./utils/lints.sh
-
-# 2. Agile first line of defense QA suite
-./utils/tests-quick.sh
-```
-
-`utils/lints.sh` executes a 9-phase static and quality audit matrix:
-
-- **Fmt & Matrix Compilation:** `cargo fmt`, multi-target `cargo check` and strict `cargo clippy -D warnings` across feature combinations (`--all-features`, `--no-default-features`).
-- **SPDX & Code Style Policies:** SPDX license header validation, anti-pattern checks, and documented `#[allow(clippy::)]` verification.
-- **Static RT Allocation Guard:** Invokes `utils/lib/verify_no_rt_alloc.sh` (backed by `utils/lib/rt_alloc_scan.awk`) to statically verify zero heap allocations in `src/clap/processor/` in ~0.2s without binary compilation.
-- **AppStream Metadata Sync:** Verifies the AppStream metainfo release version stays synchronized with `Cargo.toml`.
-- **Shell Contract Tests:** Invokes `utils/test-scripts.sh`, which discovers and runs every `tests/scripts/test_*.sh` (receipt provenance, quick-receipt grammar, performance-baseline policy, post-BOLT codegen, quick harness). A missing required script or any failing script fails the gate; per-script logs go to `target/logs/test-scripts/`.
-
-| Utility Script                              | Scope & Operation                                                                                   | Usage Context                                                               |
-|:------------------------------------------- |:--------------------------------------------------------------------------------------------------- |:--------------------------------------------------------------------------- |
-| **`utils/lints.sh`**                        | Static analysis (fmt, check, clippy, SPDX, static RT alloc, AppStream) + shell contract tests       | Core continuous verification gate                                           |
-| **`utils/test-scripts.sh`**                 | Aggregate runner for all `tests/scripts/test_*.sh` with fail-closed required-script list            | Invoked by `utils/lints.sh` (and therefore by the bootstrap)                |
-| **`utils/tests-quick.sh`**                  | 3-phase agile gate (debug structural, release parity + RT codegen, heap audit)                      | First line of defense (local & pre-commit)                                  |
-| **`utils/tests-long.sh`**                   | 4-phase heavy stress suite (GC, teardown, RT priority/latency, Xvfb GUI)                            | Nightly & release certification (operator)                                  |
-| **`utils/tests-gui.sh`**                    | Headless Xvfb lifecycle, XEmbed, clipboard testing                                                  | Invoked by Phase 4 of `tests-long.sh` / on demand                           |
-| **`utils/verify_rt_codegen.sh`**            | Disassembly inspection of `.so` (0 `malloc`, 0 `div`/`idiv`, bounded TLS)                           | Integrated in `tests-quick.sh` & `build-release.sh`                         |
-| **`utils/tests-performance-regression.sh`** | Criterion `clap_bench` regression gate over the engine `nam_perf_gate` (coverage + machine verdict) | Operator baseline renewal; on-demand regression check (`--legacy` rollback) |
-| **`utils/build-release.sh`**                | Multi-stage release builder with PGO, BOLT, RT codegen gate and packaging                           | Official release pipeline                                                   |
-| **`utils/finalize-release-receipt.sh`**     | Reconciles `release-receipt.json` with the current long-audit JSONL; re-derives status atomically     | After `tests-long.sh` (bootstrap) / manual finalization                     |
-| **`utils/mod-update.sh`**                   | Supply chain update pipeline (rustup toolchain, cargo upgrade, Cargo.lock)                          | Periodic supply chain maintenance                                           |
-| **`utils/test-lib-drift.sh`**               | Drift guard for shared QA library assets (`_lib_core.sh`, `dsp-hotpath-filter.py`, sysfs core tests)| Integrated in library QA & continuous verification                          |
-| **`utils/test-pick-bench-core.sh`**         | Unit tests for CPU benchmark core selection against simulated sysfs trees                           | Invoked by `test-lib-drift.sh`                                              |
-
-The x86-64-v3 (AVX2/FMA) engine baseline is contractual: `NAM-Plug` links against `NeuralAmpModeler-rs` without enabling opt-in EVEX features, so default and release builds contain no EVEX machine code by construction and the feature matrix above proves all configurations compile cleanly.
-
-`utils/tests-quick.sh` runs three phases, each persisting its output to `target/logs/quick-phaseN.log`, and closes with a typed receipt (`target/logs/quick-receipt.txt`). The artifact under test is selected by `ensure_clap_artifact` — honoring the authoritative `CLAP_PLUGIN_UNDER_TEST` (or `CLAP_PLUGIN_PATH`) override first — and the chosen path is exported as `CLAP_PLUGIN_UNDER_TEST` so every `dlopen`-based integration test and the release gates run against the exact same `.so` whose SHA256 is logged:
-
-1. **Structural (debug)** — unit + integration tests with debug assertions ON. Runs all unit and integration test targets (`cargo test --features testing --lib --tests`), actively enforcing execution of mandatory targets (`unittests src/lib.rs`, `tests/clap.rs`, `tests/fixtures_freshness.rs`, `tests/receipt_semantics_test.rs`, `tests/clap_e0_containment_test.rs`, `tests/clap_e2_proptest.rs`, `tests/processor_bypass_test.rs`, `tests/heap_audit.rs`, `tests/slint_view_model_test.rs`, `tests/slint_widgets_test.rs`) through fail-closed `assert_ran_target` assertions (minimum 350 executed tests). `ensure_clap_artifact debug` validates the `.so` artifact (fail-closed: missing artifact aborts with `FATAL:`) and logs its SHA256 before any test that `dlopen`s it. Under `NAM_QUICK_STRICT=1` the artifact is additionally freshness-gated: a `.so` older than any source input (`Cargo.toml`/`Cargo.lock`/`.cargo/config.toml`/`src/**`, including the patched sibling `NeuralAmpModeler-rs` tree) aborts the suite instead of being silently validated.
-2. **Release verification (release)** — the release-only surface: `ensure_clap_artifact release` builds the `.so` under release codegen, then:
-   - **CLAP × NAMCore parity oracle** — `test_clap_parity_multi_rate` (ESR < 1e-8, SNR > 80 dB for `wavenet_a1_standard`, `a2_example` and `lstm` at 44.1/48/96 kHz) compares the release `.so` against the C++ render binary (`NAM_CORE_RENDER_BIN` or `build/namcore_render`) through the multi-rate resampling reference oracle (see §3.2.1), executing when the render binary, the release `.so` and the three model fixtures are all present. `test_clap_parity_oversample` (2×/4×) and `test_clap_parity_cabsim` run in the same phase and certify the artifact's production oversampling and convolution branches (§3.2.2). The Phase 1 targets are not re-run under `--release` — debug assertions ON already validate that logic, and release codegen of the `.so` is exactly what the oracle measures. Missing prerequisites are never masked — they are recorded as `GAPS+=("clap_parity_multi_rate:missing_render_or_fixtures")` and reported as a `WARN GAP`.
-   - **CabSim IR artifact test** — `test_cabsim_ir_changes_audio_release_artifact` `dlopen`s the release `.so` to prove a loaded IR changes the audio output.
-   - **Static RT Codegen Guard** — invokes `utils/verify_rt_codegen.sh` on the newly verified release `.so` to verify machine-code invariants (0 `malloc`/`free`, 0 inner-loop divisions, bounded TLS) with zero additional compilation overhead.
-3. **RT-Safety heap-audit (debug)** — zero-allocation `process()` gate via `--features testing,heap-audit` (`processor_heap_audit_test`).
-
-The run closes with `OVERALL: PASSED` or `OVERALL: COMPLETED_WITH_GAPS` (with `NAM_QUICK_STRICT=1`, any GAP turns the run into a failure, and stale `.so` artifacts are rejected rather than rebuilt). The receipt grammar is fail-closed and shared with the release gate (`quick_receipt_check`): evidence lines `CLAP_CPP_PARITY`, `CLAP_OS_PARITY`, `CABSIM_IR`, `CABSIM_PARITY` and `RT_CODEGEN` must read `PASS`, optionally followed by space-separated `key=uint` metric tokens (e.g. `RT_CODEGEN: PASS symbols=7 instructions=14115`); any other suffix is rejected with the offending line and token. `utils/build-release.sh` verifies the receipt with `--require-passed`, writes the verifier's stderr to `target/logs/quick-receipt-check.log`, and propagates every `GAP:` line as a `quick_gap:<id>` skipped gate (fatal in strict/ceremony mode).
-
-### 5.1.1 Long-audit artifact provenance (`utils/tests-long.sh`)
-
-The long suite resolves exactly one artifact at startup — `--artifact PATH`, then `CLAP_PLUGIN_UNDER_TEST`, then `~/.clap/nam_plug.clap` — fails closed when it does not exist, exports it to every phase, and records `artifact_path` plus `artifact_sha256` in every `long-audit-receipt.jsonl` line (including `overall`). Phases 1-3 always run with `--nocapture` so the `=== CLAP Artifact ===` block remains in `long-phase*.log`, and `--strict-pre-release` additionally exports `CLAP_STRICT_ARTIFACT=1`. Before exiting, `plug_long_receipt verify-artifact` rejects a receipt whose declared hash differs from the resolved file.
-
-`utils/build-release.sh` runs **before** the long suite in the bootstrap, so its first receipt can only see a previous session's JSONL. It records `artifacts.artifact_consistency` (`match`/`mismatch`/`absent`/`incomplete`) and emits a typed `artifact_consistency:<verdict>` gap for every non-match. After `tests-long.sh`, `utils/finalize-release-receipt.sh` reconciles the receipt with the JSONL produced by the current session:
-
-1. every line must declare the same `artifact_sha256`;
-2. that hash must equal `artifacts.clap_installed_sha256`;
-3. `artifact_consistency` is set to `match`, `mismatch`, `absent` or `incomplete` (partial stamping is no longer collapsed into `absent`);
-4. `status` is recomputed with the same rule as `build-release.sh` (`utils/lib/_lib.sh`), never a duplicate;
-5. the file is replaced atomically (`mktemp` + `mv`), and re-running is byte-idempotent.
-
-An `absent` or `incomplete` verdict caps the status at `FUNCTIONALLY_CERTIFIED` outside strict mode and yields `INCOMPLETE` in strict mode; `mismatch` is always `INCOMPLETE`. The operator may pass `--allow-absent-long-audit` (`NAM_ALLOW_ABSENT_LONG_AUDIT=1` in the bootstrap); the receipt then carries a visible `operator_waiver` instead of the gap. Regression cases: `tests/scripts/test_receipt_artifact_consistency.sh` and `tests/scripts/test_finalize_release_receipt.sh`.
-
-#### Declared vs exercised
-
-Every phase line also carries `artifact_exercised`. `true` means the phase actually `dlopen`ed the resolved `.so` (`cargo test --test clap`, Phase 3 through `test_multi_instance_rt_priority`); `false` means the phase only ran `--lib` targets that never load the shared object (Phases 1, 2 and 4). `artifact_sha256` therefore means *declared* — a hash alone does not prove the phase exercised the binary.
-
-#### Cargo.lock and dirty-tree policy
-
-`utils/mod-update.sh` rewrites `Cargo.lock` during the bootstrap. When packages move, it prints `DEP_LOCK_CHANGED: <n> pacotes` and writes `target/logs/dep-lock-change.txt` with one `name: old -> new` line per package. The updated lock is a deliberate dependency change: it must be committed before certification. Until then, `build-release.sh` records `git_dirty:Cargo.lock` (or `git_dirty:worktree` for other files), and the receipt stays `INCOMPLETE`. A dirty tree is never reported as a generic error.
-
-### 5.2 Direct Cargo Commands
-
 > [!IMPORTANT]
 > **Host Memory Protection (`CARGO_BUILD_JOBS=4`):**
-> On systems with multiple CPU cores, Cargo can launch numerous parallel `rustc` processes that may quickly saturate system RAM, triggering system-wide or IDE OOM crashes. Always export `CARGO_BUILD_JOBS=4` before running Cargo commands or test scripts.
+> Always export `export CARGO_BUILD_JOBS=4` before running Cargo commands or test scripts to prevent compiler processes from saturating host RAM and causing OOM crashes.
+
+All commands must be executed from inside `./NAM-Plug/`:
+
+### 5.1 Verification Scripts (`utils/`)
+
+| Script                                      | Scope & Operation                                                                                | Usage Context                              |
+|:------------------------------------------- |:------------------------------------------------------------------------------------------------ |:------------------------------------------ |
+| **`utils/lints.sh`**                        | Static analysis (`fmt`, `check`, `clippy -D warnings`, SPDX headers, static RT allocation scan). | Core continuous verification gate          |
+| **`utils/test-scripts.sh`**                 | Aggregate runner for internal test scripts under `tests/scripts/`.                               | Invoked by `utils/lints.sh`                |
+| **`utils/tests-quick.sh`**                  | 3-phase fast QA gate (debug structural, release parity + RT codegen, heap audit).                | First line of defense (local & pre-commit) |
+| **`utils/tests-long.sh`**                   | 4-phase heavy stress suite (GC, teardown, RT priority/latency, Xvfb GUI).                        | Nightly & release certification (operator) |
+| **`utils/tests-gui.sh`**                    | Headless Xvfb lifecycle, XEmbed window negotiation, and clipboard export testing.                | Invoked by Phase 4 of `tests-long.sh`      |
+| **`utils/verify_rt_codegen.sh`**            | Disassembly inspection of `.so` (0 `malloc`, 0 `div`/`idiv`, bounded TLS).                       | Integrated in `tests-quick.sh` and release |
+| **`utils/tests-performance-regression.sh`** | Criterion `clap_bench` regression gate over `nam_perf_gate`.                                     | Performance baseline verification          |
+| **`utils/build-release.sh`**                | Multi-stage release builder with PGO, optional BOLT, RT codegen verification, and packaging.     | Official release pipeline                  |
+| **`utils/finalize-release-receipt.sh`**     | Reconciles `release-receipt.json` with current long-audit JSONL data atomically.                 | Release packaging finalization             |
+
+#### 5.1.1 Quick Suite Lifecycle (`utils/tests-quick.sh`)
+
+`utils/tests-quick.sh` executes three distinct phases, generating `target/logs/quick-receipt.txt`:
+
+1. **Phase 1: Structural (Debug):** Executes all unit and integration test targets with debug assertions enabled (enforcing execution of ≥350 tests).
+2. **Phase 2: Release Verification (Release):** Builds the release `.so` and executes the CLAP × NAMCore parity oracle (`test_clap_parity_multi_rate`), oversampling parity, CabSim IR validation, and static RT codegen disassembly inspection.
+3. **Phase 3: RT-Safety Heap Audit (Debug):** Validates zero audio-thread memory allocations via `--features testing,heap-audit`.
+
+### 5.2 Direct Cargo Commands
 
 ```bash
 # Set host concurrency guard
 export CARGO_BUILD_JOBS=4
 
-# 1. Quick compilation and lint check for tests and benches
+# 1. Type check tests and benchmarks
 cargo check --tests --benches --features testing
 
-# 2. Run standard automated unit and integration tests
+# 2. Run standard unit and integration tests
 cargo test --features testing
 
-# 3. Run allocation audit RT-safety tests (also Phase 3 of tests-quick.sh)
+# 3. Run allocation audit RT-safety tests
 cargo test --features testing,heap-audit --lib processor_heap_audit_test
 
 # 4. Run property-based tests
@@ -358,437 +242,257 @@ cargo test --features testing --test clap_e2_proptest
 # 5. Run Criterion benchmarks
 cargo bench --features testing --bench clap_bench
 
-# 6. Run the CLAP × NAMCore parity oracle (requires the C++ render binary;
-#    also Phase 2 of tests-quick.sh when prerequisites are present).
-#    Exercises 44.1 kHz, 48 kHz native and 96 kHz via the multi-rate
-#    resampling reference oracle (ESR < 1e-8, SNR > 80 dB per rate).
+# 6. Run CLAP × NAMCore parity oracle directly
 NAM_REQUIRE_CPP_ORACLE=1 cargo test --features testing --release --test clap \
     test_clap_parity_multi_rate -- --ignored --nocapture
 ```
 
-### 5.3 Isolated CI/CD Execution of the CLAP × NAMCore Parity Oracle
+### 5.3 Isolated CI/CD Parity Oracle Resolution
 
-`NAM-Plug` is a self-contained subproject: in a clone without a sibling `../NeuralAmpModeler-rs` checkout, the parity oracle resolves the NAMCore C++ render binary through the following order (mirrored by both [`clap_parity_multi_sr.rs`](../tests/clap/clap_parity_multi_sr.rs) and [`tests-quick.sh`](../utils/tests-quick.sh)):
+When running in an isolated environment without a sibling checkout of `NeuralAmpModeler-rs`, the parity oracle resolves the NAMCore C++ render binary in the following priority order:
 
-1. `NAM_CORE_RENDER_BIN` — formal environment contract (authoritative for isolated environments).
-2. This repo's own `build/namcore_render` (built via `golden_gen_build.sh`).
-3. `neural_amp_modeler_rs::testing::fixtures::render_bin_path()` — only resolves when the dependency is linked as a local path.
-4. `../NeuralAmpModeler-rs/build/namcore_render` — development convenience for the co-located monorepo workspace only; silently skipped when absent.
+1. `NAM_CORE_RENDER_BIN` environment variable (authoritative contract).
+2. Local build directory: `build/namcore_render`.
+3. Linked library path: `neural_amp_modeler_rs::testing::fixtures::render_bin_path()`.
+4. Workspace sibling checkout: `../NeuralAmpModeler-rs/build/namcore_render`.
 
-For an isolated CI/CD job, provide the prebuilt oracle binary and model fixture explicitly:
+For standalone CI/CD:
 
 ```bash
-# Authoritative binary contract — no sibling layout assumptions.
+export CARGO_BUILD_JOBS=4
 export NAM_CORE_RENDER_BIN=/opt/namcore/build/namcore_render/tools/render
-# Optional: point the fixture resolver at the model directory.
 export NAM_FIXTURES_DIR=/opt/namcore/models
-
-# Fail loud on discovery mismatch instead of a masked SKIP-pass.
 NAM_REQUIRE_CPP_ORACLE=1 cargo test --features testing --release --test clap \
     test_clap_parity_multi_rate -- --ignored --nocapture
 ```
 
-When the oracle is unavailable, `tests-quick.sh` reports an actionable `WARN GAP: clap_parity_multi_rate:missing_render_or_fixtures` (instructing the operator to set `NAM_CORE_RENDER_BIN` or build under local `build/namcore_render`) rather than failing the suite; set `NAM_QUICK_STRICT=1` to promote any GAP to a hard failure.
+### 5.4 Release Receipt & Verification Gates (`build-release.sh`)
 
-### 5.4 Release Receipt & Dist-Pipeline Provenance (`build-release.sh`)
+Production builds compile the **`dist`** profile (inherits `release`, PGO + optional BOLT, stripped, `panic = "unwind"`) into `~/.clap/nam_plug.clap`. Provenance is certified via `target/release-receipt.json`, written atomically via temporary file and rename.
 
-The distribution build (`utils/build-release.sh`) compiles the **`dist`**
-profile (inherits `release`, PGO + optional BOLT reordering, `strip`, `panic =
-"unwind"`) into `~/.clap/nam_plug.clap` and packages tarball/Flatpak
-deliverables. Its provenance is certified by a **cryptographic build receipt**
-at `target/release-receipt.json`, written **atomically** (temp file + `mv`
-rename in Phase 8) so an interrupted build (SIGINT/SIGTERM) can never leave a
-partial receipt that looks valid.
+#### Five Mandatory Release Gates
 
-The receipt's mandatory fields are:
+1. **Symbol & SONAME Validation:** Verifies export table hygiene.
+2. **External `clap-validator`:** Validates protocol conformance against the distributed binary.
+3. **NAMCore Float Parity:** Multi-rate parity, oversampling, and CabSim convolution against the C++ oracle.
+4. **CabSim IR Artifact Test:** Confirms impulse responses alter output audio as expected.
+5. **Performance Certification:** Invokes `nam_perf_guard certify` pinned to the benchmark core, verifying p99 execution stays below **85% of the audio block budget**.
 
-| Field                  | Meaning                                                                                                                                                                                            |
-|:---------------------- |:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`               | `CERTIFIED` **only** if every gate below actually ran (`skipped_gates` empty) **and** `git_dirty=false`; any skip, missing oracle/fixture/validator, or dirty tree ⇒ `INCOMPLETE` (not certified). |
-| `skipped_gates`        | List of gates skipped in non-strict mode (`NAM_STRICT_RELEASE=0`), e.g. `clap_validator:unavailable`, `namcore_parity:missing_oracle_bin`.                                                         |
-| `package`              | `name` + `version` (`nam-plug` v0.8.0).                                                                                                                                                            |
-| `provenance`           | `git_commit`, `git_dirty`, `cargo_lock_sha256`, `rustc_version`, `rustflags` (the sanitized `CONFIG_RUSTFLAGS` actually used).                                                                     |
-| `optimizations`        | `pgo_applied`, `bolt_applied`, `bolt_proof`, and pre/post-BOLT `codegen` coverage metrics (`symbols`, `instructions`, `targets_matched`, comparison verdict).                                                                                 |
-| `gates`                | `parity_oversample` and `parity_cabsim` verdicts (`PASS`/`FAIL`/`SKIP` + reason) bound to the installed artifact SHA-256.                                                                        |
-| `pgo_workload`         | `status`, `gain`, `scenarios`, `callbacks`, `clipping_count_phase1`, `clipping_count_bolt`, `log_path` and `log_sha256` for the PGO and BOLT training runs.                                      |
-| `artifacts`            | `clap_installed_path` + `clap_installed_sha256`, plus tarball/Flatpak paths and SHA-256 when built.                                                                                                |
-| `oracles_and_fixtures` | `oracle_render_bin` + SHA-256, `fixture_model_path` + SHA-256.                                                                                                                                     |
+#### 5.4.1 BOLT Win-Proof Ceremony — Opt-Out Architectural Decision
 
-The five release gates run **against the distributed artifact** — not against
-`target/release/libnam_plug.so`, which the quick QA validates and which is a
-different, non-optimized binary. `CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET"` points
-the gates at the exact installed `.so`:
+Unlike standalone host binaries, `NAM-Plug` does not include an in-tree `ab-opt-ceremony.sh` runner. Maintaining a dedicated PMU-driven A/B harness inside the plugin library introduces significant overhead relative to its gain. Therefore:
 
-1. **Symbol & SONAME validation** of the distributed artifact.
-2. **External `clap-validator`** against the distributed artifact (skipped ⇒ `skipped_gates` entry; fail-closed in strict mode).
-3. **NAMCore float parity** — `NAM_REQUIRE_CPP_ORACLE=1 CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_clap_parity_multi_rate` (three fixtures × all three certification rates) followed by artifact-level `test_clap_parity_oversample` (2×/4×, oracle required) and `test_clap_parity_cabsim` (independent direct convolution) — see §3.2.1/§3.2.2. Their verdicts are recorded under `gates.parity_oversample`/`gates.parity_cabsim` with the installed artifact SHA-256; a missing oracle is a typed gap, never a PASS.
-4. **CabSim IR artifact test** — `CLAP_PLUGIN_UNDER_TEST="$CLAP_TARGET" cargo test ... test_cabsim_ir_changes_audio_release_artifact`.
-5. **Performance certification** — `nam_perf_guard certify` (real-time deadline margins against the distributed artifact), invoked by `build-release.sh` pinned to the same benchmark core and scheduling policy as `tests-performance-regression.sh` (`pick_bench_core`/`NAM_BENCH_CORE` + `taskset`, and `chrt -f 80` when permitted). A scenario is certified only when p99 stays below **85% of the block budget** — the same threshold the audio callback telemetry uses to flag a DSP overload — so the gate fails strictly before the runtime would report an overload; the per-scenario summary prints the gate verdict with the p99 share of the budget and the remaining headroom. The report (`schema_version` 1.2) records a `host` block with `bench_core`, `cpus_allowed_list`, `sched_policy`, `governor`, `boost`, `cpu_online`, `cpu_isolated`, `irq_isolation` and the IRQs sharing the benchmark core, so a pipeline number is always attributable to its measurement environment. `--reference <previous-report.json> --p50-ratio-max <ratio>` adds a relative p50 ceiling per scenario (fails with exit 1 when exceeded); activation is gated on the operator's 3-run pinned noise calibration and is wired through `NAM_PERF_REFERENCE_REPORT` / `NAM_PERF_REFERENCE_P50_RATIO_MAX`. The reference is a previous certification report produced under the same pinning (the gate's own p50 series); the Criterion `ci-baseline` remains governed by `tests-performance-regression.sh`.
+- **LLVM-BOLT is opt-out in `NAM-Plug`.** This is an intentional decision, not a regression: a missing `ab-opt-ceremony-receipt.json` must not be triaged as a failed ceremony.
+- Passing the deadline envelope gate (`nam_perf_guard`) records `bolt_proof: "gate-pass-only"`, certifying real-time viability without claiming an unverified A/B win.
+- An applied BOLT with neither an `ab-opt-ceremony:<id>` proof nor a passing gate stays a typed gap (`bolt_proof:missing_ceremony`) in every mode.
 
-The PGO/BOLT training workload is kept out of the clipping regime: `pgo_profiling_workload` applies a measured −18 dB excitation gain (`PGO_EXCITATION_GAIN = 0.125`, peak ≈0.119 ≈ −18.5 dBFS) before the scenario matrix (`lstm_live_48k`'s dense +11 dB input automation still clipped at −12 dB) and records it as `excitation_gain` in `target/pgo-workload-receipt.json`. `build-release.sh` tees both training runs (PGO phase 2 and the BOLT instrumented run) to `target/logs/pgo-workload.log`, appending the BOLT phase, and counts `Output clipping` per phase. Any non-zero count is fail-closed in strict/ceremony mode and a typed `pgo_workload:clipping` gap otherwise — the profile is never silently trained or certified on clipped output. The final receipt block carries `{status, gain, scenarios, callbacks, clipping_count_phase1, clipping_count_bolt, log_path, log_sha256}`. The stress generator in `NeuralAmpModeler-rs` is unchanged.
+The receipt states the absence of proof instead of leaving it implicit:
 
-In strict mode (`NAM_STRICT_RELEASE=1`, default) the tree must be clean
-(`check_git_clean_strict()` runs before the build and again right before the
-receipt is written), any external `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` is
-rejected, and a gate skip or missing prerequisite aborts with exit ≠ 0 — so a
-`CERTIFIED` receipt can only ever exist for a clean-tree, all-gates-green
-build of the exact artifact that is distributed.
+- `optimizations.unproven_claims` is `["bolt_win"]` whenever `bolt_proof == "gate-pass-only"`, and `[]` when a real A/B receipt exists (or BOLT was not applied). It is a claim inventory, not a gate: `CERTIFIED` still means "the shipped bytes passed every gate", never "BOLT made them faster".
+- The pipeline prints a `[UNPROVEN]` banner before exiting so the operator cannot read a green run as an A/B win.
+- A missing `ab-opt-ceremony.sh` is therefore not a defect to "fix" by fabricating a proof; implementing the runner is an opt-in future enhancement.
 
-#### 5.4.1 BOLT Win-Proof Ceremony — Opt-Out Decision (T5.3)
+#### 5.4.1.1 Measurement Host vs. Measurement Noise
 
-Unlike `NAM-Audio-Pipe`, `NAM-Plug` ships **no `ab-opt-ceremony` producer**:
-there is no `utils/ab-opt-ceremony.sh` harness and no dedicated `ab_opt_bench`
-binary. This is a recorded, deliberate decision (the cost of maintaining a
-PMU-driven A/B ceremony inside the CLAP plugin outweighs its benefit):
-**LLVM-BOLT is opt-out in `NAM-Plug`.**
+`nam_perf_guard` reports two independent properties of a run:
 
-Consequently:
+| Field | Meaning | Effect on the gate |
+| --- | --- | --- |
+| `environment_stable` | Coefficient of variation ≤ 1.2 across the sampled series (noise/thermal). | `false` ⇒ `INCONCLUSIVE` (exit `2`). |
+| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy in §5.4 (no `isolcpus`/`nohz_full`, shared IRQ affinity, non-RT scheduling, non-`performance` governor, boost enabled, or unpinned affinity). | Recorded only; the p99 evidence remains valid for *that* host. |
 
-- The canonical `target/logs/ab-opt-ceremony-receipt.json` is **not required**
-  and is not generated by this repository.
-- A measured BOLT **win** is only claimed when a canonical ceremony receipt
-  exists with `verdict == "PGO+BOLT"`, `runs >= 3`, and a positive measured gain
-  (`gain_ci_low > 0` when reported; otherwise the canonical
-  `bolt_gain_pct.mean < 0`, where negative percent means improvement). Such a
-  receipt is recorded as `bolt_proof: "ab-opt-ceremony:<id>"`.
-- This build's own **measured performance gate** (`PERF_GATE_STATUS=PASSED`)
-  proves only that the shipped artifact meets the deadline envelope. It is
-  recorded as the explicit label `bolt_proof: "gate-pass-only"` and is **never**
-  promoted to proof of a BOLT win.
-- When BOLT is applied without ceremony proof and without a passing gate, the
-  build records the typed gap `bolt_proof:missing_ceremony` in **every mode**
-  (not only `--strict`), and the receipt status becomes `INCOMPLETE`. A
-  `bolt_proof: MISSING` sentinel sitting next to a `CERTIFIED` status is
-  therefore impossible, and a missing proof is never a silent, acceptable
-  state.
+The receipt mirrors both fields under `performance_certification`, and the pipeline prints `[DEGRADED HOST]` with the typed reasons. Reasons are stable tokens such as `bench_core_not_isolated:8`, `irq_isolation_shared:8:35`, `sched_policy_not_realtime:SCHED_OTHER`, `governor_not_performance:powersave`, `governor_unknown`, `cpu_boost_enabled`, `boost_unknown`, `affinity_not_single_core:0-15`. A degraded host never promotes a `FAIL` to `PASS`; it only prevents a `PASS` from being read as a fully isolated measurement.
+
+`perf-certification-report.json` uses `schema_version: "1.3"` and an ISO-8601 `timestamp_utc` (`YYYY-MM-DDTHH:MM:SSZ`), like the release receipt, so reports sort chronologically as text.
+
+#### 5.4.1.2 External `clap-validator` Skips
+
+Gate 2 records the validator outcome under `clap_validator` (`status`, `tests_run`, `passed`, `failed`, `skipped`, `skip_reasons`, `log_sha256`) and writes the full output to `target/logs/clap-validator.log`. Intentional skips are explicit evidence, not silence: the current artifact reports two `clap.note-ports` skips because the plugin does not implement that extension. A green run with skips is never presented as a zero-skip run.
+
+#### 5.4.1.3 Long-Audit Artifact Exercise Coverage
+
+`utils/tests-long.sh` stamps every phase with `artifact_exercised`. Phases that only run library-level (`--lib`) tests declare the artifact hash without `dlopen`-ing it, so phases 1, 2 and 4 are legitimately `false`; phase 3 (`RT Priority & Micro-Latency`) loads the shipped `.clap`. The finalizer summarizes this in the release receipt:
+
+```json
+"artifacts": {
+  "long_audit_artifact_exercised": true,
+  "long_audit_phases_exercising_artifact": ["phase3"],
+  "long_audit_phases_not_exercising_artifact": ["phase1", "phase2", "phase4"]
+}
+```
+
+This prevents "15 tests passed" from being read as "15 tests ran against the shipped shared object". Expanding dlopen coverage is a future epic, not a certificate requirement.
+
+#### 5.4.1.4 Hermetic Targets vs. Local Iteration
+
+`build-release.sh` wipes `target/pgo-build` and `target/pgo-clap` before every run so no stale object can be certified. For local iteration only, `NAM_PGO_REUSE_TARGET=1` reuses the previous target; the flag is ignored (with a warning) in strict or ceremony mode. The official `release-ceremony.sh` additionally runs `git clean -fdx`, so a certified run always compiles from scratch.
+
+#### 5.4.2 Exit Codes: Preliminary Run × Release Ceremony
+
+| Invocation                                        | Receipt status                           | Exit code |
+| ------------------------------------------------- | ---------------------------------------- | --------- |
+| `build-release.sh --strict-release` (preliminary) | any (`INCOMPLETE` is reported)           | `0`       |
+| `build-release.sh --release-ceremony`             | `CERTIFIED`                              | `0`       |
+| `build-release.sh --release-ceremony`             | `INCOMPLETE` or `FUNCTIONALLY_CERTIFIED` | `3`       |
+| Fatal error (`die`)                               | —                                        | `1`       |
+
+- In ceremony mode, exit `0` holds if and only if the receipt is `CERTIFIED`. Exit `3` is a dedicated code, distinct from `die` (`1`), and is printed with a `[CEREMONY-FAIL]` banner listing the skipped gates.
+- The receipt and artifacts are written before the gate runs and remain in `target/` for diagnosis.
+- The rule lives in `ceremony_exit_code` (`utils/lib/_lib.sh`) and is covered by `tests/scripts/test_ceremony_fail_closed.sh`.
+
+#### 5.4.3 Certified Artifact Identity (F-CER-01)
+
+The ceremony never recompiles after the long audit. The preliminary `--strict-release --install` run captures the installed bytes in `target/certified/nam_plug.clap` (plus `nam_plug.clap.sha256`). The `--release-ceremony` run then requires:
+
+```text
+sha256(long-audit receipt) == sha256(~/.clap/nam_plug.clap) == sha256(target/certified/nam_plug.clap)
+```
+
+Any divergence aborts with a `F-CER-01` diagnostic instead of rebuilding silently. Phases 2–4 are skipped, and the reused codegen/PGO evidence must match the preliminary `target/release-receipt.json`: the PGO log and workload receipt are bound by SHA, and the preliminary source must match the certified checkout (`provenance.git_commit == HEAD`, `git_dirty == false`, plus `Cargo.lock`, `rustc` and engine provenance), so an artifact built from commit A or a dirty tree cannot be certified as commit B. Because the installed artifact is the post-strip form of the BOLT output, the receipt records the canonical installed SHA plus `artifacts.pre_strip_artifact_sha256` (the codegen `.bolt.so` hash, populated in both preliminary and ceremony receipts); only the post-strip identity is compared with the long receipt. On success `artifacts.reused_certified_binary` is `true` and `certified_copy_sha256` matches `clap_installed_sha256`. If a ceremony cannot certify, Phases 6–7 are skipped so the last-known-good files in `$HOME` are not overwritten. Contract tests: `tests/scripts/test_ceremony_reuse_binary.sh` and `test_receipt_artifact_consistency.sh`.
+
+#### 5.4.4 Ceremony Sequence, Receipt Roles & Invariants
+
+The official ceremony is driven by `release-ceremony.sh` (orchestrating repository release scripts, without internal receipt logic). Phases run in this order from the repository root:
+
+```text
+[1] build-release.sh --strict-release --install           preliminary build (PGO + BOLT)
+        -> target/release-receipt.json (preliminary), target/certified/nam_plug.clap(.sha256)
+[2] tests-long.sh --strict-pre-release                     long audit (operator only)
+        -> target/logs/long-audit-receipt.jsonl
+[3] ab-opt-ceremony.sh --runs 3                            optional; not shipped in NAM-Plug (§5.4.1)
+        -> target/logs/ab-opt-ceremony-receipt.json
+[4] build-release.sh --strict-release --release-ceremony --install   final certification
+        -> target/release-receipt.json (final); exit 0 only if CERTIFIED, otherwise exit 3
+```
+
+| Receipt / artifact                           | Written by        | Role                                                                                                                |
+| -------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `target/release-receipt.json` (preliminary)  | step 1            | Build evidence (PGO workload, codegen pre/post, source provenance). Input validated by step 4; may be `INCOMPLETE`. |
+| `target/certified/nam_plug.clap` + `.sha256` | step 1            | Exact installed bytes captured for reuse. Never regenerated by step 4.                                              |
+| `target/logs/long-audit-receipt.jsonl`       | step 2            | Binds the artifact SHA exercised by the long suite.                                                                 |
+| `target/logs/ab-opt-ceremony-receipt.json`   | step 3 (optional) | BOLT win proof (`bolt_proof = ab-opt-ceremony:<id>`).                                                               |
+| `target/release-receipt.json` (final)        | step 4            | Authoritative status, gates, and artifact identities of the shipped binary.                                         |
+
+Invariants:
+
+- **The binary is never rebuilt after certification.** Step 4 reuses `target/certified/nam_plug.clap`; a missing or divergent artifact aborts with `F-CER-01` (never a silent rebuild). The reuse path is explicit in the receipt: `artifacts.reused_certified_binary` is `true` only when the reuse guard passed, and `artifacts.certified_copy_sha256` equals `artifacts.clap_installed_sha256`.
+- **Single identity chain:** `sha256(long receipt) == sha256(installed) == sha256(certified copy)`. The codegen `.bolt.so` hash is recorded separately in `artifacts.pre_strip_artifact_sha256`.
+- **Exit-3 rule (§5.4.2):** in ceremony mode only `CERTIFIED` exits `0`; any other status exits `3`. Packaging (Phases 6–7) runs only for `CERTIFIED`, so the last-known-good files in `$HOME` survive a failed ceremony.
+- **Provenance of the ceremony:** `provenance.ceremony` records `script_sha256` (SHA-256 of `release-ceremony.sh`) and the ordered `phases` it ran (for example `["build", "long", "final"]`). Manual `build-release.sh` runs, or a missing or malformed SHA, record `null`. The field is optional and additive: `schema_version` stays `1.1`.
+
+---
 
 ### 5.5 Deterministic Benchmark Execution & CPU Core Isolation (`isolcpus` + `taskset`)
 
-Micro-benchmarking real-time DSP inference and sub-microsecond CLAP processing requires rigorous environmental determinism. Without kernel-level CPU core isolation, performance measurements are subject to Linux kernel scheduler preemption, cross-core cache invalidation, frequency governor scaling, timer interrupts, and workstation background workload jitter.
+Micro-benchmarking real-time DSP requires strict environmental determinism. Without kernel-level core isolation, measurements are distorted by scheduler preemption, cross-core cache invalidation, frequency transitions, and interrupts.
 
-> [!WARNING]
-> **Environmental Noise & Baseline Invalidation**:
-> Benchmark and performance guard measurements obtained without dedicated CPU core isolation reflect non-deterministic environmental noise. Such unisolated results **cannot serve as authoritative baselines** and are strictly invalid for certifying real-time performance optimizations or merging performance-sensitive changes.
-
-To achieve reproducible micro-benchmarks and deterministic baseline capture, the host environment must be configured with kernel CPU isolation and pinned execution.
-
-#### 1. Architectural Context: Host Delegation vs. Test/Benchmark Harness
-
-As established in the architectural evaluation ([`docs/rt-hardening-evaluation.md`](./rt-hardening-evaluation.md)), `NAM-Plug` operates as a CLAP plugin (`cdylib`) and deliberately avoids process-wide RT hardening (`mlockall`, `SCHED_FIFO`, `sched_setaffinity`) during normal DAW operation, delegating thread management to the host DAW or PipeWire host.
-
-However, during **automated testing, micro-benchmarking (`clap_bench`), statistical performance certification (`nam_perf_guard`), soak tests, and regression gating (`tests-performance-regression.sh`)**, the plugin code executes in standalone harness environments. In these scenarios, kernel-level core isolation via GRUB combined with explicit pinning (`taskset -c <core>`) is mandatory to eliminate operating system jitter, cross-core cache invalidation, frequency scaling transitions, and scheduler preemption. Furthermore, DAWs running on an isolated host can dedicate audio worker threads to these isolated cores for maximum real-time stability.
-
-#### 2. Recommended Kernel Boot Command Line (`/etc/default/grub`)
-
-Configure the Linux kernel boot line with maximum core isolation and low-latency timing primitives. A representative production boot configuration for a dedicated core pair (audio/benchmark core 8, SMT sibling 9 kept offline) on a 16-thread CPU (e.g. 8 cores / 16 threads) is:
+#### Recommended Kernel Boot Parameters (`/etc/default/grub`)
 
 ```text
 isolcpus=managed_irq,domain,8,9 nohz_full=8,9 rcu_nocbs=8,9 irqaffinity=0-7,10-15 nmi_watchdog=0 skew_tick=1 clocksource=tsc tsc=reliable
 ```
 
-##### Parameter Breakdown
-
-- `isolcpus=managed_irq,domain,8,9`: Removes cores 8 and 9 from general Linux scheduler load-balancing domains (`domain`) and excludes managed interrupt request distribution (`managed_irq`) from assigning device IRQs to these cores. *(Note: Legacy bare `isolcpus=8,9` without sub-flags leaves managed kernel IRQs attached to isolated cores, inducing sporadic preemption).*
-- `nohz_full=8,9`: Enables full tickless kernel execution on cores 8 and 9. When only one runnable task executes on an isolated core (such as `taskset -c 8 cargo bench`), the periodic timer tick interrupt is suspended, eliminating scheduling jitter and timing noise.
-- `rcu_nocbs=8,9`: Offloads Read-Copy-Update (RCU) callback invocations from cores 8 and 9 to housekeeping cores (0–7, 10–15), eliminating kernel RCU softirq preemption spikes during audio block processing and telemetry updates.
-- `irqaffinity=0-7,10-15`: Specifies the default hardware interrupt mask, directing all hardware device IRQs (timers, storage controllers, network, GPUs, audio interfaces) away from the benchmark cores to housekeeping cores.
-- `nmi_watchdog=0`: Disables Non-Maskable Interrupt (NMI) watchdog periodic ticks (~1 Hz) across all cores, eliminating recurring hardware interruptions that spoil sub-microsecond latency measurements or trigger false p99 tail spikes.
-- `skew_tick=1`: Skews timer tick alignment across housekeeping cores to prevent simultaneous tick handling bursts across shared cache levels.
-- `clocksource=tsc tsc=reliable`: Enforces invariant hardware RDTSC as the system clocksource, eliminating MMIO register bus overhead on clock reads and optimizing kernel vDSO timings. This directly pairs with `NAM-Plug`'s asynchronous TSC calibration (`calibrate_tsc()`), ensuring hot-path telemetry executes in native ~17 ns rather than ~1134 ns HPET fallback (see note below).
-
-#### 3. GRUB Configuration & Verification Procedure
-
-1. Edit `/etc/default/grub` (as `root` or via `sudo`) and update `GRUB_CMDLINE_LINUX_DEFAULT`:
-
-   ```bash
-   GRUB_CMDLINE_LINUX_DEFAULT="quiet splash ... isolcpus=managed_irq,domain,8,9 nohz_full=8,9 rcu_nocbs=8,9 irqaffinity=0-7,10-15 nmi_watchdog=0 skew_tick=1 clocksource=tsc tsc=reliable"
-   ```
-
-   *(Note: Adapt core indices `8,9` and housekeeping mask `0-7,10-15` to the target machine's CPU topology, selecting dedicated performance cores free of hyperthreading siblings running host OS tasks).*
-
-2. Update the bootloader configuration:
-
-   ```bash
-   sudo update-grub
-   ```
-
-3. Reboot the machine:
-
-   ```bash
-   sudo reboot
-   ```
-
-4. Confirm after boot that kernel isolation parameters, tickless domains, and the TSC clocksource are active:
-
-   ```bash
-   cat /proc/cmdline | grep -E "isolcpus|nohz_full|rcu_nocbs|irqaffinity|clocksource"
-   cat /sys/devices/system/clocksource/clocksource0/current_clocksource
-   cat /sys/devices/system/cpu/isolated
-   cat /sys/devices/system/cpu/nohz_full
-   ```
+- `isolcpus=managed_irq,domain,8,9`: Removes isolated cores from scheduler load-balancing domains and managed interrupt distribution.
+- `nohz_full=8,9`: Suspends periodic timer tick interrupts when a single pinned task executes.
+- `rcu_nocbs=8,9`: Offloads RCU callback processing to housekeeping cores.
+- `irqaffinity=0-7,10-15`: Directs hardware device interrupts to housekeeping cores.
+- `nmi_watchdog=0`: Disables recurring hardware interruptions.
+- `clocksource=tsc tsc=reliable`: Enforces invariant hardware RDTSC as the system clocksource.
 
 > [!NOTE]
-> **Clocksource Hygiene & Telemetry Overhead (T-P4.2.3)**:
-> Systems operating with `current_clocksource = hpet` incur MMIO register bus overhead on system clock reads. Empirical profiling on an isolated performance core (AMD Ryzen 7 5700U, core 8) measured:
->
-> - **Uncalibrated fallback (`Instant::now()` via HPET)**: **1134.66 ns/call** (~1.13 µs per checkpoint, ~2.27 µs per audio block).
-> - **Calibrated RDTSC (`rdtsc_nanos()` mult/shift)**: **17.16 ns/call** (~40–50 cycles at 2.5 GHz, ~34 ns per audio block).
->
-> That represents a **66× reduction** in hot-path telemetry overhead. To eliminate host activation freezes while guaranteeing sub-20ns telemetry, `NAM-Plug` initializes `calibrate_tsc()` asynchronously on a dedicated helper thread during off-RT `new_shared()`. It incurs **0ms blocking time** on host initialization or audio activation (`activate()`). During the ~60ms measurement window, initial audio blocks fall back safely to `Instant::now()`, after which all telemetry probes seamlessly switch to native 17.16 ns RDTSC execution. Configuring `clocksource=tsc` further optimizes vDSO for any off-RT callers.
+> **Clocksource Hygiene & Telemetry Overhead:**
+> Systems falling back to HPET incur ~1.13 µs per checkpoint (~2.27 µs per audio block). Calibrated RDTSC executes in **17.16 ns/call** (~34 ns per audio block) — a **66× overhead reduction**. `NAM-Plug` calibrates RDTSC asynchronously on a helper thread during startup, incurring 0 ms blocking time on host initialization while guaranteeing sub-20ns telemetry.
 
-#### 4. Runtime Host Calibration Commands
-
-Beyond boot parameters, execute the following runtime configuration before running real-time benchmarks or performance certification guards:
+#### Host Calibration Commands
 
 ```bash
-# 1. Take the SMT sibling thread offline to eliminate hyperthreading contention:
+# Take SMT sibling thread offline
 echo 0 | sudo tee /sys/devices/system/cpu/cpu9/online
 
-# 2. Lock CPU frequency governor to 'performance' (prevents DVFS transition latency):
+# Lock frequency governor to performance
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 
-# 3. Request the 'performance' energy-performance preference on amd-pstate-epp
-#    (skipped on hosts that do not expose energy_performance_preference):
-for epp in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
-    [ -w "$epp" ] && echo performance | sudo tee "$epp" >/dev/null
-done
-
-# 4. Disable CPU frequency boost/turbo (ensures repeatable clocks without thermal throttling):
+# Disable CPU boost to ensure thermal repeatability
 echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost
 
-# 5. Route hardware IRQs to housekeeping cores (fcff masks cores 8 and 9 on a 16-thread topology):
-echo fcff | sudo tee /proc/irq/default_smp_affinity
-for irq in /proc/irq/[0-9]*/smp_affinity_list; do
-    [ -f "$irq" ] && echo 0-7,10-15 | sudo tee "$irq" >/dev/null 2>&1 || true
-done
-
-# 6. Allow PMU counter access for IPC and telemetry profiling without root:
-echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
-
-# 7. Ensure real-time priority and locked memory limits are configured:
-ulimit -r 95
-ulimit -l unlimited
-```
-
-> [!IMPORTANT]
-> The prerequisites are cumulative: isolated cores (`isolcpus=managed_irq,domain,8,9 nohz_full=8,9 rcu_nocbs=8,9` or the stricter form above), `scaling_governor=performance`, `energy_performance_preference=performance` on `amd-pstate-epp`, and `boost=0`. A log captured with a governor other than `performance` is **invalid** and must not be used as a baseline or regression comparison; `utils/tests-performance-regression.sh` enforces this fail-closed before running.
-
-#### 5. CPU Pinning via `taskset -c`
-
-Execute benchmark suites and performance guards exclusively pinned to an isolated core (e.g. core `8`):
-
-```bash
-# Pin Criterion benchmarks to isolated core 8
-taskset -c 8 cargo bench --features testing --bench clap_bench
-
-# Pin performance certification guard to isolated core 8 (SCHED_FIFO when permitted)
-taskset -c 8 chrt -f 80 cargo run --locked --profile dist --features testing --bin nam_perf_guard -- \
-    certify --clap target/release/libnam_plug.so --out target/perf-certification-report.json
-
-# Optional relative p50 ceiling against a previous report (after 3-run noise calibration)
-taskset -c 8 chrt -f 80 cargo run --locked --profile dist --features testing --bin nam_perf_guard -- \
-    certify --clap target/release/libnam_plug.so --out target/perf-certification-report.json \
-    --reference target/perf-certification-report.previous.json --p50-ratio-max 1.5
-```
-
-#### 6. Canonical Capture Workflow
-
-When establishing or validating official performance baselines, execute the canonical 3-stage validation and capture sequence inside `./NAM-Plug/`:
-
-```bash
-# Step 1: Static analysis and code health gates
-./utils/lints.sh
-
-# Step 2: Full functional QA test suite, parity oracle, and RT zero-alloc verification
-./utils/tests-quick.sh
-
-# Step 3: Pinned deterministic benchmark capture on isolated core
+# Pin benchmarks to isolated core 8
+export CARGO_BUILD_JOBS=4
 taskset -c 8 cargo bench --features testing --bench clap_bench
 ```
 
-### 5.6 GUI Testing Environment & Headless Verification (`xvfb-run`)
+---
 
-`NAM-Plug` includes comprehensive integration tests for the CLAP GUI extension (`PluginGui`), including embedded X11 window hierarchy negotiation and XEmbed parent/child tree binding (`gui_lifecycle_x11_embedded_set_parent_honest`).
+### 5.6 GUI Testing & Headless Verification (`xvfb-run`)
 
-Depending on the execution environment:
+`NAM-Plug` tests the CLAP GUI extension (`PluginGui`), including embedded X11 window negotiation:
 
-1. **Interactive Desktop (with active X11 / Xwayland display)**:
-   Tests run directly against the active X11 display (`DISPLAY=:0`), creating an embedded test host window and asserting strict XEmbed parentage.
-2. **Headless CI / Containerized Environments (without display)**:
-   - When `DISPLAY` is unset (`env -u DISPLAY`), the GUI lifecycle tests verify the fail-closed negotiation contract: `create(X11 embedded)` is rejected honestly at creation time without leaking or mutating FSM state.
+- **Interactive Desktop:** Tests run directly against the active X11 display (`DISPLAY=:0`), asserting strict XEmbed parentage.
 
-   - To run the full embedded X11 GUI lifecycle test in a headless runner, provide a virtual framebuffer using `xvfb-run`:
+- **Headless CI:** When `DISPLAY` is unset, GUI tests verify that `create(X11 embedded)` fails closed honestly without leaking resources.
 
-     ```bash
-     xvfb-run -a cargo test --features testing --lib gui_lifecycle_x11_embedded_set_parent_honest
-     ```
+- **Virtual Framebuffer:** To run embedded GUI tests in headless runners:
 
-   - If `DISPLAY` is exported but points to an unreachable X11 server, the harness emits an explicit `[WARN GAP]` and skips the physical embedding assertions cleanly rather than producing an unhandled test panic.
+  ```bash
+  export CARGO_BUILD_JOBS=4
+  xvfb-run -a cargo test --features testing --lib gui_lifecycle_x11_embedded_set_parent_honest
+  ```
 
-### 5.7 GUI Open Latency (F-UX-05 / T5.1–T5.2)
+### 5.7 GUI Open Latency & Platform Pre-Warming
 
-The persistent GUI worker (`src/clap/gui/worker.rs`) pre-warms the Slint/winit
-platform on its own thread from `gui.create()` (`GuiWorker::warm_up`), so the
-host main thread no longer pays winit/GL backend startup inside the first
-`set_parent`/`set_transient`/`show`. Every `open_window` measures the
-host-main-thread block time and logs it at `info` level:
+The persistent GUI worker (`src/clap/gui/worker.rs`) pre-warms the Slint/winit platform on its own thread upon `gui.create()` (`GuiWorker::warm_up`). This ensures the host main thread avoids winit and OpenGL initialization latency during the first `set_parent`/`show` call.
 
-```text
-NAM-Plug: GUI open_window completed in <N> ms
-NAM-Plug: Slint platform pre-warmed in <N> ms (force_x11=<bool>)
-```
-
-**Criterion.** With the platform pre-warmed, the **p95 of the main-thread
-block time** (the `open_window` line) must stay **< 50 ms** on both X11 and
-Wayland sessions. This measurement is a **manual operator step** ([OPERADOR]):
-open the GUI repeatedly under a real host, collect the log lines, and compute
-the p95. `OPEN_WINDOW_TIMEOUT` stays at its 2 s safety value; it is only
-lowered to ~500 ms once this criterion is observed to hold.
+- **Criterion:** With pre-warming active, the p95 of host-main-thread block time during `open_window` must stay **< 50 ms**.
+- **Verification:** Run the plugin under a real host, collect `NAM-Plug: GUI open_window completed in <N> ms` logs, and verify p95 latency.
 
 ### 5.8 Host Memory Guards (OOM Containment)
 
-This repository targets a 16 GiB development host. A release build of all test
-targets (fat LTO) running alongside `rust-analyzer` exhausted RAM and triggered
-a **global OOM**; because Electron's main process carries `oom_score_adj=300`,
-the kernel killed the IDE while sparing the actual `rustc` memory hogs. The
-following guards bound that failure mode:
+Development systems with 16 GiB RAM can experience compiler-induced OOM crashes when running fat-LTO release test suites alongside IDE language servers (`rust-analyzer`). Protection is enforced via:
 
-- **Parallelism:** `.cargo/config.toml` sets `[build] jobs = 4` (override per
-  invocation with `CARGO_BUILD_JOBS` on larger hosts).
-- **Containment:** `utils/tests-quick.sh`, `utils/tests-gui.sh`,
-  `utils/tests-long.sh` and `utils/build-release.sh` re-exec themselves through
-  `utils/mem-guard.sh`, a transient systemd user scope with `MemoryHigh=5G`,
-  `MemoryMax=6G`, `MemorySwapMax=6G` and `oom_score_adj=500` for the build tree.
-  It fails open (with a warning) when the user manager or cgroup delegation is
-  unavailable. `utils/tests-performance-regression.sh` is intentionally **not**
-  auto-guarded (a memory cap could distort benchmark timings); wrap it manually
-  when RAM is tight. Opt out of containment with `NAM_NO_MEM_GUARD=1`. Tune any
-  run with `NAM_MEM_GUARD_MAX`.
-
-- **GUI suite profile:** `utils/tests-gui.sh` builds only `--lib` in release
-  (every GUI/X11 test lives in `src/`) and exports
-  `CARGO_PROFILE_RELEASE_LTO=false` + `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16`.
-  GUI lifecycle semantics are unaffected; fat LTO was the direct OOM trigger.
-- **Bench profile:** `[profile.bench]` uses thin LTO and 16 codegen units.
-  **Baseline impact:** codegen now differs from the shipped fat-LTO
-  `release`/`dist` binaries. The operator must re-bootstrap the Criterion
-  baseline (`utils/tests-performance-regression.sh --bootstrap-baseline`)
-  before `--check` is a reliable regression signal.
-- **IDE protection:** Lower the running IDE's (Antigravity / VS Code family)
-  `oom_score_adj` (default `-500`; negative values need `sudo`) so a runaway build is targeted first. Run it after
-  starting/restarting the IDE.
-- **Manual heavy commands:** wrap them, e.g.
-  `utils/mem-guard.sh cargo bench --no-run`.
-
-Host-side recommendations (operated outside the repository): enable swap/zram,
-move `/tmp` off tmpfs, and tune `rust-analyzer` (`checkOnSave`, build scripts,
-thread count).
+1. **Parallelism Cap:** `.cargo/config.toml` sets `jobs = 4` (override per run with `CARGO_BUILD_JOBS=4`).
+2. **Cgroup Scope Containment:** Scripts re-exec via `utils/mem-guard.sh` within a transient systemd user scope (`MemoryHigh=5G`, `MemoryMax=6G`, `oom_score_adj=500`).
+3. **Bench Profile Tuning:** `[profile.bench]` uses thin LTO and 16 codegen units to prevent memory spikes.
+4. **IDE Process Protection:** Lowers the IDE's `oom_score_adj` to protect development environments.
 
 ### 5.9 Adaptive Rebuild Offload & Two-Phase NaN Containment
 
-- **Origin.** The two allocation-heavy structural refreshes (WaveNet slimmable
-  slice + oversampling engine pair) and the non-finite containment used to run
-  on the CLAP main thread / audio callback synchronously. They were moved to the
-  `nam-model-loader` worker (`main_thread/model_loader.rs`, polled with a 10 ms
-  `park_timeout` + `request_callback` handshake) and the containment was turned into
-  a two-phase amortized window (see `docs/architecture.md` §6.5 / §7.4).
-- **Unit coverage.**
-  `main_thread::model_loader_test::test_adaptive_rebuild_worker_services_slimmable_flag`
-  and `…_oversample_flag` exercise the worker→slot→main-tick handshake and the
-  single flag clear.
-  `…::test_watchdog_fast_cadence_while_rebuild_pending` pins the fast
-  watchdog cadence and its restoration to 250 ms.
-  `processor::processor_reset_test::tests::test_non_finite_containment_two_phase_flag_cleared_and_recovers`
-  pins the NaN containment: one flag clear per poisoning, held dry block, finite
-  output throughout, wet resumption. The pre-existing
-  `processor_stress_test::tests::test_non_finite_input_containment_and_recovery`
-  and `…::test_non_finite_reset_uses_effective_model_rate` remain the recovery
-  oracles.
-- **Rollback switches (read once at instance creation).**
-  `NAM_SYNC_MODEL_LOAD=1` (synchronous load) and
-  `NAM_SYNC_ADAPTIVE_REBUILD=1` (inline structural rebuilds) revert to the legacy
-  paths for A/B comparison.
-- **Manual operator step [OPERADOR]:** the flag→swap latency target (< 30 ms p99
-  under load) and the decision threshold (slice+prewarm > 5 ms ⇒ implement the
-  drive-only exit) require a real host measurement on the reference machine; they
-  are not enforced by the automated suites.
+- **Offloaded Structural Refreshes:** Memory-intensive model reloading and oversampling filter reallocation run on the background `nam-model-loader` worker thread (`main_thread/model_loader.rs`), communicating with the main thread via lock-free atomic slots.
+- **Two-Phase NaN Containment:** If non-finite audio samples are detected, the processor latches containment, emits a held dry block to prevent loudspeaker damage, resets state safely, and resumes clean wet processing.
+- **Rollback Switches:** Synchronous legacy behavior can be forced via `NAM_SYNC_MODEL_LOAD=1` and `NAM_SYNC_ADAPTIVE_REBUILD=1` for A/B debugging.
 
-### 5.10 Dense Automation Mitigation
+### 5.10 Dense Automation Mitigation (Piecewise Gain Fusion)
 
-**Decision gate.** The `CLAP_WorstCase_EventFloodModel` group (a loaded
-WaveNet A1 / LSTM under the same 16/64/256/1024-event floods plus the degenerate
-1-event-per-sample case) was measured on the reference machine under the
-`performance` governor, against the no-event `CLAP_Inference_*` baseline for the
-same block. Dense floods exceed the **> 2×** decision threshold, leading to the
-exact piecewise gain fusion implementation.
+When a host streams dense parameter automation (up to 1 event per sample), splitting the audio buffer at every event boundary destroys SIMD vectorization and increases CPU usage by >2×.
 
-**Implementation — exact piecewise gain fusion.**
-- Smoothed gain parameters (`PARAM_INPUT_GAIN`/`PARAM_OUTPUT_GAIN`, value or
-  modulation) no longer end the inference sub-block. Only events that must stay
-  sample-accurate (gate threshold, bypass, oversample, slim override, adaptive
-  compute, activation precision) create a sub-block boundary.
-- Fused gain targets are replayed at their exact sample offsets through the same
-  analytic IIR ramp (`apply_gain_ramp_with_steps`), so the **gain stage is
-  bit-identical** to the legacy per-event split
-  (`prop_fused_ramp_bit_identical_to_legacy_split`, ESR = 0 ≪ −120 dB), and the
-  neural model is block-invariant (`clap_e2_proptest`), so the fused inference
-  call is numerically transparent. The equivalence is scoped to the gain stage
-  and the model: the gate/mono hysteresis FSMs aggregate energy/max-diff over
-  the (now larger) fused sub-block, so their transition timing near threshold
-  can differ from the legacy split — the gate/bypass *event* boundaries
-  themselves stay sample-accurate.
-- `MIN_SPLIT_SAMPLES` (default 16) enables the fusion; `1`, an out-of-order event
-  block (host-contract violation), an active bypass/crossfade, or a block larger
-  than `MAX_RESAMP_BUF` all fall back to the legacy path verbatim.
-  `MAX_GAIN_STEPS` (64) bounds the on-stack step buffer.
-- T7.3: the PGO/BOLT workload (`pgo_profiling_workload.rs`, dense automation
-  burst) now emits one smoothed-gain event per sample so the fused ramp path is
-  profiled.
+#### Solution: Piecewise Gain Fusion
 
-**Post-mitigation measurement (reference machine, `performance` governor).**
-The degenerate 1-event-per-sample case collapses toward the no-event floor:
+- Smoothed gain parameters (`PARAM_INPUT_GAIN`, `PARAM_OUTPUT_GAIN`) no longer fragment inference sub-blocks. Only state-discontinuous events (noise gate threshold, bypass, oversampling, model swaps) create sub-block splits.
+- Gain targets are replayed at their exact sample offsets through an analytic IIR ramp (`apply_gain_ramp_with_steps`). The gain stage is bit-identical to legacy splitting (ESR = 0), while keeping neural model inference fully vectorized.
 
-| Model      | Block | Density   | Pre-S7 ratio | Post-S7 ratio |
-|:---------- |:----- |:--------- |:------------ |:------------- |
-| WaveNet A1 | 64    | 64 ev     | 2.57×        | 1.57×         |
-| WaveNet A1 | 64    | 1/sample  | 2.52×        | 1.55×         |
-| LSTM       | 64    | 64 ev     | 3.20×        | 2.07×         |
-| LSTM       | 512   | 1/sample  | 3.22×        | 2.00×         |
+#### Empirical Benchmark Comparison
 
-Inference-only (`CLAP_Inference_*`) baselines stay within run-to-run noise, so
-the mitigation adds no regression to the no-event path. Gate-dense floods (a
-boundary every few samples, e.g. 1024 events over a 64-sample block) remain
-above 2× **by design**: the noise-gate threshold stays sample-accurate.
+| Model Fixture | Block Size | Event Density    | Baseline Ratio (Unmitigated) | Optimized Ratio (Fused Ramps) |
+|:------------- |:---------- |:---------------- |:---------------------------- |:----------------------------- |
+| WaveNet A1    | 64 samples | 64 events        | 2.57×                        | **1.57×**                     |
+| WaveNet A1    | 64 samples | 1 event / sample | 2.52×                        | **1.55×**                     |
+| LSTM          | 64 samples | 64 events        | 3.20×                        | **2.07×**                     |
+| LSTM          | 512 sample | 1 event / sample | 3.22×                        | **2.00×**                     |
 
 ---
 
 ## 6. Quality Gates & Baseline Standards
 
-| Metric / Test Gate         | Threshold / Constraint                           | Enforced In                                                             |
-|:-------------------------- |:------------------------------------------------ |:----------------------------------------------------------------------- |
-| **CLAP vs NAMCore Parity** | ESR < 1e-8, SNR > 80 dB; 3 fixtures × 44.1/48/96 kHz | `clap_parity_multi_sr.rs` (Phase 2 of `tests-quick.sh`, release Gate 3) |
-| **Artifact OS/CabSim Parity** | ESR < 1e-8, SNR > 80 dB @ 2×/4× and CabSim      | `test_clap_parity_oversample`, `test_clap_parity_cabsim` (Phase 2)      |
-| **Bypass Transparency**    | Phase cancellation < -120 dBFS                   | `processor_bypass_test.rs`                                              |
-| **RT Allocation Budget**   | Exactly 0 heap allocations during `process()`    | `verify_no_rt_alloc.sh` (static) & `alloc_audit.rs` (dynamic)           |
-| **RT Codegen Invariants**  | 0 heap allocs, 0 core-loop divs, 0 core-loop TLS | `verify_rt_codegen.sh` (static machine-code inspection)                 |
-| **CLAP Event Handling**    | 0 panics / unhandled boundary conditions         | `clap_e2_proptest.rs`                                                   |
-
-Measured CLAP × NAMCore parity floor (2026-10-22, quick-suite release `.so`, pre-PGO/BOLT; full fixture matrix in §3.2.1). The certified artifact identity is `artifacts.clap_installed_sha256` in `target/release-receipt.json`, not a hash frozen in this document:
-
-| Fixture / mode                   | ESR      | SNR      |
-|:-------------------------------- |:-------- |:-------- |
-| `wavenet_a1_standard` 48 kHz     | 7.98e-12 | 111.0 dB |
-| `a2_example` 48 kHz              | 2.75e-12 | 115.6 dB |
-| `lstm` 48 kHz                    | 2.05e-11 | 106.9 dB |
-| `wavenet_a1_standard` 2× OS      | 1.55e-11 | 108.1 dB |
-| `wavenet_a1_standard` 4× OS      | 3.42e-11 | 104.7 dB |
-| `wavenet_a1_standard` + CabSim   | 8.41e-14 | 130.8 dB |
-
-The resampled rates sit on the same cross-implementation float floor as native: the multi-rate reference oracle re-renders the C++ model over the exact round-trip input the plugin's resampler produces, cancelling the sinc interpolation error (the gate is therefore uniform across the rate matrix). The oversampling reference presents the oracle with the same half-band-upsampled sequence the artifact feeds its model, and the CabSim reference is an independent direct convolution of the artifact's certified IR-free output.
+| Metric / Test Gate            | Threshold / Constraint                               | Enforced In                                                             |
+|:----------------------------- |:---------------------------------------------------- |:----------------------------------------------------------------------- |
+| **CLAP vs. NAMCore Parity**   | ESR < 1e-8, SNR > 80 dB; 3 fixtures × 44.1/48/96 kHz | `clap_parity_multi_sr.rs` (Phase 2 of `tests-quick.sh`, release Gate 3) |
+| **Artifact OS/CabSim Parity** | ESR < 1e-8, SNR > 80 dB @ 2×/4× and CabSim           | `test_clap_parity_oversample`, `test_clap_parity_cabsim` (Phase 2)      |
+| **Bypass Transparency**       | Phase cancellation < −120 dBFS                       | `processor_bypass_test.rs`                                              |
+| **RT Allocation Budget**      | Exactly 0 heap allocations during `process()`        | `verify_no_rt_alloc.sh` (static) & `alloc_audit.rs` (dynamic)           |
+| **RT Codegen Invariants**     | 0 heap allocs, 0 core-loop divs, 0 core-loop TLS     | `verify_rt_codegen.sh` (static disassembly analysis)                    |
+| **CLAP Event Handling**       | 0 panics or unhandled boundary conditions            | `clap_e2_proptest.rs`                                                   |
 
 ### 6.1 Reference Performance Baseline (Criterion Benchmark Matrix)
 
-The following baseline metrics were measured using `taskset -c 8 cargo bench --features testing --bench clap_bench` under the `x86-64-v3` AVX2/FMA baseline on an isolated CPU core (see §5.5):
+Measured on an isolated CPU core (`x86-64-v3` AVX2/FMA baseline, `performance` governor, core pinned via `taskset`):
 
 #### Neural Architecture Inference (Live Mode, Native 48 kHz, Stereo)
 
@@ -798,7 +502,7 @@ The following baseline metrics were measured using `taskset -c 8 cargo bench --f
 | **WaveNet A2 Slimmable** | `a2_example.nam`          | 18.4 µs  | 34.4 µs  | 70.2 µs   | 138.6 µs  | 276.7 µs  | 553.4 µs   | **~540 ns/sample** |
 | **LSTM 1×3**             | `lstm.nam`                | 2.6 µs   | 4.8 µs   | 9.2 µs    | 17.9 µs   | 35.4 µs   | 70.1 µs    | **~69 ns/sample**  |
 
-#### CLAP Infrastructure & Processing Overhead
+#### CLAP Infrastructure & Host Processing Overhead
 
 | Execution Group                         | Block 32 | Block 64 | Block 128 | Block 256 | Block 512 | Block 1024 | Unit Cost      |
 |:--------------------------------------- |:-------- |:-------- |:--------- |:--------- |:--------- |:---------- |:-------------- |
@@ -808,12 +512,12 @@ The following baseline metrics were measured using `taskset -c 8 cargo bench --f
 
 #### Quality Modes, Sample Rates & CabSim Convolution (WaveNet A1, Block Size 64)
 
-| Configuration / Mode                   | Mean Latency / Duration | Incremental Cost vs Live Native 48k | Notes                                          |
-|:-------------------------------------- |:----------------------- |:----------------------------------- |:---------------------------------------------- |
-| **Native 48 kHz (Live, OS Off)**       | 41.9 µs                 | Baseline (1.00×)                    | Zero added latency                             |
-| **Resample 44.1 kHz (Live, OS Off)**   | 52.5 µs                 | +10.6 µs (+25.3%)                   | Polyphase minimum-phase bandlimited FIR        |
-| **Downsample 96.0 kHz (Live, OS Off)** | 23.7 µs                 | -18.2 µs (-43.4%)                   | 64 input samples = 32 internal DSP samples     |
-| **Oversample 2× (Live)**               | 84.7 µs                 | +42.8 µs (+102%)                    | 2× internal neural iterations                  |
-| **Oversample 4× (Live)**               | 167.3 µs                | +125.4 µs (+299%)                   | 4× internal neural iterations                  |
-| **RenderMode Offline HQ (4×)**         | 168.0 µs                | +126.1 µs (+301%)                   | Deterministic HQ mastering mode                |
-| **CabSim IR Convolution (512-sample)** | 42.6 µs                 | +1.2 µs (+2.8%)                     | Partitioned time-domain / SIMD FIR convolution |
+| Configuration / Mode                   | Mean Latency / Duration | Incremental Cost vs. Live Native 48k | Notes                                          |
+|:-------------------------------------- |:----------------------- |:------------------------------------ |:---------------------------------------------- |
+| **Native 48 kHz (Live, OS Off)**       | 41.9 µs                 | Baseline (1.00×)                     | Zero added latency                             |
+| **Resample 44.1 kHz (Live, OS Off)**   | 52.5 µs                 | +10.6 µs (+25.3%)                    | Polyphase minimum-phase bandlimited FIR        |
+| **Downsample 96.0 kHz (Live, OS Off)** | 23.7 µs                 | -18.2 µs (-43.4%)                    | 64 input samples = 32 internal DSP samples     |
+| **Oversample 2× (Live)**               | 84.7 µs                 | +42.8 µs (+102%)                     | 2× internal neural iterations                  |
+| **Oversample 4× (Live)**               | 167.3 µs                | +125.4 µs (+299%)                    | 4× internal neural iterations                  |
+| **RenderMode Offline HQ (4×)**         | 168.0 µs                | +126.1 µs (+301%)                    | Deterministic HQ mastering mode                |
+| **CabSim IR Convolution (512-sample)** | 42.6 µs                 | +1.2 µs (+2.8%)                      | Partitioned time-domain / SIMD FIR convolution |

@@ -362,7 +362,11 @@ fn run_idempotence_case(total_swaps: usize, producer_threads: usize, prefill: us
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(500))]
+    #![proptest_config(ProptestConfig {
+        cases: 500,
+        failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::Off)),
+        ..ProptestConfig::default()
+    })]
 
     /// 100–500 concurrent model/IR-style swaps, raced between
     /// asynchronous requester threads and an off-RT drainer, must preserve

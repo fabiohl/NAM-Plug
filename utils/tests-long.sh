@@ -303,15 +303,27 @@ run_cargo_test() {
     local log_file="$1"
     shift
     local cmd_prefix=""
-    if [ "${1:-}" = "--affinity" ]; then
-        cmd_prefix="$(maybe_taskset)"
-        shift
-    fi
+    local features_args=(--features testing)
+    while true; do
+        case "${1:-}" in
+            --affinity)
+                cmd_prefix="$(maybe_taskset)"
+                shift
+                ;;
+            --features)
+                features_args=(--features "$2")
+                shift 2
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
     local full_cmd
     if [ -n "$cmd_prefix" ]; then
-        full_cmd="$cmd_prefix cargo test --features testing --release $*"
+        full_cmd="$cmd_prefix cargo test ${features_args[*]} --release $*"
     else
-        full_cmd="cargo test --features testing --release $*"
+        full_cmd="cargo test ${features_args[*]} --release $*"
     fi
     if [ "$DRY_RUN" = "1" ]; then
         echo -e "  ${YELLOW}[dry-run]${NC} $full_cmd 2>&1 | tee $log_file"
@@ -320,9 +332,9 @@ run_cargo_test() {
     echo -e "  ${BLUE}→${NC} $full_cmd"
     # shellcheck disable=SC2086
     if [ -n "$cmd_prefix" ]; then
-        eval $cmd_prefix cargo test --features testing --release "$@" 2>&1 | tee "$log_file"
+        eval $cmd_prefix cargo test "${features_args[@]}" --release "$@" 2>&1 | tee "$log_file"
     else
-        cargo test --features testing --release "$@" 2>&1 | tee "$log_file"
+        cargo test "${features_args[@]}" --release "$@" 2>&1 | tee "$log_file"
     fi
 }
 
@@ -374,8 +386,10 @@ export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNIT
 echo -e "\n${BLUE}${BOLD}[0/4] Pre-build — compiling all test artefacts (--no-run)...${NC}"
 TARGET_PREBUILD_ARGS=(--lib --test heap_audit --test clap)
 COMPILE_CMD=(cargo test --features testing --release --no-run --jobs "${CARGO_BUILD_JOBS:-4}" "${TARGET_PREBUILD_ARGS[@]}")
+COMPILE_HEAP_AUDIT_CMD=(cargo test --features testing,heap-audit --release --no-run --jobs "${CARGO_BUILD_JOBS:-4}" --lib)
 if [ "$DRY_RUN" = "1" ]; then
     echo -e "  ${YELLOW}[dry-run]${NC} ${COMPILE_CMD[*]} 2>&1 | tee $PREBUILD_LOG"
+    echo -e "  ${YELLOW}[dry-run]${NC} ${COMPILE_HEAP_AUDIT_CMD[*]} 2>&1 | tee -a $PREBUILD_LOG"
 else
     PREBUILD_START=$(date +%s%N)
     echo -e "  ${BLUE}→${NC} ${COMPILE_CMD[*]}"
@@ -383,7 +397,8 @@ else
     if command -v chrt >/dev/null 2>&1 && [ "$(chrt -p $$ 2>/dev/null | grep -o 'SCHED_[A-Z]*' || true)" = "SCHED_FIFO" ]; then
         NORM_PREFIX=(chrt -o 0)
     fi
-    if "${NORM_PREFIX[@]}" "${COMPILE_CMD[@]}" 2>&1 | tee "$PREBUILD_LOG"; then
+    if "${NORM_PREFIX[@]}" "${COMPILE_CMD[@]}" 2>&1 | tee "$PREBUILD_LOG" && \
+       "${NORM_PREFIX[@]}" "${COMPILE_HEAP_AUDIT_CMD[@]}" 2>&1 | tee -a "$PREBUILD_LOG"; then
         PREBUILD_END=$(date +%s%N)
         PREBUILD_DUR_MS=$(( (PREBUILD_END - PREBUILD_START) / 1000000 ))
         prebuild_str=$(format_duration_ms "$PREBUILD_DUR_MS")
@@ -429,7 +444,7 @@ if [ "$DRY_RUN" = "1" ]; then
     echo -e "    cargo test --features testing --release --lib test_gc_stress_1000_swaps -- --ignored $NOCAPTURE_FLAG"
     echo -e "    cargo test --features testing --release --lib test_gc_drain_on_destroy_no_leak -- --ignored $NOCAPTURE_FLAG"
     echo -e "    cargo test --features testing --release --test heap_audit prop_gc_swap_idempotence -- --ignored $NOCAPTURE_FLAG"
-    echo -e "    cargo test --features testing --release --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
+    echo -e "    cargo test --features testing,heap-audit --release --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1 $NOCAPTURE_FLAG"
 else
     set +e
     echo -e "  ${BLUE}→ Running test_gc_stress_1000_swaps...${NC}"
@@ -498,9 +513,9 @@ else
     echo -e "  ${BLUE}→ Running test_corrupted_states_10000_heap_stable (heap soak)...${NC}"
     TMP_LOG="target/logs/long-phase1d.log"
     if [ -n "$NOCAPTURE_FLAG" ]; then
-        run_cargo_test "$TMP_LOG" --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1 --nocapture
+        run_cargo_test "$TMP_LOG" --features testing,heap-audit --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1 --nocapture
     else
-        run_cargo_test "$TMP_LOG" --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1
+        run_cargo_test "$TMP_LOG" --features testing,heap-audit --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1
     fi
     RC4=$?
     cat "$TMP_LOG" >> "$PHASE1_LOG" 2>/dev/null || true

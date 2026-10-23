@@ -16,6 +16,9 @@
 
 set -euo pipefail
 
+# Host memory guard: cap parallel rustc jobs to 4 to prevent OOM
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+
 # Preserve the original CLI for the memory-guard re-exec below (the option
 # parser consumes "$@" with shift).
 ORIGINAL_ARGS=("$@")
@@ -47,6 +50,11 @@ Options:
                          Enforce strict fail-closed mode (default: 1).
   --release-ceremony     Official release ceremony mode: requires a pristine worktree & strict tests.
   -h, --help             Show this help message and exit.
+
+Environment:
+  NAM_PGO_REUSE_TARGET=1 Reuse target/pgo-build and target/pgo-clap for local iteration
+                         (ignored with a warning in strict/ceremony mode; certified builds
+                         always start from an empty target).
 
 Deliverables:
   - ~/.clap/nam_plug.clap                      (Installed CLAP plugin)
@@ -109,10 +117,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 NAM_LIB_NO_CD=1 source "$SCRIPT_DIR/lib/_lib.sh"
 
-echo -e "${BLUE}${BOLD}========================================================================${NC}"
-echo -e "${BLUE}${BOLD}   NAM-Plug Unified Release Build & Optimization Pipeline               ${NC}"
-echo -e "${BLUE}${BOLD}========================================================================${NC}"
-
 # Ensure execution from the subproject root directory
 cd "$PROJECT_DIR"
 
@@ -128,6 +132,12 @@ if [ "${NAM_MEM_GUARD:-0}" != "1" ] && [ "${NAM_MEM_GUARD_ACTIVE:-0}" != "1" ] &
     export NAM_MEM_GUARD=1
     exec "$SCRIPT_DIR/mem-guard.sh" "$SCRIPT_PATH" "${ORIGINAL_ARGS[@]}"
 fi
+
+# Printed after the memory-guard re-exec: `exec` restarts the script and would
+# otherwise print the banner twice.
+echo -e "${BLUE}${BOLD}========================================================================${NC}"
+echo -e "${BLUE}${BOLD}   NAM-Plug Unified Release Build & Optimization Pipeline               ${NC}"
+echo -e "${BLUE}${BOLD}========================================================================${NC}"
 
 # Engine provenance variables
 CORE_PATH=""
@@ -205,7 +215,7 @@ except Exception:
 
 # Provenance fail-closed: an official certified release can never be produced
 # from a dirty work tree. In release ceremony mode this aborts before any heavy
-# work is started and is re-verified immediately before receipt generation (Phase 8).
+# work is started and is re-verified before packaging/receipt generation.
 check_git_clean_strict() {
     if [ "$RELEASE_CEREMONY" != "true" ]; then
         return 0
@@ -242,6 +252,20 @@ PARITY_OVERSAMPLE_STATUS="SKIP"
 PARITY_OVERSAMPLE_REASON=""
 PARITY_CABSIM_STATUS="SKIP"
 PARITY_CABSIM_REASON=""
+
+# External clap-validator outcome. Skipped tests are recorded explicitly: a
+# green validator run with N skips is not the same evidence as N=0.
+CLAP_VALIDATOR_STATUS="UNKNOWN"
+CLAP_VALIDATOR_TESTS_RUN=""
+CLAP_VALIDATOR_PASSED=""
+CLAP_VALIDATOR_FAILED=""
+CLAP_VALIDATOR_SKIPPED=""
+CLAP_VALIDATOR_SKIP_REASONS=""
+CLAP_VALIDATOR_LOG=""
+
+# Performance report fields surfaced in the receipt (isolation, not noise).
+PERF_ENVIRONMENT_DEGRADED="false"
+PERF_ENVIRONMENT_DEGRADED_REASONS=""
 
 # Dynamic isolated temporary directories for PGO & BOLT profiling and packaging
 PGO_DIR="$(mktemp -d -t nam-plug-pgo.XXXXXX)"
@@ -283,9 +307,26 @@ fi
 PGO_BUILD_TARGET_DIR="$PROJECT_DIR/target/pgo-build"
 PGO_CLAP_TARGET_DIR="$PROJECT_DIR/target/pgo-clap"
 
-# Clean prior target artifacts and initialize temporary directories
-rm -rf "$PGO_BUILD_TARGET_DIR" "$PGO_CLAP_TARGET_DIR"
-mkdir -p "$PROFRAW_DIR" "$BOLT_DIR" "$PROJECT_DIR/target"
+# Hermetic build targets: every certified run starts from an empty PGO/BOLT
+# target. For local iteration the operator may opt into reusing the previous
+# target with NAM_PGO_REUSE_TARGET=1; that is deliberately refused in strict and
+# ceremony modes, because a stale object could otherwise be certified as freshly
+# built bytes.
+PGO_REUSE_TARGET=false
+if [ "${NAM_PGO_REUSE_TARGET:-0}" = "1" ]; then
+    if [ "$STRICT_MODE" = "1" ] || [ "$RELEASE_CEREMONY" = "true" ]; then
+        warn "NAM_PGO_REUSE_TARGET=1 ignored in strict/ceremony mode: certified builds are hermetic."
+    else
+        PGO_REUSE_TARGET=true
+        warn "NAM_PGO_REUSE_TARGET=1: reusing $PGO_BUILD_TARGET_DIR (uncertified local iteration)."
+    fi
+fi
+if [ "$PGO_REUSE_TARGET" = "true" ] && [ -d "$PGO_BUILD_TARGET_DIR" ]; then
+    mkdir -p "$PGO_CLAP_TARGET_DIR" "$PROFRAW_DIR" "$BOLT_DIR" "$PROJECT_DIR/target"
+else
+    rm -rf "$PGO_BUILD_TARGET_DIR" "$PGO_CLAP_TARGET_DIR"
+    mkdir -p "$PROFRAW_DIR" "$BOLT_DIR" "$PROJECT_DIR/target"
+fi
 
 # Signal handling and process/temporary file cleanup
 cleanup() {
@@ -357,6 +398,25 @@ INSTALLED_AT_START_SHA=""
 if [ -f "$CLAP_TARGET" ]; then
     INSTALLED_AT_START_SHA=$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)
 fi
+
+# Certified-artifact identity (S3 / F-CER-01). The preliminary invocation
+# captures the bytes it installs; the ceremony reuses exactly those bytes and
+# never recompiles after the long audit.
+CERTIFIED_DIR="$PROJECT_DIR/target/certified"
+CERTIFIED_CLAP="$CERTIFIED_DIR/nam_plug.clap"
+CERTIFIED_CLAP_SHA_FILE="$CERTIFIED_CLAP.sha256"
+CERTIFIED_COPY_SHA=""
+REUSED_CERTIFIED_BINARY=false
+PRE_STRIP_ARTIFACT_SHA=""
+REUSED_BOLT_APPLIED=false
+REUSED_BOLT_PROOF=""
+REUSED_BOLT_PROFILE_SHA=""
+REUSED_BOLT_VERSION=""
+REUSED_BOLT_LBR_SAMPLES=""
+REUSED_BOLT_LBR_FDATA_SHA256=""
+CODEGEN_PRE_JSON="$PROJECT_DIR/target/logs/codegen-pre-bolt.json"
+CODEGEN_POST_JSON="$PROJECT_DIR/target/logs/codegen-post-bolt.json"
+LONG_RECEIPT_PATH="$PROJECT_DIR/target/logs/long-audit-receipt.jsonl"
 
 # -----------------------------------------------------------------------------
 # PHASE 1: Environment & Dependency Verification
@@ -646,20 +706,178 @@ fi
 # rejected by the unified-schema semantic verifier (never a substring search).
 # -----------------------------------------------------------------------------
 if [ "$RELEASE_CEREMONY" = "true" ]; then
-    LONG_RECEIPT="$PROJECT_DIR/target/logs/long-audit-receipt.jsonl"
-    if [ ! -f "$LONG_RECEIPT" ]; then
+    if [ ! -f "$LONG_RECEIPT_PATH" ]; then
         die "Release ceremony requires a real long-audit receipt on disk (target/logs/long-audit-receipt.jsonl is missing).\nAsk the human operator to execute:\n  ./utils/tests-long.sh --strict-pre-release\n(AI agents MUST NEVER execute the long suite)."
     fi
-    if ! cargo run --quiet --locked --features testing --bin plug_long_receipt -- validate --strict --out "$LONG_RECEIPT"; then
+    if ! cargo run --quiet --locked --features testing --bin plug_long_receipt -- validate --strict --out "$LONG_RECEIPT_PATH"; then
         die "Release ceremony rejected the long-audit receipt (target/logs/long-audit-receipt.jsonl): strict semantic verification failed — SIMULATED, declared gaps, failures or a forged OVERALL verdict are rejected fail-closed."
     fi
     echo -e "  ${GREEN}✓${NC} Real strict long-audit receipt verified (unified engine schema, semantic verification)."
+
+    # -------------------------------------------------------------------------
+    # F-CER-01: the ceremony never recompiles. It reuses the exact bytes that
+    # the long suite certified and rejects any divergent link in the chain:
+    # long-receipt SHA == installed SHA == target/certified copy SHA.
+    # -------------------------------------------------------------------------
+    set +e
+    CERTIFIED_LONG_OUT=$(cargo run --quiet --locked --features testing --bin plug_long_receipt -- \
+        verify-artifact --out "$LONG_RECEIPT_PATH" --artifact "$CLAP_TARGET" 2>/dev/null)
+    CERTIFIED_LONG_RC=$?
+    set -e
+    CERTIFIED_LONG_SHA=$(printf '%s\n' "$CERTIFIED_LONG_OUT" | awk '/^ARTIFACT_SHA256: /{print $2; exit}')
+    [ "$CERTIFIED_LONG_SHA" = "-" ] && CERTIFIED_LONG_SHA=""
+    if [ "$CERTIFIED_LONG_RC" -ne 0 ]; then
+        die "F-CER-01: the long-audit receipt does not certify the installed artifact (verify-artifact rc=$CERTIFIED_LONG_RC, sha=${CERTIFIED_LONG_SHA:-none}). Run the preliminary --strict-release --install build first; the ceremony refuses to rebuild."
+    fi
+
+    REUSE_VERDICT=$(ceremony_certified_verdict "$CERTIFIED_DIR" "$CLAP_TARGET" "$CERTIFIED_LONG_SHA")
+    if [ "$REUSE_VERDICT" != "ok" ]; then
+        die "F-CER-01: certified artifact chain rejected ($REUSE_VERDICT). Expected sha256(long receipt) == sha256(~/.clap/nam_plug.clap) == sha256(target/certified/nam_plug.clap). Re-run the preliminary --strict-release --install build; never rebuild silently in ceremony mode."
+    fi
+    if [ "$USE_PGO" != "true" ] || [ "$USE_BOLT" != "true" ]; then
+        die "F-CER-01: ceremony reuse requires the PGO+BOLT flags (got --no-pgo/--no-bolt); the certified artifact was produced with both and the receipt must describe the bytes it ships."
+    fi
+    CERTIFIED_COPY_SHA=$(sha256sum "$CERTIFIED_CLAP" | cut -d' ' -f1)
+
+    CODEGEN_VERDICT=$(ceremony_codegen_verdict "$CODEGEN_PRE_JSON" "$CODEGEN_POST_JSON")
+    if [ "$CODEGEN_VERDICT" != "ok" ]; then
+        die "F-CER-01: reused codegen evidence rejected ($CODEGEN_VERDICT). The ceremony requires the codegen-pre/post receipts produced by the preliminary PGO+BOLT build (target/logs/codegen-*-bolt.json)."
+    fi
+    PRE_STRIP_ARTIFACT_SHA=$(codegen_post_sha "$CODEGEN_POST_JSON")
+
+    # Chain of custody for the optimization evidence: the preliminary receipt
+    # must describe this exact installed binary and the same codegen/PGO logs.
+    PRELIM_RECEIPT="$PROJECT_DIR/target/release-receipt.json"
+    if [ ! -f "$PRELIM_RECEIPT" ]; then
+        die "F-CER-01: preliminary receipt target/release-receipt.json is missing; the ceremony cannot prove which build produced the certified artifact. Run the preliminary --strict-release --install build first."
+    fi
+    PRELIM_VALUES=$(python3 - "$PRELIM_RECEIPT" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        doc = json.load(handle)
+except Exception:
+    print("|||||||||||||||||||||||||||")
+    raise SystemExit(0)
+
+artifacts = doc.get("artifacts") or {}
+optimizations = doc.get("optimizations") or {}
+pgo = doc.get("pgo_workload") or {}
+provenance = doc.get("provenance") or {}
+engine = doc.get("engine_provenance") or {}
+print("|".join(str(v if v is not None else "") for v in (
+    artifacts.get("clap_installed_sha256") or "",
+    "true" if optimizations.get("pgo_applied") else "false",
+    "true" if optimizations.get("bolt_applied") else "false",
+    optimizations.get("bolt_proof") or "",
+    optimizations.get("bolt_profile_sha256") or "",
+    optimizations.get("bolt_version") or "",
+    optimizations.get("bolt_lbr_samples") or "",
+    optimizations.get("bolt_lbr_fdata_sha256") or "",
+    ((optimizations.get("codegen") or {}).get("post_bolt") or {}).get("sha256") or "",
+    pgo.get("status") or "",
+    pgo.get("log_sha256") or "",
+    pgo.get("receipt_sha256") or "",
+    pgo.get("gain") if pgo.get("gain") is not None else "",
+    pgo.get("scenarios") if pgo.get("scenarios") is not None else "",
+    pgo.get("callbacks") if pgo.get("callbacks") is not None else "",
+    pgo.get("clipping_count_phase1") if pgo.get("clipping_count_phase1") is not None else "",
+    pgo.get("clipping_count_bolt") if pgo.get("clipping_count_bolt") is not None else "",
+    provenance.get("rustflags") or "",
+    provenance.get("git_commit") or "",
+    "true" if provenance.get("git_dirty") is True else ("false" if provenance.get("git_dirty") is False else "missing"),
+    provenance.get("cargo_lock_sha256") or "",
+    provenance.get("rustc_version") or "",
+    engine.get("dependency_type") or "",
+    engine.get("version") or "",
+    engine.get("git_commit") or "",
+    engine.get("source_tree_sha256") or "",
+    "true" if engine.get("git_dirty") is True else ("false" if engine.get("git_dirty") is False else "missing"),
+)))
+PY
+)
+    IFS='|' read -r PRELIM_INSTALLED PRELIM_PGO PRELIM_BOLT PRELIM_PROOF PRELIM_PROFILE PRELIM_VERSION PRELIM_LBR PRELIM_LBR_SHA PRELIM_CODEGEN_SHA PRELIM_PGO_STATUS PRELIM_PGO_LOG_SHA PRELIM_PGO_RECEIPT_SHA PRELIM_PGO_GAIN PRELIM_PGO_SCENARIOS PRELIM_PGO_CALLBACKS PRELIM_PGO_CLIP1 PRELIM_PGO_CLIPBOLT PRELIM_RUSTFLAGS PRELIM_GIT_COMMIT PRELIM_GIT_DIRTY PRELIM_CARGO_LOCK_SHA PRELIM_RUSTC_VER PRELIM_ENGINE_DEP PRELIM_ENGINE_VERSION PRELIM_ENGINE_COMMIT PRELIM_ENGINE_TREE PRELIM_ENGINE_DIRTY <<<"$PRELIM_VALUES"
+
+    if [ "$PRELIM_INSTALLED" != "$CERTIFIED_COPY_SHA" ]; then
+        die "F-CER-01: preliminary receipt installed sha (${PRELIM_INSTALLED:-none}) != certified copy sha ($CERTIFIED_COPY_SHA). The artifact changed after the preliminary build."
+    fi
+    if [ "$PRELIM_PGO" != "true" ] || [ "$PRELIM_BOLT" != "true" ]; then
+        die "F-CER-01: preliminary receipt reports pgo_applied=$PRELIM_PGO bolt_applied=$PRELIM_BOLT; a ceremony requires the PGO+BOLT artifact certified by the long suite."
+    fi
+    if [ -z "$PRELIM_CODEGEN_SHA" ] || [ "$PRELIM_CODEGEN_SHA" != "$PRE_STRIP_ARTIFACT_SHA" ]; then
+        die "F-CER-01: codegen-post-bolt sha (${PRE_STRIP_ARTIFACT_SHA:-none}) != preliminary receipt post_bolt sha (${PRELIM_CODEGEN_SHA:-none}). The reused codegen evidence does not belong to the certified build."
+    fi
+    if [ "$PRELIM_PGO_STATUS" != "SUCCESS" ]; then
+        die "F-CER-01: preliminary receipt pgo_workload.status=${PRELIM_PGO_STATUS:-none} (expected SUCCESS); the ceremony requires the PGO evidence produced by the preliminary build."
+    fi
+    if [ ! -f "$PGO_WORKLOAD_RECEIPT" ] || [ ! -f "$PGO_WORKLOAD_LOG" ]; then
+        die "F-CER-01: reused PGO evidence is missing ($PGO_WORKLOAD_RECEIPT / $PGO_WORKLOAD_LOG). Re-run the preliminary build."
+    fi
+    CURRENT_PGO_LOG_SHA=$(sha256sum "$PGO_WORKLOAD_LOG" | cut -d' ' -f1)
+    CURRENT_PGO_RECEIPT_SHA=$(sha256sum "$PGO_WORKLOAD_RECEIPT" | cut -d' ' -f1)
+    if [ -z "$PRELIM_PGO_LOG_SHA" ] || [ "$PRELIM_PGO_LOG_SHA" != "$CURRENT_PGO_LOG_SHA" ]; then
+        die "F-CER-01: PGO workload log sha (${CURRENT_PGO_LOG_SHA:-none}) != preliminary receipt log sha (${PRELIM_PGO_LOG_SHA:-none}). The reused PGO evidence was modified or is unbound."
+    fi
+    if [ -z "$PRELIM_PGO_RECEIPT_SHA" ] || [ "$PRELIM_PGO_RECEIPT_SHA" != "$CURRENT_PGO_RECEIPT_SHA" ]; then
+        die "F-CER-01: PGO workload receipt sha (${CURRENT_PGO_RECEIPT_SHA:-none}) != preliminary receipt receipt_sha256 (${PRELIM_PGO_RECEIPT_SHA:-none}). The reused PGO receipt is modified or unbound."
+    fi
+
+    # Source provenance: the bytes must have been built from the checkout that
+    # is being certified. A clean tree alone is not enough (commit A artifact +
+    # clean checkout B would otherwise be certified as B).
+    CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+    CURRENT_LOCK_SHA=$(sha256sum Cargo.lock 2>/dev/null | cut -d' ' -f1 || echo "")
+    CURRENT_RUSTC_VER=$(rustc --version 2>/dev/null || echo "")
+    EXPECTED_ENGINE_DEP="crates_io"
+    EXPECTED_ENGINE_COMMIT=""
+    if [ -n "$CORE_PATH" ]; then
+        EXPECTED_ENGINE_DEP="path_patch"
+        [ "$CORE_GIT_COMMIT" != "unknown" ] && EXPECTED_ENGINE_COMMIT="$CORE_GIT_COMMIT"
+    fi
+    if [ "$PRELIM_GIT_COMMIT" != "$CURRENT_HEAD" ] || [ "$PRELIM_GIT_DIRTY" != "false" ]; then
+        die "F-CER-01: preliminary build source (commit=${PRELIM_GIT_COMMIT:-none}, dirty=$PRELIM_GIT_DIRTY) does not match the certified checkout (commit=${CURRENT_HEAD:-none}, dirty=false). Rebuild the preliminary artifact from the checkout being certified."
+    fi
+    if [ "$PRELIM_CARGO_LOCK_SHA" != "$CURRENT_LOCK_SHA" ] || [ "$PRELIM_RUSTC_VER" != "$CURRENT_RUSTC_VER" ]; then
+        die "F-CER-01: preliminary build toolchain/lock differs from the current checkout (cargo.lock or rustc version changed). Rebuild the preliminary artifact."
+    fi
+    if [ "$PRELIM_ENGINE_DEP" != "$EXPECTED_ENGINE_DEP" ] \
+        || [ "$PRELIM_ENGINE_VERSION" != "$CORE_VERSION" ] \
+        || [ "$PRELIM_ENGINE_COMMIT" != "$EXPECTED_ENGINE_COMMIT" ] \
+        || [ "$PRELIM_ENGINE_TREE" != "$CORE_TREE_SHA" ] \
+        || [ "$PRELIM_ENGINE_DIRTY" != "${CORE_GIT_DIRTY:-false}" ]; then
+        die "F-CER-01: preliminary engine provenance does not match the current dependency. Rebuild the preliminary artifact."
+    fi
+
+    REUSED_CERTIFIED_BINARY=true
+    REUSED_BOLT_APPLIED="$PRELIM_BOLT"
+    REUSED_BOLT_PROOF="$PRELIM_PROOF"
+    REUSED_BOLT_PROFILE_SHA="$PRELIM_PROFILE"
+    REUSED_BOLT_VERSION="$PRELIM_VERSION"
+    REUSED_BOLT_LBR_SAMPLES="$PRELIM_LBR"
+    REUSED_BOLT_LBR_FDATA_SHA256="$PRELIM_LBR_SHA"
+    REUSED_PGO_STATUS="$PRELIM_PGO_STATUS"
+    REUSED_PGO_GAIN="$PRELIM_PGO_GAIN"
+    REUSED_PGO_SCENARIOS="$PRELIM_PGO_SCENARIOS"
+    REUSED_PGO_CALLBACKS="$PRELIM_PGO_CALLBACKS"
+    REUSED_PGO_LOG_SHA="$PRELIM_PGO_LOG_SHA"
+    REUSED_PGO_RECEIPT_SHA="$PRELIM_PGO_RECEIPT_SHA"
+    REUSED_PGO_CLIPPING_PHASE1="${PRELIM_PGO_CLIP1:-0}"
+    REUSED_PGO_CLIPPING_BOLT="${PRELIM_PGO_CLIPBOLT:-0}"
+    PGO_WORKLOAD_RAN_PHASE1=true
+    PGO_WORKLOAD_RAN_BOLT=true
+    [ -n "$PRELIM_RUSTFLAGS" ] && CLAP_RUSTFLAGS="$PRELIM_RUSTFLAGS"
+    echo -e "  ${GREEN}✓${NC} Certified artifact chain verified: installed == certified copy == long receipt (sha256: ${CERTIFIED_COPY_SHA:0:16}...)."
+    echo -e "  ${GREEN}✓${NC} Reusing preliminary PGO/BOLT + codegen evidence from commit ${PRELIM_GIT_COMMIT:0:12}; Phases 2-4 will not rebuild."
 fi
 
 # -----------------------------------------------------------------------------
 # PHASE 2: Profile-Guided Optimization (PGO) - Profiling Workload
 # -----------------------------------------------------------------------------
-if [ "$USE_PGO" = true ]; then
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ]; then
+    echo -e "\n${BLUE}${BOLD}[Phase 2/7] Reusing certified artifact — PGO profiling skipped (F-CER-01).${NC}"
+elif [ "$USE_PGO" = true ]; then
     echo -e "\n${BLUE}${BOLD}[Phase 2/7] Generating PGO profiles via workload runner...${NC}"
 
     # Allocate sufficient static value profile counters (LLVM default is 2, which exhausts on polymorphic DSP topologies).
@@ -716,23 +934,30 @@ fi
 # -----------------------------------------------------------------------------
 echo -e "\n${BLUE}${BOLD}[Phase 3/7] Compiling optimized CLAP plugin...${NC}"
 
-CLAP_BASE_RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS"
-if [ "$USE_PGO" = true ] && [ -f "$MERGED_PROFILE" ]; then
-    CLAP_BASE_RUSTFLAGS="$CLAP_BASE_RUSTFLAGS -Cprofile-use=$MERGED_PROFILE"
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ]; then
+    echo -e "  ${YELLOW}Reusing certified artifact — CLAP compilation skipped (F-CER-01).${NC}"
+    # Provenance is taken from the preliminary receipt below this block; keep a
+    # syntactically valid flag string even if that receipt is incomplete.
+    [ -n "${CLAP_RUSTFLAGS:-}" ] || CLAP_RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS -Clink-arg=-Wl,-q -Clink-arg=-Wl,-soname,nam_plug.clap"
 else
-    echo -e "  ${YELLOW}Compiling without PGO profile.${NC}"
-fi
+    CLAP_BASE_RUSTFLAGS="$CONFIG_RUSTFLAGS $ORIG_RUSTFLAGS"
+    if [ "$USE_PGO" = true ] && [ -f "$MERGED_PROFILE" ]; then
+        CLAP_BASE_RUSTFLAGS="$CLAP_BASE_RUSTFLAGS -Cprofile-use=$MERGED_PROFILE"
+    else
+        echo -e "  ${YELLOW}Compiling without PGO profile.${NC}"
+    fi
 
-CLAP_RUSTFLAGS="$CLAP_BASE_RUSTFLAGS -Clink-arg=-Wl,-q -Clink-arg=-Wl,-soname,nam_plug.clap"
-echo -e "  Using RUSTFLAGS (CLAP): ${BOLD}$CLAP_RUSTFLAGS${NC}"
-RUSTFLAGS="$CLAP_RUSTFLAGS" cargo build --locked --profile dist --target-dir "$PGO_CLAP_TARGET_DIR" --lib
+    CLAP_RUSTFLAGS="$CLAP_BASE_RUSTFLAGS -Clink-arg=-Wl,-q -Clink-arg=-Wl,-soname,nam_plug.clap"
+    echo -e "  Using RUSTFLAGS (CLAP): ${BOLD}$CLAP_RUSTFLAGS${NC}"
+    RUSTFLAGS="$CLAP_RUSTFLAGS" cargo build --locked --profile dist --target-dir "$PGO_CLAP_TARGET_DIR" --lib
 
-# Confirm binary compiled
-if [ ! -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
-    echo -e "${RED}Error: Failed to find compiled CLAP plugin library at $PGO_CLAP_TARGET_DIR/dist/libnam_plug.so${NC}"
-    exit 1
+    # Confirm binary compiled
+    if [ ! -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
+        echo -e "${RED}Error: Failed to find compiled CLAP plugin library at $PGO_CLAP_TARGET_DIR/dist/libnam_plug.so${NC}"
+        exit 1
+    fi
 fi
-echo -e "  ${GREEN}✓${NC} Compilation completed successfully."
+echo -e "  ${GREEN}✓${NC} Compilation step satisfied (compiled or certified artifact reused)."
 
 # Ensure RUSTFLAGS and LLVM_PROFILE_FILE do not leak into downstream phases or verification gates
 unset RUSTFLAGS LLVM_PROFILE_FILE 2>/dev/null || true
@@ -744,7 +969,10 @@ CLAP_BOLT_APPLIED=false
 BOLT_PROFILE_SHA=""
 BOLT_VERSION=""
 
-if [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ]; then
+    echo -e "\n${BLUE}${BOLD}[Phase 4/7] Reusing certified artifact — BOLT optimization skipped (F-CER-01).${NC}"
+    CLAP_BOLT_APPLIED="$REUSED_BOLT_APPLIED"
+elif [ "$USE_BOLT" = true ] && [ -n "$LLVM_BOLT" ]; then
     echo -e "\n${BLUE}${BOLD}[Phase 4/7] Applying BOLT post-link optimization...${NC}"
 
     # Step 1: Instrument CLAP binary
@@ -905,7 +1133,7 @@ fi
 # A claimed BOLT application must be backed by the optimized artifact. Losing
 # the file between phases would otherwise silently ship the pre-BOLT `.so`
 # while the receipt says `bolt_applied: true`.
-if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ ! -s "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
+if [ "$REUSED_CERTIFIED_BINARY" != "true" ] && [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ ! -s "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
     die "CLAP_BOLT_APPLIED=true but the optimized artifact is missing: $PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so (fail-closed)."
 fi
 
@@ -923,7 +1151,18 @@ BOLT_PROOF="MISSING"
 BOLT_LBR_SAMPLES=""
 BOLT_LBR_FDATA_SHA256=""
 CEREMONY_RECEIPT="$PROJECT_DIR/target/logs/ab-opt-ceremony-receipt.json"
-if [ -f "$CEREMONY_RECEIPT" ]; then
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ]; then
+    BOLT_PROOF="${REUSED_BOLT_PROOF:-MISSING}"
+    BOLT_LBR_SAMPLES="$REUSED_BOLT_LBR_SAMPLES"
+    BOLT_LBR_FDATA_SHA256="$REUSED_BOLT_LBR_FDATA_SHA256"
+    BOLT_PROFILE_SHA="$REUSED_BOLT_PROFILE_SHA"
+    BOLT_VERSION="$REUSED_BOLT_VERSION"
+    if [ "$BOLT_PROOF" = "MISSING" ]; then
+        warn "Preliminary receipt carries no BOLT proof; the ceremony cannot certify (typed gap bolt_proof:missing_ceremony)."
+    else
+        echo -e "  ${GREEN}✓${NC} BOLT proof reused from preliminary receipt: $BOLT_PROOF"
+    fi
+elif [ -f "$CEREMONY_RECEIPT" ]; then
     read -r proof_id ceremony_lbr ceremony_sha <<<"$(python3 -c '
 import hashlib, json, sys
 path = sys.argv[1]
@@ -978,10 +1217,12 @@ echo -e "\n${BLUE}${BOLD}[Phase 4.5/7] Generating AI-ready assembly hotspot repo
 ASM_TARGET="$PROJECT_DIR/target/dsp_hotpath.asm"
 mkdir -p "$PROJECT_DIR/target"
 mkdir -p "$PROJECT_DIR/target/logs"
-CODEGEN_PRE_JSON="$PROJECT_DIR/target/logs/codegen-pre-bolt.json"
-CODEGEN_POST_JSON="$PROJECT_DIR/target/logs/codegen-post-bolt.json"
 CODEGEN_COMPARISON="not_run"
-rm -f "$CODEGEN_PRE_JSON" "$CODEGEN_POST_JSON"
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ]; then
+    CODEGEN_COMPARISON="$(codegen_compare_verdict "$CODEGEN_PRE_JSON" "$CODEGEN_POST_JSON")"
+else
+    rm -f "$CODEGEN_PRE_JSON" "$CODEGEN_POST_JSON"
+fi
 
 if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
     ASM_BIN="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so"
@@ -989,7 +1230,9 @@ elif [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" ]; then
     ASM_BIN="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so"
 fi
 
-if [ -n "${ASM_BIN:-}" ]; then
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ]; then
+    ok "Reused pre/post-BOLT codegen evidence (comparison: $CODEGEN_COMPARISON; pre-strip sha256: ${PRE_STRIP_ARTIFACT_SHA:0:16}...)."
+elif [ -n "${ASM_BIN:-}" ]; then
     OBJDUMP_TOOL=""
     if command -v llvm-objdump &>/dev/null; then
         OBJDUMP_TOOL="llvm-objdump"
@@ -1112,40 +1355,7 @@ PYEOF
         # Post-BOLT coverage must not shrink silently: BOLT reorders functions and
         # keeps cold/unmoved bodies in `.bolt.org.text`, so accepting suffixes and
         # disassembling per symbol is what makes the post-link check meaningful.
-        CODEGEN_COMPARISON="$(python3 - "$CODEGEN_PRE_JSON" "$CODEGEN_POST_JSON" <<'PY'
-import json
-import sys
-
-
-def load(path):
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-pre = load(sys.argv[1])
-post = load(sys.argv[2])
-if pre is None and post is None:
-    print("absent")
-elif pre is None:
-    print("post_only")
-elif post is None:
-    print("pre_only")
-else:
-    fewer_targets = int(post.get("targets_matched", 0)) < int(pre.get("targets_matched", 0))
-    fewer_symbols = int(post.get("symbols", 0)) < int(pre.get("symbols", 0))
-    if fewer_targets and fewer_symbols:
-        print("post_has_fewer_symbols_and_targets")
-    elif fewer_targets:
-        print("post_has_fewer_targets")
-    elif fewer_symbols:
-        print("post_has_fewer_symbols")
-    else:
-        print("match")
-PY
-)"
+        CODEGEN_COMPARISON="$(codegen_compare_verdict "$CODEGEN_PRE_JSON" "$CODEGEN_POST_JSON")"
         case "$CODEGEN_COMPARISON" in
             match)
                 PRE_SUMMARY="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("{} symbols/{} instr, {}/{} targets".format(d["symbols"], d["instructions"], d["targets_matched"], d["targets_total"]))' "$CODEGEN_PRE_JSON")"
@@ -1197,25 +1407,58 @@ else
     echo -e "  ${YELLOW}Warning: No optimized binary found for disassembly.${NC}"
 fi
 
+# Record the pre-strip BOLT identity alongside the post-strip installed bytes.
+# The preliminary receipt must carry both; only the installed (post-strip) SHA
+# is compared with the long-audit receipt.
+if [ -f "$CODEGEN_POST_JSON" ]; then
+    CODEGEN_POST_SHA=$(codegen_post_sha "$CODEGEN_POST_JSON")
+    [ -n "$CODEGEN_POST_SHA" ] && PRE_STRIP_ARTIFACT_SHA="$CODEGEN_POST_SHA"
+fi
+
 # -----------------------------------------------------------------------------
 # PHASE 5: Deliverables Installation & Strict Certification of Shipped Bytes
 # -----------------------------------------------------------------------------
 echo -e "\n${BLUE}${BOLD}[Phase 5/7] Installing and strictly certifying distributed artifact...${NC}"
 
-mkdir -p "$CLAP_INSTALL_DIR"
-rm -f "$CLAP_TARGET"
-
-if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
-    cp "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" "$CLAP_TARGET"
-    strip --strip-unneeded "$CLAP_TARGET"
-    echo -e "  Installed CLAP plugin (PGO + BOLT): $CLAP_TARGET"
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ]; then
+    if [ ! -f "$CLAP_TARGET" ]; then
+        die "F-CER-01: certified artifact is missing at $CLAP_TARGET; the ceremony refuses to rebuild."
+    fi
+    if ! cmp -s "$CLAP_TARGET" "$CERTIFIED_CLAP"; then
+        die "F-CER-01: installed artifact diverged from the certified copy before certification gates."
+    fi
+    echo -e "  ${GREEN}✓${NC} Reusing installed certified artifact (no rebuild): $CLAP_TARGET"
 else
-    cp "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" "$CLAP_TARGET"
-    strip --strip-unneeded "$CLAP_TARGET"
-    echo -e "  Installed CLAP plugin (PGO): $CLAP_TARGET"
+    mkdir -p "$CLAP_INSTALL_DIR"
+    rm -f "$CLAP_TARGET"
+
+    if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ -f "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
+        cp "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" "$CLAP_TARGET"
+        strip --strip-unneeded "$CLAP_TARGET"
+        echo -e "  Installed CLAP plugin (PGO + BOLT): $CLAP_TARGET"
+    else
+        cp "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so" "$CLAP_TARGET"
+        strip --strip-unneeded "$CLAP_TARGET"
+        echo -e "  Installed CLAP plugin (PGO): $CLAP_TARGET"
+    fi
+
+    # T3.1: capture the exact installed bytes for the later ceremony. The copy
+    # lives outside target/logs and outside target/pgo-* so the ceremony can
+    # prove identity instead of rebuilding (F-CER-01).
+    mkdir -p "$CERTIFIED_DIR"
+    cp "$CLAP_TARGET" "$CERTIFIED_CLAP"
+    if ! cmp -s "$CLAP_TARGET" "$CERTIFIED_CLAP"; then
+        die "F-CER-01: certified copy is not byte-identical to the installed artifact ($CERTIFIED_CLAP)."
+    fi
+    sha256sum "$CERTIFIED_CLAP" | cut -d' ' -f1 > "$CERTIFIED_CLAP_SHA_FILE"
+    CERTIFIED_COPY_SHA=$(sha256sum "$CERTIFIED_CLAP" | cut -d' ' -f1)
+    echo -e "  ${GREEN}✓${NC} Certified artifact captured: $CERTIFIED_CLAP (sha256: ${CERTIFIED_COPY_SHA:0:16}...)"
 fi
 
 FINAL_CLAP_SHA=$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)
+if [ -n "$CERTIFIED_COPY_SHA" ] && [ "$FINAL_CLAP_SHA" != "$CERTIFIED_COPY_SHA" ]; then
+    die "F-CER-01: installed sha256 ($FINAL_CLAP_SHA) != certified copy sha256 ($CERTIFIED_COPY_SHA)."
+fi
 echo -e "  ${CYAN}Distributed CLAP artifact SHA-256:${NC} ${BOLD}$FINAL_CLAP_SHA${NC}"
 
 # Gate 1: Symbols and SONAME on distributed artifact
@@ -1231,14 +1474,36 @@ ok "Symbol and SONAME validation passed."
 # Gate 2: External clap-validator
 echo -e "  [Gate 2/5] Running external clap-validator against distributed artifact..."
 if command -v clap-validator >/dev/null 2>&1; then
-    clap-validator validate "$CLAP_TARGET" || die "clap-validator rejected the distribution artifact!"
-    ok "clap-validator passed."
+    CLAP_VALIDATOR_LOG="$PROJECT_DIR/target/logs/clap-validator.log"
+    mkdir -p "$(dirname "$CLAP_VALIDATOR_LOG")"
+    set +e
+    clap-validator validate "$CLAP_TARGET" 2>&1 | tee "$CLAP_VALIDATOR_LOG"
+    CLAP_VALIDATOR_RC=${PIPESTATUS[0]}
+    set -e
+    [ "$CLAP_VALIDATOR_RC" -eq 0 ] || die "clap-validator rejected the distribution artifact!"
+
+    # clap-validator prints "<N> tests run, <P> passed, <F> failed, <S> skipped".
+    # Parse the last summary line so the receipt carries the exact counts
+    # instead of only the process exit code.
+    CLAP_VALIDATOR_SUMMARY=$(grep -E 'tests run, .* passed, .* failed, .* skipped' "$CLAP_VALIDATOR_LOG" | tail -n 1 || true)
+    CLAP_VALIDATOR_TESTS_RUN=$(printf '%s\n' "$CLAP_VALIDATOR_SUMMARY" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\) tests run.*/\1/p')
+    CLAP_VALIDATOR_PASSED=$(printf '%s\n' "$CLAP_VALIDATOR_SUMMARY" | sed -n 's/.*tests run, \([0-9][0-9]*\) passed.*/\1/p')
+    CLAP_VALIDATOR_FAILED=$(printf '%s\n' "$CLAP_VALIDATOR_SUMMARY" | sed -n 's/.* passed, \([0-9][0-9]*\) failed.*/\1/p')
+    CLAP_VALIDATOR_SKIPPED=$(printf '%s\n' "$CLAP_VALIDATOR_SUMMARY" | sed -n 's/.* failed, \([0-9][0-9]*\) skipped.*/\1/p')
+    CLAP_VALIDATOR_SKIP_REASONS=$(grep -oE 'SKIPPED: .*' "$CLAP_VALIDATOR_LOG" \
+        | sed 's/^SKIPPED: //' | sort -u | paste -sd ';' - || true)
+    CLAP_VALIDATOR_STATUS="PASSED"
+    if [ -n "$CLAP_VALIDATOR_SKIPPED" ] && [ "$CLAP_VALIDATOR_SKIPPED" != "0" ]; then
+        warn "clap-validator skipped $CLAP_VALIDATOR_SKIPPED test(s): $CLAP_VALIDATOR_SKIP_REASONS"
+    fi
+    ok "clap-validator passed${CLAP_VALIDATOR_SUMMARY:+ ($CLAP_VALIDATOR_SUMMARY)}."
 else
     if [ "$STRICT_MODE" = "1" ]; then
         die "clap-validator unavailable in strict release mode!"
     fi
     warn "clap-validator unavailable. Skipping external validation."
     GATE_SKIPS+=("clap_validator:unavailable")
+    CLAP_VALIDATOR_STATUS="UNAVAILABLE"
 fi
 
 # Gate 3: NAMCore float parity test against distributed artifact
@@ -1391,6 +1656,35 @@ set -e
 
 if [ -f "$PERF_REPORT_PATH" ]; then
     PERF_REPORT_SHA=$(sha256sum "$PERF_REPORT_PATH" | cut -d' ' -f1)
+    # Surface host isolation separately from measurement noise. The guard keeps
+    # `environment_stable` for the coefficient-of-variation statistic and records
+    # isolation gaps in dedicated fields; the receipt must carry both so a PASS
+    # obtained on a non-isolated host is never read as a fully isolated run.
+    PERF_ENVIRONMENT_VALUES=$(python3 - "$PERF_REPORT_PATH" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        report = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    print("false")
+    print("")
+    raise SystemExit(0)
+
+degraded = report.get("environment_degraded") is True
+reasons = report.get("environment_degraded_reasons") or []
+if not isinstance(reasons, list):
+    reasons = [str(reasons)]
+print("true" if degraded else "false")
+print(";".join(str(reason) for reason in reasons))
+PY
+)
+    PERF_ENVIRONMENT_DEGRADED=$(printf '%s\n' "$PERF_ENVIRONMENT_VALUES" | sed -n '1p')
+    PERF_ENVIRONMENT_DEGRADED_REASONS=$(printf '%s\n' "$PERF_ENVIRONMENT_VALUES" | sed -n '2p')
+    if [ "$PERF_ENVIRONMENT_DEGRADED" = "true" ]; then
+        warn "Performance gate ran on a degraded host (isolation, not noise): ${PERF_ENVIRONMENT_DEGRADED_REASONS:-unknown}."
+    fi
 fi
 
 if [ "$PERF_EXIT_CODE" -eq 0 ]; then
@@ -1417,9 +1711,135 @@ TARBALL_SHA=""
 FLATPAK_SHA=""
 
 # -----------------------------------------------------------------------------
+# Certification status (derived before packaging)
+# -----------------------------------------------------------------------------
+# A failed ceremony must never overwrite the last-known-good distribution files
+# in $HOME. The status is therefore derived here, before Phases 6–7, and those
+# phases are skipped when a ceremony cannot certify the artifact.
+# Re-verify clean work tree before packaging and receipt writing (fail-closed).
+check_git_clean_strict
+
+GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+GIT_DIRTY=false
+if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+    GIT_DIRTY=true
+    # A rewritten lockfile is a deliberate dependency change, not an anonymous
+    # dirty tree: name the cause so the operator knows the next step.
+    if [ -n "$(git status --porcelain -- Cargo.lock 2>/dev/null || true)" ]; then
+        GATE_SKIPS+=("git_dirty:Cargo.lock")
+        warn "Cargo.lock differs from the committed lockfile — receipt cannot certify until it is committed (typed gap git_dirty:Cargo.lock)."
+    else
+        GATE_SKIPS+=("git_dirty:worktree")
+        warn "Working tree is dirty — receipt cannot certify (typed gap git_dirty:worktree)."
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# PHASE 4.2: BOLT label fallback via the measured performance gate
+# -----------------------------------------------------------------------------
+# The Plug ships no ab-opt ceremony producer (docs/testing.md §5.4.1). A PASSED
+# performance gate proves the deadline envelope, not a BOLT win, so it is
+# recorded as `gate-pass-only`; it never promotes the claim to a proof. An
+# applied BOLT without ceremony proof and without a passing gate remains a typed
+# gap in EVERY mode, so it can never yield a CERTIFIED receipt.
+if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ "$BOLT_PROOF" = "MISSING" ] && [ "$PERF_GATE_STATUS" = "PASSED" ]; then
+    BOLT_PROOF="gate-pass-only"
+    warn "BOLT win unproven; recording explicit label '$BOLT_PROOF' (performance gate PASSED)."
+fi
+if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ "$BOLT_PROOF" = "MISSING" ]; then
+    GATE_SKIPS+=("bolt_proof:missing_ceremony")
+    warn "BOLT applied but unproven (no ab-opt-ceremony receipt; perf gate not PASSED): typed gap bolt_proof:missing_ceremony."
+fi
+
+# -----------------------------------------------------------------------------
+# Long-audit artifact consistency (E-A)
+# -----------------------------------------------------------------------------
+# The long receipt is the only phase evidence that exercises the installed
+# binary. Compare the artifact it declares with the binary this pipeline just
+# installed; a receipt from another session (different artifact) is `absent`,
+# never silently credited. In ceremony mode the preflight already ran this
+# verifier, so reuse its result instead of spawning it a second time.
+ARTIFACT_CONSISTENCY="absent"
+LONG_RECEIPT_ARTIFACT_SHA=""
+LONG_RECEIPT_SESSION="none"
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ] && [ -n "${CERTIFIED_LONG_SHA:-}" ]; then
+    ARTIFACT_CONSISTENCY="match"
+    LONG_RECEIPT_ARTIFACT_SHA="$CERTIFIED_LONG_SHA"
+    LONG_RECEIPT_SESSION="current"
+elif [ -f "$LONG_RECEIPT_PATH" ]; then
+    set +e
+    ARTIFACT_VERDICT_OUT=$(cargo run --quiet --locked --features testing --bin plug_long_receipt -- \
+        verify-artifact --out "$LONG_RECEIPT_PATH" --artifact "$CLAP_TARGET" 2>/dev/null)
+    ARTIFACT_VERDICT_RC=$?
+    set -e
+    LONG_RECEIPT_ARTIFACT_SHA=$(printf '%s\n' "$ARTIFACT_VERDICT_OUT" | awk '/^ARTIFACT_SHA256: /{print $2; exit}')
+    [ "$LONG_RECEIPT_ARTIFACT_SHA" = "-" ] && LONG_RECEIPT_ARTIFACT_SHA=""
+    if [ "$ARTIFACT_VERDICT_RC" = "1" ]; then
+        ARTIFACT_CONSISTENCY="mismatch"
+    elif [ "$ARTIFACT_VERDICT_RC" = "0" ]; then
+        ARTIFACT_CONSISTENCY="match"
+    else
+        ARTIFACT_CONSISTENCY="absent"
+    fi
+    if [ -n "$INSTALLED_AT_START_SHA" ] && [ -n "$LONG_RECEIPT_ARTIFACT_SHA" ]; then
+        if [ "$LONG_RECEIPT_ARTIFACT_SHA" = "$INSTALLED_AT_START_SHA" ]; then
+            LONG_RECEIPT_SESSION="current"
+        else
+            LONG_RECEIPT_SESSION="stale"
+            ARTIFACT_CONSISTENCY="absent"
+        fi
+    elif [ -n "$LONG_RECEIPT_ARTIFACT_SHA" ]; then
+        LONG_RECEIPT_SESSION="current"
+    fi
+    if [ "$ARTIFACT_CONSISTENCY" = "match" ]; then
+        echo -e "  ${GREEN}✓${NC} Long-audit receipt certifies the installed artifact (sha256: ${LONG_RECEIPT_ARTIFACT_SHA:0:16}...)."
+    else
+        warn "Long-audit artifact consistency: $ARTIFACT_CONSISTENCY (session=$LONG_RECEIPT_SESSION, receipt_sha=${LONG_RECEIPT_ARTIFACT_SHA:-none}, installed_sha=${FINAL_CLAP_SHA:-unknown})."
+    fi
+fi
+ARTIFACT_GAP=$(receipt_artifact_gap "$ARTIFACT_CONSISTENCY")
+if [ -n "$ARTIFACT_GAP" ]; then
+    GATE_SKIPS+=("$ARTIFACT_GAP")
+    warn "Long-audit provenance is '$ARTIFACT_CONSISTENCY' — typed gap $ARTIFACT_GAP (finalized by utils/finalize-release-receipt.sh after the long suite)."
+fi
+
+# Determine typed certification status (CERTIFIED, FUNCTIONALLY_CERTIFIED, INCOMPLETE).
+# The rule lives in lib/_lib.sh so the post-long-audit finalizer never drifts.
+NON_ARTIFACT_SKIP_COUNT=0
+for skip in "${GATE_SKIPS[@]}"; do
+    case "$skip" in
+        artifact_consistency:*) ;;
+        *) NON_ARTIFACT_SKIP_COUNT=$((NON_ARTIFACT_SKIP_COUNT + 1)) ;;
+    esac
+done
+RECEIPT_STATUS=$(receipt_derive_status \
+    "$GIT_DIRTY" "${CORE_GIT_DIRTY:-false}" "$PERF_GATE_STATUS" \
+    "$QUICK_QA_PASSED" "$HEAP_AUDIT_PASSED" "$USE_PGO" \
+    "${CLAP_BOLT_APPLIED:-false}" "$NON_ARTIFACT_SKIP_COUNT")
+RECEIPT_STATUS=$(receipt_apply_artifact_cap \
+    "$RECEIPT_STATUS" "$ARTIFACT_CONSISTENCY" "$STRICT_MODE")
+
+GATE_SKIPS_JOINED=""
+if [ ${#GATE_SKIPS[@]} -gt 0 ]; then
+    GATE_SKIPS_JOINED=$(IFS='|'; printf '%s' "${GATE_SKIPS[*]}")
+fi
+if [ "$RECEIPT_STATUS" = "INCOMPLETE" ]; then
+    warn "Receipt status INCOMPLETE: git_dirty=$GIT_DIRTY core_git_dirty=$CORE_GIT_DIRTY skipped_gates=[${GATE_SKIPS_JOINED:-(none)}]"
+fi
+
+PACKAGING_ALLOWED=true
+if [ "$RELEASE_CEREMONY" = "true" ] && [ "$RECEIPT_STATUS" != "CERTIFIED" ]; then
+    PACKAGING_ALLOWED=false
+    warn "Ceremony status $RECEIPT_STATUS: distribution packaging is skipped; receipt and artifacts remain in target/ for diagnosis."
+fi
+
+# -----------------------------------------------------------------------------
 # PHASE 6: Release Packaging (.tar.zst)
 # -----------------------------------------------------------------------------
-if [ "$BUILD_TARBALL" = true ]; then
+if [ "$PACKAGING_ALLOWED" != "true" ]; then
+    echo -e "\n${YELLOW}[Phase 6/7] Skipping tarball packaging (ceremony status $RECEIPT_STATUS).${NC}"
+elif [ "$BUILD_TARBALL" = true ]; then
     echo -e "\n${BLUE}${BOLD}[Phase 6/7] Generating distribution tarball...${NC}"
 
     PKG_DIR="$(mktemp -d -t nam-plug-pkg.XXXXXX)"
@@ -1454,7 +1874,9 @@ fi
 # -----------------------------------------------------------------------------
 # PHASE 7: Release Packaging (.flatpak)
 # -----------------------------------------------------------------------------
-if [ "$BUILD_FLATPAK" = true ]; then
+if [ "$PACKAGING_ALLOWED" != "true" ]; then
+    echo -e "\n${YELLOW}[Phase 7/7] Skipping Flatpak packaging (ceremony status $RECEIPT_STATUS).${NC}"
+elif [ "$BUILD_FLATPAK" = true ]; then
     echo -e "\n${BLUE}${BOLD}[Phase 7/7] Generating Flatpak Plugin Extension Bundle (.flatpak)...${NC}"
 
     FLATPAK_BUILD_DIR="$(mktemp -d -t nam-plug-flatpak-build.XXXXXX)"
@@ -1525,113 +1947,6 @@ fi
 # -----------------------------------------------------------------------------
 echo -e "\n${BLUE}${BOLD}[Receipt] Generating cryptographic build provenance receipt...${NC}"
 
-# Re-verify clean work tree before receipt writing (fail-closed)
-check_git_clean_strict
-
-GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-GIT_DIRTY=false
-if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
-    GIT_DIRTY=true
-    # A rewritten lockfile is a deliberate dependency change, not an anonymous
-    # dirty tree: name the cause so the operator knows the next step.
-    if [ -n "$(git status --porcelain -- Cargo.lock 2>/dev/null || true)" ]; then
-        GATE_SKIPS+=("git_dirty:Cargo.lock")
-        warn "Cargo.lock differs from the committed lockfile — receipt cannot certify until it is committed (typed gap git_dirty:Cargo.lock)."
-    else
-        GATE_SKIPS+=("git_dirty:worktree")
-        warn "Working tree is dirty — receipt cannot certify (typed gap git_dirty:worktree)."
-    fi
-fi
-
-# -----------------------------------------------------------------------------
-# PHASE 4.2: BOLT label fallback via the measured performance gate
-# -----------------------------------------------------------------------------
-# The Plug ships no ab-opt ceremony producer (docs/testing.md §5.4.1). A PASSED
-# performance gate proves the deadline envelope, not a BOLT win, so it is
-# recorded as `gate-pass-only`; it never promotes the claim to a proof. An
-# applied BOLT without ceremony proof and without a passing gate remains a typed
-# gap in EVERY mode, so it can never yield a CERTIFIED receipt.
-if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ "$BOLT_PROOF" = "MISSING" ] && [ "$PERF_GATE_STATUS" = "PASSED" ]; then
-    BOLT_PROOF="gate-pass-only"
-    warn "BOLT win unproven; recording explicit label '$BOLT_PROOF' (performance gate PASSED)."
-fi
-if [ "${CLAP_BOLT_APPLIED:-false}" = true ] && [ "$BOLT_PROOF" = "MISSING" ]; then
-    GATE_SKIPS+=("bolt_proof:missing_ceremony")
-    warn "BOLT applied but unproven (no ab-opt-ceremony receipt; perf gate not PASSED): typed gap bolt_proof:missing_ceremony."
-fi
-
-# -----------------------------------------------------------------------------
-# Long-audit artifact consistency (E-A)
-# -----------------------------------------------------------------------------
-# The long receipt is the only phase evidence that exercises the installed
-# binary. Compare the artifact it declares with the binary this pipeline just
-# installed; a receipt from another session (different artifact) is `absent`,
-# never silently credited.
-LONG_RECEIPT_PATH="$PROJECT_DIR/target/logs/long-audit-receipt.jsonl"
-ARTIFACT_CONSISTENCY="absent"
-LONG_RECEIPT_ARTIFACT_SHA=""
-LONG_RECEIPT_SESSION="none"
-if [ -f "$LONG_RECEIPT_PATH" ]; then
-    set +e
-    ARTIFACT_VERDICT_OUT=$(cargo run --quiet --locked --features testing --bin plug_long_receipt -- \
-        verify-artifact --out "$LONG_RECEIPT_PATH" --artifact "$CLAP_TARGET" 2>/dev/null)
-    ARTIFACT_VERDICT_RC=$?
-    set -e
-    LONG_RECEIPT_ARTIFACT_SHA=$(printf '%s\n' "$ARTIFACT_VERDICT_OUT" | awk '/^ARTIFACT_SHA256: /{print $2; exit}')
-    [ "$LONG_RECEIPT_ARTIFACT_SHA" = "-" ] && LONG_RECEIPT_ARTIFACT_SHA=""
-    if [ "$ARTIFACT_VERDICT_RC" = "1" ]; then
-        ARTIFACT_CONSISTENCY="mismatch"
-    elif [ "$ARTIFACT_VERDICT_RC" = "0" ]; then
-        ARTIFACT_CONSISTENCY="match"
-    else
-        ARTIFACT_CONSISTENCY="absent"
-    fi
-    if [ -n "$INSTALLED_AT_START_SHA" ] && [ -n "$LONG_RECEIPT_ARTIFACT_SHA" ]; then
-        if [ "$LONG_RECEIPT_ARTIFACT_SHA" = "$INSTALLED_AT_START_SHA" ]; then
-            LONG_RECEIPT_SESSION="current"
-        else
-            LONG_RECEIPT_SESSION="stale"
-            ARTIFACT_CONSISTENCY="absent"
-        fi
-    elif [ -n "$LONG_RECEIPT_ARTIFACT_SHA" ]; then
-        LONG_RECEIPT_SESSION="current"
-    fi
-    if [ "$ARTIFACT_CONSISTENCY" = "match" ]; then
-        echo -e "  ${GREEN}✓${NC} Long-audit receipt certifies the installed artifact (sha256: ${LONG_RECEIPT_ARTIFACT_SHA:0:16}...)."
-    else
-        warn "Long-audit artifact consistency: $ARTIFACT_CONSISTENCY (session=$LONG_RECEIPT_SESSION, receipt_sha=${LONG_RECEIPT_ARTIFACT_SHA:-none}, installed_sha=${FINAL_CLAP_SHA:-unknown})."
-    fi
-fi
-ARTIFACT_GAP=$(receipt_artifact_gap "$ARTIFACT_CONSISTENCY")
-if [ -n "$ARTIFACT_GAP" ]; then
-    GATE_SKIPS+=("$ARTIFACT_GAP")
-    warn "Long-audit provenance is '$ARTIFACT_CONSISTENCY' — typed gap $ARTIFACT_GAP (finalized by utils/finalize-release-receipt.sh after the long suite)."
-fi
-
-# Determine typed certification status (CERTIFIED, FUNCTIONALLY_CERTIFIED, INCOMPLETE).
-# The rule lives in lib/_lib.sh so the post-long-audit finalizer never drifts.
-NON_ARTIFACT_SKIP_COUNT=0
-for skip in "${GATE_SKIPS[@]}"; do
-    case "$skip" in
-        artifact_consistency:*) ;;
-        *) NON_ARTIFACT_SKIP_COUNT=$((NON_ARTIFACT_SKIP_COUNT + 1)) ;;
-    esac
-done
-RECEIPT_STATUS=$(receipt_derive_status \
-    "$GIT_DIRTY" "${CORE_GIT_DIRTY:-false}" "$PERF_GATE_STATUS" \
-    "$QUICK_QA_PASSED" "$HEAP_AUDIT_PASSED" "$USE_PGO" \
-    "${CLAP_BOLT_APPLIED:-false}" "$NON_ARTIFACT_SKIP_COUNT")
-RECEIPT_STATUS=$(receipt_apply_artifact_cap \
-    "$RECEIPT_STATUS" "$ARTIFACT_CONSISTENCY" "$STRICT_MODE")
-
-GATE_SKIPS_JOINED=""
-if [ ${#GATE_SKIPS[@]} -gt 0 ]; then
-    GATE_SKIPS_JOINED=$(IFS='|'; printf '%s' "${GATE_SKIPS[*]}")
-fi
-if [ "$RECEIPT_STATUS" = "INCOMPLETE" ]; then
-    warn "Receipt status INCOMPLETE: git_dirty=$GIT_DIRTY core_git_dirty=$CORE_GIT_DIRTY skipped_gates=[${GATE_SKIPS_JOINED:-(none)}]"
-fi
 
 CARGO_LOCK_SHA=$(sha256sum Cargo.lock 2>/dev/null | cut -d' ' -f1 || echo "")
 
@@ -1642,19 +1957,31 @@ CARGO_LOCK_SHA=$(sha256sum Cargo.lock 2>/dev/null | cut -d' ' -f1 || echo "")
 # both clipping counts, the scenario/callback coverage and the SHA of the log
 # that backs them. Missing evidence is explicit (`not_run`/null), never a
 # silently green block.
-PGO_CLIPPING_TOTAL_ALL=$(( ${PGO_CLIPPING_PHASE1:-0} + ${PGO_CLIPPING_BOLT:-0} ))
-PGO_WORKLOAD_STATUS="not_run"
-if [ "$PGO_WORKLOAD_RAN_PHASE1" = true ] || [ "$PGO_WORKLOAD_RAN_BOLT" = true ]; then
-    if [ "$PGO_CLIPPING_TOTAL_ALL" -gt 0 ]; then
-        PGO_WORKLOAD_STATUS="CLIPPED"
-    elif [ -f "$PGO_WORKLOAD_RECEIPT" ] && grep -q '"status": "SUCCESS"' "$PGO_WORKLOAD_RECEIPT"; then
-        PGO_WORKLOAD_STATUS="SUCCESS"
-    else
-        PGO_WORKLOAD_STATUS="FAILED"
+if [ "$REUSED_CERTIFIED_BINARY" = "true" ]; then
+    # Reuse only the values that were validated against the preliminary receipt
+    # and its hashed proof files; never re-read the mutable workload JSON here.
+    PGO_CLIPPING_PHASE1="${REUSED_PGO_CLIPPING_PHASE1:-0}"
+    PGO_CLIPPING_BOLT="${REUSED_PGO_CLIPPING_BOLT:-0}"
+    PGO_WORKLOAD_STATUS="$REUSED_PGO_STATUS"
+    PGO_WORKLOAD_GAIN="$REUSED_PGO_GAIN"
+    PGO_WORKLOAD_SCENARIOS="$REUSED_PGO_SCENARIOS"
+    PGO_WORKLOAD_CALLBACKS="$REUSED_PGO_CALLBACKS"
+    PGO_WORKLOAD_LOG_SHA="$REUSED_PGO_LOG_SHA"
+    PGO_WORKLOAD_RECEIPT_SHA="$REUSED_PGO_RECEIPT_SHA"
+else
+    PGO_CLIPPING_TOTAL_ALL=$(( ${PGO_CLIPPING_PHASE1:-0} + ${PGO_CLIPPING_BOLT:-0} ))
+    PGO_WORKLOAD_STATUS="not_run"
+    if [ "$PGO_WORKLOAD_RAN_PHASE1" = true ] || [ "$PGO_WORKLOAD_RAN_BOLT" = true ]; then
+        if [ "$PGO_CLIPPING_TOTAL_ALL" -gt 0 ]; then
+            PGO_WORKLOAD_STATUS="CLIPPED"
+        elif [ -f "$PGO_WORKLOAD_RECEIPT" ] && grep -q '"status": "SUCCESS"' "$PGO_WORKLOAD_RECEIPT"; then
+            PGO_WORKLOAD_STATUS="SUCCESS"
+        else
+            PGO_WORKLOAD_STATUS="FAILED"
+        fi
     fi
-fi
-if [ -f "$PGO_WORKLOAD_RECEIPT" ]; then
-    PGO_WORKLOAD_VALUES=$(python3 - "$PGO_WORKLOAD_RECEIPT" <<'PY'
+    if [ -f "$PGO_WORKLOAD_RECEIPT" ]; then
+        PGO_WORKLOAD_VALUES=$(python3 - "$PGO_WORKLOAD_RECEIPT" <<'PY'
 import json
 import sys
 
@@ -1672,14 +1999,19 @@ print(
 )
 PY
 )
-    read -r PGO_WORKLOAD_GAIN PGO_WORKLOAD_SCENARIOS PGO_WORKLOAD_CALLBACKS <<<"$PGO_WORKLOAD_VALUES"
-    [ "$PGO_WORKLOAD_GAIN" = "-" ] && PGO_WORKLOAD_GAIN=""
-    [ "$PGO_WORKLOAD_SCENARIOS" = "-" ] && PGO_WORKLOAD_SCENARIOS=""
-    [ "$PGO_WORKLOAD_CALLBACKS" = "-" ] && PGO_WORKLOAD_CALLBACKS=""
-fi
-PGO_WORKLOAD_LOG_SHA=""
-if [ -f "$PGO_WORKLOAD_LOG" ]; then
-    PGO_WORKLOAD_LOG_SHA=$(sha256sum "$PGO_WORKLOAD_LOG" | cut -d' ' -f1)
+        read -r PGO_WORKLOAD_GAIN PGO_WORKLOAD_SCENARIOS PGO_WORKLOAD_CALLBACKS <<<"$PGO_WORKLOAD_VALUES"
+        [ "$PGO_WORKLOAD_GAIN" = "-" ] && PGO_WORKLOAD_GAIN=""
+        [ "$PGO_WORKLOAD_SCENARIOS" = "-" ] && PGO_WORKLOAD_SCENARIOS=""
+        [ "$PGO_WORKLOAD_CALLBACKS" = "-" ] && PGO_WORKLOAD_CALLBACKS=""
+    fi
+    PGO_WORKLOAD_LOG_SHA=""
+    if [ -f "$PGO_WORKLOAD_LOG" ]; then
+        PGO_WORKLOAD_LOG_SHA=$(sha256sum "$PGO_WORKLOAD_LOG" | cut -d' ' -f1)
+    fi
+    PGO_WORKLOAD_RECEIPT_SHA=""
+    if [ -f "$PGO_WORKLOAD_RECEIPT" ]; then
+        PGO_WORKLOAD_RECEIPT_SHA=$(sha256sum "$PGO_WORKLOAD_RECEIPT" | cut -d' ' -f1)
+    fi
 fi
 
 RUSTC_VER=$(rustc --version 2>/dev/null || echo "unknown")
@@ -1693,10 +2025,16 @@ export BOLT_PROOF BOLT_LBR_SAMPLES BOLT_LBR_FDATA_SHA256
 export CODEGEN_PRE_JSON CODEGEN_POST_JSON CODEGEN_COMPARISON
 export PGO_WORKLOAD_STATUS PGO_WORKLOAD_GAIN PGO_WORKLOAD_SCENARIOS PGO_WORKLOAD_CALLBACKS
 export PGO_CLIPPING_PHASE1 PGO_CLIPPING_BOLT PGO_WORKLOAD_LOG PGO_WORKLOAD_LOG_SHA
+export PGO_WORKLOAD_RECEIPT_SHA CLAP_RUSTFLAGS
+export PRE_STRIP_ARTIFACT_SHA CERTIFIED_CLAP CERTIFIED_COPY_SHA
 export PARITY_OVERSAMPLE_STATUS PARITY_OVERSAMPLE_REASON
 export PARITY_CABSIM_STATUS PARITY_CABSIM_REASON
+export CLAP_VALIDATOR_STATUS CLAP_VALIDATOR_TESTS_RUN CLAP_VALIDATOR_PASSED
+export CLAP_VALIDATOR_FAILED CLAP_VALIDATOR_SKIPPED CLAP_VALIDATOR_SKIP_REASONS
+export CLAP_VALIDATOR_LOG
+export PERF_ENVIRONMENT_DEGRADED PERF_ENVIRONMENT_DEGRADED_REASONS
 python3 -c "
-import json, os, sys
+import json, os, re, sys
 
 skipped_gates = [g for g in sys.argv[1].split('|') if g]
 
@@ -1724,6 +2062,22 @@ def _float_or_none(value):
         return None
 
 
+def _sha256_or_none(path):
+    if not path or not os.path.isfile(path):
+        return None
+    import hashlib
+    with open(path, 'rb') as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def _ceremony_provenance():
+    script_sha = os.environ.get('NAM_CEREMONY_SCRIPT_SHA256', '')
+    if not re.fullmatch(r'[0-9a-f]{64}', script_sha):
+        return None
+    phases = [p for p in os.environ.get('NAM_CEREMONY_PHASES', '').split(',') if p]
+    return {'script_sha256': script_sha, 'phases': phases}
+
+
 receipt = {
     'schema_version': '1.1',
     'timestamp_utc': '$TIMESTAMP',
@@ -1740,7 +2094,8 @@ receipt = {
         'git_dirty': bool('$GIT_DIRTY' == 'true'),
         'cargo_lock_sha256': '$CARGO_LOCK_SHA',
         'rustc_version': '$RUSTC_VER',
-        'rustflags': '$CLAP_RUSTFLAGS'
+        'rustflags': os.environ.get('CLAP_RUSTFLAGS', ''),
+        'ceremony': _ceremony_provenance()
     },
     'engine_provenance': {
         'dependency_type': 'path_patch' if '$CORE_PATH' else 'crates_io',
@@ -1756,11 +2111,26 @@ receipt = {
         'heap_audit_passed': bool('$HEAP_AUDIT_PASSED' == 'true'),
         'receipt_sha256': '$QUICK_RECEIPT_SHA' or None,
         'heap_audit_log_sha256': '$HEAP_AUDIT_LOG_SHA' or None,
-        # The quick suite exercises the pre-PGO/BOLT release `.so`; its observed
+        # The quick suite exercises the pre-PGO/BOLT release .so; its observed
         # hash and strictness must be explicit so a green OVERALL is never read
-        # as "strict run of the installed artifact".
+        # as 'strict run of the installed artifact'.
         'artifact_sha256': '$QUICK_RECEIPT_ARTIFACT_SHA' or None,
         'strict': bool('$QUICK_RECEIPT_STRICT' == '1')
+    },
+    # External protocol conformance, including deliberate skips. A green run
+    # with skips is not the same evidence as a green run with none.
+    'clap_validator': {
+        'status': os.environ.get('CLAP_VALIDATOR_STATUS', 'UNKNOWN') or 'UNKNOWN',
+        'tests_run': _int_or_none(os.environ.get('CLAP_VALIDATOR_TESTS_RUN')),
+        'passed': _int_or_none(os.environ.get('CLAP_VALIDATOR_PASSED')),
+        'failed': _int_or_none(os.environ.get('CLAP_VALIDATOR_FAILED')),
+        'skipped': _int_or_none(os.environ.get('CLAP_VALIDATOR_SKIPPED')),
+        'skip_reasons': [
+            reason
+            for reason in (os.environ.get('CLAP_VALIDATOR_SKIP_REASONS', '') or '').split(';')
+            if reason
+        ],
+        'log_sha256': _sha256_or_none(os.environ.get('CLAP_VALIDATOR_LOG')),
     },
     # Artifact-level parity gates (S3.1). Each entry names the exact installed
     # bytes it exercised; a skipped oracle is explicit, never a PASS.
@@ -1781,10 +2151,18 @@ receipt = {
         'bolt_applied': bool('$CLAP_BOLT_APPLIED' == 'true'),
         'bolt_profile_sha256': '$BOLT_PROFILE_SHA' or None,
         'bolt_version': '$BOLT_VERSION' or None,
-        # Independent win proof: only a valid `ab-opt-ceremony:<id>` receipt may
+        # Independent win proof: only a valid 'ab-opt-ceremony:<id>' receipt may
         # claim a measured BOLT gain. A PASSED performance gate is labelled
-        # `gate-pass-only` and never promoted to a proof of a BOLT win.
+        # 'gate-pass-only' and never promoted to a proof of a BOLT win.
         'bolt_proof': os.environ.get('BOLT_PROOF', 'MISSING') or 'MISSING',
+        # Claims the receipt deliberately does NOT make. 'gate-pass-only' proves
+        # the deadline envelope, not that BOLT made the artifact faster, so the
+        # unproven claim is named instead of implied.
+        'unproven_claims': (
+            ['bolt_win']
+            if (os.environ.get('BOLT_PROOF', 'MISSING') or 'MISSING') == 'gate-pass-only'
+            else []
+        ),
         'bolt_lbr_samples': os.environ.get('BOLT_LBR_SAMPLES') or None,
         'bolt_lbr_fdata_sha256': os.environ.get('BOLT_LBR_FDATA_SHA256') or None,
         # Pre/post-link codegen coverage, so a post-BOLT verifier that silently
@@ -1806,25 +2184,42 @@ receipt = {
         'clipping_count_phase1': _int_or_none(os.environ.get('PGO_CLIPPING_PHASE1')),
         'clipping_count_bolt': _int_or_none(os.environ.get('PGO_CLIPPING_BOLT')),
         'log_path': os.environ.get('PGO_WORKLOAD_LOG') or None,
-        'log_sha256': os.environ.get('PGO_WORKLOAD_LOG_SHA') or None
+        'log_sha256': os.environ.get('PGO_WORKLOAD_LOG_SHA') or None,
+        'receipt_sha256': os.environ.get('PGO_WORKLOAD_RECEIPT_SHA') or None
     },
     'performance_certification': {
         'gate_status': '$PERF_GATE_STATUS',
         'report_path': '$PERF_REPORT_PATH' if '$PERF_REPORT_SHA' else None,
-        'report_sha256': '$PERF_REPORT_SHA' or None
+        'report_sha256': '$PERF_REPORT_SHA' or None,
+        # Isolation is separate from environment_stable, which is a noise statistic.
+        # A degraded host does not fail the deadline gate, but the number it
+        # produced must not be read as a fully isolated measurement.
+        'environment_degraded': bool(os.environ.get('PERF_ENVIRONMENT_DEGRADED') == 'true'),
+        'environment_degraded_reasons': [
+            reason
+            for reason in (os.environ.get('PERF_ENVIRONMENT_DEGRADED_REASONS', '') or '').split(';')
+            if reason
+        ]
     },
     'artifacts': {
         'clap_installed_path': '$CLAP_TARGET',
         'clap_installed_sha256': '$FINAL_CLAP_SHA',
+        'certified_copy_path': os.environ.get('CERTIFIED_CLAP') or None,
+        'certified_copy_sha256': os.environ.get('CERTIFIED_COPY_SHA') or None,
+        'reused_certified_binary': bool('${REUSED_CERTIFIED_BINARY:-false}' == 'true'),
+        # S1 finding: the installed artifact is the post-strip form of the
+        # BOLT output, while codegen receipts measure the pre-strip .bolt.so.
+        # Record that auxiliary hash so the two identities are never confused.
+        'pre_strip_artifact_sha256': os.environ.get('PRE_STRIP_ARTIFACT_SHA') or None,
         'long_receipt_path': '$LONG_RECEIPT_PATH',
         'long_receipt_artifact_sha256': '$LONG_RECEIPT_ARTIFACT_SHA' or None,
         'long_receipt_session': '$LONG_RECEIPT_SESSION',
         'artifact_consistency': '$ARTIFACT_CONSISTENCY',
         'installed_sha256_at_build_start': '$INSTALLED_AT_START_SHA' or None,
-        'tarball_path': '$TARBALL' if '$BUILD_TARBALL' == 'true' else None,
-        'tarball_sha256': '$TARBALL_SHA' if '$BUILD_TARBALL' == 'true' else None,
-        'flatpak_path': '$FLATPAK_BUNDLE' if '$BUILD_FLATPAK' == 'true' else None,
-        'flatpak_sha256': '$FLATPAK_SHA' if '$BUILD_FLATPAK' == 'true' else None
+        'tarball_path': '$TARBALL' if '$BUILD_TARBALL' == 'true' and '${PACKAGING_ALLOWED:-true}' == 'true' else None,
+        'tarball_sha256': '$TARBALL_SHA' if '$BUILD_TARBALL' == 'true' and '${PACKAGING_ALLOWED:-true}' == 'true' else None,
+        'flatpak_path': '$FLATPAK_BUNDLE' if '$BUILD_FLATPAK' == 'true' and '${PACKAGING_ALLOWED:-true}' == 'true' else None,
+        'flatpak_sha256': '$FLATPAK_SHA' if '$BUILD_FLATPAK' == 'true' and '${PACKAGING_ALLOWED:-true}' == 'true' else None
     },
     'oracles_and_fixtures': {
         'oracle_render_bin': '$ORACLE_BIN' or None,
@@ -1841,6 +2236,19 @@ with open('$RECEIPT_TMP', 'w') as f:
 RECEIPT_TARGET="$PROJECT_DIR/target/release-receipt.json"
 mv -f "$RECEIPT_TMP" "$RECEIPT_TARGET"
 echo -e "  ${GREEN}✓${NC} Atomic build receipt generated at: ${BOLD}$RECEIPT_TARGET${NC} (status: $RECEIPT_STATUS)"
+
+# State the limits of what the receipt proves while the operator is still
+# looking at the console: a CERTIFIED status is not a claim of a measured BOLT
+# speedup, nor of a fully isolated measurement host.
+if [ "${BOLT_PROOF:-}" = "gate-pass-only" ]; then
+    echo -e "  ${YELLOW}[UNPROVEN]${NC} BOLT applied with bolt_proof=gate-pass-only: the performance gate proves the deadline envelope, not a BOLT speedup (optimizations.unproven_claims=[bolt_win])."
+fi
+if [ "$PERF_ENVIRONMENT_DEGRADED" = "true" ]; then
+    echo -e "  ${YELLOW}[DEGRADED HOST]${NC} performance gate ran outside the isolated-core policy: ${PERF_ENVIRONMENT_DEGRADED_REASONS:-unknown}."
+fi
+if [ -n "$CLAP_VALIDATOR_SKIPPED" ]; then
+    echo -e "  ${CYAN}clap-validator:${NC} ${CLAP_VALIDATOR_SUMMARY:-status=$CLAP_VALIDATOR_STATUS} (reasons: ${CLAP_VALIDATOR_SKIP_REASONS:-none})"
+fi
 
 BANNER_COLOR="${GREEN}"
 if [ "$RECEIPT_STATUS" = "CERTIFIED" ]; then
@@ -1859,14 +2267,25 @@ fi
 echo -e "  ${BOLD}Artifacts saved:${NC}"
 echo -e "    - CLAP Plugin:    ${CYAN}$CLAP_TARGET${NC} (sha256: ${FINAL_CLAP_SHA:0:16}...)"
 echo -e "    - Build Receipt:  ${CYAN}$RECEIPT_TARGET${NC}"
-if [ "$BUILD_TARBALL" = true ]; then
+if [ "$BUILD_TARBALL" = true ] && [ "$PACKAGING_ALLOWED" = true ]; then
     echo -e "    - Tarball:        ${CYAN}$TARBALL${NC} (sha256: ${TARBALL_SHA:0:16}...)"
 fi
-if [ "$BUILD_FLATPAK" = true ]; then
+if [ "$BUILD_FLATPAK" = true ] && [ "$PACKAGING_ALLOWED" = true ]; then
     echo -e "    - Flatpak Bundle: ${CYAN}$FLATPAK_BUNDLE${NC} (sha256: ${FLATPAK_SHA:0:16}...)"
 fi
 if [ -f "$PROJECT_DIR/target/dsp_hotpath.asm" ]; then
     echo -e "    - Assembly ASM:   ${CYAN}$PROJECT_DIR/target/dsp_hotpath.asm${NC}"
 fi
 echo -e "${BANNER_COLOR}${BOLD}================================================================================${NC}\n"
+
+# Release ceremony is fail-closed: the receipt and artifacts above stay on disk
+# for diagnosis, but the run must not report success unless status is CERTIFIED.
+CEREMONY_EXIT=$(ceremony_exit_code "$RECEIPT_STATUS" "$RELEASE_CEREMONY")
+if [ "$CEREMONY_EXIT" -ne 0 ]; then
+    echo -e "${RED}${BOLD}================================================================================${NC}" >&2
+    echo -e "${RED}${BOLD}[CEREMONY-FAIL] receipt status=$RECEIPT_STATUS gaps=[${GATE_SKIPS_JOINED:-(none)}]${NC}" >&2
+    echo -e "${RED}${BOLD}Release ceremony requires CERTIFIED. Receipt kept at: $RECEIPT_TARGET (exit $CEREMONY_EXIT)${NC}" >&2
+    echo -e "${RED}${BOLD}================================================================================${NC}" >&2
+    exit "$CEREMONY_EXIT"
+fi
 
