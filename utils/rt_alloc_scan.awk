@@ -3,7 +3,7 @@
 #
 # rt_alloc_scan.awk — fail-closed static scanner for RT-path allocations.
 #
-# Usage: awk -f utils/lib/rt_alloc_scan.awk <file.rs>...
+# Usage: awk -f utils/rt_alloc_scan.awk <file.rs>...
 #
 # Flags any RT-hostile allocation pattern found on the real-time processing
 # path of NAM-Plug's `src/clap/processor/`, excluding the documented off-RT
@@ -31,7 +31,7 @@
 #
 # Scope note (T5.2): this is the SOURCE-level half of the zero-alloc contract.
 # The BINARY-level half (alloc/div/TLS gates on the compiled artifact) is the
-# unified disassembly filter `lib/dsp-hotpath-filter.py` driven by
+# unified disassembly filter `utils/dsp-hotpath-filter.py` driven by
 # `utils/codegen-profile.json` and invoked from `verify_rt_codegen.sh`; the two
 # are complementary (pre-build source vs post-build machine code), not
 # duplicates.

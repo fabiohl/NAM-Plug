@@ -75,6 +75,11 @@ fn resolves_pinned_core_before_isolated_fallback() {
         Some(10)
     );
     assert_eq!(resolve_bench_core(&[0, 1, 2, 3], &[8, 9], Some(3)), Some(3));
+    // Test that the first isolated core in the list is selected without preferential bias towards 8
+    assert_eq!(
+        resolve_bench_core(&[0, 1, 2, 3, 8, 9], &[9, 8], None),
+        Some(9)
+    );
 }
 
 fn reference_report(reference_p50_ns: f64) -> ReferenceReport {

@@ -248,20 +248,17 @@ flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 
 ### Method 2: Direct Build from Source (`cargo build`)
 
-> [!IMPORTANT]
-> **Host Memory Protection (`CARGO_BUILD_JOBS=4`):**
-> On systems with high core counts, Cargo can spawn numerous parallel `rustc` processes that may rapidly saturate RAM and trigger OOM killer crashes. Always set `export CARGO_BUILD_JOBS=4` before compiling or testing. For heavy optimization tasks, `utils/mem-guard.sh` wraps execution inside systemd cgroup limits.
+> [!NOTE]
+> **Host Memory Management:**
+> On systems with constrained RAM, configure `CARGO_BUILD_JOBS` in your host shell profile (e.g. `~/.bashrc`) to prevent memory exhaustion during parallel codegen.
 
 For native DAWs installed directly on your system:
 
 ```bash
-# 1. Limit compiler parallelism
-export CARGO_BUILD_JOBS=4
-
-# 2. Build the release shared library
+# 1. Build the release shared library
 cargo build --release
 
-# 3. Install to your local user CLAP directory
+# 2. Install to your local user CLAP directory
 mkdir -p ~/.clap
 cp target/release/libnam_plug.so ~/.clap/nam_plug.clap
 ```
@@ -269,27 +266,24 @@ cp target/release/libnam_plug.so ~/.clap/nam_plug.clap
 To preview the GUI standalone without opening a DAW:
 
 ```bash
-export CARGO_BUILD_JOBS=4
 cargo run --bin ui_preview
 ```
 
 ### Method 3: Hyper-Optimized Build (`./utils/build-release.sh`)
 
-For maximum performance in live and studio environments, compile using the automated 5-phase optimization pipeline combining **Profile-Guided Optimization (PGO)** and **LLVM-BOLT** machine-code layout reordering:
+For maximum performance in live and studio environments, compile using the automated optimization pipeline combining **Profile-Guided Optimization (PGO)** and **LLVM-BOLT** machine-code layout reordering into canonical artifacts in `target/dist/`:
 
 ```bash
-export CARGO_BUILD_JOBS=4
 ./utils/build-release.sh
 ```
 
-| Pipeline Option | Purpose                                                                               |
-|:--------------- |:------------------------------------------------------------------------------------- |
-| `--install`     | Automatically installs the generated Flatpak bundle locally in addition to `~/.clap/` |
-| `--no-flatpak`  | Skips Flatpak bundle creation                                                         |
-| `--no-tarball`  | Skips `.tar.zst` distribution archive packaging                                       |
-| `--no-pgo`      | Skips PGO trace collection and compiles directly with the `dist` profile              |
-| `--no-bolt`     | Skips LLVM-BOLT post-link layout optimization                                         |
-| `-h, --help`    | Displays command-line help screen and exits                                           |
+| Canonical Option | Purpose                                                                               |
+|:---------------- |:------------------------------------------------------------------------------------- |
+| `--package`      | Generates distribution archive (`.tar.zst`) and Flatpak extension (`.flatpak`)       |
+| `--install`      | Automatically installs the generated CLAP binary to `~/.clap/` (and flatpak bundle)  |
+| `--strict`       | Enforces fail-closed mode: any optimization or verification gap aborts with exit code 1 |
+| `--certify`      | Does not compile; strictly validates and certifies canonical artifacts via receipts  |
+| `-h, --help`     | Displays command-line help screen and exits                                           |
 
 ---
 
@@ -305,19 +299,35 @@ export CARGO_BUILD_JOBS=4
 
 ## 🧪 CI & QA Automation Suite (`./utils/`)
 
-It's recommended to use `export CARGO_BUILD_JOBS=4` and `utils/mem-guard.sh` for host memory exhaustion (*OOM*) protection:
+The `./utils/` suite automates formatting, static analysis, parity verification, and release certification:
 
 | Script                                                                           | Purpose & Scope                                                                                                                                            |
 |:-------------------------------------------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`utils/lints.sh`](utils/lints.sh)                                               | **Static Analysis Gate:** Runs `cargo fmt`, `cargo check`, strict `cargo clippy`, validates SPDX headers, AppStream metadata, and static RT allocations.   |
-| [`utils/tests-quick.sh`](utils/tests-quick.sh)                                   | **Agile QA Suite:** 3-phase test run covering unit/integration tests, C++ NAMCore parity verification, RT codegen disassembly guard, and heap-audit tests. |
-| [`utils/tests-gui.sh`](utils/tests-gui.sh)                                       | **Headless GUI Suite:** Headless Xvfb lifecycle, XEmbed embedding cycles, and clipboard interop tests.                                                     |
+| [`utils/lints.sh`](utils/lints.sh)                                               | **Static Analysis Gate:** Runs `cargo fmt`, `cargo check` matrix, strict `clippy`, validates SPDX headers, policies, and RT allocations (~6s).            |
+| [`utils/tests-quick.sh`](utils/tests-quick.sh)                                   | **Agile QA Suite:** Multi-phase test run (≤ 5 min budget) covering unit/integration tests, C++ NAMCore parity, oversampling parity, and RT codegen guards. |
+| [`utils/tests-long.sh`](utils/tests-long.sh)                                     | **Pre-Release Audit:** Heavy stress testing (GC model swaps, off-RT drain, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`. |
+| [`utils/build-release.sh`](utils/build-release.sh)                               | **Release Pipeline & Certification:** Compiles release artifacts (`target/dist/`), packages bundles, and certifies canonical receipts (`--certify`).      |
 | [`utils/verify_rt_codegen.sh`](utils/verify_rt_codegen.sh)                       | **Static Codegen Guard:** Disassembles the CLAP `.so` and asserts zero `malloc`/`free`, zero `div`/`idiv`, and bounded TLS access.                         |
-| [`utils/tests-performance-regression.sh`](utils/tests-performance-regression.sh) | **Criterion Regression Guard:** Enforces latency budgets and verifies CPU governor/isolation against baseline SLAs.                                        |
-| [`utils/build-release.sh`](utils/build-release.sh)                               | **Release Pipeline:** Compiles release artifact via PGO and LLVM-BOLT, verifies certification gates, and packages `.tar.zst` and `.flatpak`.               |
-| [`utils/tests-long.sh`](utils/tests-long.sh)                                     | **Pre-Release Audit:** Heavy stress testing (GC model swaps, off-RT drain, multi-instance RT priority, CPU core pinning). Maintainer run only.             |
-| [`utils/mem-guard.sh`](utils/mem-guard.sh)                                       | **OOM Containment Guard:** Wraps heavy commands in systemd transient scopes (`MemoryMax=6G`, `oom_score_adj=500`).                                         |
-| [`utils/mod-update.sh`](utils/mod-update.sh)                                     | **Dependency Maintenance:** Upgrades toolchain and Cargo dependencies via `cargo upgrade`.                                                                 |
+| [`utils/mod-update.sh`](utils/mod-update.sh)                                     | **Dependency Maintenance:** Manual toolchain and Cargo dependency upgrade utility.                                                                         |
+
+### Script Contract & Release Chain
+
+All automation scripts adhere to a unified execution contract (Class A interactive, Class B decoupled audit, Class C build, Class D manual tool) with deterministic `PHASE:` and `RESULT:` output streams.
+
+The official release sequence strictly decouples compilation from certification:
+
+```bash
+# 1. Build canonical release artifact (nam_plug.clap) into target/dist/
+./utils/build-release.sh --strict --package --install
+
+# 2. Audit the canonical artifact under heavy stress
+./utils/tests-long.sh --strict --artifact
+
+# 3. Certify release evidence atomically without recompilation
+./utils/build-release.sh --certify
+```
+
+For full details on script classes, exit codes, interface variables, and measured execution budgets, see [`docs/testing.md`](docs/testing.md).
 
 ---
 

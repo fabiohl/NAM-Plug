@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev, 'dev-*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # x86_64 is the reference platform: canonical lints + quick QA suite disciplines.
+  x86_64-linux:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev binutils
+      # Runner images can ship an older preinstalled stable; the crate needs rust-version 1.99.
+      - name: Update Rust toolchain
+        run: rustup update --no-self-update stable && rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
+      - name: Lints (fmt check, check, clippy, policies)
+        run: ./utils/lints.sh
+      - name: Quick QA suite
+        run: ./utils/tests-quick.sh
+      - name: Publish step summary
+        if: always()
+        run: |
+          echo "### Run Summary: x86_64-linux" >> $GITHUB_STEP_SUMMARY
+          if [ -d target/logs ]; then
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            grep -hE '^(RESULT:|PHASE:)' target/logs/*.log 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-x86_64-linux
+          path: target/logs/**
+          retention-days: 14
+
+  # macOS (aarch64): compile-time verification of the platform-conditional code paths.
+  macos-arm64:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Update Rust toolchain
+        run: rustup update --no-self-update stable && rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --features testing -- -D warnings
+      - name: Publish step summary
+        if: always()
+        run: |
+          echo "### Run Summary: macos-arm64 (clippy)" >> $GITHUB_STEP_SUMMARY
+
+  # MSRV job: validates compilation with rust-version from Cargo.toml (1.99.0).
+  msrv:
+    name: msrv (1.99.0)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.99.0 --no-self-update --profile minimal && rustup default 1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
+      - name: Cargo check (MSRV)
+        run: cargo check --locked --all-targets --features testing
+      - name: Publish step summary
+        if: always()
+        run: |
+          echo "### Run Summary: msrv (1.99.0)" >> $GITHUB_STEP_SUMMARY
+          echo "MSRV cargo check completed." >> $GITHUB_STEP_SUMMARY

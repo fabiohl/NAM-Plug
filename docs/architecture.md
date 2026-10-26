@@ -88,11 +88,9 @@ The underlying DSP engine (`NeuralAmpModeler-rs`) provides an optional `rt-harde
 
 ```bash
 # Standard release build (produces target/release/libnam_plug.so)
-export CARGO_BUILD_JOBS=4
 cargo build --release
 
 # Development build with testing harness
-export CARGO_BUILD_JOBS=4
 cargo build --features testing
 ```
 
@@ -667,7 +665,6 @@ Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh`:
 
 ```bash
 # 1. Build release plugin and Flatpak bundle
-export CARGO_BUILD_JOBS=4
 ./utils/build-release.sh --install
 
 # 2. Validate AppStream metadata

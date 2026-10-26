@@ -155,7 +155,7 @@ fn wait_until_child_destroyed(
 /// cannot propagate a `set_parent` error to the host, so the negotiation must
 /// fail where it can be seen), and the FSM stays untouched.
 #[test]
-#[ignore = "requires dedicated Xvfb: run utils/tests-gui.sh"]
+#[ignore = "requires dedicated Xvfb: run utils/tests-long.sh --only gui"]
 fn gui_lifecycle_x11_embedded_set_parent_honest() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let gui_ext = plugin_instance

@@ -45,7 +45,6 @@ Fixes #
 <!-- Run these verification scripts from the repository root before opening or marking PR ready for review: -->
 
 ```bash
-export CARGO_BUILD_JOBS=4
 utils/lints.sh        # Static analysis, fmt, clippy (-D warnings), SPDX validation
 utils/tests-quick.sh  # Agile testing, host integration tests, CLAP validation
 ```

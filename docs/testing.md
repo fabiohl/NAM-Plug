@@ -168,14 +168,13 @@ Benchmarks measure throughput, parameter modulation overhead, neural inference a
 - **Zero Heap Allocations:** Iteration loops operate strictly on pre-allocated, 64-byte aligned buffers (`AlignedVec<f32>`).
 - **CPU Core Isolation:** Benchmarks are pinned to isolated physical cores via `taskset` (see [§5.5](#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset)).
 
-### 4.3 Performance Regression Gate & Baseline Discipline
+### 4.3 Performance Certification Gate
 
-[`utils/tests-performance-regression.sh`](../utils/tests-performance-regression.sh) executes the automated performance gate, delegating statistical interpretation to the unified `nam_perf_gate` binary:
+Performance is certified against the canonical artifact by `nam_perf_guard certify --clap target/dist/nam_plug.clap`, invoked by phase 4 of `utils/tests-long.sh --artifact` (without `--artifact` the phase is recorded as the typed GAP `perf:requires_artifact`):
 
-- **Coverage Validation:** Asserts that all mandatory Criterion groups defined in [`benches/clap_bench.manifest`](../benches/clap_bench.manifest) are present.
-- **Operating Modes:** `--check` (read-only verification) and `--bootstrap-baseline` (human operator baseline capture on calibrated hardware).
-- **Governor Gating:** Fails closed if the benchmark CPU core governor is not locked to `performance`.
-- **Baseline Durability:** Stored under `.performance-baselines/` and backed up to `~/.cache/nam-plug/perf-baselines/` during workspace bootstrap cleanups.
+- **Benchmark core:** resolved by the precedence in [§7](#7-script-contract--automation-disciplines): explicit `NAM_BENCH_CORE` → isolated online core → first allowed CPU → unpinned (`GAP`).
+- **Budget:** p99 block execution must stay below 85% of the audio block budget.
+- **Coverage:** mandatory Criterion groups are declared in [`benches/clap_bench.manifest`](../benches/clap_bench.manifest).
 
 ### 4.4 Engine DSP vs. CLAP Plugin Boundary Differentiation
 
@@ -193,9 +192,9 @@ The benchmark suite differentiates between core neural math and plugin host inte
 
 ## 5. Execution Commands & Developer Workflow
 
-> [!IMPORTANT]
-> **Host Memory Protection (`CARGO_BUILD_JOBS=4`):**
-> Always export `export CARGO_BUILD_JOBS=4` before running Cargo commands or test scripts to prevent compiler processes from saturating host RAM and causing OOM crashes.
+> [!NOTE]
+> **Host Memory Management:**
+> On systems with constrained RAM, configure `CARGO_BUILD_JOBS` in your host shell profile (e.g. `~/.bashrc`) to prevent memory exhaustion during parallel codegen.
 
 All commands must be executed from inside `./NAM-Plug/`:
 
@@ -203,19 +202,16 @@ All commands must be executed from inside `./NAM-Plug/`:
 
 | Script                                      | Scope & Operation                                                                                | Usage Context                              |
 |:------------------------------------------- |:------------------------------------------------------------------------------------------------ |:------------------------------------------ |
-| **`utils/lints.sh`**                        | Static analysis (`fmt`, `check`, `clippy -D warnings`, SPDX headers, static RT allocation scan). | Core continuous verification gate          |
-| **`utils/test-scripts.sh`**                 | Aggregate runner for internal test scripts under `tests/scripts/`.                               | Invoked by `utils/lints.sh`                |
-| **`utils/tests-quick.sh`**                  | 3-phase fast QA gate (debug structural, release parity + RT codegen, heap audit).                | First line of defense (local & pre-commit) |
-| **`utils/tests-long.sh`**                   | 4-phase heavy stress suite (GC, teardown, RT priority/latency, Xvfb GUI).                        | Nightly & release certification (operator) |
-| **`utils/tests-gui.sh`**                    | Headless Xvfb lifecycle, XEmbed window negotiation, and clipboard export testing.                | Invoked by Phase 4 of `tests-long.sh`      |
-| **`utils/verify_rt_codegen.sh`**            | Disassembly inspection of `.so` (0 `malloc`, 0 `div`/`idiv`, bounded TLS).                       | Integrated in `tests-quick.sh` and release |
-| **`utils/tests-performance-regression.sh`** | Criterion `clap_bench` regression gate over `nam_perf_gate`.                                     | Performance baseline verification          |
-| **`utils/build-release.sh`**                | Multi-stage release builder with PGO, optional BOLT, RT codegen verification, and packaging.     | Official release pipeline                  |
-| **`utils/finalize-release-receipt.sh`**     | Reconciles `release-receipt.json` with current long-audit JSONL data atomically.                 | Release packaging finalization             |
+| **`utils/lints.sh`**                        | Static analysis (`fmt`, `check` matrix, `clippy -D warnings`, SPDX headers, static RT allocations; ~6s). | Core continuous verification gate          |
+| **`utils/tests-quick.sh`**                  | Agile QA suite (≤ 5 min budget; `cargo test --features testing` + heap-audit unit gate).                 | First line of defense (local & pre-commit) |
+| **`utils/tests-long.sh`**                   | Pre-release & nightly audit suite (GC, teardown, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`. | Nightly & release audit (operator)         |
+| **`utils/verify_rt_codegen.sh`**            | Disassembly inspection of `.so` (0 `malloc`, 0 `div`/`idiv`, bounded TLS).                       | Invoked by `build-release.sh` (pre/post BOLT) |
+| **`utils/build-release.sh`**                | Canonical release builder and receipt certifier (`--strict`, `--package`, `--install`, `--certify`). | Official release pipeline                  |
+| **`utils/mod-update.sh`**                   | Manual toolchain and Cargo dependency upgrade utility (Class D).                                 | Dependency maintenance                     |
 
 #### 5.1.1 Quick Suite Lifecycle (`utils/tests-quick.sh`)
 
-`utils/tests-quick.sh` executes three distinct phases, generating `target/logs/quick-receipt.txt`:
+`utils/tests-quick.sh` executes three distinct phases with a runtime budget of $\le 5$ minutes, writing detailed phase logs to `target/logs/tests-quick-<phase>.log` and concluding with a canonical `RESULT: PASS` line:
 
 1. **Phase 1: Structural (Debug):** Executes all unit and integration test targets with debug assertions enabled (enforcing execution of ≥350 tests).
 2. **Phase 2: Release Verification (Release):** Builds the release `.so` and executes the CLAP × NAMCore parity oracle (`test_clap_parity_multi_rate`), oversampling parity, CabSim IR validation, and static RT codegen disassembly inspection.
@@ -224,9 +220,6 @@ All commands must be executed from inside `./NAM-Plug/`:
 ### 5.2 Direct Cargo Commands
 
 ```bash
-# Set host concurrency guard
-export CARGO_BUILD_JOBS=4
-
 # 1. Type check tests and benchmarks
 cargo check --tests --benches --features testing
 
@@ -259,16 +252,38 @@ When running in an isolated environment without a sibling checkout of `NeuralAmp
 For standalone CI/CD:
 
 ```bash
-export CARGO_BUILD_JOBS=4
 export NAM_CORE_RENDER_BIN=/opt/namcore/build/namcore_render/tools/render
 export NAM_FIXTURES_DIR=/opt/namcore/models
 NAM_REQUIRE_CPP_ORACLE=1 cargo test --features testing --release --test clap \
     test_clap_parity_multi_rate -- --ignored --nocapture
 ```
 
-### 5.4 Release Receipt & Verification Gates (`build-release.sh`)
+### 5.4 Release Architecture & Verification Gates (`build-release.sh` & `plug_long_receipt certify`)
 
-Production builds compile the **`dist`** profile (inherits `release`, PGO + optional BOLT, stripped, `panic = "unwind"`) into `~/.clap/nam_plug.clap`. Provenance is certified via `target/release-receipt.json`, written atomically via temporary file and rename.
+Production builds compile the **`dist`** profile (inherits `release`, PGO + optional BOLT, stripped, `panic = "unwind"`) into the canonical artifact directory `target/dist/nam_plug.clap`. Certification is decoupled from compilation and enforced via strongly typed receipts verified by the `plug_long_receipt certify` Rust binary.
+
+#### The Three-Step Decoupled Release Chain
+
+The canonical release workflow strictly decouples artifact compilation, long-audit stress testing, and final certification:
+
+```text
+[Step 1: Build]    utils/build-release.sh --strict [--package] [--install]
+                   -> target/dist/nam_plug.clap (.sha256)
+                   -> target/dist/build-receipt.json (preliminary build provenance)
+
+[Step 2: Audit]    utils/tests-long.sh --strict --artifact
+                   -> target/logs/tests-long-receipt.jsonl (stamps target/dist/nam_plug.clap SHA)
+
+[Step 3: Certify]  utils/build-release.sh --certify
+                   -> Invokes plug_long_receipt certify via cargo run (no artifact recompilation)
+                   -> target/dist/release-receipt.json (authoritative CERTIFIED status)
+```
+
+| Step / Action | Script & Command | Role & Guarantees |
+|:------------- |:---------------- |:----------------- |
+| **1. Canonical Build** | `utils/build-release.sh --strict [--package] [--install]` | Compiles PGO + BOLT artifact into `target/dist/nam_plug.clap`. Packages distribution tarball and Flatpak extension if requested. Emits `target/dist/build-receipt.json`. |
+| **2. Artifact Stress Audit** | `utils/tests-long.sh --strict --artifact` | Executes the full pre-release stress suite directly against the canonical artifact `target/dist/nam_plug.clap` via `dlopen`. Records results in `target/logs/tests-long-receipt.jsonl`. |
+| **3. Final Certification** | `utils/build-release.sh --certify` | Validates cryptographic identity and release gates across receipts without recompilation. Emits final `target/dist/release-receipt.json`. |
 
 #### Five Mandatory Release Gates
 
@@ -278,40 +293,45 @@ Production builds compile the **`dist`** profile (inherits `release`, PGO + opti
 4. **CabSim IR Artifact Test:** Confirms impulse responses alter output audio as expected.
 5. **Performance Certification:** Invokes `nam_perf_guard certify` pinned to the benchmark core, verifying p99 execution stays below **85% of the audio block budget**.
 
-#### 5.4.1 BOLT Win-Proof Ceremony — Opt-Out Architectural Decision
+#### 5.4.1 Certified Artifact Identity (F-CER-01)
+
+The certification process (`build-release.sh --certify`) never recompiles after the long audit. The typed Rust certifier (`plug_long_receipt certify`) strictly enforces cryptographic parity across the artifact chain:
+
+```text
+sha256(long-audit receipt) == sha256(build receipt) == sha256(target/dist/nam_plug.clap)
+```
+
+Any divergence aborts immediately with a `F-CER-01` diagnostic error instead of rebuilding silently. The reused codegen/PGO evidence must match the preliminary `target/dist/build-receipt.json`: the PGO log and workload receipt are bound by SHA, and the source must match the certified checkout (`provenance.git_commit == HEAD`, `git_dirty == false`, plus `Cargo.lock`, `rustc` and engine provenance), ensuring that an artifact built from commit A or a dirty tree cannot be certified as commit B.
+
+#### 5.4.2 LLVM-BOLT Win-Proof Policy — Opt-Out Architectural Decision
 
 Unlike standalone host binaries, `NAM-Plug` does not include an in-tree `ab-opt-ceremony.sh` runner. Maintaining a dedicated PMU-driven A/B harness inside the plugin library introduces significant overhead relative to its gain. Therefore:
 
-- **LLVM-BOLT is opt-out in `NAM-Plug`.** This is an intentional decision, not a regression: a missing `ab-opt-ceremony-receipt.json` must not be triaged as a failed ceremony.
+- **LLVM-BOLT is opt-out in `NAM-Plug`.** This is an intentional decision, not a regression: a missing A/B receipt must not be triaged as a failed ceremony.
 - Passing the deadline envelope gate (`nam_perf_guard`) records `bolt_proof: "gate-pass-only"`, certifying real-time viability without claiming an unverified A/B win.
 - An applied BOLT with neither an `ab-opt-ceremony:<id>` proof nor a passing gate stays a typed gap (`bolt_proof:missing_ceremony`) in every mode.
+- The receipt states the absence of proof instead of leaving it implicit: `optimizations.unproven_claims` is `["bolt_win"]` whenever `bolt_proof == "gate-pass-only"`, and `[]` when a real A/B receipt exists (or BOLT was not applied). `CERTIFIED` certifies that the shipped bytes passed every functional and real-time gate.
 
-The receipt states the absence of proof instead of leaving it implicit:
-
-- `optimizations.unproven_claims` is `["bolt_win"]` whenever `bolt_proof == "gate-pass-only"`, and `[]` when a real A/B receipt exists (or BOLT was not applied). It is a claim inventory, not a gate: `CERTIFIED` still means "the shipped bytes passed every gate", never "BOLT made them faster".
-- The pipeline prints a `[UNPROVEN]` banner before exiting so the operator cannot read a green run as an A/B win.
-- A missing `ab-opt-ceremony.sh` is therefore not a defect to "fix" by fabricating a proof; implementing the runner is an opt-in future enhancement.
-
-#### 5.4.1.1 Measurement Host vs. Measurement Noise
+#### 5.4.3 Measurement Host vs. Measurement Noise
 
 `nam_perf_guard` reports two independent properties of a run:
 
 | Field | Meaning | Effect on the gate |
-| --- | --- | --- |
+|:----- |:------- |:------------------ |
 | `environment_stable` | Coefficient of variation ≤ 1.2 across the sampled series (noise/thermal). | `false` ⇒ `INCONCLUSIVE` (exit `2`). |
-| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy in §5.4 (no `isolcpus`/`nohz_full`, shared IRQ affinity, non-RT scheduling, non-`performance` governor, boost enabled, or unpinned affinity). | Recorded only; the p99 evidence remains valid for *that* host. |
+| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy (no `isolcpus`/`nohz_full`, shared IRQ affinity, non-RT scheduling, non-`performance` governor, boost enabled, or unpinned affinity). | Recorded only; the p99 evidence remains valid for *that* host. |
 
-The receipt mirrors both fields under `performance_certification`, and the pipeline prints `[DEGRADED HOST]` with the typed reasons. Reasons are stable tokens such as `bench_core_not_isolated:8`, `irq_isolation_shared:8:35`, `sched_policy_not_realtime:SCHED_OTHER`, `governor_not_performance:powersave`, `governor_unknown`, `cpu_boost_enabled`, `boost_unknown`, `affinity_not_single_core:0-15`. A degraded host never promotes a `FAIL` to `PASS`; it only prevents a `PASS` from being read as a fully isolated measurement.
+The receipt mirrors both fields under `performance_certification`, and the pipeline prints `[DEGRADED HOST]` with the typed reasons. Reasons are stable tokens such as `bench_core_not_isolated:<N>`, `irq_isolation_shared:<N>`, `sched_policy_not_realtime:SCHED_OTHER`, `governor_not_performance:powersave`, `governor_unknown`, `cpu_boost_enabled`, `boost_unknown`, `affinity_not_single_core:0-15`. A degraded host never promotes a `FAIL` to `PASS`; it only prevents a `PASS` from being read as a fully isolated measurement.
 
 `perf-certification-report.json` uses `schema_version: "1.3"` and an ISO-8601 `timestamp_utc` (`YYYY-MM-DDTHH:MM:SSZ`), like the release receipt, so reports sort chronologically as text.
 
-#### 5.4.1.2 External `clap-validator` Skips
+#### 5.4.4 External `clap-validator` Skips
 
 Gate 2 records the validator outcome under `clap_validator` (`status`, `tests_run`, `passed`, `failed`, `skipped`, `skip_reasons`, `log_sha256`) and writes the full output to `target/logs/clap-validator.log`. Intentional skips are explicit evidence, not silence: the current artifact reports two `clap.note-ports` skips because the plugin does not implement that extension. A green run with skips is never presented as a zero-skip run.
 
-#### 5.4.1.3 Long-Audit Artifact Exercise Coverage
+#### 5.4.5 Long-Audit Artifact Exercise Coverage
 
-`utils/tests-long.sh` stamps every phase with `artifact_exercised`. Phases that only run library-level (`--lib`) tests declare the artifact hash without `dlopen`-ing it, so phases 1, 2 and 4 are legitimately `false`; phase 3 (`RT Priority & Micro-Latency`) loads the shipped `.clap`. The finalizer summarizes this in the release receipt:
+`utils/tests-long.sh` stamps every phase with `artifact_exercised`. Phases that only run library-level (`--lib`) tests declare the artifact hash without `dlopen`-ing it, so phases 1, 2 and 4 are legitimately `false`; phase 3 (`RT Priority & Micro-Latency`) loads the shipped `.clap`. The certifier summarizes this in the release receipt:
 
 ```json
 "artifacts": {
@@ -322,63 +342,6 @@ Gate 2 records the validator outcome under `clap_validator` (`status`, `tests_ru
 ```
 
 This prevents "15 tests passed" from being read as "15 tests ran against the shipped shared object". Expanding dlopen coverage is a future epic, not a certificate requirement.
-
-#### 5.4.1.4 Hermetic Targets vs. Local Iteration
-
-`build-release.sh` wipes `target/pgo-build` and `target/pgo-clap` before every run so no stale object can be certified. For local iteration only, `NAM_PGO_REUSE_TARGET=1` reuses the previous target; the flag is ignored (with a warning) in strict or ceremony mode. The official `release-ceremony.sh` additionally runs `git clean -fdx`, so a certified run always compiles from scratch.
-
-#### 5.4.2 Exit Codes: Preliminary Run × Release Ceremony
-
-| Invocation                                        | Receipt status                           | Exit code |
-| ------------------------------------------------- | ---------------------------------------- | --------- |
-| `build-release.sh --strict-release` (preliminary) | any (`INCOMPLETE` is reported)           | `0`       |
-| `build-release.sh --release-ceremony`             | `CERTIFIED`                              | `0`       |
-| `build-release.sh --release-ceremony`             | `INCOMPLETE` or `FUNCTIONALLY_CERTIFIED` | `3`       |
-| Fatal error (`die`)                               | —                                        | `1`       |
-
-- In ceremony mode, exit `0` holds if and only if the receipt is `CERTIFIED`. Exit `3` is a dedicated code, distinct from `die` (`1`), and is printed with a `[CEREMONY-FAIL]` banner listing the skipped gates.
-- The receipt and artifacts are written before the gate runs and remain in `target/` for diagnosis.
-- The rule lives in `ceremony_exit_code` (`utils/lib/_lib.sh`) and is covered by `tests/scripts/test_ceremony_fail_closed.sh`.
-
-#### 5.4.3 Certified Artifact Identity (F-CER-01)
-
-The ceremony never recompiles after the long audit. The preliminary `--strict-release --install` run captures the installed bytes in `target/certified/nam_plug.clap` (plus `nam_plug.clap.sha256`). The `--release-ceremony` run then requires:
-
-```text
-sha256(long-audit receipt) == sha256(~/.clap/nam_plug.clap) == sha256(target/certified/nam_plug.clap)
-```
-
-Any divergence aborts with a `F-CER-01` diagnostic instead of rebuilding silently. Phases 2–4 are skipped, and the reused codegen/PGO evidence must match the preliminary `target/release-receipt.json`: the PGO log and workload receipt are bound by SHA, and the preliminary source must match the certified checkout (`provenance.git_commit == HEAD`, `git_dirty == false`, plus `Cargo.lock`, `rustc` and engine provenance), so an artifact built from commit A or a dirty tree cannot be certified as commit B. Because the installed artifact is the post-strip form of the BOLT output, the receipt records the canonical installed SHA plus `artifacts.pre_strip_artifact_sha256` (the codegen `.bolt.so` hash, populated in both preliminary and ceremony receipts); only the post-strip identity is compared with the long receipt. On success `artifacts.reused_certified_binary` is `true` and `certified_copy_sha256` matches `clap_installed_sha256`. If a ceremony cannot certify, Phases 6–7 are skipped so the last-known-good files in `$HOME` are not overwritten. Contract tests: `tests/scripts/test_ceremony_reuse_binary.sh` and `test_receipt_artifact_consistency.sh`.
-
-#### 5.4.4 Ceremony Sequence, Receipt Roles & Invariants
-
-The official ceremony is driven by `release-ceremony.sh` (orchestrating repository release scripts, without internal receipt logic). Phases run in this order from the repository root:
-
-```text
-[1] build-release.sh --strict-release --install           preliminary build (PGO + BOLT)
-        -> target/release-receipt.json (preliminary), target/certified/nam_plug.clap(.sha256)
-[2] tests-long.sh --strict-pre-release                     long audit (operator only)
-        -> target/logs/long-audit-receipt.jsonl
-[3] ab-opt-ceremony.sh --runs 3                            optional; not shipped in NAM-Plug (§5.4.1)
-        -> target/logs/ab-opt-ceremony-receipt.json
-[4] build-release.sh --strict-release --release-ceremony --install   final certification
-        -> target/release-receipt.json (final); exit 0 only if CERTIFIED, otherwise exit 3
-```
-
-| Receipt / artifact                           | Written by        | Role                                                                                                                |
-| -------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `target/release-receipt.json` (preliminary)  | step 1            | Build evidence (PGO workload, codegen pre/post, source provenance). Input validated by step 4; may be `INCOMPLETE`. |
-| `target/certified/nam_plug.clap` + `.sha256` | step 1            | Exact installed bytes captured for reuse. Never regenerated by step 4.                                              |
-| `target/logs/long-audit-receipt.jsonl`       | step 2            | Binds the artifact SHA exercised by the long suite.                                                                 |
-| `target/logs/ab-opt-ceremony-receipt.json`   | step 3 (optional) | BOLT win proof (`bolt_proof = ab-opt-ceremony:<id>`).                                                               |
-| `target/release-receipt.json` (final)        | step 4            | Authoritative status, gates, and artifact identities of the shipped binary.                                         |
-
-Invariants:
-
-- **The binary is never rebuilt after certification.** Step 4 reuses `target/certified/nam_plug.clap`; a missing or divergent artifact aborts with `F-CER-01` (never a silent rebuild). The reuse path is explicit in the receipt: `artifacts.reused_certified_binary` is `true` only when the reuse guard passed, and `artifacts.certified_copy_sha256` equals `artifacts.clap_installed_sha256`.
-- **Single identity chain:** `sha256(long receipt) == sha256(installed) == sha256(certified copy)`. The codegen `.bolt.so` hash is recorded separately in `artifacts.pre_strip_artifact_sha256`.
-- **Exit-3 rule (§5.4.2):** in ceremony mode only `CERTIFIED` exits `0`; any other status exits `3`. Packaging (Phases 6–7) runs only for `CERTIFIED`, so the last-known-good files in `$HOME` survive a failed ceremony.
-- **Provenance of the ceremony:** `provenance.ceremony` records `script_sha256` (SHA-256 of `release-ceremony.sh`) and the ordered `phases` it ran (for example `["build", "long", "final"]`). Manual `build-release.sh` runs, or a missing or malformed SHA, record `null`. The field is optional and additive: `schema_version` stays `1.1`.
 
 ---
 
@@ -416,7 +379,6 @@ echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governo
 echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost
 
 # Pin benchmarks to isolated core 8
-export CARGO_BUILD_JOBS=4
 taskset -c 8 cargo bench --features testing --bench clap_bench
 ```
 
@@ -433,7 +395,6 @@ taskset -c 8 cargo bench --features testing --bench clap_bench
 - **Virtual Framebuffer:** To run embedded GUI tests in headless runners:
 
   ```bash
-  export CARGO_BUILD_JOBS=4
   xvfb-run -a cargo test --features testing --lib gui_lifecycle_x11_embedded_set_parent_honest
   ```
 
@@ -448,8 +409,8 @@ The persistent GUI worker (`src/clap/gui/worker.rs`) pre-warms the Slint/winit p
 
 Development systems with 16 GiB RAM can experience compiler-induced OOM crashes when running fat-LTO release test suites alongside IDE language servers (`rust-analyzer`). Protection is enforced via:
 
-1. **Parallelism Cap:** `.cargo/config.toml` sets `jobs = 4` (override per run with `CARGO_BUILD_JOBS=4`).
-2. **Cgroup Scope Containment:** Scripts re-exec via `utils/mem-guard.sh` within a transient systemd user scope (`MemoryHigh=5G`, `MemoryMax=6G`, `oom_score_adj=500`).
+1. **Parallelism Cap:** Controlled via host environment (e.g., `CARGO_BUILD_JOBS` in `~/.bashrc` on memory-constrained systems).
+2. **Cgroup Scope Containment:** Heavy out-of-band builds can be wrapped with host-level cgroup containment provided by the operator host tooling (transient systemd user scope).
 3. **Bench Profile Tuning:** `[profile.bench]` uses thin LTO and 16 codegen units to prevent memory spikes.
 4. **IDE Process Protection:** Lowers the IDE's `oom_score_adj` to protect development environments.
 
@@ -521,3 +482,101 @@ Measured on an isolated CPU core (`x86-64-v3` AVX2/FMA baseline, `performance` g
 | **Oversample 4× (Live)**               | 167.3 µs                | +125.4 µs (+299%)                    | 4× internal neural iterations                  |
 | **RenderMode Offline HQ (4×)**         | 168.0 µs                | +126.1 µs (+301%)                    | Deterministic HQ mastering mode                |
 | **CabSim IR Convolution (512-sample)** | 42.6 µs                 | +1.2 µs (+2.8%)                      | Partitioned time-domain / SIMD FIR convolution |
+
+---
+
+## 7. Script Contract & Automation Disciplines
+
+All automation scripts in `utils/` adhere to a lean, predictable execution contract designed for deterministic automation, reproducible continuous integration, and transparent developer workflows.
+
+### 7.1 Script Classes & Error Handling Policies
+
+Each script strictly adheres to one of four architectural classes:
+
+| Class | Typical Scripts | Error Handling Policy | Architectural Rationale |
+|:----- |:--------------- |:--------------------- |:----------------------- |
+| **Class A — Interactive** | `lints.sh`, `tests-quick.sh` | `set -euo pipefail`; aborts on first failure; `ERR` trap emits `RESULT: FAIL` | Real-time developer loops. Immediate failure surfaces bugs fast and conserves developer cycles. |
+| **Class B — Decoupled Audit** | `tests-long.sh` | `set -o pipefail` (no `-e`, no `-u`); each phase records status independently; collects all failures; exit `1` at end if any phase failed | Nightly and pre-release audits. Collects all phase evidence without aborting prematurely. |
+| **Class C — Build** | `build-release.sh` | `set -euo pipefail`; aborts on first failure | Build pipelines where intermediate failure invalidates downstream artifacts. |
+| **Class D — Manual Tool** | `mod-update.sh`, `verify_rt_codegen.sh` | `set -euo pipefail` | Targeted utilities executed under direct operator supervision. |
+
+### 7.2 Output Protocol & Exit Codes
+
+Script output follows a structured stream suitable for automated parsing:
+
+1. **Phase Announcement:**
+   ```text
+   PHASE: <phase_name>
+   ```
+2. **Phase Completion:**
+   ```text
+   PHASE: <phase_name> PASS log=<path>
+   PHASE: <phase_name> FAIL rc=<exit_code> log=<path>
+   PHASE: <phase_name> GAP <technical_reason>
+   ```
+3. **Unified Final Result Line:**
+   Every script terminates by emitting exactly one final summary line:
+   ```text
+   RESULT: PASS|PASS_WITH_GAPS|FAIL (<seconds>s) fails=<list|none> gaps=<list|none>
+   ```
+4. **Exit Codes:**
+   - `0`: Complete success (`PASS`), or success with documented gaps (`PASS_WITH_GAPS`) when not in strict mode.
+   - `1`: Execution failure (`FAIL`), or unfulfilled `GAP` when invoked with `--strict`.
+   - `2`: Syntax error, unknown option, or missing precondition.
+
+Detailed execution logs are written to `target/logs/<script>-<phase>.log` via `tee`.
+
+### 7.3 Core Automation Principles
+
+- **No Tests of Test Tooling:** Test suites validate CLAP plugin interfaces, DSP kernels, neural inference, and GUI event loops. Meta-tests that verify auxiliary scripts, receipt JSON schemas, or internal QA tools are forbidden. Tooling integrity is guaranteed by strict typing, minimal surface area, and routine execution.
+- **Quick Never Provisions Infrastructure:** `utils/tests-quick.sh` operates entirely on already-available fixtures and pre-built tooling. It never provisions external dependencies or triggers out-of-band builds. Missing optional tooling or fixtures gracefully emits a typed `GAP`.
+- **Long Collects All Failures:** `utils/tests-long.sh` executes all configured preflights and stress phases to completion, aggregating passes, gaps, and failures into a final diagnostic summary without early termination.
+- **Convention Over Parameterization:** All scripts default to host capabilities (all online cores, zero artificial thermal cooldown, unpinned execution). Environment variables only exist to override defaults when explicitly required.
+
+### 7.4 Canonical Command-Line Flags
+
+Only canonical flags are supported across scripts (no legacy aliases):
+
+| Script | Supported Flags | Notes |
+|:------ |:--------------- |:----- |
+| **All scripts** | `-h`, `--help` | Displays concise usage and exits 0. |
+| `lints.sh` | None | Strict zero-flag policy; formatting is applied in-place during local development and verified via `CI=true` on CI. |
+| `tests-quick.sh` | None | Fast first-line discipline; no `--allow-gaps` or simulation flags. |
+| `tests-long.sh` | `--strict`, `--only <phase>[,<phase>]`, `--artifact` | `--strict` promotes any `GAP` to `FAIL` (exit 1); `--only` runs specific phases; `--artifact` tests canonical `target/dist/nam_plug.clap`. |
+| `build-release.sh` | `--strict`, `--package`, `--install`, `--certify` | `--package` builds tarball and Flatpak; `--install` installs to `~/.clap/`; `--certify` validates receipts without recompiling. |
+
+### 7.5 Canonical Environment Variables
+
+#### Interface Variables (User & CI Control)
+
+| Variable | Default | Scope | Purpose & Semantics |
+|:-------- |:------- |:----- |:------------------- |
+| `CARGO_BUILD_JOBS` | Unset (all cores) | Host / Cargo | Set in the host shell profile (`~/.bashrc`) to limit compiler parallelism on memory-constrained systems. Scripts never override or hardcode this. |
+| `CI` | Unset | CI Runner | When `true`, instructs `lints.sh` to execute `cargo fmt --check` instead of modifying files in-place. |
+| `NAM_THERMAL_COOLDOWN_S` | `0` | RT / Benchmark | Non-negative integer seconds for thermal settling between benchmark runs. |
+| `NAM_BENCH_CORE` | `auto` | Benchmark | Core pinning: explicit CPU ID, isolated core if online, first allowed CPU, or unpinned fallback (`GAP`). |
+| `NAM_PHASE_TIMEOUT_S` | Per-phase default | `tests-long.sh` | Overrides timeout duration across all audit phases for emergency debugging. |
+| `NAM_GUI_TIMEOUT_MS` | `3000` | GUI Testing | Timeout in milliseconds for headless Xvfb window and lifecycle assertions. |
+
+#### Harness Variables (Internal Script → Rust Communication)
+
+| Variable | Configured By | Read By | Purpose |
+|:-------- |:------------- |:------- |:------- |
+| `NAM_RUN_ID` | `utils/_lib.sh` | Test harnesses | Unique timestamped run identifier for logging and receipt isolation. |
+| `NAM_REQUIRE_CPP_ORACLE` | `tests-long.sh --strict` | Parity suites | Enforces hard failure if the C++ reference render binary is unavailable. |
+| `NAM_RT_STRICT` | `tests-long.sh --strict` | RT deadline tests | Rejects latency outliers and deadline budget misses fail-closed. |
+| `CLAP_PLUGIN_UNDER_TEST` | `tests-long.sh --artifact` | Long audit harnesses | Specifies path to the canonical compiled `.clap` binary under test. |
+| `NAM_CORE_RENDER_BIN` | `_lib.sh` / preflights | C++ Parity tests | Absolute path to the compiled upstream C++ `render` CLI binary. |
+| `NAM_FIXTURES_DIR` | `_lib.sh` / preflights | Model loaders | Explicit path to test model fixtures directory. |
+| `NAM_MODELS_DIR` | User / harness | Model loaders | Root directory for resolving model files hierarchically. |
+
+### 7.6 Measured Durations & Budgets
+
+Execution times measured on standard development hardware (16-core, SSD):
+
+| Discipline / Script | Measured Duration | Budget Ceiling | Notes |
+|:------------------- |:----------------- |:-------------- |:----- |
+| `utils/lints.sh` | ~6s (warm cache) to ~45s (clean build) | $\le 2$ min | Covers fmt, check (3 permutations), clippy (`-D warnings`), doc, SPDX, policies, and RT allocation verification. |
+| `utils/tests-quick.sh` | ~90s (warm cache) | $\le 5$ min | Covers structural unit/integration tests, C++ NAMCore parity, oversampling parity, CabSim IR, and static RT codegen. |
+| `utils/tests-long.sh` | ~8–12 min (full suite) | $\le 15$ min | GC swaps, off-RT drain, RT priority/latency with loaded `.clap`, and headless Xvfb GUI. |
+| `utils/build-release.sh` | ~2–4 min (full PGO/BOLT) | $\le 8$ min | PGO profiling workload, BOLT optimization, and canonical packaging. |

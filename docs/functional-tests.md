@@ -7,7 +7,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 **Audience:** Developers, QA Testers, and End Users.
 **Target DAWs:** Bitwig Studio 6+ and Reaper / Fender Studio Pro 8+ (Linux, Flatpak / Native).
-**Preparation:** `~/.clap/nam_plug.clap` installed (Release build via `export CARGO_BUILD_JOBS=4; utils/build-release.sh` or `target/release/libnam_plug.so`), ≥1 valid `.nam` model, 1 invalid file, 1 `.wav` IR file, Guitar DI or audio signal generator on track, and `pw-top` open to monitor XRUNs (Recommended: 128 samples @ 48 kHz).
+**Preparation:** `~/.clap/nam_plug.clap` installed (Release build via `utils/build-release.sh` or `target/release/libnam_plug.so`), ≥1 valid `.nam` model, 1 invalid file, 1 `.wav` IR file, Guitar DI or audio signal generator on track, and `pw-top` open to monitor XRUNs (Recommended: 128 samples @ 48 kHz).
 
 > [!NOTE]
 > This guide covers manual human QA workflows. For automated unit and integration tests (`cargo test`), property testing, allocation auditing, and Criterion performance benchmarks (`cargo bench`), refer to [`testing.md`](testing.md).
@@ -178,10 +178,10 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 
 Before signing off on manual QA, verify that the automated release gates and mathematical parity checks have passed:
 
-- [ ] **3.5.1 Automated Quick Verification:** Run `export CARGO_BUILD_JOBS=4; ./utils/tests-quick.sh` (or inspect `target/logs/quick-receipt.txt`).
-  *Expected:* Output confirms `CLAP_CPP_PARITY: PASS`, `CLAP_OS_PARITY: PASS`, `CABSIM_PARITY: PASS`, and `RT_CODEGEN: PASS`. Overall result must be `PASSED`.
+- [ ] **3.5.1 Automated Quick Verification:** Run `./utils/tests-quick.sh` (or inspect `target/logs/tests-quick-*.log`).
+  *Expected:* Output confirms structural tests, C++ NAMCore parity, oversampling parity, CabSim IR validation, and RT codegen pass. Overall result must be `RESULT: PASS`.
 - [ ] **3.5.2 Parity Standards:** Confirm that multi-rate C++ NAMCore parity, oversampling (2×/4×), and CabSim IR convolution satisfy `ESR < 1e-8` and `SNR > 80 dB` across certification rates (44.1, 48, and 96 kHz). For detailed oracle methodology and baseline figures, see [`testing.md`](testing.md#321-multi-rate-resampling-reference-oracle).
-- [ ] **3.5.3 Release Receipt:** For production builds (`utils/build-release.sh`), inspect `target/release-receipt.json` to verify `status: "CERTIFIED"` with zero unapproved skipped gates.
+- [ ] **3.5.3 Release Receipt:** For production builds (`utils/build-release.sh`), inspect `target/dist/release-receipt.json` to verify `status: "CERTIFIED"` with zero unapproved skipped gates.
 
 ---
 

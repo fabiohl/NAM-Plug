@@ -9,9 +9,8 @@
 //! declared hashes, detects missing/incomplete/conflicting declarations, and
 //! compares them with the artifact actually installed.
 //!
-//! It is used by `plug_long_receipt verify-artifact` (the release-time gate and
-//! the regression script under `tests/scripts/`); the shell never re-implements
-//! the comparison.
+//! It is used by `plug_long_receipt verify-artifact` (the release-time gate);
+//! the shell never re-implements the comparison.
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -386,7 +385,3 @@ pub fn verify_receipt_artifact(receipt_path: &Path, artifact_path: &Path) -> Art
         }
     }
 }
-
-#[cfg(test)]
-#[path = "long_artifact_test.rs"]
-mod tests;

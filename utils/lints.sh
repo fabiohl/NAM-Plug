@@ -1,217 +1,107 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
-#
-# Standard quality control and static analysis script for NAM-Plug.
-# Runs all cargo checks first (fmt, check, clippy) covering the maximum
-# feature spectrum dynamically, followed by static textual checks.
-#
-# Dynamic feature matrix (broad and resilient to Cargo.toml changes):
-#   All Features (catch-all) : --all-targets --all-features
-#   Base CDylib              : --lib --no-default-features
-#   No Default Features      : --all-targets --no-default-features
-
+# lints.sh — Análise estática, formatação e conformidade textual. Classe A.
+# Uso: utils/lints.sh
+set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
+cd "$(dirname "$0")/.."
+. utils/_lib.sh
 
-# Host memory guard: cap parallel rustc jobs to 4 to prevent OOM
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { echo "Uso: utils/lints.sh"; exit 0; }
+trap 'echo "RESULT: FAIL ($((SECONDS - T0))s) fails=${PHASE_NAME:-step} gaps=none"' ERR
 
-PHASE_TOTAL=9
-source "$(dirname "$0")/lib/_lib.sh"
+run_step() {
+  local name="$1"; shift
+  PHASE_NAME="$name"; phase "$name"
+  local log="$LOG_DIR/lints-$name.log"; local rc=0
+  "$@" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
+  if [ "$rc" -eq 0 ]; then
+    echo "PHASE: $name PASS log=$log"
+  else
+    FAILS+=("$name"); echo "PHASE: $name FAIL rc=$rc log=$log"; exit 1
+  fi
+}
 
-echo -e "${BLUE}${BOLD}========================================${NC}"
-echo -e "${BLUE}${BOLD}    NAM-Plug Linting & Quality Suite    ${NC}"
-echo -e "${BLUE}${BOLD}========================================${NC}"
-SUITE_START=$(date +%s%N)
+phase_fmt() {
+  if [ "${CI:-}" = "true" ]; then cargo fmt --all -- --check; else cargo fmt --all; git diff --stat; fi
+}
+run_step fmt phase_fmt
 
-# ---------------------------------------------------------------------------
-# [1/9] Code formatting (cargo fmt)
-# ---------------------------------------------------------------------------
-phase "Applying code formatting (cargo fmt)..."
-cargo fmt --all
-ok "Code formatting applied ($(phase_elapsed_str))."
+phase_check() {
+  cargo check --locked --all-targets --all-features
+  cargo check --locked --lib --no-default-features
+  cargo check --locked --all-targets --no-default-features
+}
+run_step check phase_check
 
-# ---------------------------------------------------------------------------
-# [2/9] Compilation checks (cargo check) — broad feature matrix
-# ---------------------------------------------------------------------------
-phase "Executing compilation checks (cargo check)..."
+phase_clippy() {
+  cargo clippy --locked --all-targets --all-features -- -D warnings
+  cargo clippy --locked --lib --no-default-features -- -D warnings
+  cargo clippy --locked --all-targets --no-default-features -- -D warnings
+}
+run_step clippy phase_clippy
 
-echo -e "  ${YELLOW}${BOLD}Checking: All Targets + All Features (broad catch-all)...${NC}"
-cargo check --all-targets --all-features
+phase_doc() {
+  RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
+}
+run_step doc phase_doc
 
-echo -e "  ${YELLOW}${BOLD}Checking: Base CDylib (no default features)...${NC}"
-cargo check --lib --no-default-features
+phase_spdx() {
+  local files missing invalid
+  files=$(git ls-files 'src/*.rs' 'tests/*.rs' 'benches/*.rs' 'utils/*.sh' 'build.rs' 'Cargo.toml')
+  missing=$(grep -L "SPDX-License-Identifier" $files || true)
+  if [ -n "$missing" ]; then
+    echo "Missing SPDX header:" >&2; echo "$missing" | sed 's/^/  /' >&2; exit 1
+  fi
+  invalid=$(grep -l "SPDX-License-Identifier" $files | xargs grep -L -E "SPDX-License-Identifier: (GPL-3\.0-or-later|MIT)" || true)
+  if [ -n "$invalid" ]; then
+    echo "Invalid SPDX identifier:" >&2; echo "$invalid" | sed 's/^/  /' >&2; exit 1
+  fi
+}
+run_step spdx phase_spdx
 
-echo -e "  ${YELLOW}${BOLD}Checking: All Targets (no default features)...${NC}"
-cargo check --all-targets --no-default-features
-ok "Compilation checks passed ($(phase_elapsed_str))."
+phase_policies() {
+  if [ -d "tests/common" ] && grep -rnF "#[test]" tests/common/ > /dev/null 2>&1; then
+    echo "ERROR: #[test] in tests/common/" >&2; exit 1
+  fi
 
-# ---------------------------------------------------------------------------
-# [3/9] Static analysis (cargo clippy) — strict, broad feature matrix
-# ---------------------------------------------------------------------------
-phase "Executing strict static analysis (cargo clippy)..."
+  utils/verify_no_rt_alloc.sh
 
-echo -e "  ${YELLOW}${BOLD}Clippy: All Targets + All Features (broad catch-all)...${NC}"
-cargo clippy --all-targets --all-features -- -D warnings
-
-echo -e "  ${YELLOW}${BOLD}Clippy: Base CDylib (no default features)...${NC}"
-cargo clippy --lib --no-default-features -- -D warnings
-
-echo -e "  ${YELLOW}${BOLD}Clippy: All Targets (no default features)...${NC}"
-cargo clippy --all-targets --no-default-features -- -D warnings
-ok "Static analysis passed cleanly with zero warnings ($(phase_elapsed_str))."
-
-# ---------------------------------------------------------------------------
-# [4/9] SPDX license header validation (deterministic, no external tooling)
-# ---------------------------------------------------------------------------
-phase "Validating SPDX license headers..."
-
-# Build the list of directories to search as an array to avoid fragile word
-# splitting inside command substitution when benches/ is absent.
-rs_dirs=( src tests )
-[ -d benches ] && rs_dirs+=( benches )
-
-# Enumeration is fail-closed: with `set -euo pipefail` and no `|| true`, any
-# failure in the find/test commands aborts the gate instead of silently
-# producing an empty (or partial) scope.
-spdx_scope=$(
-    {
-        find "${rs_dirs[@]}" -type f -name '*.rs'
-        find utils tests -type f -name '*.sh'
-        if [ -f build.rs ]; then echo build.rs; fi
-        if [ -f Cargo.toml ]; then echo Cargo.toml; fi
+  local clippy_errs
+  clippy_errs=$(git ls-files 'src/*.rs' 'tests/*.rs' 'benches/*.rs' | xargs awk '
+    FNR == 1 { prev = 0 }
+    /^[[:space:]]*#\[allow\(clippy::/ {
+      if (!prev) print FILENAME ":" FNR ": " $0
+      prev = 0; next
     }
-)
-
-# Missing SPDX header: scan file-by-file (no xargs, so grep errors are never
-# masked into an empty result) — an unreadable file counts as missing.
-missing=""
-while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    if ! grep -q "SPDX-License-Identifier" "$f"; then
-        missing+="$f"$'\n'
-    fi
-done <<< "$spdx_scope"
-if [ -n "$missing" ]; then
-    echo -e "  ${RED}${BOLD}Missing SPDX header in files:${NC}"
-    echo "$missing" | sed 's/^/    /'
+    /^[[:space:]]*(\/\/[[:space:]]*(SPDX|Copyright)|\/\/\/|\/\/!)/ { prev = 0; next }
+    /^[[:space:]]*(\/\/[^/!]|[\/]\*)/ { prev = 1; next }
+    /^[[:space:]]*$/ { next }
+    { prev = 0 }
+  ')
+  if [ -n "$clippy_errs" ]; then
+    echo "Uncommented clippy allow attributes found:" >&2
+    echo "$clippy_errs" >&2
     exit 1
-fi
+  fi
 
-# Invalid SPDX identifier (expected GPL-3.0-or-later or MIT): same file-by-file
-# scan — a grep error on one file is a hard failure, never a silent pass.
-invalid=""
-while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    if grep -q "SPDX-License-Identifier" "$f" \
-        && ! grep -qE "SPDX-License-Identifier: (GPL-3\.0-or-later|MIT)" "$f"; then
-        invalid+="$f"$'\n'
-    fi
-done <<< "$spdx_scope"
-if [ -n "$invalid" ]; then
-    echo -e "  ${RED}${BOLD}Invalid SPDX identifier (expected GPL-3.0-or-later or MIT):${NC}"
-    echo "$invalid" | sed 's/^/    /'
-    exit 1
-fi
-ok "All files have valid SPDX headers (GPL-3.0-or-later, MIT) ($(phase_elapsed_str))."
-
-# ---------------------------------------------------------------------------
-# [5/9] Anti-pattern check: #[test] in tests/common/
-# ---------------------------------------------------------------------------
-phase "Checking anti-pattern #[test] in tests/common/..."
-if [ -d "tests/common" ] && grep -rnF "#[test]" tests/common/ > /dev/null 2>&1; then
-    echo -e "  ${RED}${BOLD}ERROR: '#[test]' found in tests/common/ (redundant executions):${NC}"
-    grep -rnF "#[test]" tests/common/ | sed 's/^/    /'
-    exit 1
-fi
-ok "No '#[test]' in tests/common/ ($(phase_elapsed_str))."
-
-# ---------------------------------------------------------------------------
-# [6/9] RT-path static allocation scan
-#
-# Verifies that the audio-thread code under `src/clap/processor/` contains no
-# `Box::new` or implicit heap allocations outside the documented off-RT sites
-# (`activate()`, panic helpers, test modules). Static half of the zero-alloc
-# contract; the dynamic half is the heap-audit CI lane.
-# ---------------------------------------------------------------------------
-phase "Checking RT path for heap allocations (static scan)..."
-"$(dirname "$0")/lib/verify_no_rt_alloc.sh"
-ok "RT-path static allocation scan passed ($(phase_elapsed_str))."
-
-# ---------------------------------------------------------------------------
-# [7/9] Undocumented #[allow(clippy::)] check (enforce allow_attributes policy)
-#
-# The project sets `allow_attributes = "warn"` in [lints.clippy], meaning every
-# #[allow(clippy::...)] must carry a justification comment immediately above it
-# (using the standard `// REASON:` or `// #[allow]` comment convention).
-# A bare #[allow(clippy::...)] with no preceding comment is flagged here as a
-# policy violation to keep lint suppressions auditable.
-# ---------------------------------------------------------------------------
-phase "Checking for undocumented #[allow(clippy::)] suppressions..."
-
-undocumented_allows=""
-while IFS= read -r rs_file; do
-    # Read the file line by line, tracking whether the previous non-blank line
-    # was a comment. Flag any #[allow(clippy:: line whose preceding non-blank
-    # line is not a comment (// or #).
-    prev_was_comment=false
-    while IFS= read -r line; do
-        trimmed="${line#"${line%%[! ]*}"}"   # lstrip whitespace
-        if [[ "$trimmed" =~ ^\#\[allow\(clippy:: ]]; then
-            if ! $prev_was_comment; then
-                undocumented_allows+="$rs_file: $trimmed"$'\n'
-            fi
-            prev_was_comment=false
-        elif [[ "$trimmed" =~ ^//|^# ]]; then
-            prev_was_comment=true
-        elif [ -n "$trimmed" ]; then
-            prev_was_comment=false
-        fi
-        # blank lines do not reset the comment flag (allow blank separator between
-        # comment and attribute)
-    done < "$rs_file"
-done < <(printf '%s\n' "$spdx_scope" | grep '\.rs$')
-
-if [ -n "$undocumented_allows" ]; then
-    echo -e "  ${RED}${BOLD}ERROR: Undocumented #[allow(clippy::)] found (add a justification comment above):${NC}"
-    echo "$undocumented_allows" | sed 's/^/    /'
-    exit 1
-fi
-ok "All #[allow(clippy::)] suppressions are documented ($(phase_elapsed_str))."
-
-# ---------------------------------------------------------------------------
-# [8/9] AppStream metadata version sync check
-# ---------------------------------------------------------------------------
-phase "Checking AppStream metainfo release version sync with Cargo.toml..."
-
-cargo_ver=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
-metainfo_file="packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml"
-
-if [ -f "$metainfo_file" ]; then
+  local cargo_ver metainfo_file xml_ver
+  cargo_ver=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+  metainfo_file="packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml"
+  if [ -f "$metainfo_file" ]; then
     xml_ver=$(grep -m1 '<release version=' "$metainfo_file" | sed -E 's/.*version="([^"]+)".*/\1/')
     if [ "$cargo_ver" != "$xml_ver" ]; then
-        echo -e "  ${RED}${BOLD}ERROR: Version mismatch between Cargo.toml ($cargo_ver) and $metainfo_file ($xml_ver)!${NC}"
-        exit 1
+      echo "ERROR: Version mismatch between Cargo.toml ($cargo_ver) and $metainfo_file ($xml_ver)!" >&2
+      exit 1
     fi
-    ok "AppStream metainfo version matches Cargo.toml ($cargo_ver) ($(phase_elapsed_str))."
-fi
+  fi
+}
+run_step policies phase_policies
 
-# ---------------------------------------------------------------------------
-# [9/9] Shell contract tests (tests/scripts/test_*.sh)
-#
-# Keeps every script-level contract test on the normal verification path. The
-# aggregate runner discovers all test_*.sh files and requires the receipt,
-# performance-baseline, codegen and quick-harness guards to exist, so an
-# orphaned or silently skipped script fails the gate instead of disappearing.
-# ---------------------------------------------------------------------------
-phase "Executing shell contract tests (tests/scripts/test_*.sh)..."
-"$(dirname "$0")/test-scripts.sh"
-ok "Shell contract tests passed ($(phase_elapsed_str))."
+phase_script_budget() {
+  wc -l utils/*.sh
+}
+run_step script-budget phase_script_budget
 
-SUITE_END=$(date +%s%N)
-TOTAL_DUR_MS=$(( (SUITE_END - SUITE_START) / 1000000 ))
-TOTAL_DUR_STR=$(format_duration_ms "$TOTAL_DUR_MS")
-
-echo -e "${GREEN}${BOLD}========================================${NC}"
-echo -e "${GREEN}${BOLD} Quality suite completed successfully in ${TOTAL_DUR_STR}!${NC}"
-echo -e "${GREEN}${BOLD}========================================${NC}"
+finish

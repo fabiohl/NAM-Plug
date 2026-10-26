@@ -261,8 +261,7 @@ fn read_sched_policy() -> String {
 /// Resolves the core the measurement is actually running on.
 ///
 /// Priority: explicit `NAM_BENCH_CORE` → a single CPU in the affinity mask
-/// (the `taskset` case) → the first isolated CPU allowed by the mask, preferring
-/// core 8 exactly like `pick_bench_core`.
+/// (the `taskset` case) → the first isolated CPU allowed by the mask.
 fn resolve_bench_core(
     allowed: &[usize],
     isolated: &[usize],
@@ -273,9 +272,6 @@ fn resolve_bench_core(
     }
     if allowed.len() == 1 {
         return allowed.first().copied();
-    }
-    if isolated.contains(&8) && allowed.contains(&8) {
-        return Some(8);
     }
     isolated.iter().copied().find(|core| allowed.contains(core))
 }

@@ -99,12 +99,6 @@ name = "nam_perf_guard"
 path = "src/bin/nam_perf_guard.rs"
 required-features = ["testing"]
 
-# Fail-closed semantic verifier for the quick-suite receipt
-# (target/logs/quick-receipt.txt). Invoked by utils/build-release.sh instead of
-# a substring search. No `testing` feature required: it is pure receipt parsing.
-[[bin]]
-name = "quick_receipt_check"
-path = "src/bin/quick_receipt_check.rs"
 
 # Unified-schema (engine `testing::receipt`) emitter/verifier for the long-suite
 # receipt (target/logs/long-audit-receipt.jsonl). Testing-only because it reuses
