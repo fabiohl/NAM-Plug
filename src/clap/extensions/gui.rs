@@ -201,20 +201,6 @@ impl<'a> NamClapMainThread<'a> {
             );
             spawn_reaper("nam-model-loader-reaper", still_running);
         }
-
-        // 4. Same bounded protocol for the opt-in asynchronous restore loader.
-        if let Some(loader) = self.restore_loader.borrow_mut().take()
-            && let Some(handle) = loader.shutdown()
-            && let Some(still_running) =
-                try_join_until(handle, std::time::Instant::now() + TEARDOWN_JOIN_TIMEOUT)
-        {
-            log::warn!(
-                "NAM-Plug: restore loader thread did not exit within {:?} — \
-                 handing it to the reaper",
-                TEARDOWN_JOIN_TIMEOUT
-            );
-            spawn_reaper("nam-restore-loader-reaper", still_running);
-        }
     }
 
     /// Returns the static host handle and shared Arc needed by window callbacks.

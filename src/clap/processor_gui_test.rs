@@ -424,7 +424,7 @@ mod tests {
     /// headless lifecycle integration tests.
     #[test]
     #[ignore = "requires dedicated X11 display server and mutates process environment"]
-    fn test_headless_gui_floating_window_lifecycle() {
+    fn gui_x11_headless_floating_window_lifecycle() {
         assert!(
             std::env::var("DISPLAY").is_ok(),
             "DISPLAY environment variable not set. \
@@ -500,7 +500,7 @@ mod tests {
     /// compatible with headless CI environments.
     #[test]
     #[ignore = "requires dedicated X11 display server connection"]
-    fn test_headless_clipboard_works() {
+    fn gui_x11_headless_clipboard_works() {
         assert!(
             std::env::var("DISPLAY").is_ok(),
             "DISPLAY environment variable not set. \

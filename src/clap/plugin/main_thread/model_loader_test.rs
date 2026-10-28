@@ -9,8 +9,7 @@ use crate::clap::host_harness::{
 };
 use crate::clap::plugin::main_thread::load::{set_test_mid_load_hook, test_mid_load_hook_lock};
 use crate::clap::plugin::shared::{
-    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, RENDER_MODE_OFFLINE,
-    RENDER_MODE_REALTIME,
+    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest,
 };
 use crate::clap::test_util;
 use clack_common::process::PluginAudioConfiguration;
@@ -359,11 +358,6 @@ fn test_adaptive_rebuild_worker_services_slimmable_flag() {
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
-    assert!(
-        mt.async_adaptive_rebuild,
-        "adaptive rebuild offload must be enabled by default"
-    );
-
     shared
         .cold
         .rt_status
@@ -439,51 +433,6 @@ fn test_adaptive_rebuild_worker_services_oversample_flag() {
     assert!(
         !shared.cold.rt_status.check_flag(RT_STATUS_NEEDS_OS_REBUILD),
         "the worker-driven path must clear the oversample-rebuild flag"
-    );
-}
-
-/// T4.3: the async-restore gate is enabled only for an interactive (non-offline)
-/// host that is already active, and only when the opt-in switch is set.
-#[test]
-fn test_async_restore_gating() {
-    let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
-    let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
-    let shared = &mt.shared;
-
-    shared
-        .cold
-        .render_mode
-        .store(RENDER_MODE_REALTIME, Ordering::Relaxed);
-    shared.cold.buffer_size.store(0, Ordering::Relaxed);
-    mt.async_restore_enabled.set(true);
-    assert!(
-        !mt.should_use_async_restore(),
-        "pre-activate restores must stay synchronous"
-    );
-
-    shared.cold.buffer_size.store(128, Ordering::Relaxed);
-    assert!(
-        mt.should_use_async_restore(),
-        "an active interactive host with the opt-in set must use the worker"
-    );
-
-    shared
-        .cold
-        .render_mode
-        .store(RENDER_MODE_OFFLINE, Ordering::Relaxed);
-    assert!(
-        !mt.should_use_async_restore(),
-        "offline/render restores must stay synchronous"
-    );
-
-    shared
-        .cold
-        .render_mode
-        .store(RENDER_MODE_REALTIME, Ordering::Relaxed);
-    mt.async_restore_enabled.set(false);
-    assert!(
-        !mt.should_use_async_restore(),
-        "the asynchronous restore is opt-in"
     );
 }
 

@@ -390,10 +390,9 @@ pub struct NamClapProcessor<'a> {
     /// `prewarm_step` elapsed time (U-02 / F-PR-10). A plain scalar: written and
     /// read on the audio thread with no allocation or lock.
     pub(crate) prewarm_cost_ns_per_sample: Option<f32>,
-    /// Diagnostic rollback latch (`NAM_PREWARM_STATIC=1`): when set, the
-    /// adaptive prewarm policy ignores the measured cost (and the EWMA) and
-    /// falls back to the frozen per-family table. Read once from the
-    /// environment in `activate()`.
+    /// Frozen-table latch: when set (debug builds, where the measured cost is not
+    /// release-representative) the adaptive prewarm policy ignores the measured
+    /// cost (and the EWMA) and falls back to the frozen per-family table.
     pub(crate) prewarm_static: bool,
     /// EWMA smoothed DSP load permille (0.0 ..= 1000.0, tau ≈ 250 ms).
     pub(crate) dsp_load_ewma: f32,

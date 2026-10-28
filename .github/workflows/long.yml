@@ -29,6 +29,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  NAM_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   long-qa:
@@ -41,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
-            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev binutils xvfb
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libfontconfig1-dev binutils xvfb
       # Runner images can ship an older preinstalled stable; the crate needs rust-version 1.99.
       - name: Update Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
@@ -59,19 +60,15 @@ jobs:
           if [ "${{ inputs.strict }}" = "true" ]; then STRICT_FLAG="--strict"; fi
           ONLY_FLAG=""
           if [ -n "${{ inputs.phases }}" ]; then ONLY_FLAG="--only ${{ inputs.phases }}"; fi
-          ./utils/tests-long.sh $STRICT_FLAG --artifact $ONLY_FLAG
+          xvfb-run -a ./utils/tests-long.sh $STRICT_FLAG --artifact $ONLY_FLAG
       - name: Certify
         if: ${{ inputs.strict && inputs.phases == '' }}
         run: ./utils/build-release.sh --certify
       - name: Publish step summary
         if: always()
-        run: |
-          echo "### Long QA Suite Run Summary" >> $GITHUB_STEP_SUMMARY
-          if [ -d target/logs ]; then
-            echo '```text' >> $GITHUB_STEP_SUMMARY
-            grep -hE '^(RESULT:|PHASE:|STRICT:|ERROR:)' target/logs/*.log 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          fi
+        uses: ./.github/actions/qa-summary
+        with:
+          title: Long QA Suite
       - name: Upload logs and receipts
         if: always()
         uses: actions/upload-artifact@v4

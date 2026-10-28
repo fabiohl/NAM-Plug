@@ -465,13 +465,8 @@ Model loading is divided into two phases:
 2. **Commit Phase (Main Thread):** The completed result is swapped atomically on the main thread and pushed to the audio thread via SPSC command queues.
 
 - **Adaptive Structural Rebuild Offload:** The model loader also offloads allocation-heavy tasks for the audio thread, including WaveNet slimmable slices and oversampling engine rebuilds. The main thread's housekeeping watchdog accelerates from 250 ms to 50 ms while a rebuild is pending.
-- **Rollback Switches:** Environment variables `NAM_SYNC_MODEL_LOAD=1` and `NAM_SYNC_ADAPTIVE_REBUILD=1` revert these operations to synchronous execution for debugging.
 
-### 7.5 Opt-in Asynchronous State Restore (`nam-restore-loader`)
-
-When `NAM_ASYNC_RESTORE=1` is enabled on an active host, state validation runs on a dedicated `"nam-restore-loader"` worker while the commit runs on the main thread, preserving the fail-closed policy. Default configurations remain synchronous.
-
-### 7.6 GUI Lifecycle State Machine
+### 7.5 GUI Lifecycle State Machine
 
 Window visibility is governed by `GuiLifecycle` (`Hidden → ShowRequested → Active → HideRequested → Hidden`):
 

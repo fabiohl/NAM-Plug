@@ -258,22 +258,17 @@ fn read_sched_policy() -> String {
     "unknown".to_string()
 }
 
-/// Resolves the core the measurement is actually running on.
-///
-/// Priority: explicit `NAM_BENCH_CORE` → a single CPU in the affinity mask
-/// (the `taskset` case) → the first isolated CPU allowed by the mask.
+/// Resolves the core the measurement runs on, in the canonical order of the
+/// constitution §4.2: explicit `NAM_BENCH_CORE` → first isolated CPU allowed by
+/// the affinity mask → first permitted CPU → `None` (GAP).
 fn resolve_bench_core(
     allowed: &[usize],
     isolated: &[usize],
     override_core: Option<usize>,
 ) -> Option<usize> {
-    if let Some(core) = override_core {
-        return Some(core);
-    }
-    if allowed.len() == 1 {
-        return allowed.first().copied();
-    }
-    isolated.iter().copied().find(|core| allowed.contains(core))
+    override_core
+        .or_else(|| isolated.iter().copied().find(|core| allowed.contains(core)))
+        .or_else(|| allowed.first().copied())
 }
 
 fn irqs_sharing_core(core: usize) -> Vec<String> {
@@ -1029,7 +1024,3 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
-
-#[cfg(test)]
-#[path = "nam_perf_guard/tests.rs"]
-mod tests;

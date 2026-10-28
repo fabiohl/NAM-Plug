@@ -3,6 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # verify_no_rt_alloc.sh — Varredura estática de alocações proibidas no hot-path RT. Classe D.
 # Uso: utils/verify_no_rt_alloc.sh
+# Orçamento: 53
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
 cd "$(dirname "$0")/.."

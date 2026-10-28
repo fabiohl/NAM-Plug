@@ -131,7 +131,7 @@ panic = "unwind"
 # 16 GiB host. Thin LTO keeps cross-crate inlining while bounding memory.
 # Consequence: codegen differs from the shipped fat-LTO `release`/`dist`
 # binaries, so the operator must re-bootstrap the Criterion baseline
-# (`utils/tests-performance-regression.sh --bootstrap-baseline`) before treating
+# (`nam_perf_gate run --bootstrap-baseline`) before treating
 # `--check` as a regression signal.
 [profile.bench]
 lto = "thin"

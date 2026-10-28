@@ -264,22 +264,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             dispatched_model_generation: Cell::new(0),
             dispatched_model_is_gui: Cell::new(false),
             rebuild_slots: crate::clap::plugin::main_thread::model_loader::RebuildSlots::new(),
-            // Rollback switch: `NAM_SYNC_ADAPTIVE_REBUILD=1` forces the
-            // structural rebuilds (slimmable slice + oversampling engines) back
-            // onto the main-thread inline path.
-            async_adaptive_rebuild: std::env::var_os("NAM_SYNC_ADAPTIVE_REBUILD").is_none(),
             pending_async_loads: RefCell::new(std::collections::VecDeque::new()),
-            // Rollback switch (rollout guard): force the historical synchronous
-            // load path. Read once at instance creation.
-            sync_model_load: std::env::var_os("NAM_SYNC_MODEL_LOAD").is_some(),
-            restore_loader: RefCell::new(None),
-            restore_result_slot: crate::clap::plugin::main_thread::restore_loader::new_result_slot(
-            ),
-            restore_worker_busy: Cell::new(false),
-            pending_async_restore: RefCell::new(None),
-            // Opt-in: an async restore reports success to the host before
-            // validation runs, so it is only enabled deliberately.
-            async_restore_enabled: Cell::new(std::env::var_os("NAM_ASYNC_RESTORE").is_some()),
         };
 
         // Register periodic main-thread watchdog timer (F-NP-R1).

@@ -156,7 +156,7 @@ fn wait_until_child_destroyed(
 /// fail where it can be seen), and the FSM stays untouched.
 #[test]
 #[ignore = "requires dedicated Xvfb: run utils/tests-long.sh --only gui"]
-fn gui_lifecycle_x11_embedded_set_parent_honest() {
+fn gui_x11_lifecycle_embedded_set_parent_honest() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let gui_ext = plugin_instance
         .plugin_handle()
@@ -176,7 +176,7 @@ fn gui_lifecycle_x11_embedded_set_parent_honest() {
     let handle = plugin_instance.plugin_handle();
     if display_set {
         let xdg_session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-        let dedicated_x11 = std::env::var_os("NAM_GUI_DEDICATED_X11").is_some();
+        let dedicated_x11 = std::env::var("NAM_GUI_DEDICATED_X11").as_deref() == Ok("1");
         let x11_connect_ok = x11rb::connect(None).is_ok();
 
         if !x11_connect_ok || (xdg_session == "wayland" && !dedicated_x11) {
@@ -520,7 +520,7 @@ fn gui_lifecycle_reopen_after_user_closed_returns_ok() {
 /// `#[ignore]`d; the headless tests above are the always-on gate.
 #[test]
 #[ignore = "requires a dedicated X11 display server (Xvfb) and mutates process env"]
-fn gui_lifecycle_hide_after_show_with_real_window() {
+fn gui_x11_lifecycle_hide_after_show_with_real_window() {
     assert!(
         std::env::var("DISPLAY").is_ok(),
         "DISPLAY not set; start Xvfb before running this test"
@@ -579,7 +579,7 @@ fn gui_lifecycle_hide_after_show_with_real_window() {
 /// Run against a dedicated display server:
 ///
 /// ```text
-/// Xvfb :99 -screen 0 1280x800x24 &; DISPLAY=:99 cargo test --features testing -- --ignored gui_embedded
+/// Xvfb :99 -screen 0 1280x800x24 &; DISPLAY=:99 cargo test --features testing -- --ignored gui_x11_embedded
 /// ```
 ///
 /// Keep this the only test matching `gui_embedded`: Slint 1.18 allows one
@@ -587,7 +587,7 @@ fn gui_lifecycle_hide_after_show_with_real_window() {
 /// not create windows (see `docs/architecture.md` §7.7).
 #[test]
 #[ignore = "requires a dedicated X11 display server (Xvfb/Xephyr) and mutates process env"]
-fn gui_embedded_x11_open_close_cycles_no_leak() {
+fn gui_x11_embedded_open_close_cycles_no_leak() {
     use x11rb::protocol::xproto::ConnectionExt as _;
     assert!(
         std::env::var("DISPLAY").is_ok(),

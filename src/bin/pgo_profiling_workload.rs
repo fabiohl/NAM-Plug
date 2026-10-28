@@ -265,9 +265,7 @@ fn main() {
         scenario_results,
     };
 
-    let receipt_path = std::env::var("NAM_PGO_RECEIPT_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("target/pgo-workload-receipt.json"));
+    let receipt_path = PathBuf::from("target/pgo-workload-receipt.json");
 
     if let Some(parent) = receipt_path.parent() {
         let _ = std::fs::create_dir_all(parent);

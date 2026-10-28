@@ -12,7 +12,6 @@ mod housekeeping;
 pub(crate) mod load;
 mod logging;
 pub(crate) mod model_loader;
-pub(crate) mod restore_loader;
 
 use super::command_scheduler::{CommandProducer, PushError};
 use super::errors::{self, static_plugin_error};
@@ -172,29 +171,11 @@ pub struct NamClapMainThread<'a> {
     /// by the main thread on each `housekeeping()` tick (F-UX-02).
     /// Off-RT only.
     pub(crate) rebuild_slots: model_loader::RebuildSlots,
-    /// Whether the adaptive structural rebuilds (slimmable slice + oversampling
-    /// engines) run on the loader worker instead of the main thread. Disabled by
-    /// the `NAM_SYNC_ADAPTIVE_REBUILD` rollback switch (legacy inline path).
-    pub(crate) async_adaptive_rebuild: bool,
     /// Asynchronous loads accepted but not yet dispatched (worker busy).
     /// A newer GUI request supersedes pending GUI entries (last-wins), so at
     /// most one GUI load is ever pending at a time.
     pub(crate) pending_async_loads:
         RefCell<std::collections::VecDeque<model_loader::ModelLoaderJob>>,
-    /// When true the loader runs synchronously on the main thread (legacy
-    /// behaviour). Set once from `NAM_SYNC_MODEL_LOAD` at instance creation.
-    pub(crate) sync_model_load: bool,
-    /// Opt-in asynchronous state-restore loader (T4.3). Spawned lazily.
-    pub(crate) restore_loader: RefCell<Option<restore_loader::RestoreLoader>>,
-    /// Delivery slot written by the restore worker and drained on each tick.
-    pub(crate) restore_result_slot: restore_loader::RestoreResultSlot,
-    /// Whether the restore worker has an outstanding job.
-    pub(crate) restore_worker_busy: Cell<bool>,
-    /// Accepted-but-not-dispatched restore job (last-wins).
-    pub(crate) pending_async_restore: RefCell<Option<restore_loader::RestoreJob>>,
-    /// When true, interactive active restores run on the restore worker. Set
-    /// once from `NAM_ASYNC_RESTORE`; offline/pre-activate always stay sync.
-    pub(crate) async_restore_enabled: Cell<bool>,
 }
 
 impl<'a> NamClapMainThread<'a> {

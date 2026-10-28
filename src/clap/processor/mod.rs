@@ -345,13 +345,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         // Catch panics from this instance so they don't
         // crash the host or other active instances.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            #[cfg(feature = "heap-audit")]
-            {
-                if std::env::var("NAM_HEAP_AUDIT").is_ok() {
-                    neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED
-                        .store(true, Ordering::Relaxed);
-                }
-            }
             // 1. SPSC channel extraction from Shared (ownership transfer)
             // Extracted resources are held in a rollback guard.
             // If any later allocation fails, Drop restores everything into ColdShared.
@@ -974,11 +967,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // (allocations allowed) so the first amortization window after
             // activation is sized from real hardware instead of the conservative
             // family table. The frozen-table latch is set in debug builds (the
-            // measured cost there is not release-representative) and by the
-            // diagnostic rollback `NAM_PREWARM_STATIC=1`. Continuous model swaps
-            // update this scalar from the load payload.
-            let prewarm_static = !prewarm_policy::ADAPTIVE_COST_ENABLED
-                || std::env::var("NAM_PREWARM_STATIC").is_ok();
+            // measured cost there is not release-representative). Continuous model
+            // swaps update this scalar from the load payload.
+            let prewarm_static = !prewarm_policy::ADAPTIVE_COST_ENABLED;
             let prewarm_cost_ns_per_sample = if prewarm_static {
                 None
             } else {
@@ -1443,8 +1434,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 if let Some(model) = self.model_l.as_mut() {
                     let frames_count = audio.frames_count() as usize;
                     let family = ModelFamily::from_model(model);
-                    // `NAM_PREWARM_STATIC=1` forces the frozen family table and
-                    // disables the runtime EWMA (diagnostic rollback).
+                    // The frozen family table replaces the runtime EWMA when the latch is set.
                     let measured_cost = if self.prewarm_static {
                         None
                     } else {

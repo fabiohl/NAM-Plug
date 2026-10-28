@@ -29,8 +29,7 @@ pub(crate) const PREWARM_STEP_PISO: usize = 1;
 /// than the optimized profile the per-family table describes, so a debug
 /// measurement would shrink the amortization step below the table's safe value
 /// and make convergence-count-sensitive tests profile-dependent without
-/// improving any shipped binary. `NAM_PREWARM_STATIC=1` forces the frozen
-/// table in every profile (diagnostic rollback).
+/// improving any shipped binary.
 pub(crate) const ADAPTIVE_COST_ENABLED: bool = !cfg!(debug_assertions);
 
 /// Block length used for the off-RT per-sample cost calibration

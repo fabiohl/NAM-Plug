@@ -3,14 +3,13 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # mod-update.sh — Utilitário de atualização de dependências. Classe D.
 # Uso: utils/mod-update.sh
+# Orçamento: 60
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . utils/_lib.sh
 
 [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { echo "Uso: utils/mod-update.sh"; exit 0; }
-
-echo "=== NAM-Plug Supply Chain Update Pipeline ==="
 
 # 1. Update Rust Toolchain
 echo "Updating active Rust toolchain (rustup)..."
@@ -33,4 +32,4 @@ fi
 echo "Updating resolved versions in Cargo.lock..."
 cargo update --verbose
 
-echo "=== Supply chain update complete ==="
+ok "supply chain update complete"

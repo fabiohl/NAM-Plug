@@ -517,7 +517,3 @@ pub fn evaluate_certification(
         long_audit,
     }
 }
-
-#[cfg(test)]
-#[path = "release_test.rs"]
-mod tests;

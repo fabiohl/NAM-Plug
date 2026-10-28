@@ -6,14 +6,13 @@
 use super::NamClapMainThread;
 use crate::clap::gui::dialog_state;
 use crate::clap::plugin::shared::{
-    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, RENDER_MODE_OFFLINE,
-    SlimmableRebuild, StagedSwap, UI_ALERT_CABSIM_CONTRACT, UI_ALERT_DEGRADE_MINIMAL,
-    UI_ALERT_DEGRADE_REDUCED, UI_ALERT_HOST_CONTRACT, UI_ALERT_NON_FINITE_INPUT, UI_ALERT_POISONED,
+    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, SlimmableRebuild,
+    StagedSwap, UI_ALERT_CABSIM_CONTRACT, UI_ALERT_DEGRADE_MINIMAL, UI_ALERT_DEGRADE_REDUCED,
+    UI_ALERT_HOST_CONTRACT, UI_ALERT_NON_FINITE_INPUT, UI_ALERT_POISONED,
     UI_ALERT_RESAMPLER_FAILED,
 };
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::host::HostMainThreadHandle;
-use clack_plugin::plugin::PluginError;
 use neural_amp_modeler_rs::common::spsc::{self, GcItem, drain_gc_channels};
 use neural_amp_modeler_rs::models::slimmable::slice_wavenet_model;
 use neural_amp_modeler_rs::models::{NamModel, StaticModel};
@@ -62,7 +61,6 @@ impl<'a> NamClapMainThread<'a> {
         self.handle_oversample_rebuild();
         self.sync_watchdog_cadence();
         self.handle_pending_model_load();
-        self.handle_pending_async_restore();
         self.handle_pending_ir_and_clear();
         self.sync_latency_and_telemetry();
         self.update_alert_bits();
@@ -301,7 +299,7 @@ impl<'a> NamClapMainThread<'a> {
             return;
         }
 
-        if self.async_adaptive_rebuild && !self.sync_model_load && self.ensure_rebuild_worker() {
+        if self.ensure_rebuild_worker() {
             self.drain_slimmable_rebuild();
             return;
         }
@@ -483,7 +481,7 @@ impl<'a> NamClapMainThread<'a> {
             return;
         }
 
-        if self.async_adaptive_rebuild && !self.sync_model_load && self.ensure_rebuild_worker() {
+        if self.ensure_rebuild_worker() {
             self.drain_oversample_rebuild();
             return;
         }
@@ -728,11 +726,6 @@ impl<'a> NamClapMainThread<'a> {
             .ui_dialog_open
             .store(false, Ordering::Relaxed);
 
-        if self.sync_model_load {
-            self.run_sync_model_load(req);
-            return;
-        }
-
         // Allocate the model identity generation now (before dispatch) so a
         // newer request bumps the target and this result can be discarded when
         // it arrives late. `ui_loading` is raised here and cleared on commit or
@@ -796,9 +789,8 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// Historical synchronous load path: used in rollback mode
-    /// (`NAM_SYNC_MODEL_LOAD`), and as the fail-closed fallback when the loader
-    /// worker cannot be spawned or dispatched.
+    /// Historical synchronous load path, kept as the fail-closed fallback when the
+    /// loader worker cannot be spawned or dispatched.
     fn run_sync_model_load(&self, req: PendingModelRequest) {
         self.shared.cold.ui_loading.store(true, Ordering::Relaxed);
         let res = self.load_model(&req.path);
@@ -961,19 +953,11 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// Lazily spawns the per-instance asynchronous model loader.
-    ///
-    /// When the adaptive-rebuild offload is enabled the worker also receives the
-    /// rebuild delivery slots and polls the `RT_STATUS_NEEDS_*` flags;
-    /// under the `NAM_SYNC_ADAPTIVE_REBUILD` rollback it is spawned with `None`
-    /// and the main thread keeps the legacy inline rebuild path.
+    /// Lazily spawns the per-instance asynchronous model loader. The worker also
+    /// receives the rebuild delivery slots and polls the `RT_STATUS_NEEDS_*` flags.
     fn spawn_model_loader(&self) -> Result<(), &'static str> {
         let (host_static, shared_arc) = self.host_static_and_shared();
-        let rebuilds = if self.async_adaptive_rebuild {
-            Some(self.rebuild_slots.clone())
-        } else {
-            None
-        };
+        let rebuilds = Some(self.rebuild_slots.clone());
         let loader = super::model_loader::ModelLoader::spawn(
             self.shared.cold.instance_id,
             self.sys.clone(),
@@ -989,8 +973,8 @@ impl<'a> NamClapMainThread<'a> {
     /// Ensures the asynchronous loader worker exists, spawning it lazily.
     ///
     /// Returns `true` when a worker able to drive the adaptive rebuilds is
-    /// available; `false` (sync rollback, or spawn failure) makes the caller fall
-    /// back to the inline main-thread path (fail-closed).
+    /// available; `false` (spawn failure) makes the caller fall back to the inline
+    /// main-thread path (fail-closed).
     fn ensure_rebuild_worker(&self) -> bool {
         if self.model_loader.borrow().is_some() {
             return true;
@@ -1003,144 +987,6 @@ impl<'a> NamClapMainThread<'a> {
             return false;
         }
         true
-    }
-
-    // ── Asynchronous state restore (T4.3, opt-in) ──────────────────────────
-
-    /// Whether an interactive, active restore should be offloaded to the
-    /// restore worker instead of blocking the host's `state.load` callback.
-    pub(crate) fn should_use_async_restore(&self) -> bool {
-        self.async_restore_enabled.get()
-            && self.shared.cold.render_mode.load(Ordering::Relaxed) != RENDER_MODE_OFFLINE
-            && self.shared.cold.buffer_size.load(Ordering::Relaxed) > 0
-    }
-
-    /// Enqueues a restore for off-RT validation. Returns `Ok(())` as soon as the
-    /// job is accepted; the atomic commit runs later on the main thread.
-    pub(crate) fn enqueue_async_restore(
-        &self,
-        buffer: Vec<u8>,
-        mode: crate::clap::extensions::state_transaction::RestoreMode,
-    ) -> Result<(), PluginError> {
-        let host_rate = {
-            let rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
-            if rate == 0 { 48000 } else { rate }
-        };
-        let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
-        let job = super::restore_loader::RestoreJob {
-            buffer,
-            mode,
-            host_rate,
-            buffer_size,
-        };
-
-        if self.restore_worker_busy.get() {
-            // Last-wins: a newer restore supersedes an accepted-but-undispatched one.
-            *self.pending_async_restore.borrow_mut() = Some(job);
-            return Ok(());
-        }
-        self.dispatch_restore_job(job)
-    }
-
-    /// Spawns the worker lazily and dispatches `job`, falling back to the
-    /// synchronous path on any failure (fail-closed).
-    fn dispatch_restore_job(
-        &self,
-        job: super::restore_loader::RestoreJob,
-    ) -> Result<(), PluginError> {
-        let have_loader = self.restore_loader.borrow().is_some();
-        if !have_loader && let Err(msg) = self.spawn_restore_loader() {
-            log::warn!(
-                "NAM-Plug: restore loader worker unavailable ({msg}); \
-                 falling back to synchronous restore"
-            );
-            return self.run_sync_restore(job);
-        }
-
-        let dispatch_result = {
-            let loader = self.restore_loader.borrow();
-            loader.as_ref().map(|loader| loader.dispatch(job))
-        };
-
-        match dispatch_result {
-            Some(Ok(())) => {
-                self.restore_worker_busy.set(true);
-                Ok(())
-            }
-            Some(Err(job)) => {
-                log::warn!(
-                    "NAM-Plug: restore loader dispatch failed; falling back to synchronous restore"
-                );
-                self.run_sync_restore(job)
-            }
-            None => Err(PluginError::Message("restore loader missing after spawn")),
-        }
-    }
-
-    /// Historical blocking restore used as the fail-closed fallback.
-    fn run_sync_restore(&self, job: super::restore_loader::RestoreJob) -> Result<(), PluginError> {
-        let params = crate::clap::extensions::state::load_state(&job.buffer)?;
-        let validated = crate::clap::extensions::state_transaction::validate::validate_and_build(
-            &params,
-            job.host_rate,
-            job.buffer_size,
-            &self.sys,
-            &job.mode,
-        )?;
-        crate::clap::extensions::state_transaction::commit::commit(validated, self, &job.mode)
-    }
-
-    fn spawn_restore_loader(&self) -> Result<(), &'static str> {
-        let (host_static, shared_arc) = self.host_static_and_shared();
-        let loader = super::restore_loader::RestoreLoader::spawn(
-            self.shared.cold.instance_id,
-            self.sys.clone(),
-            shared_arc,
-            host_static,
-            Arc::clone(&self.restore_result_slot),
-        )?;
-        *self.restore_loader.borrow_mut() = Some(loader);
-        Ok(())
-    }
-
-    /// Consumes a completed async restore and commits it on the main thread, then
-    /// dispatches any superseding job. Runs on each housekeeping tick.
-    fn handle_pending_async_restore(&self) {
-        let result = {
-            let mut slot = self
-                .restore_result_slot
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            slot.take()
-        };
-
-        if let Some(result) = result {
-            self.restore_worker_busy.set(false);
-            match result.outcome {
-                Ok(validated) => {
-                    if let Err(e) = crate::clap::extensions::state_transaction::commit::commit(
-                        validated,
-                        self,
-                        &result.mode,
-                    ) {
-                        // Fail-closed: the previous DSP state stays intact.
-                        log::error!("NAM-Plug: async state restore commit failed: {e}");
-                    } else {
-                        log::info!("NAM-Plug: async state restore committed");
-                    }
-                }
-                Err(msg) => {
-                    log::error!("NAM-Plug: async state restore validation failed: {msg}")
-                }
-            }
-        }
-
-        if !self.restore_worker_busy.get()
-            && let Some(job) = self.pending_async_restore.borrow_mut().take()
-            && let Err(e) = self.dispatch_restore_job(job)
-        {
-            log::error!("NAM-Plug: async state restore dispatch failed: {e}");
-        }
     }
 
     /// Propagates IR dialog results and processes pending IR loads / clears.

@@ -60,11 +60,11 @@ impl TestedArtifact {
     }
 }
 
-/// True when strict artifact mode is active (`NAM_QUICK_STRICT=1` or
-/// `CLAP_STRICT_ARTIFACT=1`).
+/// True when strict artifact mode is active (`NAM_RT_STRICT=1` or
+/// `NAM_REQUIRE_CPP_ORACLE=1`, both exported by `utils/tests-long.sh --strict`).
 fn is_strict_artifact_mode() -> bool {
-    env::var("NAM_QUICK_STRICT").as_deref() == Ok("1")
-        || env::var("CLAP_STRICT_ARTIFACT").as_deref() == Ok("1")
+    env::var("NAM_RT_STRICT").as_deref() == Ok("1")
+        || env::var("NAM_REQUIRE_CPP_ORACLE").as_deref() == Ok("1")
 }
 
 /// Fail-closed staleness gate. In strict mode the resolved artifact must
@@ -159,7 +159,7 @@ fn stale_input_against(artifact_mtime: SystemTime, inputs: &[PathBuf]) -> Option
 /// 3. Profile-specific target directories (CARGO_TARGET_DIR or target/)
 ///
 /// **Does NOT fall back** to `~/.clap/nam-plug.clap` unless explicitly pointed to by
-/// `CLAP_PLUGIN_UNDER_TEST`. In strict mode (`NAM_QUICK_STRICT=1` or `CLAP_STRICT_ARTIFACT=1`),
+/// `CLAP_PLUGIN_UNDER_TEST`. In strict mode (`NAM_RT_STRICT=1` or `NAM_REQUIRE_CPP_ORACLE=1`),
 /// missing explicit artifacts or profile mismatches fail immediately (fail-closed), and
 /// `TestedArtifact::resolve_and_hash` additionally enforces the fail-closed staleness gate
 /// (the `.so` must be newer than every source input it is compiled from).

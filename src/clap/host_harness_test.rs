@@ -897,8 +897,7 @@ fn baselined_housekeeping_load_blocking_time() {
         shared.cold.model_load_counter.load(Ordering::Relaxed),
         0,
         "the timed callback must not have loaded the model synchronously — \
-         the async loader must own the prepare phase \
-         (NAM_SYNC_MODEL_LOAD must not be set)"
+         the async loader must own the prepare phase"
     );
 
     let ms = elapsed.as_secs_f64() * 1e3;
@@ -909,8 +908,7 @@ fn baselined_housekeeping_load_blocking_time() {
     assert!(
         ms < 2.0,
         "housekeeping() blocked for {ms:.3} ms while accepting a model load; \
-         the load must complete on the `nam-model-loader` worker (target < 2 ms). \
-         Check whether NAM_SYNC_MODEL_LOAD is set."
+         the load must complete on the `nam-model-loader` worker (target < 2 ms)."
     );
 
     // Drive the loader to completion and confirm the model was adopted.

@@ -3,6 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # build-release.sh — Compila e empacota artefato release canônico (nam_plug.clap). Classe C.
 # Uso: utils/build-release.sh [--strict] [--package] [--install] [--certify] [-h|--help]
+# Orçamento: 1000
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -96,10 +97,10 @@ if [ "$DO_CERTIFY" = true ]; then
     fi
 
     if [ "$RC" -eq 0 ]; then
-        echo "PHASE: certify PASS log=$LOG_DIR/build-release-certify.log"
+        emit "PHASE: certify PASS log=$LOG_DIR/build-release-certify.log"
     else
         FAILS+=("certify")
-        echo "PHASE: certify FAIL rc=$RC log=$LOG_DIR/build-release-certify.log"
+        emit "PHASE: certify FAIL rc=$RC log=$LOG_DIR/build-release-certify.log"
     fi
     finish
     exit $?
@@ -111,7 +112,6 @@ fi
 phase "env_verify"
 ENV_LOG="$LOG_DIR/build-release-env_verify.log"
 {
-    echo "=== Toolchain & Environment Verification ==="
     command -v rustc >/dev/null || { echo "rustc missing"; exit 1; }
     command -v cargo >/dev/null || { echo "cargo missing"; exit 1; }
     command -v nm >/dev/null || { echo "nm missing"; exit 1; }
@@ -121,7 +121,7 @@ ENV_LOG="$LOG_DIR/build-release-env_verify.log"
     rustc --version
     cargo --version
 } 2>&1 | tee "$ENV_LOG"
-echo "PHASE: env_verify PASS log=$ENV_LOG"
+emit "PHASE: env_verify PASS log=$ENV_LOG"
 
 VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml 2>/dev/null || echo "1.0.0")
 ARCHIVE_NAME="nam-plug-${VERSION}-linux-x86_64"
@@ -231,11 +231,11 @@ if [ -n "$LLVM_PROFDATA" ]; then
 
     if [ "$RC" -eq 0 ] && [ -s "$MERGED_PROFILE" ]; then
         PGO_STATUS="applied"
-        echo "PHASE: pgo_profile PASS log=$PGO_LOG"
+        emit "PHASE: pgo_profile PASS log=$PGO_LOG"
     else
         if [ "$DO_STRICT" -eq 1 ]; then
             FAILS+=("pgo_profile")
-            echo "PHASE: pgo_profile FAIL rc=$RC log=$PGO_LOG"
+            emit "PHASE: pgo_profile FAIL rc=$RC log=$PGO_LOG"
         else
             gap "pgo_profile"
             PGO_STATUS="failed"
@@ -269,10 +269,10 @@ RC=${PIPESTATUS[0]}
 
 COMPILED_SO="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.so"
 if [ "$RC" -eq 0 ] && [ -f "$COMPILED_SO" ]; then
-    echo "PHASE: compile_clap PASS log=$COMPILE_LOG"
+    emit "PHASE: compile_clap PASS log=$COMPILE_LOG"
 else
     FAILS+=("compile_clap")
-    echo "PHASE: compile_clap FAIL rc=$RC log=$COMPILE_LOG"
+    emit "PHASE: compile_clap FAIL rc=$RC log=$COMPILE_LOG"
     exit 1
 fi
 
@@ -331,11 +331,11 @@ if [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
 
     if [ "$RC" -eq 0 ] && [ -s "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
         BOLT_STATUS="applied"
-        echo "PHASE: bolt_optimize PASS log=$BOLT_LOG"
+        emit "PHASE: bolt_optimize PASS log=$BOLT_LOG"
     else
         if [ "$DO_STRICT" -eq 1 ]; then
             FAILS+=("bolt_optimize")
-            echo "PHASE: bolt_optimize FAIL rc=$RC log=$BOLT_LOG"
+            emit "PHASE: bolt_optimize FAIL rc=$RC log=$BOLT_LOG"
             exit 1
         else
             gap "bolt_optimize"
@@ -402,10 +402,10 @@ else
     "$SCRIPT_DIR/verify_rt_codegen.sh" "$ACTIVE_SO" --json-out "$CODEGEN_POST_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
 fi
 if [ "$CODEGEN_RC" -eq 0 ]; then
-    echo "PHASE: codegen_report PASS log=$CODEGEN_LOG"
+    emit "PHASE: codegen_report PASS log=$CODEGEN_LOG"
 else
     FAILS+=("codegen_report")
-    echo "PHASE: codegen_report FAIL rc=$CODEGEN_RC log=$CODEGEN_LOG"
+    emit "PHASE: codegen_report FAIL rc=$CODEGEN_RC log=$CODEGEN_LOG"
     exit 1
 fi
 
@@ -434,10 +434,10 @@ DELIVER_LOG="$LOG_DIR/build-release-deliver_artifact.log"
 RC=${PIPESTATUS[0]}
 
 if [ "$RC" -eq 0 ]; then
-    echo "PHASE: deliver_artifact PASS log=$DELIVER_LOG"
+    emit "PHASE: deliver_artifact PASS log=$DELIVER_LOG"
 else
     FAILS+=("deliver_artifact")
-    echo "PHASE: deliver_artifact FAIL rc=$RC log=$DELIVER_LOG"
+    emit "PHASE: deliver_artifact FAIL rc=$RC log=$DELIVER_LOG"
     exit 1
 fi
 
@@ -496,10 +496,10 @@ EOF
     } 2>&1 | tee "$PKG_LOG"
     RC=${PIPESTATUS[0]}
     if [ "$RC" -eq 0 ]; then
-        echo "PHASE: packaging PASS log=$PKG_LOG"
+        emit "PHASE: packaging PASS log=$PKG_LOG"
     else
         FAILS+=("packaging")
-        echo "PHASE: packaging FAIL rc=$RC log=$PKG_LOG"
+        emit "PHASE: packaging FAIL rc=$RC log=$PKG_LOG"
     fi
 fi
 
@@ -521,10 +521,10 @@ if [ "$DO_INSTALL" = true ]; then
     } 2>&1 | tee "$INST_LOG"
     RC=${PIPESTATUS[0]}
     if [ "$RC" -eq 0 ]; then
-        echo "PHASE: install PASS log=$INST_LOG"
+        emit "PHASE: install PASS log=$INST_LOG"
     else
         FAILS+=("install")
-        echo "PHASE: install FAIL rc=$RC log=$INST_LOG"
+        emit "PHASE: install FAIL rc=$RC log=$INST_LOG"
     fi
 fi
 
@@ -571,10 +571,10 @@ cargo run --quiet --locked --features testing --bin plug_long_receipt -- build-r
 RC=${PIPESTATUS[0]}
 
 if [ "$RC" -eq 0 ]; then
-    echo "PHASE: build_receipt PASS log=$RECEIPT_LOG"
+    emit "PHASE: build_receipt PASS log=$RECEIPT_LOG"
 else
     FAILS+=("build_receipt")
-    echo "PHASE: build_receipt FAIL rc=$RC log=$RECEIPT_LOG"
+    emit "PHASE: build_receipt FAIL rc=$RC log=$RECEIPT_LOG"
 fi
 
 finish
