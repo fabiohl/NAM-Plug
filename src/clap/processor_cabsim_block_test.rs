@@ -11,16 +11,15 @@
 //! * The same input signal delivered in different block sizes (partition-sized,
 //!   odd 333, and smaller quanta) produces the same wet sample sequence, with
 //!   exact stream cardinality, no `RT_STATUS_CABSIM_CONTRACT_VIOLATION`, and
-//!   the documented causal underrun prefix `block·(⌈P/block⌉−1)` (0 when the
-//!   host block equals the partition) — mirroring the engine's own
-//!   `process_block` certification. Host blocks that tile the partition lock
-//!   the output FIFO phase after the prefix; non-tiling sizes (333) leave
-//!   periodic causal underrun gaps whose removal restores the aligned stream.
+//!   the engine's constant `partition`-sample priming delay — mirroring the
+//!   engine's own `process_block` certification. Host blocks that do not tile
+//!   the partition still deliver the identical stream at the same absolute
+//!   offset (the driver chunks internally).
 //! * The latency announced to the host (`PluginLatency::get()`, refreshed via
 //!   `HostLatency::changed()` from the main-thread housekeeping cycle) equals
-//!   the fixed cab-sim partition, and the wet impulse peak physically lands at
-//!   `declared + underrun_prefix` for both partition-sized and odd-sized host
-//!   blocks.
+//!   the fixed cab-sim partition, and the wet impulse peak of a pre-delayed
+//!   IR physically lands at `IR pre-delay + declared` for both
+//!   partition-sized and odd-sized host blocks.
 //! * A DAW quantum renegotiation (activate 256 → 512, rate constant) reuses
 //!   the deactivated adapter (fixed partition, no FFT rebuild): the partition
 //!   latency and tail telemetry are unchanged, no new latency notification
@@ -135,16 +134,11 @@ mod tests {
         out
     }
 
-    /// Documented causal underrun prefix of the block-agnostic driver: the
-    /// wet sample for input time 0 only flows after the first full partition
-    /// is accumulated and delivered — `block·(⌈P/block⌉−1)` silent samples
-    /// (0 when the host block equals or exceeds the partition).
-    fn underrun_prefix(block: usize, partition: usize) -> usize {
-        if block >= partition {
-            0
-        } else {
-            block * (partition.div_ceil(block) - 1)
-        }
+    /// Constant priming delay of the block-agnostic driver: the output queue
+    /// starts with one full partition of silence, so the wet stream is
+    /// delayed by exactly `partition` samples for every host block size.
+    fn priming_prefix(_block: usize, partition: usize) -> usize {
+        partition
     }
 
     /// Reads the cab-sim contract-violation flag of the given instance.
@@ -165,7 +159,7 @@ mod tests {
 
         // 512 = partition-sized quantum; 333 = odd size spanning partition
         // boundaries; smaller sizes exercise the input FIFO partial-tail
-        // accumulation and the causal underrun delivery.
+        // accumulation and the constant priming delivery.
         for block in [PARTITION, 256usize, 128, 64, 333] {
             let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
             let ir = write_decay_ir(&format!("cabsim_invariance_{block}"));
@@ -193,34 +187,31 @@ mod tests {
                 "block {block}: block-agnostic cab-sim stage must not flag a contract violation"
             );
 
-            // The causal underrun prefix precedes the aligned wet stream.
-            let prefix = underrun_prefix(block, PARTITION);
+            // The constant priming delay precedes the aligned wet stream, and
+            // the wet stream starts at exactly that absolute offset (no extra
+            // partition and no chunking-dependent gaps).
+            let prefix = priming_prefix(block, PARTITION);
             assert!(
                 out[..prefix].iter().all(|&s| s.abs() < 1e-9),
-                "block {block}: first {prefix} samples must be the silent underrun prefix"
+                "block {block}: first {prefix} samples must be the silent priming prefix"
+            );
+            assert_eq!(
+                out.iter().position(|&s| s.abs() >= 1e-9),
+                Some(prefix),
+                "block {block}: wet output must start exactly at the priming prefix"
             );
 
-            // Strip the documented underrun prefix and any residual FIFO-phase
-            // underrun gaps (a constant sub-quantum block size that does not
-            // tile the partition leaves the output queue phase-shifted, exactly
-            // like the legacy consumer path), then compare the wet sample
-            // sequences bit-exactly across all chunkings.
-            let tail: Vec<f32> = out[prefix..]
-                .iter()
-                .copied()
-                .filter(|&s| s.abs() >= 1e-9)
-                .collect();
+            // Compare the full post-prefix stream bit-exactly across all
+            // chunkings (the block-agnostic driver chunks internally, so
+            // non-tiling sizes align too).
+            let tail = &out[prefix..];
             match reference.as_ref() {
-                None => reference = Some(tail),
-                Some(expected) => {
-                    let k = expected.len().min(tail.len());
-                    assert!(k > 0, "block {block}: aligned wet stream must not be empty");
-                    assert_eq!(
-                        &tail[..k],
-                        &expected[..k],
-                        "block {block}: wet stream must be bit-identical to the reference chunking"
-                    );
-                }
+                None => reference = Some(tail.to_vec()),
+                Some(expected) => assert_eq!(
+                    tail,
+                    expected.as_slice(),
+                    "block {block}: wet stream must be bit-identical to the reference chunking"
+                ),
             }
             let _ = std::fs::remove_file(&ir);
         }
@@ -284,9 +275,9 @@ mod tests {
             "exactly one HostLatency::changed() when the partition latency lands"
         );
 
-        // The wet impulse peak physically lands at declared + underrun_prefix:
-        // the IR pre-delay (== partition) plus the documented causal buffering
-        // of the delivered host blocks.
+        // The wet impulse peak physically lands at IR pre-delay + declared:
+        // the fixture's partition-sized pre-delay plus the engine's constant
+        // partition priming delay, independent of the delivered host blocks.
         let mut impulse = vec![0.0f32; PARTITION];
         impulse[0] = 1.0;
         let tail = vec![0.0f32; PARTITION * 4];
@@ -296,7 +287,7 @@ mod tests {
                 setup_with_ir(&mut inst2, &state2, audio_config(PARTITION as u32), &ir);
             let mut stream = render_in_blocks(&mut started2, &impulse, block);
             stream.extend_from_slice(&render_in_blocks(&mut started2, &tail, block));
-            let prefix = underrun_prefix(block, PARTITION);
+            let prefix = priming_prefix(block, PARTITION);
             let expected_peak = PARTITION + prefix;
             let peak = stream
                 .iter()
@@ -304,7 +295,7 @@ mod tests {
                 .expect("impulse must propagate through the wet path");
             assert_eq!(
                 peak, expected_peak,
-                "block {block}: wet impulse peak must land at declared latency + underrun prefix"
+                "block {block}: wet impulse peak must land at IR pre-delay + declared latency"
             );
             assert!(
                 !cab_contract_flag(&mut inst2),
@@ -349,8 +340,8 @@ mod tests {
             "one notification for the 0 → 256 install"
         );
 
-        // Reference render at the original quantum (block == partition → zero
-        // underrun prefix, stream time-aligned).
+        // Reference render at the original quantum (constant priming delay,
+        // stream time-aligned across chunkings).
         let signal = test_signal(SIGNAL_LEN);
         let before = render_in_blocks(&mut started, &signal, 256);
 
@@ -393,10 +384,9 @@ mod tests {
         );
 
         // The in-place reset on reinstall makes the restarted timeline fresh:
-        // with the fixed partition the wet stream is bit-identical across the
-        // quantum renegotiation and its changed host block size (both
-        // chunkings have a zero underrun prefix: 256 == partition, 512 ≥
-        // partition).
+        // with the fixed partition and constant priming delay the wet stream
+        // is bit-identical across the quantum renegotiation and its changed
+        // host block size (256 == partition, 512 > partition).
         assert_eq!(
             after, before,
             "output must be bit-identical across a quantum renegotiation with a reused adapter"

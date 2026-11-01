@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 [package]
 name = "nam-plug"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.99.0"
 license = "GPL-3.0-or-later"
@@ -14,7 +14,7 @@ keywords = ["audio", "dsp", "nam", "neural-amp-modeler", "clap", "plugin"]
 categories = ["multimedia::audio", "multimedia"]
 
 [dependencies]
-NeuralAmpModeler-rs = { version = "1.0.1", default-features = false, features = [
+NeuralAmpModeler-rs = { version = "2.0.0", default-features = false, features = [
     "dual-mono",
 ] }
 clack-common = "0.2"
@@ -58,7 +58,7 @@ serde_json = "1.0"
 log = "0.4"
 anyhow = "1.0"
 thiserror = "2.0"
-rtrb = "0.4.0"
+rtrb = "0.4.1"
 # rt-hardening (opt-in, Linux-only, never default): NOT activated in NAM-Plug.
 # The plugin runs inside the DAW host process (cdylib); mlockall, SCHED_FIFO,
 # CPU affinity and PM-QoS are host-level responsibilities delegated to the DAW
@@ -71,7 +71,7 @@ clap-sys = "0.5"
 slint-build = "1.18"
 
 [dev-dependencies]
-NeuralAmpModeler-rs = { version = "1.0.1", features = ["testing"] }
+NeuralAmpModeler-rs = { version = "2.0.0", features = ["testing"] }
 nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.2", features = ["clack-plugin"] }
 clap-sys = "0.5"
@@ -113,6 +113,9 @@ default = ["dual-mono"]
 testing = ["NeuralAmpModeler-rs/testing"]
 dual-mono = ["NeuralAmpModeler-rs/dual-mono"]
 heap-audit = ["NeuralAmpModeler-rs/heap-audit"]
+# Display-server lifecycle tests. Off by default so the catch-all long phase
+# never executes them without a dedicated Xvfb; the `gui` long phase enables it.
+gui-x11 = []
 
 [lib]
 name = "nam_plug"
@@ -156,3 +159,6 @@ allow_attributes = "warn"
 [package.metadata.docs.rs]
 features = ["testing"]
 rustdoc-args = ["--cfg", "docsrs"]
+
+[patch.crates-io]
+NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs" }

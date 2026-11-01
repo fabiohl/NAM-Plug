@@ -59,16 +59,14 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
     <keyword>plugin</keyword>
   </keywords>
   <releases>
-    <release version="1.0.0" date="2026-10-22">
+    <release version="1.1.0" date="2026-11-01">
       <description>
-        <p>Inaugural production release of NAM-Plug (v1.0.0):</p>
+        <p>NAM-Plug 1.1.0:</p>
         <ul>
-          <li>CLAP 1.2+ Host Integration: Native plugin built on clack, sample-accurate parameter automation, dynamic PDC, and full state persistence with SHA-256 asset hashing.</li>
-          <li>Neural DSP Engine: Powered by NeuralAmpModeler-rs with 24 model variants (WaveNet A1/A2, LSTM, ConvNet, Linear), dual-oracle parity validation, and binary .namb v2 container support.</li>
-          <li>SIMD &amp; DSP Stack: x86-64-v3 (AVX2/FMA) baseline, native 256-phase minimum-phase sinc resampler, UPOLS FFT CabSim convolver, and 2×/4× anti-aliasing oversampling.</li>
-          <li>Strict RT Safety: Hard real-time audio callback contract (0 heap allocs/drops, 0 locks, 0 blocking I/O), 3-tier SPSC GC cascade, and denormal/subnormal armor.</li>
-          <li>Declarative Slint GUI: Native X11 XEmbed host embedding, Wayland/X11 floating fallbacks, 5-zone modular layout, 60 Hz lock-free telemetry, and keyboard accessibility.</li>
-          <li>Distribution &amp; Tooling: Standalone Flatpak extension (org.freedesktop.LinuxAudio.BaseExtension 25.08) and 5-phase PGO + LLVM-BOLT release optimization pipeline.</li>
+          <li>Release Receipts: Rust-based long-phase receipts, golden quick-receipt validation, and fail-closed certified-artifact identity checks.</li>
+          <li>Runtime Hardening: Adaptive worker polling, standardized host log alerts, asynchronous model loading, and proportional reset stabilization.</li>
+          <li>Latency Contract: Cab-sim reports the engine's constant partition-sized priming latency, with dry and wet paths aligned to the declared figure.</li>
+          <li>Quality Gates: Independent CI lint and quick jobs with engine provenance and always-uploaded evidence; typed phase-status carriers.</li>
         </ul>
       </description>
     </release>

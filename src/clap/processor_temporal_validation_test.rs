@@ -100,13 +100,14 @@ mod tests {
         path
     }
 
-    /// Writes an IR with an exact pre-delay of `partition` samples.
-    fn write_pre_delay_ir(partition: usize, name: &str) -> PathBuf {
+    /// Writes an IR with a unit impulse at index 0: the wet response carries
+    /// no IR pre-delay content, so its peak isolates the DSP latency.
+    fn write_unit_ir(name: &str) -> PathBuf {
         let path = tmp_path(&format!("{name}.wav"));
-        let mut ir = vec![0.0f32; partition * 2];
-        ir[partition] = 1.0;
+        let mut ir = vec![0.0f32; 512];
+        ir[0] = 1.0;
         neural_amp_modeler_rs::testing::wav::write_wav_f32(&path, &ir, 48000)
-            .expect("write pre-delay IR WAV");
+            .expect("write unit IR WAV");
         path
     }
 
@@ -262,8 +263,8 @@ mod tests {
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
-        let ir = write_pre_delay_ir(256, "t44_xfade_ir");
-        mt.load_cabsim(&ir).expect("load IR");
+        let ir = write_unit_ir("t44_xfade_ir");
+        mt.load_cabsim(&ir).expect("load unit IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
 
         // Generate a 440 Hz sine wave over 20 blocks (5120 samples)
@@ -403,8 +404,8 @@ mod tests {
         let started = stopped.start_processing().expect("start_processing");
 
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
-        let ir = write_pre_delay_ir(256, "t44_combined_ir");
-        mt.load_cabsim(&ir).expect("load pre-delay IR");
+        let ir = write_unit_ir("t44_combined_ir");
+        mt.load_cabsim(&ir).expect("load unit IR");
 
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
 
@@ -420,7 +421,8 @@ mod tests {
             "declared latency must equal sum of OS X2 (12) + CabSim partition (256) = 268"
         );
 
-        // Feed impulse under Wet mode (Bypass = OFF)
+        // Feed impulse under Wet mode (Bypass = OFF). The unit IR has no
+        // pre-delay content, so the peak isolates the declared DSP latency.
         let mut impulse = [0.0f32; BLOCK];
         impulse[0] = 1.0;
 

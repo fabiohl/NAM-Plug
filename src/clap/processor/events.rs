@@ -50,7 +50,7 @@ impl<'a> NamClapProcessor<'a> {
         // certification gate (`processor_drain_latency_test.rs`). Compiled
         // out of every non-test build; two serialized TSC reads (~15 ns
         // each, calibrated) are included in the reported samples.
-        #[cfg(all(test, target_arch = "x86_64"))]
+        #[cfg(all(test, target_arch = "x86_64", feature = "heap-audit"))]
         let drain_probe_t0 = neural_amp_modeler_rs::common::tsc::rdtsc_nanos();
         let mut budget = SwapBudget::new(CMD_SWAP_TUNABLES.swaps_per_callback);
         {
@@ -69,7 +69,7 @@ impl<'a> NamClapProcessor<'a> {
             self.slimmable_drain
                 .drain(&mut handler, &mut budget, &mut gc);
         }
-        #[cfg(all(test, target_arch = "x86_64"))]
+        #[cfg(all(test, target_arch = "x86_64", feature = "heap-audit"))]
         super::DRAIN_PROBE_NS.store(
             neural_amp_modeler_rs::common::tsc::rdtsc_nanos().wrapping_sub(drain_probe_t0),
             Ordering::Relaxed,

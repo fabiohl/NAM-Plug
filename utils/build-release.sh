@@ -63,19 +63,25 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         *)
-            echo "build-release.sh: unknown flag '$1'" >&2
-            echo "Allowed flags: --strict, --package, --install, --certify, -h, --help" >&2
-            exit 2
+            usage_fail "build-release.sh: flag desconhecida '$1' (permitidas: --strict, --package, --install, --certify, -h, --help)"
             ;;
     esac
 done
 
-mkdir -p "$DIST_DIR" "$LOG_DIR" "target/logs"
+lib_init
+trap 'trap_fail $?' ERR
+mkdir -p "$DIST_DIR" "$LOG_DIR"
+if [ "$DO_CERTIFY" != true ]; then
+    # Never let a failed build inherit the previous build's run id.
+    rm -f "$LOG_DIR/build-run-id"
+fi
 
 # -----------------------------------------------------------------------------
 # MODE: --certify (Pure receipt & artifact validation without compilation)
 # -----------------------------------------------------------------------------
 if [ "$DO_CERTIFY" = true ]; then
+    # A failed certification must not leave a previous CERTIFIED receipt behind.
+    rm -f "target/dist/release-receipt.json"
     phase "certify"
     CERT_ARGS=("--artifact" "$CLAP_TARGET" "--build-receipt" "$BUILD_RECEIPT")
     if [ "$DO_STRICT" -eq 1 ]; then
@@ -90,11 +96,13 @@ if [ "$DO_CERTIFY" = true ]; then
     fi
 
     RC=0
-    if [ -n "$CERT_BIN" ]; then
-        "$CERT_BIN" certify "${CERT_ARGS[@]}" 2>&1 | tee "$LOG_DIR/build-release-certify.log" || RC=${PIPESTATUS[0]}
-    else
-        cargo run --release --quiet --locked --features testing --bin plug_long_receipt -- certify "${CERT_ARGS[@]}" 2>&1 | tee "$LOG_DIR/build-release-certify.log" || RC=${PIPESTATUS[0]}
+    if [ -z "$CERT_BIN" ]; then
+        FAILS+=("certify-verifier-missing")
+        emit "PHASE: certify FAIL rc=2 log=none (plug_long_receipt unavailable; --certify never recompiles)"
+        finish
+        exit 1
     fi
+    "$CERT_BIN" certify "${CERT_ARGS[@]}" 2>&1 | tee "$LOG_DIR/build-release-certify.log" || RC=${PIPESTATUS[0]}
 
     if [ "$RC" -eq 0 ]; then
         emit "PHASE: certify PASS log=$LOG_DIR/build-release-certify.log"
@@ -138,7 +146,9 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
         GIT_DIRTY=true
         if [ "$DO_STRICT" -eq 1 ]; then
-            echo "build-release: git tree dirty in strict mode (fail-closed)" >&2
+            FAILS+=("dirty_worktree")
+            emit "PHASE: env_verify FAIL dirty worktree in strict mode"
+            finish
             exit 1
         fi
     fi
@@ -152,7 +162,9 @@ export CARGO_PROFILE_BENCH_STRIP="false"
 # Parse .cargo/config.toml rustflags using POSIX awk
 CONFIG_RUSTFLAGS=$(awk -F'"' '/^  "-C/ || /^  "-Wl/ || /^  "-/ {if ($2 != "") printf "%s ", $2}' .cargo/config.toml 2>/dev/null || true)
 if [ -z "${CONFIG_RUSTFLAGS:-}" ]; then
-    echo "build-release: failed to extract rustflags from .cargo/config.toml" >&2
+    FAILS+=("rustflags")
+    emit "PHASE: env_verify FAIL cannot extract rustflags from .cargo/config.toml"
+    finish
     exit 1
 fi
 ORIG_RUSTFLAGS="${RUSTFLAGS:-}"
@@ -456,7 +468,8 @@ if [ "$DO_PACKAGE" = true ]; then
         mkdir -p "$TMP_PKG_DIR/$ARCHIVE_NAME"
         cp "$CLAP_TARGET" "$TMP_PKG_DIR/$ARCHIVE_NAME/"
         [ -f "README.md" ] && cp "README.md" "$TMP_PKG_DIR/$ARCHIVE_NAME/"
-        [ -f "LICENSE" ] && cp "LICENSE" "$TMP_PKG_DIR/$ARCHIVE_NAME/"
+        if [ -f "LICENSE.txt" ]; then cp "LICENSE.txt" "$TMP_PKG_DIR/$ARCHIVE_NAME/"; else echo "ERROR: LICENSE.txt missing"; exit 1; fi
+        if [ -f "NOTICE" ]; then cp "NOTICE" "$TMP_PKG_DIR/$ARCHIVE_NAME/"; else echo "ERROR: NOTICE missing"; exit 1; fi
 
         cat << 'EOF' > "$TMP_PKG_DIR/$ARCHIVE_NAME/install.sh"
 #!/usr/bin/env bash
@@ -484,6 +497,9 @@ EOF
                 "$FLATPAK_BUILD_DIR" org.freedesktop.LinuxAudio.Plugins.NAMPlug "$SDK_NAME" org.freedesktop.Platform 25.08
             mkdir -p "$FLATPAK_BUILD_DIR/files/clap"
             cp "$CLAP_TARGET" "$FLATPAK_BUILD_DIR/files/clap/nam_plug.clap"
+            mkdir -p "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug"
+            cp "LICENSE.txt" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
+            cp "NOTICE" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
             flatpak build-finish "$FLATPAK_BUILD_DIR" --extension-priority=100
             flatpak build-export --update-appstream "$FLATPAK_REPO_DIR" "$FLATPAK_BUILD_DIR" 25.08
             flatpak build-bundle --runtime "$FLATPAK_REPO_DIR" "$FLATPAK_BUNDLE" org.freedesktop.LinuxAudio.Plugins.NAMPlug 25.08
@@ -491,15 +507,29 @@ EOF
             FLATPAK_PATH="$FLATPAK_BUNDLE"
             echo "Generated flatpak bundle: $FLATPAK_BUNDLE"
         else
-            echo "flatpak command not found; skipping flatpak bundle."
+            echo "flatpak command not found; packaging gap recorded."
+        fi
+        [ -f "$TARBALL" ] || { echo "ERROR: requested tarball was not produced: $TARBALL"; exit 1; }
+        if [ -n "$FLATPAK_PATH" ] && [ ! -f "$FLATPAK_PATH" ]; then
+            echo "ERROR: requested Flatpak bundle was not produced: $FLATPAK_PATH" >&2
+            exit 1
         fi
     } 2>&1 | tee "$PKG_LOG"
     RC=${PIPESTATUS[0]}
     if [ "$RC" -eq 0 ]; then
+        # The packaging block runs in a pipeline subshell: paths assigned
+        # inside it do not survive. Recompute them from the verified files.
+        TARBALL_PATH="$TARBALL"
+        if command -v flatpak >/dev/null 2>&1 && [ -f "$FLATPAK_BUNDLE" ]; then
+            FLATPAK_PATH="$FLATPAK_BUNDLE"
+        fi
         emit "PHASE: packaging PASS log=$PKG_LOG"
     else
         FAILS+=("packaging")
         emit "PHASE: packaging FAIL rc=$RC log=$PKG_LOG"
+    fi
+    if ! command -v flatpak >/dev/null 2>&1; then
+        gap "flatpak:tool_missing"
     fi
 fi
 
@@ -510,17 +540,21 @@ INSTALLED_PATH=""
 if [ "$DO_INSTALL" = true ]; then
     phase "install"
     INST_LOG="$LOG_DIR/build-release-install.log"
+    CLAP_INSTALL_DIR="${HOME}/.clap"
     {
         mkdir -p "$CLAP_INSTALL_DIR"
         cp "$CLAP_TARGET" "$CLAP_INSTALL_DIR/nam_plug.clap"
         INSTALLED_PATH="$CLAP_INSTALL_DIR/nam_plug.clap"
         echo "Installed to $INSTALLED_PATH"
         if [ -n "$FLATPAK_PATH" ] && [ -f "$FLATPAK_PATH" ]; then
-            flatpak install --user --reinstall -y "$FLATPAK_PATH" || true
+            flatpak install --user --reinstall -y "$FLATPAK_PATH"
         fi
     } 2>&1 | tee "$INST_LOG"
     RC=${PIPESTATUS[0]}
     if [ "$RC" -eq 0 ]; then
+        if [ -f "$CLAP_INSTALL_DIR/nam_plug.clap" ]; then
+            INSTALLED_PATH="$CLAP_INSTALL_DIR/nam_plug.clap"
+        fi
         emit "PHASE: install PASS log=$INST_LOG"
     else
         FAILS+=("install")
@@ -571,6 +605,9 @@ cargo run --quiet --locked --features testing --bin plug_long_receipt -- build-r
 RC=${PIPESTATUS[0]}
 
 if [ "$RC" -eq 0 ]; then
+    # The long audit reuses this id so build and long receipts reconcile even
+    # when the three commands run as independent processes.
+    printf '%s\n' "$NAM_RUN_ID" > "$LOG_DIR/build-run-id"
     emit "PHASE: build_receipt PASS log=$RECEIPT_LOG"
 else
     FAILS+=("build_receipt")

@@ -38,7 +38,7 @@ pub(crate) use state::{CMD_SWAP_TUNABLES, SLIMMABLE_SWAP_TUNABLES};
 /// `RtSwapDrain::drain` calls), recorded by `events::process_events` on x86_64
 /// test builds via calibrated TSC reads. Consumed by the drain-latency
 /// certification gate; absent from every non-test build.
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(all(test, target_arch = "x86_64", feature = "heap-audit"))]
 pub(crate) static DRAIN_PROBE_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -1786,7 +1786,7 @@ mod processor_slimmable_generation_test;
 #[path = "../processor_command_budget_test.rs"]
 mod processor_command_budget_test;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "heap-audit"))]
 #[path = "../processor_drain_latency_test.rs"]
 mod processor_drain_latency_test;
 

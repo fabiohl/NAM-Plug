@@ -422,6 +422,7 @@ mod tests {
     /// maps the window on the GUI thread and `destroy()` exercises the teardown
     /// path. The FSM `show → hide` transitions are covered separately by the
     /// headless lifecycle integration tests.
+    #[cfg(feature = "gui-x11")]
     #[test]
     #[ignore = "requires dedicated X11 display server and mutates process environment"]
     fn gui_x11_headless_floating_window_lifecycle() {
@@ -498,6 +499,7 @@ mod tests {
     /// `set_text()` (atom-level text storage).  This ensures the clipboard
     /// integration — used by the status-bar diagnostic-copy button — is
     /// compatible with headless CI environments.
+    #[cfg(feature = "gui-x11")]
     #[test]
     #[ignore = "requires dedicated X11 display server connection"]
     fn gui_x11_headless_clipboard_works() {

@@ -9,7 +9,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 . utils/_lib.sh
 
-[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { echo "Uso: utils/verify_no_rt_alloc.sh"; exit 0; }
+case "${1:-}" in "") ;; -h|--help) echo "Uso: utils/verify_no_rt_alloc.sh"; exit 0 ;; *) usage_fail "verify_no_rt_alloc.sh aceita apenas -h/--help" ;; esac
+lib_init
 
 AWK_PROG="utils/rt_alloc_scan.awk"
 PROC_DIR="src/clap/processor"

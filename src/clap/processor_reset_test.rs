@@ -35,9 +35,9 @@ mod tests {
         extract_plugin_main_thread, extract_plugin_shared, make_harness_audio_processor,
         make_test_plugin_with_harness, perform_restart, process_block_harness,
     };
-    use crate::clap::test_util::{
-        StereoTestBuffers, assert_zero_alloc, model_path, process_stereo_block_prealloc, tmp_path,
-    };
+    #[cfg(feature = "heap-audit")]
+    use crate::clap::test_util::{StereoTestBuffers, process_stereo_block_prealloc};
+    use crate::clap::test_util::{assert_zero_alloc, model_path, tmp_path};
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
     use clack_common::utils::ClapId;
@@ -45,6 +45,7 @@ mod tests {
     use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
+    #[cfg(feature = "heap-audit")]
     use std::time::Instant;
 
     const BLOCK: usize = 256;
@@ -220,8 +221,11 @@ mod tests {
         let mut impulse = [0.0f32; BLOCK];
         impulse[0] = 1.0;
 
-        // Fresh instance: impulse → capture the reference impulse response.
-        let first = process_block(&mut started, &impulse);
+        // The first host callback of a fresh adapter delivers the primed
+        // partition of silence; the impulse response starts on the following
+        // callback. Capture both blocks so the full response is compared.
+        let mut first = process_block(&mut started, &impulse);
+        first.extend_from_slice(&process_block(&mut started, &silence));
         assert!(
             block_max_abs(&first) > 1e-3,
             "fresh impulse response must carry energy"
@@ -239,16 +243,18 @@ mod tests {
         // ── Seek/loop relocation: reset ──
         started.reset();
 
-        // No stale tail may replay — the immediate post-reset block is silence.
-        let post_reset = process_block(&mut started, &silence);
+        // The first post-reset callback is the re-primed partition: no stale
+        // tail may replay there.
+        let mut second = process_block(&mut started, &impulse);
         assert!(
-            block_max_abs(&post_reset) < 1e-6,
+            block_max_abs(&second) < 1e-6,
             "impulse before reset must not produce tail after reset (max-abs {:.3e})",
-            block_max_abs(&post_reset)
+            block_max_abs(&second)
         );
 
-        // Post-reset impulse response == fresh impulse response (bit-exact).
-        let second = process_block(&mut started, &impulse);
+        // Post-reset impulse response == fresh impulse response (bit-exact):
+        // the primed first block above is followed by the response block.
+        second.extend_from_slice(&process_block(&mut started, &silence));
         assert_eq!(
             second, first,
             "post-reset impulse response must be bit-identical to the fresh one"
@@ -698,9 +704,10 @@ mod tests {
         // produces the IR tail for a fresh impulse, latency unchanged.
         let mut impulse = [0.0f32; BLOCK];
         impulse[0] = 1.0;
-        let out = process_block(&mut started, &impulse);
+        let out_impulse = process_block(&mut started, &impulse);
+        let out_tail = process_block(&mut started, &silence);
         assert!(
-            block_max_abs(&out) > 1e-3,
+            block_max_abs(&out_impulse) > 1e-3 || block_max_abs(&out_tail) > 1e-3,
             "IR must remain active after the reset"
         );
         assert_eq!(
@@ -723,6 +730,7 @@ mod tests {
 
     // ── RT Wall-Clock Latency Certification: reset() + post-reset block ──
 
+    #[cfg(feature = "heap-audit")]
     const RT_BUDGET_NS: u128 = 1_333_333; // 64 frames @ 48 kHz ≈ 1.33 ms
 
     /// Own wall-clock budget of the A2-cascade family (per-family envelope).
@@ -738,6 +746,7 @@ mod tests {
     /// regression of the phase-zero reset or the amortized feed. Both A2
     /// costs are engine-side (engine frozen by D6 contract); shrinking
     /// this envelope requires engine work (cascade double-zeroing backlog).
+    #[cfg(feature = "heap-audit")]
     const RT_BUDGET_A2_NS: u128 = 4_000_000; // 25% headroom over 3.2 ms p50
 
     /// Micro-latency and wall-clock certification for `PluginAudioProcessor::reset()`
@@ -754,6 +763,7 @@ mod tests {
     ///   block allocate heap memory.
     /// - **Equivalence / Parity:** The first wet block after the window converges within the
     ///   `1e-6` tolerance of a freshly initialized instance.
+    #[cfg(feature = "heap-audit")]
     #[test]
     #[ignore = "timing/micro-latency certification: run in Phase 3 of utils/tests-long.sh on a pinned core with --test-threads=1"]
     fn test_reset_wall_clock_time_within_contract() {

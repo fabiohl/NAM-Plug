@@ -642,7 +642,7 @@ Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh`:
 2. **Install:** Installs `nam_plug.clap` into `files/clap/` and AppStream XML into `files/share/metainfo/`.
 3. **Finish:** Runs `flatpak build-finish --extension-priority=100`.
 4. **Export OSTree:** Executes `flatpak build-export --update-appstream`.
-5. **Create Bundle:** Generates standalone bundle `nam-plug-v<VERSION>-linux-x86_64-v3.flatpak`.
+5. **Create Bundle:** Generates the standalone bundle `target/dist/org.freedesktop.LinuxAudio.Plugins.NAMPlug.flatpak` (and the `nam-plug-<VERSION>-linux-x86_64.tar.zst` archive).
 6. **Deploy:** Optionally installs bundle locally via `flatpak install --user --reinstall -y`.
 
 ### 10.5 AppStream Catalog Dynamics & Bundle Semantics

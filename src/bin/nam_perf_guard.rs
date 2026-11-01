@@ -67,6 +67,9 @@ impl clack_host::prelude::HostHandlers for PerfHost {
 pub struct PerfCertificationReport {
     pub schema_version: String,
     pub timestamp_utc: String,
+    /// Runner identifier, when the caller/CI exported `NAM_RUN_ID`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub clap_artifact_path: String,
     pub clap_artifact_sha256: String,
     pub overall_status: String,
@@ -124,6 +127,15 @@ pub struct HostEnvironment {
     pub irq_isolation: String,
     /// IRQ numbers whose affinity currently includes the benchmark core.
     pub irqs_sharing_bench_core: Vec<String>,
+    /// Whether the process affinity was successfully narrowed to `bench_core`.
+    #[serde(default)]
+    pub affinity_applied: bool,
+    /// Core reported by `sched_getcpu()` after applying the affinity.
+    #[serde(default)]
+    pub affinity_observed_core: Option<usize>,
+    /// Typed reason the affinity could not be applied or verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affinity_error: Option<String>,
 }
 
 /// Relative p50 ceiling against a previous certification report.
@@ -148,6 +160,8 @@ pub struct ReferenceComparison {
 
 #[derive(Debug, Deserialize)]
 struct ReferenceReport {
+    #[serde(default)]
+    clap_artifact_sha256: Option<String>,
     scenarios: Vec<ReferenceScenario>,
 }
 
@@ -271,6 +285,35 @@ fn resolve_bench_core(
         .or_else(|| allowed.first().copied())
 }
 
+/// Narrows the current process to `core` and verifies where it actually ran.
+/// The affinity is exercised in-process (no shell `taskset`) so the report can
+/// distinguish the requested, applied and observed core.
+fn apply_bench_affinity(core: usize) -> Result<usize, String> {
+    if core >= libc::CPU_SETSIZE as usize {
+        return Err(format!("cpu_out_of_range:{core}"));
+    }
+    // SAFETY: `cpu_set_t` is a plain bitset; zeroing it and setting one valid
+    // CPU index is the documented libc API. `sched_setaffinity` is called for
+    // pid 0 (current thread) with the exact size of the set.
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::CPU_ZERO(&mut set);
+        libc::CPU_SET(core, &mut set);
+        let rc = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+        if rc != 0 {
+            return Err(format!(
+                "sched_setaffinity:{core}:{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let observed = libc::sched_getcpu();
+        if observed < 0 {
+            return Err(format!("sched_getcpu:{}", std::io::Error::last_os_error()));
+        }
+        Ok(observed as usize)
+    }
+}
+
 fn irqs_sharing_core(core: usize) -> Vec<String> {
     let Ok(entries) = fs::read_dir("/proc/irq") else {
         return Vec::new();
@@ -341,6 +384,7 @@ fn probe_host() -> HostEnvironment {
         cpu_isolated,
         irq_isolation,
         irqs_sharing_bench_core,
+        ..HostEnvironment::default()
     }
 }
 
@@ -367,6 +411,15 @@ fn host_degradation_reasons(host: &HostEnvironment) -> Vec<String> {
         None => reasons.push("bench_core_unresolved".to_string()),
     }
 
+    if let Some(error) = &host.affinity_error {
+        reasons.push(format!("affinity_apply_failed:{error}"));
+    }
+    if let (Some(requested), Some(observed)) = (host.bench_core, host.affinity_observed_core)
+        && requested != observed
+    {
+        reasons.push(format!("affinity_observed_mismatch:{requested}:{observed}"));
+    }
+
     if host.sched_policy != "SCHED_FIFO" && host.sched_policy != "SCHED_RR" {
         reasons.push(format!("sched_policy_not_realtime:{}", host.sched_policy));
     }
@@ -381,7 +434,7 @@ fn host_degradation_reasons(host: &HostEnvironment) -> Vec<String> {
         None => reasons.push("boost_unknown".to_string()),
     }
     let allowed = parse_cpu_list(&host.cpus_allowed_list);
-    if allowed.len() > 1 {
+    if !host.affinity_applied && allowed.len() > 1 {
         reasons.push(format!(
             "affinity_not_single_core:{}",
             host.cpus_allowed_list
@@ -447,6 +500,7 @@ fn load_reference_check(
     reference_path: &Path,
     measured: &[(String, f64)],
     p50_ratio_max: f64,
+    artifact_sha256: &str,
 ) -> Result<ReferenceCheck, String> {
     let bytes = fs::read(reference_path).map_err(|e| {
         format!(
@@ -456,6 +510,13 @@ fn load_reference_check(
     })?;
     let reference: ReferenceReport = serde_json::from_slice(&bytes)
         .map_err(|e| format!("invalid reference report {}: {e}", reference_path.display()))?;
+    if let Some(reference_sha) = &reference.clap_artifact_sha256
+        && reference_sha != artifact_sha256
+    {
+        return Err(format!(
+            "reference artifact SHA-256 ({reference_sha}) != current artifact ({artifact_sha256})"
+        ));
+    }
     let reference_sha256: String = Sha256::digest(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -835,6 +896,19 @@ fn main() -> ExitCode {
     let mut all_deadlines_passed = true;
     let mut environment_stable = true;
 
+    // Affinity is applied before the first measurement, not merely recorded:
+    // the report must distinguish the requested from the observed core.
+    let mut host = probe_host();
+    if let Some(core) = host.bench_core {
+        match apply_bench_affinity(core) {
+            Ok(observed) => {
+                host.affinity_applied = true;
+                host.affinity_observed_core = Some(observed);
+            }
+            Err(error) => host.affinity_error = Some(error),
+        }
+    }
+
     for sc in &scenarios {
         match measure_scenario(&clap_target, sc) {
             Ok(metrics) => {
@@ -878,7 +952,6 @@ fn main() -> ExitCode {
         }
     }
 
-    let host = probe_host();
     let degradation_reasons = host_degradation_reasons(&host);
     let environment_degraded = !degradation_reasons.is_empty();
     let reference_check = match reference_path.as_deref() {
@@ -887,7 +960,7 @@ fn main() -> ExitCode {
                 .iter()
                 .map(|scenario| (scenario.name.clone(), scenario.p50_ns))
                 .collect();
-            match load_reference_check(path, &measured, p50_ratio_max) {
+            match load_reference_check(path, &measured, p50_ratio_max, &clap_sha) {
                 Ok(check) => Some(check),
                 Err(err) => {
                     eprintln!("❌ FATAL: {err}");
@@ -898,10 +971,13 @@ fn main() -> ExitCode {
         None => None,
     };
     let reference_failed = reference_check.as_ref().is_some_and(|check| !check.passed);
+    let reference_missing = reference_check.is_none();
 
+    // A degraded host or a missing paired series cannot certify a release:
+    // the numbers may describe a valid run, but not the reference environment.
     let overall_status = if !all_deadlines_passed || reference_failed {
         "FAIL"
-    } else if !environment_stable {
+    } else if !environment_stable || environment_degraded || reference_missing {
         "INCONCLUSIVE"
     } else {
         "PASS"
@@ -924,6 +1000,9 @@ fn main() -> ExitCode {
     );
     for reason in &degradation_reasons {
         println!("  degraded: {reason}");
+    }
+    if reference_missing {
+        println!("Reference Series Missing:   true (certification requires a paired --reference)");
     }
     println!("All Scenarios Passed Gate:  {all_deadlines_passed}");
     println!(
@@ -952,8 +1031,9 @@ fn main() -> ExitCode {
     println!("========================================================================");
 
     let report = PerfCertificationReport {
-        schema_version: "1.3".to_string(),
+        schema_version: "1.4".to_string(),
         timestamp_utc: now_iso8601(),
+        run_id: env::var("NAM_RUN_ID").ok().filter(|v| !v.is_empty()),
         clap_artifact_path: clap_target.to_string_lossy().to_string(),
         clap_artifact_sha256: clap_sha,
         overall_status: overall_status.to_string(),
@@ -968,13 +1048,30 @@ fn main() -> ExitCode {
 
     let target_out =
         out_path.unwrap_or_else(|| PathBuf::from("target/perf-certification-report.json"));
-    if let Some(parent) = target_out.parent() {
-        let _ = fs::create_dir_all(parent);
+    if let Some(parent) = target_out.parent()
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "❌ FATAL: cannot create report directory {}: {err}",
+            parent.display()
+        );
+        return ExitCode::from(1);
     }
-    if let Ok(json) = serde_json::to_string_pretty(&report) {
-        let _ = fs::write(&target_out, json);
-        println!("Report saved to: {}", target_out.display());
+    let json = match serde_json::to_string_pretty(&report) {
+        Ok(json) => json,
+        Err(err) => {
+            eprintln!("❌ FATAL: cannot serialize performance report: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = fs::write(&target_out, json) {
+        eprintln!(
+            "❌ FATAL: cannot write performance report {}: {err}",
+            target_out.display()
+        );
+        return ExitCode::from(1);
     }
+    println!("Report saved to: {}", target_out.display());
 
     match overall_status {
         "PASS" => ExitCode::SUCCESS,

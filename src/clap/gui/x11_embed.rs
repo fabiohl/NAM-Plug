@@ -76,7 +76,7 @@ pub(crate) fn is_embedded_supported() -> bool {
 
 /// Returns the human-readable backend kind currently pinned, for diagnostic purposes.
 #[inline]
-#[cfg(test)]
+#[cfg(all(test, feature = "gui-x11"))]
 pub(crate) fn backend_kind_for_diag() -> &'static str {
     match BACKEND_KIND.load(Ordering::Acquire) {
         KIND_UNDECIDED => "Undecided",

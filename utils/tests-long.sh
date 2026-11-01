@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # tests-long.sh — suíte longa de auditoria, certificação e provas de artefato. Classe B.
 # Uso: utils/tests-long.sh [--strict] [--only <fase>[,<fase>]] [--artifact] [-h|--help]
-# Orçamento: 300
+# Orçamento: 340
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -o pipefail
 cd "$(dirname "$0")/.."
@@ -11,17 +11,15 @@ cd "$(dirname "$0")/.."
 
 SCRIPT_NAME="tests-long"
 LOG_DIR=target/logs
-mkdir -p "$LOG_DIR"
+DEFAULT_TARGET_DIR="target/long"
 RECEIPT="$LOG_DIR/long-audit-receipt.jsonl"
 
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/long}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$DEFAULT_TARGET_DIR}"
 export CARGO_TARGET_DIR
 
 USE_ARTIFACT=0
 ONLY_PHASES=""
 STRICT=0
-# long: fases dedicadas/pinadas (gui: gui_x11_ sob xvfb; heap-audit: micro-latência com --test-threads=1)
-SKIP=(gui_x11_ processor_drain_latency_test test_reset_wall_clock_time_within_contract test_structural_burst_p99_within_contract)
 
 usage() {
     cat <<'EOF'
@@ -67,6 +65,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Reuse the build run id so the independent build/long/certify processes
+# reconcile instead of each generating a different id.
+if [ -z "${NAM_RUN_ID:-}" ] && [ -s target/logs/build-run-id ]; then
+    IFS= read -r NAM_RUN_ID < target/logs/build-run-id || true
+    export NAM_RUN_ID
+fi
+lib_init
+
 PHASES=(catch-all gui artifact perf heap-audit)
 if [ -n "$ONLY_PHASES" ]; then
     IFS=',' read -ra requested <<< "$ONLY_PHASES"
@@ -76,11 +82,23 @@ if [ -n "$ONLY_PHASES" ]; then
     done
 fi
 
-# target/long is removed by default unless --only is specified to accelerate iterative reruns
-if [ -z "$ONLY_PHASES" ]; then
-    rm -rf "$CARGO_TARGET_DIR"
+# Only an unrestricted run may replace the canonical receipt. A partial --only
+# run writes a sibling receipt and preserves the previous full evidence.
+if [ -n "$ONLY_PHASES" ]; then
+    RECEIPT="$LOG_DIR/long-audit-receipt.partial.jsonl"
 fi
-rm -f "$RECEIPT"
+
+# target/long is removed by default unless --only is specified to accelerate
+# iterative reruns. A custom CARGO_TARGET_DIR is operator data and is never
+# removed: the script has no authority to delete an arbitrary directory.
+if [ -z "$ONLY_PHASES" ]; then
+    if [ "$CARGO_TARGET_DIR" = "$DEFAULT_TARGET_DIR" ]; then
+        rm -rf "$DEFAULT_TARGET_DIR"
+    else
+        emit "PHASE: long-cleanup SKIPPED custom_cargo_target_dir=$CARGO_TARGET_DIR"
+    fi
+fi
+rm -f "$RECEIPT" "$LOG_DIR/tests-long-status.tsv"
 
 ARTIFACT_PATH=""
 ARTIFACT_SHA256=""
@@ -100,7 +118,7 @@ should_run() {
 
 PLUG_LONG_RECEIPT_BIN="$CARGO_TARGET_DIR/release/plug_long_receipt"
 if [ ! -x "$PLUG_LONG_RECEIPT_BIN" ]; then
-    cargo build --release --features testing --bin plug_long_receipt >> "$LOG_DIR/tests-long-receipt.log" 2>&1
+    cargo build --locked --release --features testing --bin plug_long_receipt >> "$LOG_DIR/tests-long-receipt.log" 2>&1
 fi
 
 # append_receipt <phase-id> <nome> <status> <log> <ms> <tests> <exercised> [gaps]
@@ -118,10 +136,12 @@ append_receipt() {
     }
 }
 
-# close_phase <pid> <nome> <rc> <log> <dur_ms> <tests> <exercised> [gaps]
+# close_phase <pid> <nome> <rc> <log> <dur_ms> <tests> <exercised> [gaps] [requires_tests]
+# `requires_tests=0` is used by phases that certify an artifact instead of
+# running a Cargo test binary (perf), so `ran_tests` does not apply.
 close_phase() {
-    local pid=$1 pname=$2 rc=$3 plog=$4 dur=$5 tests=$6 ex=$7 pgaps=${8:-} st=PASSED
-    if [ "$rc" -eq 0 ] && ran_tests "$plog"; then
+    local pid=$1 pname=$2 rc=$3 plog=$4 dur=$5 tests=$6 ex=$7 pgaps=${8:-} req_tests=${9:-1} st=PASSED
+    if [ "$rc" -eq 0 ] && { [ "$req_tests" = "0" ] || ran_tests "$plog"; }; then
         emit "PHASE: $pname PASS log=$plog"
     else
         FAILS+=("$pid")
@@ -141,11 +161,11 @@ skip_phase() {
 # ── Fase catch-all ───────────────────────────────────────────────────────────
 if should_run "catch-all"; then
     t_start=$SECONDS; plog="$LOG_DIR/long-catch-all.log"; phase "catch-all"
-    skips=(); for s in "${SKIP[@]}"; do skips+=(--skip "$s"); done
     # timeout: pior comando ~230s (build LTO + testes); 2x p100 ≈ 500s
-    timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-500}" cargo test --release --features testing --no-fail-fast \
-        -- --include-ignored "${skips[@]}" 2>&1 | tee "$plog"
-    catch_rc=${PIPESTATUS[0]}
+    timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-500}" cargo test --locked --release --features testing --no-fail-fast \
+        -- --include-ignored 2>&1 | tee "$plog"
+    pst=("${PIPESTATUS[@]}"); catch_rc=${pst[0]}
+    [ "${pst[1]}" -eq 0 ] || catch_rc=1
     close_phase "phase1" "catch-all" "$catch_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "" false
 else
     skip_phase "phase1" "catch-all"
@@ -163,7 +183,7 @@ if should_run "gui"; then
         for gt in gui_x11_embedded_open_close_cycles_no_leak gui_x11_lifecycle_embedded_set_parent_honest gui_x11_lifecycle_hide_after_show_with_real_window gui_x11_headless_clipboard_works gui_x11_headless_floating_window_lifecycle; do
             LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe NAM_GUI_DEDICATED_X11=1 NAM_GUI_TIMEOUT_MS="${NAM_GUI_TIMEOUT_MS:-15000}" \
                 timeout --kill-after=30 "$gui_to" xvfb-run -a --server-args="-screen 0 1280x800x24" \
-                cargo test --features testing --release --lib "$gt" -- --ignored < /dev/null 2>&1 | tee -a "$plog" || gui_rc=1
+                cargo test --locked --features testing,gui-x11 --release --lib "$gt" -- --ignored < /dev/null 2>&1 | tee -a "$plog" || gui_rc=1
         done
         close_phase "phase2" "gui" "$gui_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "" false
     fi
@@ -184,7 +204,7 @@ if should_run "artifact"; then
         candidate="$CARGO_TARGET_DIR/release/libnam_plug.so"; rm -f "$candidate"
         echo "Building neutral release artifact..." >> "$plog"
         CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-            timeout --kill-after=30 "$art_to" cargo build --release --features testing 2>&1 | tee -a "$plog"; build_rc=${PIPESTATUS[0]}
+            timeout --kill-after=30 "$art_to" cargo build --locked --release --features testing 2>&1 | tee -a "$plog"; build_rc=${PIPESTATUS[0]}
         if [ "$build_rc" -ne 0 ]; then echo "ERROR: Neutral artifact build failed (rc=$build_rc)" >> "$plog"
         elif [ -f "$candidate" ]; then plugin_under_test="$candidate"
         else echo "ERROR: Neutral artifact $candidate not found" >> "$plog"; fi
@@ -210,7 +230,7 @@ if should_run "artifact"; then
             test_cabsim_ir_changes_audio_release_artifact test_clap_parity_cabsim)
         for atest in "${ARTIFACT_TESTS[@]}"; do
             echo "--- Running artifact test: $atest ---" >> "$plog"
-            timeout --kill-after=30 "$art_to" cargo test --features testing --release --test clap "$atest" \
+            timeout --kill-after=30 "$art_to" cargo test --locked --features testing --release --test clap "$atest" \
                 -- --ignored --nocapture 2>&1 | tee -a "$plog"
             sub_rc=${PIPESTATUS[0]}
             [ "$sub_rc" -eq 0 ] && art_passed=$((art_passed + 1)) || art_rc=1
@@ -240,12 +260,27 @@ if should_run "perf"; then
     t_start=$SECONDS; phase "perf"
     plog="$LOG_DIR/long-perf.log"; : > "$plog"
     if [ "$USE_ARTIFACT" = "1" ]; then
-        # timeout: pior comando ~30s (nam_perf_guard certify); 2x p100 ≈ 120s
-        timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-120}" cargo run --release --features testing \
-            --bin nam_perf_guard -- certify --clap "$ARTIFACT_PATH" 2>&1 | tee -a "$plog"
-        perf_rc=${PIPESTATUS[0]}
-        # one gate: nam_perf_guard certify (validator rejects PASSED with 0 tests)
-        close_phase "phase4" "perf" "$perf_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) 1 true
+        # Certification requires a paired reference series on the certified
+        # host. Its absence is a typed gap, never a PASS.
+        perf_reference="$LOG_DIR/perf-reference.json"
+        if [ ! -f "$perf_reference" ] && [ -s "$LOG_DIR/perf-certification-report.json" ]; then
+            # First run of a new baseline is a GAP; afterwards the previous
+            # certification report is the paired series for a relative gate.
+            perf_reference="$LOG_DIR/perf-certification-report.json"
+            emit "PHASE: perf reference=previous_report"
+        fi
+        if [ ! -f "$perf_reference" ]; then
+            gap "perf:reference_missing"; append_receipt "phase4" "perf" "SKIPPED" "$plog" 0 0 false "perf:reference_missing"
+        else
+            # timeout: pior comando ~30s (nam_perf_guard certify); 2x p100 ≈ 120s
+            timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-120}" cargo run --locked --release --features testing \
+                --bin nam_perf_guard -- certify --clap "$ARTIFACT_PATH" --reference "$perf_reference" \
+                --out "$LOG_DIR/perf-certification-report.json" 2>&1 | tee -a "$plog"
+            pst=("${PIPESTATUS[@]}"); perf_rc=${pst[0]}
+            [ "${pst[1]}" -eq 0 ] || perf_rc=1
+            # one gate: nam_perf_guard certify (artifact evidence, not a Cargo test binary)
+            close_phase "phase4" "perf" "$perf_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) 1 true "" 0
+        fi
     else
         gap "perf:requires_artifact"
         append_receipt "phase4" "perf" "SKIPPED" "$plog" $(( (SECONDS - t_start) * 1000 )) 0 false "perf:requires_artifact"
@@ -261,7 +296,7 @@ if should_run "heap-audit"; then
     heap_rc=0; heap_passed=0; heap_to=${NAM_PHASE_TIMEOUT_S:-500}
     run_heap_test() {
         echo "--- Running heap/RT test: $* ---" >> "$plog"
-        timeout --kill-after=30 "$heap_to" cargo test --features testing --release "$@" 2>&1 | tee -a "$plog"
+        timeout --kill-after=30 "$heap_to" cargo test --locked --features testing,heap-audit --release "$@" 2>&1 | tee -a "$plog"
         local rc=${PIPESTATUS[0]}
         [ "$rc" -eq 0 ] && heap_passed=$((heap_passed + 1)) || heap_rc=1
     }
@@ -276,7 +311,7 @@ if should_run "heap-audit"; then
     run_heap_test --lib test_reset_wall_clock_time_within_contract -- --ignored --test-threads=1
 
     echo "--- Running TLS heap-stability soak ---" >> "$plog"
-    timeout --kill-after=30 "$heap_to" cargo test --features testing,heap-audit --release --lib \
+    timeout --kill-after=30 "$heap_to" cargo test --locked --features testing,heap-audit --release --lib \
         test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1 2>&1 | tee -a "$plog"
     tls_rc=${PIPESTATUS[0]}
     [ "$tls_rc" -eq 0 ] && heap_passed=$((heap_passed + 1)) || heap_rc=1
@@ -284,6 +319,10 @@ if should_run "heap-audit"; then
     close_phase "phase5" "heap-audit" "$heap_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$heap_passed"
 else
     skip_phase "phase5" "heap-audit"
+fi
+
+if [ -n "$ONLY_PHASES" ]; then
+    gap "only-subset:${ONLY_PHASES//,/}"
 fi
 
 # ── Terminal receipt derivation & verification ───────────────────────────────

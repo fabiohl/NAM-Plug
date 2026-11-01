@@ -165,13 +165,15 @@ Benchmarks measure throughput, parameter modulation overhead, neural inference a
 - **Deterministic Fixtures:** Pre-validated via SHA-256 hashes prior to benchmark execution.
 - **Pre-Warming:** Models are pre-warmed for 2048 samples prior to `b.iter()` to avoid cache-cold bias.
 - **Zero Heap Allocations:** Iteration loops operate strictly on pre-allocated, 64-byte aligned buffers (`AlignedVec<f32>`).
-- **CPU Core Isolation:** Benchmarks are pinned to isolated physical cores via `taskset` (see [§5.5](#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset)).
+- **CPU Core Isolation:** `nam_perf_guard` resolves and then **applies** the affinity in-process with `sched_setaffinity`, verifying the observed core with `sched_getcpu` (see [§5.5](#55-deterministic-benchmark-execution--cpu-core-isolation-isolcpus--taskset)). Shell scripts never invoke `taskset` literally.
 
 ### 4.3 Performance Certification Gate
 
 Performance is certified against the canonical artifact by `nam_perf_guard certify --clap target/dist/nam_plug.clap`, invoked by the `perf` phase of `utils/tests-long.sh --artifact` (receipt `phase_id=phase4`; without `--artifact` the phase is recorded as the typed GAP `perf:requires_artifact`):
 
-- **Benchmark core:** resolved by the precedence in [§7](#7-script-contract--automation-disciplines): explicit `NAM_BENCH_CORE` → isolated online core → first allowed CPU → unpinned (`GAP`).
+- **Benchmark core:** resolved by the precedence in [§7](#7-script-contract--automation-disciplines): explicit `NAM_BENCH_CORE` → isolated online core → first allowed CPU → unpinned (`GAP`); then applied and verified in-process.
+- **Paired reference:** certification uses `target/logs/perf-reference.json` when present, otherwise the previous `target/logs/perf-certification-report.json` as the rolling paired series. The reference must describe the same artifact SHA-256; a mismatch is a fatal error. The very first run has no series and is the typed GAP `perf:reference_missing`, never a PASS.
+- **Report:** written to `target/logs/perf-certification-report.json`; a write failure aborts with exit 1 instead of silently losing evidence.
 - **Budget:** p99 block execution must stay below 85% of the audio block budget.
 - **Coverage:** mandatory Criterion groups are declared in [`benches/clap_bench.manifest`](../benches/clap_bench.manifest).
 
@@ -221,15 +223,15 @@ The long suite uses the canonical phase names below; `utils/tests-long.sh --help
 
 | Receipt `phase_id` | Canonical phase | Command, Invariant & Timeout | Log |
 |:------------------ |:--------------- |:---------------------------- |:--- |
-| `phase1` | `catch-all` | `cargo test --release --features testing --no-fail-fast -- --include-ignored "${skips[@]}"` (timeout 500s; worst command $p_{100} \approx 230$s); runs all non-ignored and ignored tests except dedicated suites. | `target/logs/long-catch-all.log` |
-| `phase2` | `gui` | `cargo test --features testing --release --lib "$gt" -- --ignored < /dev/null` per test under `xvfb-run` (timeout 300s; worst command $p_{100} \approx 120$s cold / 1.2s warm); emits `gui:xvfb_not_found` when `xvfb-run` is absent. | `target/logs/long-gui.log` |
+| `phase1` | `catch-all` | `cargo test --locked --release --features testing --no-fail-fast -- --include-ignored` (timeout 500s; worst command $p_{100} \approx 230$s); dedicated suites are excluded by Cargo features, never by a shell `--skip` list. | `target/logs/long-catch-all.log` |
+| `phase2` | `gui` | `cargo test --locked --features testing,gui-x11 --release --lib "$gt" -- --ignored < /dev/null` per test under `xvfb-run` (timeout 300s; worst command $p_{100} \approx 120$s cold / 1.2s warm); emits `gui:xvfb_not_found` when `xvfb-run` is absent. | `target/logs/long-gui.log` |
 | `phase3` | `artifact` | Parity and CabSim tests against a neutral release `.so`, or against `target/dist/nam_plug.clap` with `--artifact` (timeout 400s; worst command $p_{100} \approx 180$s); optional `clap-validator` gate. | `target/logs/long-artifact.log` |
-| `phase4` | `perf` | `nam_perf_guard certify --clap target/dist/nam_plug.clap` (timeout 120s; worst command $p_{100} \approx 30$s); requires `--artifact`, otherwise `SKIPPED` with `perf:requires_artifact`. | `target/logs/long-perf.log` |
-| `phase5` | `heap-audit` | GC swap/destroy, off-RT teardown, RT priority/latency, burst deadline and TLS heap-stability soak tests (timeout 500s; worst command $p_{100} \approx 215$s under release heap-audit LTO). | `target/logs/long-heap-audit.log` |
+| `phase4` | `perf` | `nam_perf_guard certify --clap target/dist/nam_plug.clap --reference <paired-series> --out target/logs/perf-certification-report.json` (timeout 120s; worst command $p_{100} \approx 30$s); requires `--artifact` and a paired series (`perf-reference.json` or the previous report), otherwise `SKIPPED` with a typed GAP. | `target/logs/long-perf.log` |
+| `phase5` | `heap-audit` | GC swap/destroy, off-RT teardown, RT priority/latency, burst deadline and TLS heap-stability soak tests under `--features testing,heap-audit` (timeout 500s; worst command $p_{100} \approx 215$s under release heap-audit LTO). | `target/logs/long-heap-audit.log` |
 
-The script defines the skip list `SKIP=(gui_x11_ processor_drain_latency_test test_reset_wall_clock_time_within_contract test_structural_burst_p99_within_contract)` at the top. The `catch-all` phase passes these to Cargo via `--skip`, while the dedicated phases execute them with isolated environments: `gui` executes `gui_x11_` under `xvfb-run` (`< /dev/null`), and `heap-audit` executes the micro-latency and timing tests with `--test-threads=1`. The five GUI tests are `gui_x11_embedded_open_close_cycles_no_leak`, `gui_x11_lifecycle_embedded_set_parent_honest`, `gui_x11_lifecycle_hide_after_show_with_real_window`, `gui_x11_headless_clipboard_works` and `gui_x11_headless_floating_window_lifecycle`.
+Dedicated suites are selected by Cargo features instead of a shell skip list: the five `gui_x11_*` tests require `gui-x11`, and the micro-latency/timing tests (`processor_drain_latency_test`, `test_reset_wall_clock_time_within_contract`, `test_structural_burst_p99_within_contract`) require `heap-audit`. The catch-all phase compiles neither feature, so it cannot run them without a display or pinned core; the dedicated phases enable the corresponding feature explicitly.
 
-`--only <name>[,<name>]` accepts only canonical phase names. Unselected phases are still appended to the receipt as `SKIPPED`, and `target/long` is preserved for iterative reruns (it is removed only when `--only` is absent).
+`--only <name>[,<name>]` accepts only canonical phase names. Unselected phases are still appended to the receipt as `SKIPPED`, and `target/long` is preserved for iterative reruns (it is removed only when `--only` is absent). A partial run writes `target/logs/long-audit-receipt.partial.jsonl` and never deletes `target/logs/long-audit-receipt.jsonl` from a previous full run; `target/dist`, logs and receipts are never removed.
 
 ### 5.2 Direct Cargo Commands
 
@@ -272,6 +274,12 @@ NAM_REQUIRE_CPP_ORACLE=1 cargo test --features testing --release --test clap \
     test_clap_parity_multi_rate -- --ignored --nocapture
 ```
 
+#### 5.3.1 Hosted CI Jobs and Engine Source
+
+- **`ci.yml`:** lints and quick run as separate jobs (`x86_64-linux-lints`, `x86_64-linux-quick`, `linux-arm64-lints`, `linux-arm64-quick`) plus `msrv`, so a lint failure cannot hide the functional suite. The ARM64 jobs are `continue-on-error` (experimental) until a native aarch64 execution is approved. Each job, including `msrv`, writes `target/logs/ci-provenance.log` (SHA, package version, rustc/toolchain) and uploads `target/logs/**` with `if: always()`. The MSRV job sets `RUSTUP_TOOLCHAIN=1.99.0` so the repository's `rust-toolchain.toml` cannot silently select stable.
+- **Engine source is a GAP:** `[patch.crates-io]` resolves `NeuralAmpModeler-rs` from `../NeuralAmpModeler-rs`. The oracle fallbacks in §5.3 do not help Cargo resolution: a runner without the sibling checkout fails before any test runs, and the provenance line records `engine=GAP engine_sibling_absent`. Hosted results are therefore not evidence until the product owner authorizes an engine source and SHA.
+- **`long.yml`:** `workflow_dispatch` only, operator-triggered, `timeout-minutes: 120`. Hosted runs select `--only catch-all,gui,artifact`; the `perf` and `heap-audit` timing phases are not selected because a hosted runner is not a comparable speed gate. A supplied `phases` value is transported through the environment and passed as one argument, never interpolated into shell code. Certification is not performed in this workflow; the operator runs `build-release.sh --certify` on the isolated host.
+
 ### 5.4 Release Architecture & Verification Gates (`build-release.sh` & `plug_long_receipt certify`)
 
 Production builds compile the **`dist`** profile (inherits `release`, PGO + optional BOLT, stripped, `panic = "unwind"`) into the canonical artifact directory `target/dist/nam_plug.clap`. Certification is decoupled from compilation and enforced via strongly typed receipts verified by the `plug_long_receipt certify` Rust binary.
@@ -305,7 +313,7 @@ The canonical release workflow strictly decouples artifact compilation, long-aud
 2. **External `clap-validator`:** Validates protocol conformance against the distributed binary.
 3. **NAMCore Float Parity:** Multi-rate parity, oversampling, and CabSim convolution against the C++ oracle.
 4. **CabSim IR Artifact Test:** Confirms impulse responses alter output audio as expected.
-5. **Performance Certification:** Invokes `nam_perf_guard certify` pinned to the benchmark core, verifying p99 execution stays below **85% of the audio block budget**.
+5. **Performance Certification:** Invokes `nam_perf_guard certify` with affinity applied and verified in-process, a paired reference series, and no `environment_degraded` reason; p99 execution must stay below **85% of the audio block budget**.
 
 #### 5.4.1 Certified Artifact Identity (F-CER-01)
 
@@ -333,11 +341,12 @@ Unlike standalone host binaries, `NAM-Plug` does not include an in-tree `ab-opt-
 | Field | Meaning | Effect on the gate |
 |:----- |:------- |:------------------ |
 | `environment_stable` | Coefficient of variation ≤ 1.2 across the sampled series (noise/thermal). | `false` ⇒ `INCONCLUSIVE` (exit `2`). |
-| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy (no `isolcpus`/`nohz_full`, shared IRQ affinity, non-RT scheduling, non-`performance` governor, boost enabled, or unpinned affinity). | Recorded only; the p99 evidence remains valid for *that* host. |
+| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy (no `isolcpus`/`nohz_full`, shared IRQ affinity, non-RT scheduling, non-`performance` governor, boost enabled, affinity not applied/observed on the selected core). | `true` ⇒ `INCONCLUSIVE` (exit `2`); certification is blocked. |
+| paired reference series | `--reference` report supplied to `nam_perf_guard certify`. | Absent ⇒ `INCONCLUSIVE` (exit `2`); the script records `perf:reference_missing`. |
 
-The receipt mirrors both fields under `performance_certification`, and the pipeline prints `[DEGRADED HOST]` with the typed reasons. Reasons are stable tokens such as `bench_core_not_isolated:<N>`, `irq_isolation_shared:<N>`, `sched_policy_not_realtime:SCHED_OTHER`, `governor_not_performance:powersave`, `governor_unknown`, `cpu_boost_enabled`, `boost_unknown`, `affinity_not_single_core:0-15`. A degraded host never promotes a `FAIL` to `PASS`; it only prevents a `PASS` from being read as a fully isolated measurement.
+The receipt mirrors both fields under `performance_certification`, and the pipeline prints `[DEGRADED HOST]` with the typed reasons. Reasons are stable tokens such as `bench_core_not_isolated:<N>`, `irq_isolation_shared:<N>`, `sched_policy_not_realtime:SCHED_OTHER`, `governor_not_performance:powersave`, `governor_unknown`, `cpu_boost_enabled`, `boost_unknown`, `affinity_apply_failed:<detail>`, `affinity_observed_mismatch:<requested>:<observed>`. A degraded host blocks certification instead of promoting the run to `PASS`.
 
-`perf-certification-report.json` uses `schema_version: "1.3"` and an ISO-8601 `timestamp_utc` (`YYYY-MM-DDTHH:MM:SSZ`), like the release receipt, so reports sort chronologically as text.
+`perf-certification-report.json` is written to `target/logs/` and uses `schema_version: "1.4"` with the optional `run_id`, the requested/applied/observed affinity fields and an ISO-8601 `timestamp_utc` (`YYYY-MM-DDTHH:MM:SSZ`), like the release receipt, so reports sort chronologically as text.
 
 #### 5.4.4 External `clap-validator` Skips
 
@@ -468,7 +477,7 @@ When a host streams dense parameter automation (up to 1 event per sample), split
 
 ### 6.1 Reference Performance Baseline (Criterion Benchmark Matrix)
 
-Measured on an isolated CPU core (`x86-64-v3` AVX2/FMA baseline, `performance` governor, core pinned via `taskset`):
+Measured on an isolated CPU core (`x86-64-v3` AVX2/FMA baseline, `performance` governor, operator-pinned host):
 
 #### Neural Architecture Inference (Live Mode, Native 48 kHz, Stereo)
 
@@ -540,6 +549,15 @@ Script output follows a structured stream suitable for automated parsing:
    - `2`: Syntax error, unknown option, or missing precondition.
 
 Detailed execution logs are written to `target/logs/<script>-<phase>.log` via `tee`. The long suite uses the canonical `target/logs/long-<name>.log` names listed in [§5.1.2](#512-long-audit-lifecycle-utilstests-longsh). The canonical `PHASE:`/`RESULT:` lines are also appended to `target/logs/summary.txt` and published by the local `.github/actions/qa-summary` composite action; the ARM CI job now invokes `utils/lints.sh` instead of an inline clippy command.
+
+### 7.2.1 Evidence Lifecycle (`utils/_lib.sh`)
+
+`utils/_lib.sh` is a pure definition file: sourcing it has no side effects. Every script parses `-h`/`--help` and rejects unknown flags **before** calling `lib_init`, so help never destroys evidence. `lib_init` is the single point that creates `target/logs`, resolves `NAM_RUN_ID` (honoring a pre-exported value, as CI does per run/attempt), truncates `target/logs/summary.txt` only when the run id differs from `target/logs/.summary-run`, and removes the script's own stale carrier. `utils/build-release.sh` writes `target/logs/build-run-id` after a successful build; `utils/tests-long.sh` reuses it when `NAM_RUN_ID` is not pre-exported, so the three local release commands reconcile. A discipline invoked as a child inside another discipline's phase sets `lib_quiet=1`, which suppresses its writes to `summary.txt`: the parent's verdict can never be replaced by a child's `PASS`.
+
+- **One RESULT per invocation.** Every path through a script — success, phase failure, unexpected error (`ERR` trap → `trap_fail`), or usage error — terminates with exactly one `RESULT:` line and exit codes `0`/`1`/`2` as above.
+- **Typed status carrier.** Each `finish` writes `target/logs/<script>-status.tsv`: one line, four TAB-separated columns — `<discipline>\t<PASS|PASS_WITH_GAPS|FAIL>\t<gaps|none>\t<fails|none>` (lists comma-separated). A carrier write failure forces `FAIL` and appends `carrier` to the fails list; a missing or invalid carrier is never treated as success. `summary.txt` remains the human/AI-readable record, not the decision source.
+- **GAP grammar.** Gap markers follow `PHASE: <phase_name> GAP <technical_reason>`, emitted by the `gap` helper with the current `PHASE_NAME`.
+- **Write failures are failures.** `emit` records a failed `summary.txt` append in `EMIT_RC` without returning error (a `return 1` would escape the ERR trap under `set -e` and abort with neither `RESULT` nor carrier); `finish` then downgrades the verdict to `FAIL`, rewrites the carrier with `fails=emit` and prints a single `RESULT: FAIL`. `run_step` captures both `PIPESTATUS[0]` (the producer) and the `tee` status. Neither path can silently report `PASS`.
 
 ### 7.3 Core Automation Principles
 

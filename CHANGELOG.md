@@ -13,6 +13,38 @@ Control begins formally with version 1.0.0.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Performance certification evidence:** `nam_perf_guard` now applies and verifies CPU affinity in-process, writes the report fail-closed to `target/logs/perf-certification-report.json`, blocks certification on a degraded host or missing paired reference, and records `run_id`.
+- **Long audit safety:** a partial `--only` run preserves the previous full receipt, dedicated GUI/heap suites are selected by Cargo features instead of a shell `--skip` list, custom `CARGO_TARGET_DIR` is never deleted, and all Cargo calls use `--locked`.
+- **Release packaging:** `LICENSE.txt` and the engine `NOTICE` are included in the tarball and Flatpak, `--install` uses `~/.clap`, Flatpak installation failures are no longer suppressed, and `--package` fails when a requested bundle is absent.
+- **Release certification:** `build-release.sh` persists `target/logs/build-run-id`, the long audit reuses it, and `--certify` removes a stale release receipt before failing.
+- **CI:** hosted long runs exclude the speed gate, phase input is no longer interpolated into shell code, and the MSRV job proves the 1.99.0 toolchain and uploads provenance.
+
+## [1.1.0] - 2026-11-01
+
+### Added
+
+- **Release Receipts and Identity Chain:** Rust-based long-phase receipts, golden quick-receipt validation and fail-closed contract tests for the certified artifact identity chain.
+- **Adaptive Worker Polling:** Standardized host log alert transitions and adaptive worker polling in the runtime main-thread housekeeping.
+- **Proportional Reset Stabilization:** Proportional stabilization budget policy for model resets, preserving reset containment and parity.
+- **CI Provenance:** Independent lint and quick jobs with engine provenance logging and always-uploaded gate evidence.
+
+### Changed
+
+- **Asynchronous Model Loading:** Integrated the asynchronous model loader and adaptive orchestrator rebuilds into the main-thread pipeline.
+- **Model Data Builders:** Updated model data builders and unknown-instruction-set handling; removed experimental asynchronous state-restore and sync fallback flags.
+- **Gate Scripts:** Streamlined lint and quick disciplines with typed phase evidence carriers.
+
+### Fixed
+
+- **State Transaction:** Buffer size is now passed through the state transaction, and the performance harness matches the real block contract.
+- **Latency Alignment:** Consumer tests now follow the engine's constant partition-sized cab-sim priming latency (the cab-sim contribution equals the partition; total declared latency adds the oversampling and resampler terms).
+
+---
+
 ## [1.0.0] - 2026-10-22
 
 ### Added

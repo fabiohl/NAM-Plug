@@ -101,8 +101,8 @@ mod tests {
     }
 
     /// Asserts that a tail profile is audible across its whole window and ends
-    /// in silence. The conv engine is same-block (group delay ≈ 0),
-    /// so the IR occupies `PARTITIONS` blocks starting at the impulse block;
+    /// in silence. The engine primes one partition of output silence, so the
+    /// IR occupies `PARTITIONS` blocks starting one block after the impulse;
     /// the drain then flushes `TAIL_DRAIN` samples and finally yields silence.
     fn assert_tail_profile(profile: &[f32], start: usize, label: &str) {
         let audible_window = &profile[start..start + PARTITIONS];
@@ -168,22 +168,23 @@ mod tests {
         // ── Impulse 1 → silence: full tail, then silence ──
         let n1 = 42;
         let profile1 = tail_energy_profile(&mut started, 0, n1);
-        assert_tail_profile(&profile1, 0, "tail 1");
+        // The first callback after install delivers the primed partition.
+        assert_tail_profile(&profile1, 1, "tail 1");
 
         // ── Impulse 2 → silence: the counter must be re-armed to the full IR
         //    duration (the first drain consumed it to zero), yielding a second
         //    complete tail instead of immediate silence. ──
         let n2 = 120;
         let profile2 = tail_energy_profile(&mut started, 42, n2);
-        assert_tail_profile(&profile2, 42, "tail 2");
+        assert_tail_profile(&profile2, 43, "tail 2");
 
         // Rearm invariant: both triggers produce tails of comparable duration
         // (without rearming, tail 2 would be absent entirely).
-        let audible1 = profile1[0..PARTITIONS]
+        let audible1 = profile1[1..1 + PARTITIONS]
             .iter()
             .filter(|&&e| e > 1e-4)
             .count();
-        let audible2 = profile2[42..42 + PARTITIONS]
+        let audible2 = profile2[43..43 + PARTITIONS]
             .iter()
             .filter(|&&e| e > 1e-4)
             .count();

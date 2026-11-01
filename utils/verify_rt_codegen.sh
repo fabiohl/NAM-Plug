@@ -35,6 +35,8 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+lib_init
+
 OBJDUMP_TOOL="${OBJDUMP_TOOL:-$(command -v llvm-objdump || command -v objdump || true)}"
 
 [ -n "$OBJDUMP_TOOL" ] && [ -x "$OBJDUMP_TOOL" ] || die "objdump not found (fail-closed)."

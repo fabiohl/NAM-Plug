@@ -9,16 +9,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 . utils/_lib.sh
 
-case "${1:-}" in "") ;; -h|--help) echo "Uso: utils/lints.sh"; exit 0 ;; *) echo "RESULT: FAIL (uso)"; exit 2 ;; esac
-trap 'emit "RESULT: FAIL ($((SECONDS - T0))s) fails=${PHASE_NAME:-step} gaps=none"' ERR
-
-run_step() {
-  local name=$1; shift; PHASE_NAME=$name; phase "$name"
-  local log="$LOG_DIR/lints-$name.log" rc
-  set +e; ( set -e; "$@" ) 2>&1 | tee "$log"; rc=${PIPESTATUS[0]}; set -e
-  [ "$rc" -eq 0 ] || { FAILS+=("$name"); emit "PHASE: $name FAIL rc=$rc log=$log"; finish || true; exit 1; }
-  emit "PHASE: $name PASS log=$log"
-}
+case "${1:-}" in "") ;; -h|--help) echo "Uso: utils/lints.sh"; exit 0 ;; *) usage_fail "lints.sh aceita apenas -h/--help" ;; esac
+lib_init
+trap 'trap_fail $?' ERR
 
 phase_fmt() {
   if [ "${CI:-}" = "true" ]; then cargo fmt --all -- --check; else cargo fmt --all && git diff --stat; fi
@@ -45,13 +38,16 @@ phase_doc() {
 run_step doc phase_doc
 
 phase_spdx() {
-  local files missing invalid
-  files=$(git ls-files 'src/*.rs' 'tests/*.rs' 'benches/*.rs' 'utils/*.sh' 'build.rs' 'Cargo.toml')
-  missing=$(grep -L "SPDX-License-Identifier" $files || true)
+  local listing files missing invalid
+  listing=$(git ls-files 'src/*.rs' 'tests/*.rs' 'benches/*.rs' 'utils/*.sh' 'build.rs' 'Cargo.toml') \
+    || { echo "SPDX scan failed: git ls-files failed" >&2; return 1; }
+  [ -n "$listing" ] || { echo "SPDX scan failed: git ls-files returned no files" >&2; return 1; }
+  mapfile -t files <<< "$listing"
+  missing=$(grep -L "SPDX-License-Identifier" "${files[@]}" || true)
   if [ -n "$missing" ]; then
     echo "Missing SPDX header:" >&2; echo "$missing" | sed 's/^/  /' >&2; exit 1
   fi
-  invalid=$(grep -l "SPDX-License-Identifier" $files | xargs grep -L -E "SPDX-License-Identifier: (GPL-3\.0-or-later|MIT)" || true)
+  invalid=$(grep -l "SPDX-License-Identifier" "${files[@]}" | xargs grep -L -E "SPDX-License-Identifier: (GPL-3\.0-or-later|MIT)" || true)
   if [ -n "$invalid" ]; then
     echo "Invalid SPDX identifier:" >&2; echo "$invalid" | sed 's/^/  /' >&2; exit 1
   fi
@@ -63,7 +59,7 @@ phase_policies() {
     echo "ERROR: #[test] in tests/common/" >&2; exit 1
   fi
 
-  utils/verify_no_rt_alloc.sh
+  lib_quiet=1 utils/verify_no_rt_alloc.sh
 
   local clippy_errs
   clippy_errs=$(git ls-files 'src/*.rs' 'tests/*.rs' 'benches/*.rs' | xargs awk '
@@ -95,6 +91,15 @@ phase_policies() {
   fi
 }
 run_step policies phase_policies
+
+# AppStream metadata was validated manually before; make it a real gate.
+phase_packaging() {
+  local m="packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml"
+  [ -f "$m" ] || { echo "Missing mandatory packaging path: $m" >&2; return 1; }
+  command -v appstreamcli >/dev/null 2>&1 || { echo "appstreamcli is required (appstream package)" >&2; return 1; }
+  appstreamcli validate --no-net --strict "$m"
+}
+run_step packaging phase_packaging
 
 phase_script_budget() { local f b; for f in $(find utils -name '*.sh'); do b=$(sed -n 's/^# Orçamento: *\([0-9]*\).*/\1/p;T;q' "$f"); [ -n "$b" ] && [ "$(wc -l < "$f")" -le "$b" ] || { echo "ORÇAMENTO: $f teto=${b:-AUSENTE} linhas=$(wc -l < "$f")" >&2; return 1; }; done; }
 run_step script-budget phase_script_budget

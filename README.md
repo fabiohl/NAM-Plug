@@ -5,7 +5,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # NAM-Plug
 
-![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.99%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![Version](https://img.shields.io/badge/Version-1.0.0-informational.svg) ![GUI](https://img.shields.io/badge/GUI-Slint%201.18%20%7C%20FemtoVG%20%7C%20X11%20Embedded%20%7C%20Wayland-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg) ![Parity](https://img.shields.io/badge/Parity-Dual--Oracle%20%3E136dB%20SNR-success.svg)
+![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.99%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![Version](https://img.shields.io/badge/Version-1.1.0-informational.svg) ![GUI](https://img.shields.io/badge/GUI-Slint%201.18%20%7C%20FemtoVG%20%7C%20X11%20Embedded%20%7C%20Wayland-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg) ![Parity](https://img.shields.io/badge/Parity-Dual--Oracle%20%3E136dB%20SNR-success.svg)
 
 **NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs (Bitwig Studio, REAPER, Studio One, etc.).
 
@@ -229,7 +229,7 @@ sudo apt update && sudo apt install -y build-essential pkg-config cmake libgl1-m
 If you run a sandboxed Flatpak DAW (Bitwig Studio, REAPER, Studio One), install the pre-built `.flatpak` extension:
 
 ```bash
-flatpak install --user --reinstall ~/nam-plug-v1.0.0-linux-x86_64-v3.flatpak
+flatpak install --user --reinstall target/dist/org.freedesktop.LinuxAudio.Plugins.NAMPlug.flatpak
 ```
 
 Compatible Flatpak DAWs automatically mount and discover the plugin at `/app/extensions/Plugins/clap/nam_plug.clap` on startup—no sandbox permission overrides required.
@@ -376,4 +376,4 @@ The system architecture, real-time safety guarantees, CLAP state management, DSP
 
 ### License
 
-This project is licensed under the **GNU General Public License v3.0 or later** (**GPL-3.0-or-later**). See [LICENSE.txt](LICENSE.txt) for details.
+This project is licensed under the **GNU General Public License v3.0 or later** (**GPL-3.0-or-later**). See [LICENSE.txt](LICENSE.txt) for details. Third-party attribution for the Apache-2.0 `NeuralAmpModeler-rs` engine is in [NOTICE](NOTICE), which is included in the distributed tarball and Flatpak bundle.

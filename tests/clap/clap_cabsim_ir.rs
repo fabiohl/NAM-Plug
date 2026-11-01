@@ -124,7 +124,7 @@ fn load_state(instance: &mut PluginInstance<TestHost>, params: &ProcessingParams
 }
 
 #[test]
-#[ignore = "runs in tests-quick.sh Phase 2 against the freshly built release artifact"]
+#[ignore = "runs in tests-long.sh Phase 7 against the freshly built release artifact"]
 fn test_cabsim_ir_changes_audio_release_artifact() {
     let mut instance = create_plugin_instance();
 

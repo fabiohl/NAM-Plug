@@ -17,9 +17,13 @@
 use crate::clap::gui::lifecycle::{GuiEvent, GuiLifecycle};
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::test_util::{self};
-use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui, Window};
+use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGui};
+#[cfg(feature = "gui-x11")]
+use clack_extensions::gui::{GuiSize, Window};
 use clack_host::plugin::PluginInstance;
+#[cfg(feature = "gui-x11")]
 use x11rb::connection::Connection;
+#[cfg(feature = "gui-x11")]
 use x11rb::protocol::xproto::ConnectionExt as _;
 
 /// Returns a shared reference to the main thread struct of a test plugin.
@@ -53,6 +57,7 @@ fn x11_floating() -> GuiConfiguration<'static> {
 }
 
 /// Fixed X11 embedded configuration.
+#[cfg(feature = "gui-x11")]
 fn x11_embedded() -> GuiConfiguration<'static> {
     GuiConfiguration {
         api_type: GuiApiType::X11,
@@ -64,6 +69,7 @@ fn x11_embedded() -> GuiConfiguration<'static> {
 ///
 /// Returns `None` when no X11 display server is reachable (headless CI) — the
 /// caller then exercises the graceful-failure path instead.
+#[cfg(feature = "gui-x11")]
 fn create_host_parent_window() -> Option<(x11rb::rust_connection::RustConnection, u32)> {
     use x11rb::protocol::xproto::{CreateWindowAux, EventMask, WindowClass};
 
@@ -96,6 +102,7 @@ fn create_host_parent_window() -> Option<(x11rb::rust_connection::RustConnection
 /// embedded Slint window) or `timeout` elapses.
 ///
 /// Respects `NAM_GUI_TIMEOUT_MS` (default 4000 ms, min 4000 ms).
+#[cfg(feature = "gui-x11")]
 fn wait_for_embedded_child(
     conn: &x11rb::rust_connection::RustConnection,
     host: u32,
@@ -124,6 +131,7 @@ fn wait_for_embedded_child(
 
 /// Polls until `child` no longer exists on the X server (the embedded window
 /// was destroyed by teardown) or `timeout` elapses.
+#[cfg(feature = "gui-x11")]
 fn wait_until_child_destroyed(
     conn: &x11rb::rust_connection::RustConnection,
     child: u32,
@@ -154,6 +162,7 @@ fn wait_until_child_destroyed(
 /// embedded)` is rejected when no X11 display is reachable (clack 0.1.1
 /// cannot propagate a `set_parent` error to the host, so the negotiation must
 /// fail where it can be seen), and the FSM stays untouched.
+#[cfg(feature = "gui-x11")]
 #[test]
 #[ignore = "requires dedicated Xvfb: run utils/tests-long.sh --only gui"]
 fn gui_x11_lifecycle_embedded_set_parent_honest() {
@@ -518,6 +527,7 @@ fn gui_lifecycle_reopen_after_user_closed_returns_ok() {
 /// Complementary backend variant: same `create → set_transient → show → hide →
 /// destroy` sequence with a real Slint window. Requires a display server, hence
 /// `#[ignore]`d; the headless tests above are the always-on gate.
+#[cfg(feature = "gui-x11")]
 #[test]
 #[ignore = "requires a dedicated X11 display server (Xvfb) and mutates process env"]
 fn gui_x11_lifecycle_hide_after_show_with_real_window() {
@@ -585,6 +595,7 @@ fn gui_x11_lifecycle_hide_after_show_with_real_window() {
 /// Keep this the only test matching `gui_embedded`: Slint 1.18 allows one
 /// platform per process, so a second display test in the same process could
 /// not create windows (see `docs/architecture.md` §7.7).
+#[cfg(feature = "gui-x11")]
 #[test]
 #[ignore = "requires a dedicated X11 display server (Xvfb/Xephyr) and mutates process env"]
 fn gui_x11_embedded_open_close_cycles_no_leak() {

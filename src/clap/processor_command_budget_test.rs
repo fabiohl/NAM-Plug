@@ -25,6 +25,7 @@ use neural_amp_modeler_rs::common::spsc::{
 use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
 use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
 use std::sync::atomic::Ordering;
+#[cfg(feature = "heap-audit")]
 use std::time::Instant;
 
 const N: usize = 512;
@@ -32,6 +33,7 @@ const SR_48K: f64 = 48000.0;
 
 /// Performance contract for a 64-sample quantum at 48 kHz
 /// (`NeuralAmpModeler-rs/docs/functional-tests.md`, Phase 5): p99 < 1.33 ms.
+#[cfg(feature = "heap-audit")]
 const RT_BUDGET_NS: u128 = 1_330_000;
 
 fn audio_config(max_frames: u32) -> PluginAudioConfiguration {
@@ -481,6 +483,7 @@ fn test_structural_burst_deferral_counts_deterministic() {
 /// degrade the callback time — p99/max stays within the performance contract
 /// (`p99 < 1.33 ms` per 64-sample block at 48 kHz). The bypass path keeps DSP
 /// cost negligible so the measurement isolates the *drain* cost.
+#[cfg(feature = "heap-audit")]
 #[test]
 #[ignore = "timing/micro-latency certification: run in Phase 3 of utils/tests-long.sh on a pinned core with --test-threads=1"]
 fn test_structural_burst_p99_within_contract() {

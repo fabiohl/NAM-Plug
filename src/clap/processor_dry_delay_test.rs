@@ -42,15 +42,27 @@ mod tests {
     }
 
     /// Writes an IR WAV of `2 * partition` samples whose impulse sits exactly
-    /// `partition` samples in — a pure `partition`-sample delay. The wet
-    /// convolution of an input impulse then lands exactly `partition` samples
-    /// later, matching the declared cab-sim latency.
+    /// `partition` samples in — pure IR pre-delay content. With the engine's
+    /// partition priming, this content is additional to the declared cab-sim
+    /// latency; alignment tests must use [`write_unit_ir`] instead.
     fn write_pre_delay_ir(partition: usize, name: &str) -> PathBuf {
         let path = tmp_path(&format!("{name}.wav"));
         let mut ir = vec![0.0f32; partition * 2];
         ir[partition] = 1.0;
         neural_amp_modeler_rs::testing::wav::write_wav_f32(&path, &ir, 48000)
             .expect("write pre-delay IR WAV");
+        path
+    }
+
+    /// Writes a `2 * partition`-sample IR with a unit impulse at index 0: the
+    /// only latency in the wet response is the engine's declared cab-sim
+    /// partition, so dry and wet must coincide without IR pre-delay content.
+    fn write_unit_ir(partition: usize, name: &str) -> PathBuf {
+        let path = tmp_path(&format!("{name}.wav"));
+        let mut ir = vec![0.0f32; partition * 2];
+        ir[0] = 1.0;
+        neural_amp_modeler_rs::testing::wav::write_wav_f32(&path, &ir, 48000)
+            .expect("write unit IR WAV");
         path
     }
 
@@ -103,15 +115,15 @@ mod tests {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
-        // Activate and load a pre-delay IR (partition = 256 → L = 256).
+        // Activate and load a unit IR (partition = 256 → declared L = 256).
         let stopped = instance
             .activate(|_, _| make_harness_audio_processor(&state), audio_config())
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
-        let ir = write_pre_delay_ir(256, "t41_cabsim");
-        mt.load_cabsim(&ir).expect("load pre-delay IR");
+        let ir = write_unit_ir(256, "t41_cabsim");
+        mt.load_cabsim(&ir).expect("load unit IR");
         assert!(
             state.restart_requested.load(Ordering::SeqCst),
             "first IR load must request a host restart"
@@ -267,8 +279,8 @@ mod tests {
         let started = stopped.start_processing().expect("start_processing");
 
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
-        let ir = write_pre_delay_ir(256, "t41_xfade");
-        mt.load_cabsim(&ir).expect("load pre-delay IR");
+        let ir = write_unit_ir(256, "t41_xfade");
+        mt.load_cabsim(&ir).expect("load unit IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
 
         // Block 0: silence (wet, fills the cab-sim pipeline).
@@ -277,8 +289,8 @@ mod tests {
 
         // Block 1: bypass=ON at offset 0 (crossfade over samples 0..63) with an
         // impulse at index 0. The delayed dry of this impulse must land at block
-        // 2 index 0 — the same index where the (now paused) wet would have
-        // placed it. No transient may be swallowed or split.
+        // 2 index 0 — the same index where the (now paused) unit-IR wet would
+        // have placed it. No transient may be swallowed or split.
         let mut event_buffer = EventBuffer::new();
         let bypass_event =
             ParamValueEvent::new(0u32, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 1.0f64);
@@ -333,7 +345,7 @@ mod tests {
 
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t41_ss");
-        mt.load_cabsim(&ir).expect("load pre-delay IR");
+        mt.load_cabsim(&ir).expect("load unit IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
 
         set_bypass_on(shared);
@@ -374,7 +386,7 @@ mod tests {
 
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t41_zalloc");
-        mt.load_cabsim(&ir).expect("load pre-delay IR");
+        mt.load_cabsim(&ir).expect("load unit IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config());
 
         // Bypass ON at offset 0 → crossfade entry.
