@@ -138,24 +138,43 @@ pub struct HostEnvironment {
     pub affinity_error: Option<String>,
 }
 
-/// Relative p50 ceiling against a previous certification report.
+/// Relative p99 tail ceiling against a previous certification report.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReferenceCheck {
     pub reference_path: String,
     pub reference_sha256: String,
+    pub status: String,
+    pub p99_ratio_max: f64,
     pub p50_ratio_max: f64,
-    pub worst_ratio: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worst_p99_ratio: Option<f64>,
+    pub worst_p50_ratio: f64,
     pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inconclusive_reason: Option<String>,
     pub comparisons: Vec<ReferenceComparison>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReferenceComparison {
     pub name: String,
-    pub reference_p50_ns: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_p50_ns: Option<f64>,
     pub measured_p50_ns: f64,
-    pub ratio: f64,
-    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_p99_ns: Option<f64>,
+    pub measured_p99_ns: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_max_ns: Option<f64>,
+    pub measured_max_ns: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99_passed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,7 +187,12 @@ struct ReferenceReport {
 #[derive(Debug, Deserialize)]
 struct ReferenceScenario {
     name: String,
-    p50_ns: f64,
+    #[serde(default)]
+    p50_ns: Option<f64>,
+    #[serde(default)]
+    p99_ns: Option<f64>,
+    #[serde(default)]
+    max_ns: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -445,60 +469,121 @@ fn host_degradation_reasons(host: &HostEnvironment) -> Vec<String> {
 }
 
 fn evaluate_reference_series(
-    measured: &[(String, f64)],
+    measured: &[ScenarioPerfMetrics],
     reference: &ReferenceReport,
+    p99_ratio_max: f64,
     p50_ratio_max: f64,
     reference_path: &str,
     reference_sha256: &str,
 ) -> Result<ReferenceCheck, String> {
+    if !p99_ratio_max.is_finite() || p99_ratio_max <= 0.0 {
+        return Err(format!(
+            "invalid --p99-ratio-max '{p99_ratio_max}': must be a positive finite number"
+        ));
+    }
     if !p50_ratio_max.is_finite() || p50_ratio_max <= 0.0 {
         return Err(format!(
             "invalid --p50-ratio-max '{p50_ratio_max}': must be a positive finite number"
         ));
     }
-    let reference_p50: BTreeMap<&str, f64> = reference
+    let reference_scenarios: BTreeMap<&str, &ReferenceScenario> = reference
         .scenarios
         .iter()
-        .map(|scenario| (scenario.name.as_str(), scenario.p50_ns))
+        .map(|scenario| (scenario.name.as_str(), scenario))
         .collect();
 
     let mut comparisons = Vec::with_capacity(measured.len());
-    let mut worst_ratio = 0.0_f64;
-    for (name, measured_p50_ns) in measured {
-        let Some(&reference_p50_ns) = reference_p50.get(name.as_str()) else {
+    let mut worst_p99_ratio: Option<f64> = None;
+    let mut worst_p50_ratio = 0.0_f64;
+    let mut missing_p99_scenarios = Vec::new();
+    let mut p99_failures = Vec::new();
+
+    for m in measured {
+        let Some(ref_sc) = reference_scenarios.get(m.name.as_str()) else {
             return Err(format!(
-                "reference report '{reference_path}' has no scenario '{name}'"
+                "reference report '{reference_path}' has no scenario '{}'",
+                m.name
             ));
         };
-        if !reference_p50_ns.is_finite() || reference_p50_ns <= 0.0 {
-            return Err(format!(
-                "reference p50 for scenario '{name}' is not a positive finite value: {reference_p50_ns}"
-            ));
-        }
-        let ratio = measured_p50_ns / reference_p50_ns;
-        worst_ratio = worst_ratio.max(ratio);
+
+        // p50 comparison (informative)
+        let ref_p50 = ref_sc.p50_ns.filter(|v| v.is_finite() && *v > 0.0);
+        let p50_ratio = ref_p50.map(|rp| {
+            let r = m.p50_ns / rp;
+            worst_p50_ratio = worst_p50_ratio.max(r);
+            r
+        });
+
+        // max comparison (informative)
+        let ref_max = ref_sc.max_ns.filter(|v| v.is_finite() && *v > 0.0);
+        let max_ratio = ref_max.map(|rm| m.max_ns / rm);
+
+        // p99 comparison (tail certification gate)
+        let ref_p99 = ref_sc.p99_ns.filter(|v| v.is_finite() && *v > 0.0);
+        let (p99_ratio, p99_passed) = match ref_p99 {
+            Some(rp) => {
+                let r = m.p99_ns / rp;
+                worst_p99_ratio = Some(worst_p99_ratio.map_or(r, |w| w.max(r)));
+                let passed = r <= p99_ratio_max;
+                if !passed {
+                    p99_failures.push((m.name.clone(), r));
+                }
+                (Some(r), Some(passed))
+            }
+            None => {
+                missing_p99_scenarios.push(m.name.clone());
+                (None, None)
+            }
+        };
+
         comparisons.push(ReferenceComparison {
-            name: name.clone(),
-            reference_p50_ns,
-            measured_p50_ns: *measured_p50_ns,
-            ratio,
-            passed: ratio <= p50_ratio_max,
+            name: m.name.clone(),
+            reference_p50_ns: ref_p50,
+            measured_p50_ns: m.p50_ns,
+            p50_ratio,
+            reference_p99_ns: ref_p99,
+            measured_p99_ns: m.p99_ns,
+            p99_ratio,
+            reference_max_ns: ref_max,
+            measured_max_ns: m.max_ns,
+            max_ratio,
+            p99_passed,
         });
     }
+
+    let (status, passed, inconclusive_reason) = if !missing_p99_scenarios.is_empty() {
+        (
+            "INCONCLUSIVE".to_string(),
+            false,
+            Some(format!(
+                "reference report '{reference_path}' lacks p99 tail statistics for scenarios: {}",
+                missing_p99_scenarios.join(", ")
+            )),
+        )
+    } else if !p99_failures.is_empty() {
+        ("FAIL".to_string(), false, None)
+    } else {
+        ("PASS".to_string(), true, None)
+    };
 
     Ok(ReferenceCheck {
         reference_path: reference_path.to_string(),
         reference_sha256: reference_sha256.to_string(),
+        status,
+        p99_ratio_max,
         p50_ratio_max,
-        worst_ratio,
-        passed: comparisons.iter().all(|comparison| comparison.passed),
+        worst_p99_ratio,
+        worst_p50_ratio,
+        passed,
+        inconclusive_reason,
         comparisons,
     })
 }
 
 fn load_reference_check(
     reference_path: &Path,
-    measured: &[(String, f64)],
+    measured: &[ScenarioPerfMetrics],
+    p99_ratio_max: f64,
     p50_ratio_max: f64,
     artifact_sha256: &str,
 ) -> Result<ReferenceCheck, String> {
@@ -524,6 +609,7 @@ fn load_reference_check(
     evaluate_reference_series(
         measured,
         &reference,
+        p99_ratio_max,
         p50_ratio_max,
         &reference_path.to_string_lossy(),
         &reference_sha256,
@@ -767,7 +853,7 @@ fn measure_scenario(
 fn usage() -> ! {
     eprintln!(
         "Usage: nam_perf_guard certify --clap <path-to-.clap> [--out <output.json>] \
-         [--reference <previous-report.json>] [--p50-ratio-max <ratio>]"
+         [--reference <previous-report.json>] [--p99-ratio-max <ratio>] [--p50-ratio-max <ratio>]"
     );
     std::process::exit(1);
 }
@@ -783,6 +869,7 @@ fn main() -> ExitCode {
     let mut clap_path: Option<PathBuf> = None;
     let mut out_path: Option<PathBuf> = None;
     let mut reference_path: Option<PathBuf> = None;
+    let mut p99_ratio_max = 1.25_f64;
     let mut p50_ratio_max = 1.5_f64;
 
     let mut i = 1;
@@ -808,6 +895,22 @@ fn main() -> ExitCode {
                     usage();
                 }
                 reference_path = Some(PathBuf::from(&args[i]));
+            }
+            "--p99-ratio-max" => {
+                i += 1;
+                if i >= args.len() {
+                    usage();
+                }
+                p99_ratio_max = match args[i].parse::<f64>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!(
+                            "❌ FATAL: invalid --p99-ratio-max '{}': expected a number",
+                            args[i]
+                        );
+                        return ExitCode::from(1);
+                    }
+                };
             }
             "--p50-ratio-max" => {
                 i += 1;
@@ -956,11 +1059,7 @@ fn main() -> ExitCode {
     let environment_degraded = !degradation_reasons.is_empty();
     let reference_check = match reference_path.as_deref() {
         Some(path) => {
-            let measured: Vec<(String, f64)> = results
-                .iter()
-                .map(|scenario| (scenario.name.clone(), scenario.p50_ns))
-                .collect();
-            match load_reference_check(path, &measured, p50_ratio_max, &clap_sha) {
+            match load_reference_check(path, &results, p99_ratio_max, p50_ratio_max, &clap_sha) {
                 Ok(check) => Some(check),
                 Err(err) => {
                     eprintln!("❌ FATAL: {err}");
@@ -970,14 +1069,23 @@ fn main() -> ExitCode {
         }
         None => None,
     };
-    let reference_failed = reference_check.as_ref().is_some_and(|check| !check.passed);
+    let reference_failed = reference_check
+        .as_ref()
+        .is_some_and(|check| check.status == "FAIL");
+    let reference_inconclusive = reference_check
+        .as_ref()
+        .is_some_and(|check| check.status == "INCONCLUSIVE");
     let reference_missing = reference_check.is_none();
 
-    // A degraded host or a missing paired series cannot certify a release:
-    // the numbers may describe a valid run, but not the reference environment.
+    // A degraded host, an inconclusive reference comparison, or a missing paired series
+    // cannot certify a release: the numbers may describe a valid run, but not the reference environment.
     let overall_status = if !all_deadlines_passed || reference_failed {
         "FAIL"
-    } else if !environment_stable || environment_degraded || reference_missing {
+    } else if !environment_stable
+        || environment_degraded
+        || reference_missing
+        || reference_inconclusive
+    {
         "INCONCLUSIVE"
     } else {
         "PASS"
@@ -1011,20 +1119,38 @@ fn main() -> ExitCode {
     );
     if let Some(check) = &reference_check {
         println!(
-            "Reference Check:            {} (worst p50 ratio {:.3} <= {:.3}, ref={})",
-            if check.passed { "PASS" } else { "FAIL" },
-            check.worst_ratio,
-            check.p50_ratio_max,
+            "Reference Check Status:     {} (worst p99 ratio: {}, max allowed: {:.3}, ref={})",
+            check.status,
+            check
+                .worst_p99_ratio
+                .map_or_else(|| "n/a".to_string(), |w| format!("{w:.3}")),
+            check.p99_ratio_max,
             check.reference_path
         );
-        for comparison in &check.comparisons {
+        if let Some(reason) = &check.inconclusive_reason {
+            println!("  inconclusive reason:      {reason}");
+        }
+        println!("  worst p50 ratio (info):   {:.3}", check.worst_p50_ratio);
+        for comp in &check.comparisons {
+            let ref_p99_str = comp
+                .reference_p99_ns
+                .map_or_else(|| "n/a".to_string(), |v| format!("{:.1}µs", v / 1000.0));
+            let r99_str = comp
+                .p99_ratio
+                .map_or_else(|| "n/a".to_string(), |v| format!("{v:.3}"));
+            let status_str = match comp.p99_passed {
+                Some(true) => "PASS",
+                Some(false) => "FAIL",
+                None => "INCONCLUSIVE",
+            };
             println!(
-                "  {} p50={:.1}µs ref={:.1}µs ratio={:.3} {}",
-                comparison.name,
-                comparison.measured_p50_ns / 1000.0,
-                comparison.reference_p50_ns / 1000.0,
-                comparison.ratio,
-                if comparison.passed { "PASS" } else { "FAIL" }
+                "  {} p99={:.1}µs ref_p99={} ratio={} [{}] | p50={:.1}µs (info)",
+                comp.name,
+                comp.measured_p99_ns / 1000.0,
+                ref_p99_str,
+                r99_str,
+                status_str,
+                comp.measured_p50_ns / 1000.0,
             );
         }
     }

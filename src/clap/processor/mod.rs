@@ -82,6 +82,7 @@ pub(crate) static TEST_PREWARM_ELAPSED_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 use crate::clap::plugin::errors::{self, static_plugin_error};
+use crate::clap::plugin::shared::StagedSwap;
 use crate::clap::plugin::{
     CommandConsumer, NamClapMainThread, NamClapShared, PendingRestartOs, StagedRestore,
 };
@@ -334,6 +335,28 @@ impl<'a> NamClapProcessor<'a> {
     }
 }
 
+/// Rollback guard that restores staged restore and staged swap items back to
+/// `NamClapMainThread` if `activate()` fails or early-returns with an error.
+struct StagedItemsRollbackGuard<'m, 'a> {
+    main_thread: &'m NamClapMainThread<'a>,
+    staged_restore: Option<StagedRestore>,
+    staged_swap: Option<StagedSwap>,
+    disarmed: bool,
+}
+
+impl Drop for StagedItemsRollbackGuard<'_, '_> {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            if let Some(r) = self.staged_restore.take() {
+                *self.main_thread.staged_restore.borrow_mut() = Some(r);
+            }
+            if let Some(s) = self.staged_swap.take() {
+                *self.main_thread.staged_swap.borrow_mut() = Some(s);
+            }
+        }
+    }
+}
+
 impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamClapProcessor<'a> {
     /// `activate` is the ONLY allocation site — kept out of `process`.
     fn activate(
@@ -476,7 +499,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     // changes reuse the adapter — keeping its partition (and
                     // the latency the host already received) instead of paying
                     // a full FFT rebuild per buffer-size change.
-                    let cab_matches = deact.cabsim_adapter.is_some() && rate_matches;
+                    let cab_matches = deact.cabsim_pair.is_some() && rate_matches;
                     // The streaming adapter's FIFO capacities are sized by the
                     // worst-case host block, so it also needs `buf_matches`.
                     let stream_matches = rate_matches && buf_matches;
@@ -517,6 +540,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     } else {
                         Some(build_cab_sim_from_raw_samples(
                             shared,
+                            None,
                             audio_config.max_frames_count as usize,
                             host_rate,
                         )?)
@@ -571,6 +595,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
                     let cab = Some(build_cab_sim_from_raw_samples(
                         shared,
+                        None,
                         audio_config.max_frames_count as usize,
                         host_rate,
                     )?);
@@ -595,10 +620,6 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     (res, stream, cab, Some((os_l, os_r)))
                 };
 
-            // Flush any model deferred by load_model() (state-restore-before-activate).
-            // This calls set_max_buffer_size on the main thread before process() starts.
-            main_thread.flush_pending_model()?;
-
             // Consume any latency-affecting restore or swap staged for this
             // restart cycle. All fallible stages above already succeeded, so
             // staged items are never stranded by a failure between here and
@@ -606,59 +627,201 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // by the main thread; they take precedence over preserved
             // (`DeactivatedDspState`) ones, and superseded preserved resources
             // drop here on the main thread.
-            let staged_restore = main_thread.staged_restore.borrow_mut().take();
-            let staged_restore_valid = staged_restore.as_ref().is_some_and(|r| {
-                if let Some(ref m) = r.txn.model {
-                    m.new_stream.host_rate() == host_rate
-                        && m.new_stream.max_block() == host_buffer as usize
-                } else {
-                    true
+            let mut staged_guard = StagedItemsRollbackGuard {
+                main_thread,
+                staged_restore: main_thread.staged_restore.borrow_mut().take(),
+                staged_swap: main_thread.staged_swap.borrow_mut().take(),
+                disarmed: false,
+            };
+
+            // Adapt staged_restore for any host audio configuration changes
+            // (e.g. sample rate or buffer size renegotiated upon restart).
+            if let Some(ref mut r) = staged_guard.staged_restore {
+                if let Some(ref mut m) = r.txn.model
+                    && (m.new_stream.host_rate() != host_rate
+                        || m.new_stream.max_block() != host_buffer as usize)
+                {
+                    log::info!(
+                        "NAM-Plug: adapting staged restore model for new audio config \
+                         (staged: {} Hz/{} frames -> host: {} Hz/{} frames)",
+                        m.new_stream.host_rate(),
+                        m.new_stream.max_block(),
+                        host_rate,
+                        host_buffer
+                    );
+                    let model_rate = m.new_stream.model_rate();
+                    let new_res = NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
+                        static_plugin_error(
+                            errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                            format_args!("{e:?}"),
+                        )
+                    })?;
+                    let new_stream = crate::clap::plugin::build_stream_adapter(
+                        host_rate,
+                        model_rate,
+                        host_buffer as usize,
+                    )
+                    .map_err(|e| {
+                        static_plugin_error(
+                            errors::dsp_resources::STREAM_BUILD_FAILED,
+                            format_args!("{e:?}"),
+                        )
+                    })?;
+                    if let Some(ref mut model) = m.model_l {
+                        model
+                            .set_max_buffer_size(host_buffer as usize)
+                            .map_err(|e| {
+                                static_plugin_error(
+                                    errors::activation::MODEL_RESIZE_FAILED,
+                                    format_args!("{e:?}"),
+                                )
+                            })?;
+                        let prewarm_cost_ns =
+                            if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
+                                let measure_frames =
+                                    crate::clap::processor::prewarm_policy::PREWARM_MEASURE_FRAMES
+                                        .min((host_buffer as usize).max(1));
+                                Some(model.measure_cost_ns_per_sample(measure_frames))
+                            } else {
+                                None
+                            };
+                        m.prewarm_cost_ns = prewarm_cost_ns;
+                    }
+                    if let Some(ref mut model) = m.model_r {
+                        model
+                            .set_max_buffer_size(host_buffer as usize)
+                            .map_err(|e| {
+                                static_plugin_error(
+                                    errors::activation::MODEL_RESIZE_FAILED,
+                                    format_args!("{e:?}"),
+                                )
+                            })?;
+                    }
+                    *m.new_resampler = new_res;
+                    m.new_stream = new_stream;
                 }
-            });
-            if !staged_restore_valid && staged_restore.is_some() {
-                log::warn!(
-                    "NAM-Plug: staged restore discarded — audio configuration changed before \
-                     the host restart (host_rate={host_rate}, buffer={host_buffer})"
-                );
+
+                if let Some(Some(ref mut adapter)) = r.txn.ir
+                    && (adapter.sample_rate != host_rate
+                        || adapter.partition_size() != host_buffer as usize)
+                {
+                    let override_samples = r
+                        .publish
+                        .ir_raw_samples
+                        .as_deref()
+                        .map(|s| (s, r.publish.ir_raw_sample_rate));
+                    if let Some(new_a) = build_cab_sim_from_raw_samples(
+                        shared,
+                        override_samples,
+                        host_buffer as usize,
+                        host_rate,
+                    )? {
+                        *adapter = new_a;
+                    }
+                }
             }
 
-            let staged_swap = main_thread.staged_swap.borrow_mut().take();
-            let staged_model_ok = staged_swap
-                .as_ref()
-                .and_then(|s| s.model.as_ref())
-                .is_some_and(|m| {
-                    // The streaming adapter FIFOs are sized by host rate and
-                    // max block; a config change between staging and the
-                    // restart invalidates the staged resampler/adapter.
-                    m.new_stream.host_rate() == host_rate
-                        && m.new_stream.max_block() == host_buffer as usize
-                });
-            if !staged_model_ok
-                && staged_swap
-                    .as_ref()
-                    .and_then(|s| s.model.as_ref())
-                    .is_some()
-            {
-                log::warn!(
-                    "NAM-Plug: staged model swap discarded — audio configuration changed before \
-                     the host restart (host_rate={host_rate}, buffer={host_buffer})"
-                );
+            // Adapt staged_swap for any host configuration changes
+            if let Some(ref mut s) = staged_guard.staged_swap {
+                if let Some(ref mut m) = s.model
+                    && (m.new_stream.host_rate() != host_rate
+                        || m.new_stream.max_block() != host_buffer as usize)
+                {
+                    log::info!(
+                        "NAM-Plug: adapting staged model swap for new audio config \
+                         (staged: {} Hz/{} frames -> host: {} Hz/{} frames)",
+                        m.new_stream.host_rate(),
+                        m.new_stream.max_block(),
+                        host_rate,
+                        host_buffer
+                    );
+                    let model_rate = m.new_stream.model_rate();
+                    let new_res = NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
+                        static_plugin_error(
+                            errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                            format_args!("{e:?}"),
+                        )
+                    })?;
+                    let new_stream = crate::clap::plugin::build_stream_adapter(
+                        host_rate,
+                        model_rate,
+                        host_buffer as usize,
+                    )
+                    .map_err(|e| {
+                        static_plugin_error(
+                            errors::dsp_resources::STREAM_BUILD_FAILED,
+                            format_args!("{e:?}"),
+                        )
+                    })?;
+                    if let Some(ref mut model) = m.model_l {
+                        model
+                            .set_max_buffer_size(host_buffer as usize)
+                            .map_err(|e| {
+                                static_plugin_error(
+                                    errors::activation::MODEL_RESIZE_FAILED,
+                                    format_args!("{e:?}"),
+                                )
+                            })?;
+                        let prewarm_cost_ns =
+                            if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
+                                let measure_frames =
+                                    crate::clap::processor::prewarm_policy::PREWARM_MEASURE_FRAMES
+                                        .min((host_buffer as usize).max(1));
+                                Some(model.measure_cost_ns_per_sample(measure_frames))
+                            } else {
+                                None
+                            };
+                        m.prewarm_cost_ns = prewarm_cost_ns;
+                    }
+                    if let Some(ref mut model) = m.model_r {
+                        model
+                            .set_max_buffer_size(host_buffer as usize)
+                            .map_err(|e| {
+                                static_plugin_error(
+                                    errors::activation::MODEL_RESIZE_FAILED,
+                                    format_args!("{e:?}"),
+                                )
+                            })?;
+                    }
+                    *m.new_resampler = new_res;
+                    m.new_stream = new_stream;
+                }
+
+                if let Some(Some(ref mut adapter)) = s.ir
+                    && (adapter.sample_rate != host_rate
+                        || adapter.partition_size() != host_buffer as usize)
+                    && let Some(new_a) = build_cab_sim_from_raw_samples(
+                        shared,
+                        None,
+                        host_buffer as usize,
+                        host_rate,
+                    )?
+                {
+                    *adapter = new_a;
+                }
             }
-            let (staged_model, staged_ir) = match staged_swap {
+
+            let staged_restore = staged_guard.staged_restore.take();
+            let (staged_model, staged_ir) = match staged_guard.staged_swap.take() {
                 Some(s) => (s.model, s.ir),
                 None => (None, None),
             };
+            staged_guard.disarmed = true;
+
+            let staged_restore_valid = staged_restore.is_some();
+            let staged_model_ok = staged_model.is_some();
 
             // All fallible stages succeeded: now assemble the active DSP resources
             // by taking ownership from staged items or the rollback guard.
             let (
                 mut model_l,
+                mut model_r,
                 model_generation,
                 resampler,
                 stream,
                 os_l,
                 os_r,
-                cabsim_adapter,
+                cabsim_pair,
                 model_input_mult_adj,
                 model_output_mult_adj,
             ) = if staged_restore_valid {
@@ -680,6 +843,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 if let Some(deact) = rollback.deactivated.take() {
                     let (
                         model_l,
+                        model_r,
                         model_generation,
                         resampler,
                         stream,
@@ -688,6 +852,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     ) = if let Some(m) = txn.model {
                         (
                             m.model_l,
+                            m.model_r,
                             m.generation,
                             m.new_resampler,
                             m.new_stream,
@@ -697,6 +862,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     } else {
                         (
                             deact.model_l,
+                            deact.model_r,
                             deact.model_generation,
                             new_resampler.unwrap_or(deact.resampler),
                             new_stream.unwrap_or(deact.stream),
@@ -705,12 +871,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         )
                     };
 
-                    let cabsim_adapter = if let Some(ir) = txn.ir {
+                    let cabsim_pair = if let Some(ir) = txn.ir {
                         ir
                     } else if let Some(new_c) = new_cabsim {
                         new_c
                     } else {
-                        deact.cabsim_adapter
+                        deact.cabsim_pair
                     };
 
                     let (os_l, os_r) = if let Some((l, r)) = new_os {
@@ -721,18 +887,20 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
                     (
                         model_l,
+                        model_r,
                         model_generation,
                         resampler,
                         stream,
                         os_l,
                         os_r,
-                        cabsim_adapter,
+                        cabsim_pair,
                         model_input_mult_adj,
                         model_output_mult_adj,
                     )
                 } else {
                     let (
                         model_l,
+                        model_r,
                         model_generation,
                         resampler,
                         stream,
@@ -741,6 +909,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     ) = if let Some(m) = txn.model {
                         (
                             m.model_l,
+                            m.model_r,
                             m.generation,
                             m.new_resampler,
                             m.new_stream,
@@ -749,6 +918,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         )
                     } else {
                         (
+                            None,
                             None,
                             0,
                             new_resampler.ok_or_else(|| {
@@ -764,7 +934,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         )
                     };
 
-                    let cabsim_adapter = if let Some(ir) = txn.ir {
+                    let cabsim_pair = if let Some(ir) = txn.ir {
                         ir
                     } else {
                         new_cabsim.ok_or_else(|| {
@@ -778,12 +948,13 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
                     (
                         model_l,
+                        model_r,
                         model_generation,
                         resampler,
                         stream,
                         os_l,
                         os_r,
-                        cabsim_adapter,
+                        cabsim_pair,
                         model_input_mult_adj,
                         model_output_mult_adj,
                     )
@@ -791,6 +962,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             } else if let Some(deact) = rollback.deactivated.take() {
                 let (
                     model_l,
+                    model_r,
                     model_generation,
                     resampler,
                     stream,
@@ -809,6 +981,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     };
                     (
                         m.model_l,
+                        m.model_r,
                         m.generation,
                         m.new_resampler,
                         m.new_stream,
@@ -818,6 +991,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 } else {
                     (
                         deact.model_l,
+                        deact.model_r,
                         deact.model_generation,
                         new_resampler.unwrap_or(deact.resampler),
                         new_stream.unwrap_or(deact.stream),
@@ -825,12 +999,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         deact.model_output_mult_adj,
                     )
                 };
-                let cabsim_adapter = if let Some(ir) = staged_ir {
+                let cabsim_pair = if let Some(ir) = staged_ir {
                     ir
                 } else if let Some(new_c) = new_cabsim {
                     new_c
                 } else {
-                    deact.cabsim_adapter
+                    deact.cabsim_pair
                 };
                 let (os_l, os_r) = if let Some((l, r)) = new_os {
                     (l, r)
@@ -839,18 +1013,20 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 };
                 (
                     model_l,
+                    model_r,
                     model_generation,
                     resampler,
                     stream,
                     os_l,
                     os_r,
-                    cabsim_adapter,
+                    cabsim_pair,
                     model_input_mult_adj,
                     model_output_mult_adj,
                 )
             } else {
                 let (
                     model_l,
+                    model_r,
                     model_generation,
                     resampler,
                     stream,
@@ -869,6 +1045,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     };
                     (
                         m.model_l,
+                        m.model_r,
                         m.generation,
                         m.new_resampler,
                         m.new_stream,
@@ -877,6 +1054,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     )
                 } else {
                     (
+                        None,
                         None,
                         0,
                         new_resampler.ok_or_else(|| {
@@ -889,7 +1067,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         1.0,
                     )
                 };
-                let cabsim_adapter = if let Some(ir) = staged_ir {
+                let cabsim_pair = if let Some(ir) = staged_ir {
                     ir
                 } else {
                     new_cabsim.ok_or_else(|| {
@@ -901,12 +1079,13 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 })?;
                 (
                     model_l,
+                    model_r,
                     model_generation,
                     resampler,
                     stream,
                     os_l,
                     os_r,
-                    cabsim_adapter,
+                    cabsim_pair,
                     model_input_mult_adj,
                     model_output_mult_adj,
                 )
@@ -919,12 +1098,13 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // clear the FDL and FIFO history in place. Zero-alloc — the IR and
             // the RFFT plan are preserved, so a quantum renegotiation still
             // avoids the full rebuild.
-            let cabsim_adapter = {
-                let mut cabsim_adapter = cabsim_adapter;
-                if let Some(ref mut adapter) = cabsim_adapter {
-                    adapter.reset();
+            let cabsim_pair = {
+                let mut cabsim_pair = cabsim_pair;
+                if let Some(ref mut pair) = cabsim_pair {
+                    pair.l.reset();
+                    pair.r.reset();
                 }
-                cabsim_adapter
+                cabsim_pair
             };
 
             // Complete any outstanding split-stabilization pass of the
@@ -957,6 +1137,29 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         "NAM-Plug: model stabilization pass did not complete during activate()"
                     );
                 }
+            }
+            if let Some(model) = &mut model_r {
+                for _ in 0..64 {
+                    if model.prewarm_complete() {
+                        break;
+                    }
+                    model.prewarm_step(usize::MAX);
+                }
+                debug_assert!(
+                    model.prewarm_complete(),
+                    "model_r stabilization pass must complete in activate()"
+                );
+                if !model.prewarm_complete() {
+                    log::warn!(
+                        "NAM-Plug: model_r stabilization pass did not complete during activate()"
+                    );
+                }
+            }
+            if let Some(ref mut model) = model_l {
+                model.inject_rt_status(Arc::clone(&shared.cold.rt_status));
+            }
+            if let Some(ref mut model) = model_r {
+                model.inject_rt_status(Arc::clone(&shared.cold.rt_status));
             }
 
             let silence_hyst = DynamicHysteresis::new();
@@ -1034,8 +1237,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // authoritative PDC value.
             let mut initial_latency = stream.latency_samples();
             initial_latency += os_l.latency_samples() as u32;
-            if let Some(ref adapter) = cabsim_adapter {
-                initial_latency += adapter.latency_samples() as u32;
+            if let Some(ref pair) = cabsim_pair {
+                initial_latency += pair.partition_size() as u32;
             }
             // Publish the installed latency contributions so the main thread
             // can decide continuous-vs-staged swaps (same latency ⇒ continuous,
@@ -1046,9 +1249,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .current_stream_latency
                 .store(stream.latency_samples(), Ordering::Relaxed);
             shared.cold.current_cabsim_latency.store(
-                cabsim_adapter
+                cabsim_pair
                     .as_ref()
-                    .map_or(0, |a| a.latency_samples() as u32),
+                    .map_or(0, |p| p.partition_size() as u32),
                 Ordering::Relaxed,
             );
             // Publish the CabSim tail telemetry on the restart install path
@@ -1056,9 +1259,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // leaving the atomic at 0 (and the host tail extension wrong) after
             // a staged IR lands via `activate()`.
             shared.rt_to_ui.cabsim_tail_samples.store(
-                cabsim_adapter
+                cabsim_pair
                     .as_ref()
-                    .map(|a| (a.num_partitions() * a.latency_samples()) as u32)
+                    .map(|p| (p.l.num_partitions() * p.l.latency_samples()) as u32)
                     .unwrap_or(0),
                 Ordering::Relaxed,
             );
@@ -1076,7 +1279,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .store(audio_config.max_frames_count, Ordering::Relaxed);
 
             // Flush any model deferred by load_model() (state-restore-before-activate).
-            // This calls set_max_buffer_size on the main thread before process() starts.
+            // Now that sample_rate and buffer_size are published, build resampler
+            // and streaming buffer for the exact newly negotiated audio config.
             main_thread.flush_pending_model()?;
 
             // Defuse the rollback guard — transfers SPSC channel
@@ -1105,10 +1309,20 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .saturating_add(DRY_DELAY_MAX_EXTRA);
             let dry_delay = DryDelayLine::new(dry_delay_capacity, initial_latency as usize);
 
+            let recovered_commands = std::mem::take(
+                &mut *shared
+                    .cold
+                    .recovered_commands
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+
             Ok(Self {
                 model_l,
+                model_r,
                 model_generation,
-                cabsim_adapter,
+                cabsim_pair,
+                recovered_commands,
                 resampler,
                 stream,
                 os_l,
@@ -1165,6 +1379,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 prewarm_pending: false,
                 prewarm_cost_ns_per_sample,
                 prewarm_static,
+                prewarm_zero_budget_count: 0,
                 last_seen_generation: 0,
                 max_frames_count: audio_config.max_frames_count as usize,
                 min_frames_count: audio_config.min_frames_count as usize,
@@ -1261,8 +1476,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             if !self.poisoned {
                 let deactivated = DeactivatedDspState {
                     model_l: self.model_l,
+                    model_r: self.model_r,
                     model_generation: self.model_generation,
-                    cabsim_adapter: self.cabsim_adapter,
+                    cabsim_pair: self.cabsim_pair,
                     resampler: self.resampler,
                     stream: self.stream,
                     os_l: self.os_l,
@@ -1434,6 +1650,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 if let Some(model) = self.model_l.as_mut() {
                     let frames_count = audio.frames_count() as usize;
                     let family = ModelFamily::from_model(model);
+                    let chains = if self.model_r.is_some() { 2 } else { 1 };
                     // The frozen family table replaces the runtime EWMA when the latch is set.
                     let measured_cost = if self.prewarm_static {
                         None
@@ -1446,11 +1663,16 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         self.sample_rate,
                         family,
                         measured_cost,
+                        chains,
                     );
                     if step > 0 {
+                        self.prewarm_zero_budget_count = 0;
                         #[cfg(target_arch = "x86_64")]
                         let step_start = rdtsc_nanos();
                         let _ = model.prewarm_step(step);
+                        if let Some(model_r) = self.model_r.as_mut() {
+                            let _ = model_r.prewarm_step(step);
+                        }
                         // Refine the per-sample cost estimate from the real
                         // drain elapsed time (U-02 / F-PR-10). A step that
                         // overran half the callback period folds in the worst
@@ -1485,7 +1707,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                                     };
                                     let period_ns =
                                         (effective_frames as f64 / effective_rate) * 1e9;
-                                    let sample_cost = elapsed as f64 / step as f64;
+                                    let total_samples = (step * chains) as f64;
+                                    let sample_cost = elapsed as f64 / total_samples;
                                     const EWMA_ALPHA: f64 = 0.25;
                                     let mut ewma = match self.prewarm_cost_ns_per_sample {
                                         Some(prev) if prev.is_finite() && prev > 0.0 => {
@@ -1501,8 +1724,35 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                                 }
                             }
                         }
+                        #[cfg(not(target_arch = "x86_64"))]
+                        {
+                            #[cfg(any(test, feature = "testing"))]
+                            let _ = TEST_PREWARM_ELAPSED_NS.swap(0, Ordering::Relaxed);
+                        }
+                    } else {
+                        // Budget is zero for this callback (D-15 / S08.5).
+                        // Track consecutive starvation; do NOT force a sample if that would break deadline.
+                        self.prewarm_zero_budget_count =
+                            self.prewarm_zero_budget_count.saturating_add(1);
+                        // Emit request_callback() and update starvation telemetry strictly on the limit
+                        // transition (== LIMIT) rather than on every subsequent callback, preventing a
+                        // callback storm while zero budget persists. Do NOT assert HOST_CONTRACT_VIOLATION
+                        // for an internal budget constraint (S08.5).
+                        if self.prewarm_zero_budget_count
+                            == prewarm_policy::PREWARM_ZERO_BUDGET_STARVATION_LIMIT
+                        {
+                            self.shared
+                                .rt_to_ui
+                                .prewarm_starvation_epoch
+                                .fetch_add(1, Ordering::Relaxed);
+                            // Clear potentially elevated EWMA to retry against conservative table cost
+                            self.prewarm_cost_ns_per_sample = None;
+                            self.host.request_callback();
+                        }
                     }
-                    if !model.prewarm_complete() {
+                    if !model.prewarm_complete()
+                        || self.model_r.as_ref().is_some_and(|m| !m.prewarm_complete())
+                    {
                         return self.process_dry_contained_block(
                             &mut audio,
                             events.input,
@@ -1511,6 +1761,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     }
                 }
                 self.prewarm_pending = false;
+                self.prewarm_zero_budget_count = 0;
             }
 
             // DSP block (gate, inference, resampling, output, telemetry)
@@ -1573,6 +1824,11 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 model.prewarm_reset();
                 self.prewarm_pending = true;
             }
+            if let Some(model) = &mut self.model_r {
+                model.prewarm_reset();
+                self.prewarm_pending = true;
+            }
+            self.prewarm_zero_budget_count = 0;
 
             // 2. Streaming resample adapter: clears its FIFOs, resets the
             //    inner resampler and re-arms the priming budget — post-reset
@@ -1592,8 +1848,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // 5. CabSim convolution adapter: clears the FDL and the input/output
             //    FIFOs, rewinds the partition accumulator and the IR ring-out
             //    budget (keeps the IR).
-            if let Some(adapter) = &mut self.cabsim_adapter {
-                adapter.reset();
+            if let Some(pair) = &mut self.cabsim_pair {
+                pair.l.reset();
+                pair.r.reset();
             }
 
             // 6. Noise-gate hysteresis FSMs back to the initial Open state
@@ -1668,67 +1925,88 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
 
 fn build_cab_sim_from_raw_samples(
     shared: &NamClapShared,
+    override_samples: Option<(&[f32], u32)>,
     partition_size: usize,
     host_rate: u32,
-) -> Result<Option<Box<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter>>, PluginError> {
+) -> Result<Option<Box<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair>>, PluginError> {
+    use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
+    use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
     use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
     use std::sync::atomic::Ordering;
-
-    let raw_guard = shared.cold.ir_raw_samples.lock().map_err(|e| {
-        static_plugin_error(
-            errors::dsp_resources::CABSIM_STORAGE_LOCK_POISONED,
-            format_args!("{e}"),
-        )
-    })?;
-    let Some(ref samples) = *raw_guard else {
-        return Ok(None);
-    };
-
-    let stored_rate = shared.cold.ir_raw_sample_rate.load(Ordering::Relaxed);
-
-    let resolved_samples: std::borrow::Cow<'_, [f32]> =
-        if stored_rate > 0 && stored_rate != host_rate {
-            let resampled = CabSimIr::resample(samples, stored_rate, host_rate).map_err(|e| {
-                static_plugin_error(
-                    errors::dsp_resources::CABSIM_IR_RESAMPLE_FAILED,
-                    format_args!("{stored_rate} Hz → {host_rate} Hz: {e}"),
-                )
-            })?;
-            std::borrow::Cow::Owned(resampled)
-        } else {
-            std::borrow::Cow::Borrowed(samples)
-        };
 
     if partition_size == 0 {
         return Ok(None);
     }
 
-    let engine = neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine::new(
-        &resolved_samples,
-        partition_size,
-    )
-    .map_err(|e| {
-        static_plugin_error(
-            errors::dsp_resources::CABSIM_BUILD_FAILED,
-            format_args!("ConvEngine::new failed: {e:?}"),
-        )
-    })?;
-
-    Ok(Some(Box::new(
-        neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter::new(Box::new(engine)).map_err(
-            |e| {
+    let (samples_cow, stored_rate) = match override_samples {
+        Some((samples, rate)) => (std::borrow::Cow::Borrowed(samples), rate),
+        None => {
+            let raw_guard = shared.cold.ir_raw_samples.lock().map_err(|e| {
                 static_plugin_error(
-                    errors::dsp_resources::CABSIM_BUILD_FAILED,
-                    format_args!("CabSimAdapter::new failed: {e:?}"),
+                    errors::dsp_resources::CABSIM_STORAGE_LOCK_POISONED,
+                    format_args!("{e}"),
                 )
-            },
-        )?,
-    )))
+            })?;
+            let Some(ref samples) = *raw_guard else {
+                return Ok(None);
+            };
+            (
+                std::borrow::Cow::Owned(samples.clone()),
+                shared.cold.ir_raw_sample_rate.load(Ordering::Relaxed),
+            )
+        }
+    };
+
+    if samples_cow.is_empty() {
+        return Ok(None);
+    }
+
+    let resolved_samples: std::borrow::Cow<'_, [f32]> = if stored_rate > 0
+        && stored_rate != host_rate
+    {
+        let resampled = CabSimIr::resample(&samples_cow, stored_rate, host_rate).map_err(|e| {
+            static_plugin_error(
+                errors::dsp_resources::CABSIM_IR_RESAMPLE_FAILED,
+                format_args!("{stored_rate} Hz → {host_rate} Hz: {e}"),
+            )
+        })?;
+        std::borrow::Cow::Owned(resampled)
+    } else {
+        samples_cow
+    };
+
+    let build_adapter = || -> Result<CabSimAdapter, PluginError> {
+        let engine = ConvEngine::new(&resolved_samples, partition_size).map_err(|e| {
+            static_plugin_error(
+                errors::dsp_resources::CABSIM_BUILD_FAILED,
+                format_args!("ConvEngine::new failed: {e:?}"),
+            )
+        })?;
+        CabSimAdapter::new(Box::new(engine)).map_err(|e| {
+            static_plugin_error(
+                errors::dsp_resources::CABSIM_BUILD_FAILED,
+                format_args!("CabSimAdapter::new failed: {e:?}"),
+            )
+        })
+    };
+
+    let l = build_adapter()?;
+    let r = build_adapter()?;
+
+    Ok(Some(Box::new(CabSimPair {
+        l: Box::new(l),
+        r: Box::new(r),
+        sample_rate: host_rate,
+    })))
 }
 
 #[cfg(test)]
 #[path = "../processor_bypass_test.rs"]
 mod processor_bypass_test;
+
+#[cfg(test)]
+#[path = "../processor_dual_mono_test.rs"]
+mod processor_dual_mono_test;
 
 #[cfg(test)]
 #[path = "../processor_stress_test.rs"]

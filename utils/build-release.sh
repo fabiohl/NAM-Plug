@@ -72,8 +72,8 @@ lib_init
 trap 'trap_fail $?' ERR
 mkdir -p "$DIST_DIR" "$LOG_DIR"
 if [ "$DO_CERTIFY" != true ]; then
-    # Never let a failed build inherit the previous build's run id.
-    rm -f "$LOG_DIR/build-run-id"
+    # Never let a failed build inherit the previous build's run id or receipt.
+    rm -f "$LOG_DIR/build-run-id" "$BUILD_RECEIPT"
 fi
 
 # -----------------------------------------------------------------------------
@@ -102,13 +102,23 @@ if [ "$DO_CERTIFY" = true ]; then
         finish
         exit 1
     fi
-    "$CERT_BIN" certify "${CERT_ARGS[@]}" 2>&1 | tee "$LOG_DIR/build-release-certify.log" || RC=${PIPESTATUS[0]}
+    set +e
+    "$CERT_BIN" certify "${CERT_ARGS[@]}" 2>&1 | tee "$LOG_DIR/build-release-certify.log"
+    pipestatus=("${PIPESTATUS[@]}")
+    set -e
+    RC=${pipestatus[0]}
+    TRC=${pipestatus[1]}
 
-    if [ "$RC" -eq 0 ]; then
-        emit "PHASE: certify PASS log=$LOG_DIR/build-release-certify.log"
-    else
+    if [ "$RC" -ne 0 ]; then
+        rm -f "target/dist/release-receipt.json"
         FAILS+=("certify")
         emit "PHASE: certify FAIL rc=$RC log=$LOG_DIR/build-release-certify.log"
+    elif [ "$TRC" -ne 0 ]; then
+        rm -f "target/dist/release-receipt.json"
+        FAILS+=("certify-log")
+        emit "PHASE: certify FAIL rc=$TRC log=$LOG_DIR/build-release-certify.log (tee)"
+    else
+        emit "PHASE: certify PASS log=$LOG_DIR/build-release-certify.log"
     fi
     finish
     exit $?
@@ -257,6 +267,7 @@ else
     gap "pgo_profdata_unavailable"
     if [ "$DO_STRICT" -eq 1 ]; then
         echo "build-release: llvm-profdata unavailable in strict mode" >&2
+        finish
         exit 1
     fi
 fi
@@ -285,6 +296,7 @@ if [ "$RC" -eq 0 ] && [ -f "$COMPILED_SO" ]; then
 else
     FAILS+=("compile_clap")
     emit "PHASE: compile_clap FAIL rc=$RC log=$COMPILE_LOG"
+    finish
     exit 1
 fi
 
@@ -348,6 +360,7 @@ if [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
         if [ "$DO_STRICT" -eq 1 ]; then
             FAILS+=("bolt_optimize")
             emit "PHASE: bolt_optimize FAIL rc=$RC log=$BOLT_LOG"
+            finish
             exit 1
         else
             gap "bolt_optimize"
@@ -358,6 +371,7 @@ else
     gap "bolt_tools_unavailable"
     if [ "$DO_STRICT" -eq 1 ]; then
         echo "build-release: llvm-bolt or merge-fdata unavailable in strict mode" >&2
+        finish
         exit 1
     fi
 fi
@@ -409,15 +423,16 @@ if [ -z "$OBJDUMP_TOOL" ]; then
     if [ "$DO_STRICT" -eq 1 ]; then CODEGEN_RC=1; fi
 else
     if [ "$BOLT_STATUS" = "applied" ] && [ -f "$COMPILED_SO" ]; then
-        "$SCRIPT_DIR/verify_rt_codegen.sh" "$COMPILED_SO" --json-out "$CODEGEN_PRE_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
+        lib_quiet=1 "$SCRIPT_DIR/verify_rt_codegen.sh" "$COMPILED_SO" --json-out "$CODEGEN_PRE_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
     fi
-    "$SCRIPT_DIR/verify_rt_codegen.sh" "$ACTIVE_SO" --json-out "$CODEGEN_POST_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
+    lib_quiet=1 "$SCRIPT_DIR/verify_rt_codegen.sh" "$ACTIVE_SO" --json-out "$CODEGEN_POST_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
 fi
 if [ "$CODEGEN_RC" -eq 0 ]; then
     emit "PHASE: codegen_report PASS log=$CODEGEN_LOG"
 else
     FAILS+=("codegen_report")
     emit "PHASE: codegen_report FAIL rc=$CODEGEN_RC log=$CODEGEN_LOG"
+    finish
     exit 1
 fi
 
@@ -426,30 +441,33 @@ fi
 # -----------------------------------------------------------------------------
 phase "deliver_artifact"
 DELIVER_LOG="$LOG_DIR/build-release-deliver_artifact.log"
-{
-    echo "Installing canonical artifact to $CLAP_TARGET..."
-    cp "$ACTIVE_SO" "$CLAP_TARGET"
-    strip --strip-unneeded "$CLAP_TARGET"
-
-    # Compute SHA-256
-    sha256sum "$CLAP_TARGET" | cut -d' ' -f1 > "$CLAP_SHA_FILE"
-    CLAP_SHA=$(cat "$CLAP_SHA_FILE")
-    echo "Canonical artifact SHA-256: $CLAP_SHA"
-
+# Staged delivery: the published pair (artifact + SHA) changes only after every check passes.
+STAGE_DIR=$(mktemp -d "$DIST_DIR/.nam-plug-stage.XXXXXX")
+STAGE_CLAP="$STAGE_DIR/nam_plug.clap"
+if {
+    echo "Staging canonical artifact in $STAGE_DIR..."
+    cp "$ACTIVE_SO" "$STAGE_CLAP"
+    strip --strip-unneeded "$STAGE_CLAP"
+    chmod 0755 "$STAGE_CLAP"
+    STAGE_SHA=$(sha256sum "$STAGE_CLAP" | cut -d' ' -f1)
+    echo "Staged artifact SHA-256: $STAGE_SHA"
     echo "Verifying symbols (clap_entry) and SONAME..."
-    nm -D "$CLAP_TARGET" | grep -w "clap_entry" >/dev/null || { echo "Missing clap_entry symbol!"; exit 1; }
-    readelf -d "$CLAP_TARGET" | grep SONAME >/dev/null || { echo "Missing SONAME!"; exit 1; }
-
+    nm -D "$STAGE_CLAP" | grep -w "clap_entry" >/dev/null || { echo "Missing clap_entry symbol!"; exit 1; }
+    readelf -d "$STAGE_CLAP" | grep SONAME >/dev/null || { echo "Missing SONAME!"; exit 1; }
     echo "Running dynamic linker smoke test (smoke-load)..."
-    cargo run --quiet --locked --features testing --bin plug_long_receipt -- smoke-load --artifact "$CLAP_TARGET"
-} 2>&1 | tee "$DELIVER_LOG"
-RC=${PIPESTATUS[0]}
-
-if [ "$RC" -eq 0 ]; then
+    cargo run --quiet --locked --features testing --bin plug_long_receipt -- smoke-load --artifact "$STAGE_CLAP"
+    mv -f "$STAGE_CLAP" "$CLAP_TARGET"
+    printf '%s\n' "$STAGE_SHA" > "$CLAP_SHA_FILE"
+    [ "$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)" = "$STAGE_SHA" ] || { echo "published SHA-256 differs from staged artifact"; exit 1; }
+} 2>&1 | tee "$DELIVER_LOG"; then
+    rm -rf "$STAGE_DIR"
     emit "PHASE: deliver_artifact PASS log=$DELIVER_LOG"
 else
+    rm -rf "$STAGE_DIR"
+    rm -f "$BUILD_RECEIPT"
     FAILS+=("deliver_artifact")
-    emit "PHASE: deliver_artifact FAIL rc=$RC log=$DELIVER_LOG"
+    emit "PHASE: deliver_artifact FAIL rc=1 log=$DELIVER_LOG"
+    finish
     exit 1
 fi
 
@@ -527,6 +545,8 @@ EOF
     else
         FAILS+=("packaging")
         emit "PHASE: packaging FAIL rc=$RC log=$PKG_LOG"
+        finish
+        exit 1
     fi
     if ! command -v flatpak >/dev/null 2>&1; then
         gap "flatpak:tool_missing"
@@ -610,6 +630,7 @@ if [ "$RC" -eq 0 ]; then
     printf '%s\n' "$NAM_RUN_ID" > "$LOG_DIR/build-run-id"
     emit "PHASE: build_receipt PASS log=$RECEIPT_LOG"
 else
+    rm -f "$BUILD_RECEIPT"
     FAILS+=("build_receipt")
     emit "PHASE: build_receipt FAIL rc=$RC log=$RECEIPT_LOG"
 fi

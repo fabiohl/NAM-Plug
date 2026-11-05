@@ -12,7 +12,7 @@ use neural_amp_modeler_rs::common::spsc::{
     GcItem, GcOverflowBuffer, RtStatusFlags, RtSwapDrain, SwapTunables,
 };
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::gate::{DynamicHysteresis, GateParams};
 use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
@@ -151,6 +151,8 @@ impl BypassCrossfader {
 pub struct NamClapProcessor<'a> {
     /// Active model for the left channel (None = bypass).
     pub(crate) model_l: Option<Box<StaticModel>>,
+    /// Active model for the right channel in dual-mono mode (None = bypass or mono).
+    pub(crate) model_r: Option<Box<StaticModel>>,
     /// Monotonic generation of the currently active model identity.
     ///
     /// Set to the generation carried by the model-install payload in
@@ -159,10 +161,14 @@ pub struct NamClapProcessor<'a> {
     /// publishes it into the rebuild request and the slimmable swap handler
     /// compares it against each rebuilt delivery to reject stale results.
     pub(crate) model_generation: u64,
-    /// Active cab-sim convolution adapter (None = bypass, zero cost).
+    /// Active cab-sim convolution pair (None = bypass, zero cost).
     /// Held in `Box` end-to-end (main thread → SPSC → RT swap → GC) so
     /// installing/swapping/clearing an IR never allocates on the audio thread.
-    pub(crate) cabsim_adapter: Option<Box<CabSimAdapter>>,
+    pub(crate) cabsim_pair: Option<Box<CabSimPair>>,
+    /// Non-model commands recovered from a failed activation, replayed once at
+    /// the start of the first callback. Moved off `ColdShared` in `activate()`
+    /// (main thread), so the audio thread never locks or allocates for it.
+    pub(crate) recovered_commands: crate::clap::plugin::shared::RecoveredCommands,
     /// Polyphase sinc resampler (bypass when sample_rate == 48000).
     /// Held in Box for RT-safe disposal without allocation.
     pub(crate) resampler: Box<NamResampler>,
@@ -394,6 +400,15 @@ pub struct NamClapProcessor<'a> {
     /// release-representative) the adaptive prewarm policy ignores the measured
     /// cost (and the EWMA) and falls back to the frozen per-family table.
     pub(crate) prewarm_static: bool,
+    /// Consecutive audio callbacks where the prewarm budget was zero (D-15).
+    ///
+    /// Incremented when `prewarm_pending` is true but `compute_prewarm_step` returns 0
+    /// (e.g. callback duration too small to fit even 1 sample without breaking deadline).
+    /// Reset to 0 when `step > 0`, on `reset()`, or upon model convergence.
+    /// When reaching [`PREWARM_ZERO_BUDGET_STARVATION_LIMIT`](crate::clap::processor::prewarm_policy::PREWARM_ZERO_BUDGET_STARVATION_LIMIT),
+    /// latches [`RT_STATUS_HOST_CONTRACT_VIOLATION`](neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION)
+    /// and resets poisoned EWMA cost to recover liveness.
+    pub(crate) prewarm_zero_budget_count: u32,
     /// EWMA smoothed DSP load permille (0.0 ..= 1000.0, tau ≈ 250 ms).
     pub(crate) dsp_load_ewma: f32,
     /// Cached block frame count for hot-path budget reciprocal scaling.

@@ -170,6 +170,12 @@ pub mod assets {
         "Asset stream exceeded the maximum size allowed for SHA-256 hashing";
 }
 
+/// Model loader worker errors.
+pub mod model_loader {
+    /// The model loader worker panicked during model preparation.
+    pub const WORKER_PANIC: &str = "Model loader worker panicked during preparation";
+}
+
 /// Builds a `PluginError::Message` without allocating or leaking.
 ///
 /// `code` must be one of the static catalog constants above — it is the exact

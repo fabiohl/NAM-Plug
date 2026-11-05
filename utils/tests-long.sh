@@ -16,10 +16,7 @@ RECEIPT="$LOG_DIR/long-audit-receipt.jsonl"
 
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$DEFAULT_TARGET_DIR}"
 export CARGO_TARGET_DIR
-
-USE_ARTIFACT=0
-ONLY_PHASES=""
-STRICT=0
+USE_ARTIFACT=0; ONLY_PHASES=""; STRICT=0
 
 usage() {
     cat <<'EOF'
@@ -40,28 +37,11 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --strict)
-            STRICT=1
-            shift
-            ;;
-        --only)
-            [ $# -ge 2 ] || { echo "ERRO: --only requer argumento" >&2; exit 2; }
-            ONLY_PHASES=",$2,"
-            shift 2
-            ;;
-        --artifact)
-            USE_ARTIFACT=1
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "ERRO: flag não reconhecida: $1" >&2
-            usage
-            exit 2
-            ;;
+        --strict) STRICT=1; shift ;;
+        --only) [ $# -ge 2 ] || { echo "ERRO: --only requer argumento" >&2; exit 2; }; ONLY_PHASES=",$2,"; shift 2 ;;
+        --artifact) USE_ARTIFACT=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "ERRO: flag não reconhecida: $1" >&2; usage; exit 2 ;;
     esac
 done
 
@@ -158,6 +138,16 @@ skip_phase() {
     append_receipt "$1" "$2" SKIPPED "$log" 0 0 false "$gaps"
 }
 
+# run_named <phase_tag> <test_name> <cmd...>
+run_named() {
+    local ptag=$1 sname="${2##*::}" sublog="$LOG_DIR/long-$1-${2##*::}.log" pst
+    shift 2
+    echo "--- Running $ptag test: $sname ---" >> "$plog"
+    "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"
+    pst=("${PIPESTATUS[@]}")
+    [ "${pst[0]}" -eq 0 ] && [ "${pst[1]}" -eq 0 ] && ran_tests "$sublog"
+}
+
 # ── Fase catch-all ───────────────────────────────────────────────────────────
 if should_run "catch-all"; then
     t_start=$SECONDS; plog="$LOG_DIR/long-catch-all.log"; phase "catch-all"
@@ -179,13 +169,21 @@ if should_run "gui"; then
         append_receipt "phase2" "gui" "SKIPPED" "$plog" $(( (SECONDS - t_start) * 1000 )) 0 false "gui:xvfb_not_found"
     else
         # timeout: pior teste ~1.2s (~120s frio); 2x p100 ≈ 300s
-        gui_to=${NAM_PHASE_TIMEOUT_S:-300}; gui_rc=0
-        for gt in gui_x11_embedded_open_close_cycles_no_leak gui_x11_lifecycle_embedded_set_parent_honest gui_x11_lifecycle_hide_after_show_with_real_window gui_x11_headless_clipboard_works gui_x11_headless_floating_window_lifecycle; do
+        gui_to=${NAM_PHASE_TIMEOUT_S:-300}; gui_rc=0; gui_passed=0
+        GUI_TESTS=(
+            clap::extensions::gui::gui_lifecycle_integration_test::gui_x11_embedded_open_close_cycles_no_leak
+            clap::extensions::gui::gui_lifecycle_integration_test::gui_x11_lifecycle_embedded_set_parent_honest
+            clap::extensions::gui::gui_lifecycle_integration_test::gui_x11_lifecycle_hide_after_show_with_real_window
+            clap::processor::processor_gui_test::tests::gui_x11_headless_clipboard_works
+            clap::processor::processor_gui_test::tests::gui_x11_headless_floating_window_lifecycle
+        )
+        for gt in "${GUI_TESTS[@]}"; do
             LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe NAM_GUI_DEDICATED_X11=1 NAM_GUI_TIMEOUT_MS="${NAM_GUI_TIMEOUT_MS:-15000}" \
-                timeout --kill-after=30 "$gui_to" xvfb-run -a --server-args="-screen 0 1280x800x24" \
-                cargo test --locked --features testing,gui-x11 --release --lib "$gt" -- --ignored < /dev/null 2>&1 | tee -a "$plog" || gui_rc=1
+                run_named "gui" "$gt" timeout --kill-after=30 "$gui_to" xvfb-run -a --server-args="-screen 0 1280x800x24" \
+                cargo test --locked --features testing,gui-x11 --release --lib "$gt" -- --ignored --exact \
+                && gui_passed=$((gui_passed + 1)) || gui_rc=1
         done
-        close_phase "phase2" "gui" "$gui_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "" false
+        close_phase "phase2" "gui" "$gui_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$gui_passed" false
     fi
 else
     skip_phase "phase2" "gui"
@@ -226,14 +224,17 @@ if should_run "artifact"; then
         fi
 
         # Run parity and CabSim tests against the plugin artifact
-        ARTIFACT_TESTS=(test_clap_parity_multi_rate test_clap_parity_oversample
-            test_cabsim_ir_changes_audio_release_artifact test_clap_parity_cabsim)
+        ARTIFACT_TESTS=(
+            clap_parity_multi_sr::test_clap_parity_multi_rate
+            clap_parity_multi_sr::test_clap_parity_oversample
+            clap_cabsim_ir::test_cabsim_ir_changes_audio_release_artifact
+            clap_parity_multi_sr::test_clap_parity_cabsim
+        )
         for atest in "${ARTIFACT_TESTS[@]}"; do
-            echo "--- Running artifact test: $atest ---" >> "$plog"
-            timeout --kill-after=30 "$art_to" cargo test --locked --features testing --release --test clap "$atest" \
-                -- --ignored --nocapture 2>&1 | tee -a "$plog"
-            sub_rc=${PIPESTATUS[0]}
-            [ "$sub_rc" -eq 0 ] && art_passed=$((art_passed + 1)) || art_rc=1
+            run_named "artifact" "$atest" timeout --kill-after=30 "$art_to" \
+                cargo test --locked --features testing --release --test clap "$atest" \
+                -- --ignored --exact --nocapture \
+                && art_passed=$((art_passed + 1)) || art_rc=1
         done
 
         # clap-validator if installed

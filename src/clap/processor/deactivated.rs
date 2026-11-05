@@ -13,7 +13,7 @@
 //! audio configuration. If the host changed either, the affected resources are
 //! discarded and rebuilt from scratch. Model weights are always reusable.
 
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::StaticModel;
@@ -23,16 +23,18 @@ pub(crate) struct DeactivatedDspState {
     /// Active neural model (L channel). Always reusable — model weights
     /// are independent of host sample rate and buffer size.
     pub(crate) model_l: Option<Box<StaticModel>>,
+    /// Active neural model (R channel) in dual-mono mode.
+    pub(crate) model_r: Option<Box<StaticModel>>,
     /// Monotonic generation of the active model identity,
     /// persisted with the model so a reactivation keeps the same generation.
     pub(crate) model_generation: u64,
-    /// Cab-sim convolution adapter. The underlying `process_block` driver is
+    /// Cab-sim convolution pair. The underlying `process_block` driver is
     /// block-agnostic — host blocks of any size are chunked against the fixed
-    /// partition internally — so the adapter is reusable across buffer-size
+    /// partition internally — so the pair is reusable across buffer-size
     /// changes and only a host sample-rate change (the IR is resampled to the
     /// host rate at build time) forces a rebuild. Kept `Box`ed to preserve the
     /// end-to-end real-time safe ownership contract.
-    pub(crate) cabsim_adapter: Option<Box<CabSimAdapter>>,
+    pub(crate) cabsim_pair: Option<Box<CabSimPair>>,
     /// Polyphase sinc resampler. Reusable only if `host_rate` matches the
     /// current host sample rate (phase interpolation banks are rate-dependent).
     pub(crate) resampler: Box<NamResampler>,

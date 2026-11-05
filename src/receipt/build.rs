@@ -258,3 +258,52 @@ pub fn compare_codegen(
 
     (verdict, pre_syms, post_syms)
 }
+
+/// Extract the `NeuralAmpModeler-rs` provenance from `Cargo.lock`.
+///
+/// The lockfile is the single source of truth: a crates.io dependency declares
+/// `source = "registry+..."` plus a checksum; a path dependency has neither.
+pub fn extract_engine_provenance(cargo_lock_path: &Path) -> EngineProvenance {
+    let Ok(content) = fs::read_to_string(cargo_lock_path) else {
+        return EngineProvenance {
+            dependency_type: "missing_lockfile".to_string(),
+            version: "unknown".to_string(),
+            checksum: None,
+        };
+    };
+    let mut in_pkg = false;
+    let mut version = "unknown".to_string();
+    let mut checksum = None;
+    let mut dep_type = "workspace_or_path".to_string();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[[package]]" {
+            in_pkg = false;
+        } else if trimmed == "name = \"NeuralAmpModeler-rs\"" {
+            in_pkg = true;
+        } else if in_pkg {
+            if let Some(v) = trimmed.strip_prefix("version = \"") {
+                version = v.trim_end_matches('"').to_string();
+            } else if let Some(s) = trimmed.strip_prefix("source = \"") {
+                let src = s.trim_end_matches('"');
+                if src.starts_with("registry+") {
+                    dep_type = "crates.io".to_string();
+                } else if src.starts_with("git+") {
+                    dep_type = "git".to_string();
+                } else {
+                    dep_type = src.to_string();
+                }
+            } else if let Some(c) = trimmed.strip_prefix("checksum = \"") {
+                checksum = Some(c.trim_end_matches('"').to_string());
+            } else if trimmed.starts_with("[[") {
+                break;
+            }
+        }
+    }
+    EngineProvenance {
+        dependency_type: dep_type,
+        version,
+        checksum,
+    }
+}

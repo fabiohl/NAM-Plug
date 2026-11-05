@@ -42,7 +42,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 * **Dual-Oracle Numerical Parity:** Formally certified against canonical C++ NAMCore ($f32$) and double-precision ($f64$) mathematical oracles across 52 baseline envelopes (`docs/quality-contract.json`). Typical WaveNet models achieve ESR $< 2.31 \times 10^{-14}$ (SNR $> 136.4\text{ dB}$, MR-STFT $< 6.5 \times 10^{-6}$), while ConvNet achieves ESR $< 9.33 \times 10^{-16}$ (SNR $> 150.3\text{ dB}$).
 * **Native CLAP 1.2+ Standard Integration:** Built directly upon the `clack` framework, exposing a clean, translation-free CLAP implementation. Fully supports sample-accurate parameter automation, project state persistence (JSON serialization with SHA-256 asset verification), host latency reporting with dynamic PDC (`clap_plugin_latency`), and native host extensions (`audio-ports`, `gui`, `params`, `state`, `preset-discovery`, `render`, `tail`, `track-info`).
 * **Hardware-Accelerated Slint GUI with Native X11 Embedding:** Declarative user interface rendered via FemtoVG / OpenGL with **native X11 XEmbed host panel embedding** into Bitwig Studio and REAPER, plus Wayland and X11 floating window fallbacks. A dedicated 60 Hz event-loop thread polls lock-free atomic view models with 0% audio thread overhead.
-* **Complete Integrated Tone Pipeline:** Includes a native 256-phase minimum-phase Kaiser sinc resampler ($0.7\text{–}1.3\text{ µs}$ execution, $>105\text{ dB}$ stopband, 0 pre-ringing) adapting any model sample rate to host rates (44.1, 48, 96, 192 kHz), Uniform-Partitioned Overlap-Save (UPOLS) FFT cabinet IR convolution ($1.3\text{ µs}$ for 512-sample IRs), polyphase half-band oversampling (2×/4×), and branchless 32 ms equal-power crossfaded bypass.
+* **Complete Integrated Tone Pipeline:** Includes a native 256-phase minimum-phase Kaiser sinc resampler ($0.7\text{–}1.3\text{ µs}$ execution, $>105\text{ dB}$ stopband, 0 pre-ringing) adapting any model sample rate to host rates (44.1, 48, 96, 192 kHz), Uniform-Partitioned Overlap-Save (UPOLS) FFT cabinet IR convolution ($1.3\text{ µs}$ for 512-sample IRs), polyphase half-band oversampling (2×/4×), and branchless crossfaded bypass (64-sample ramp, about 1.3 ms at 48 kHz).
 * **Binary `.namb` v2 Container Support:** Loads pre-transposed binary models (Gate-Major LSTM, Interleaved-4 WaveNet) with IEEE 802.3 CRC32 integrity validation, slashing model loading and hot-swap times from $\sim 50\text{ ms}$ to $< 1\text{ ms}$.
 * **Sandbox-Ready Flatpak Audio Plugin Extension:** Distributed as an official Flatpak extension (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`) extending `org.freedesktop.LinuxAudio.BaseExtension` 25.08, providing automatic discovery in sandboxed DAWs (Bitwig, REAPER, Studio One) without compromising filesystem security.
 
@@ -63,7 +63,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 | **Activation Precision**       | `Standard` (exact Taylor minimax) vs `Fast` (Padé polynomial approximations)         | User-selectable balance between floating-point precision (+89.5 dB SNR) and CPU cycles   |
 | **Graphical User Interface**   | Slint 1.18 declarative UI (FemtoVG/OpenGL via `winit`)                               | Native X11 XEmbed host panel embedding, Wayland/X11 floating fallback, 60 FPS metering   |
 | **Denormal Armor**             | Symmetric −220 dBFS dither injection + hardware MXCSR FTZ/DAZ                        | Eliminates 10–100× CPU microcode penalties during digital silence with zero net DC drift |
-| **Bypass Crossfader**          | 32 ms equal-power crossfade with branchless FMA loop & phase compensation            | Smooth, pop-free transitions with zero phase cancellation                                |
+| **Bypass Crossfader**          | 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with branchless FMA loop & phase compensation | Smooth, pop-free transitions with zero phase cancellation                                |
 | **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`                | Instant host Plugin Delay Compensation with 0 per-block audio thread overhead            |
 | **Binary `.namb` v2 Format**   | Pre-transposed memory layout (Gate-Major LSTM, Interleaved-4 WaveNet) with CRC32     | Reduces model loading and DAW track hot-swap time from ~50 ms to $< 1\text{ ms}$         |
 | **Flatpak Extension**          | `org.freedesktop.LinuxAudio.Plugins.NAMPlug` on BaseExtension 25.08                  | Seamless 1-click loading in sandboxed Flatpak DAWs without host permissions              |
@@ -183,7 +183,7 @@ In guitar production, an authentic recorded amp tone consists of two distinct co
 7. **Select Activation Math Mode:**
    * **`Standard` (Default):** Exact precision Taylor minimax math (+89.5 dB SNR).
    * **`Fast`:** Padé polynomial approximation, reducing CPU consumption on large sessions.
-8. **Bypass / Active:** Click **`ACTIVE`** at any time to audition your raw tone. Transitions use smooth 32 ms equal-power crossfading with zero clicks or pops.
+8. **Bypass / Active:** Click **`ACTIVE`** at any time to audition your raw tone. Transitions use a 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with no clicks or pops.
 
 ### 4. Reading the Real-Time Telemetry Bar (Footer)
 

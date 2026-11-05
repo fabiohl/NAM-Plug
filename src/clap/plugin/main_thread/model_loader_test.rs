@@ -592,3 +592,192 @@ fn test_adaptive_worker_polling_reduces_idle_wakeups_by_at_least_10x_and_preserv
 
     let _ = std::fs::remove_file(&good);
 }
+
+/// T-06.3 / F-PLUG-08: worker panic is contained by catch_unwind, published as a typed error,
+/// clears `model_worker_busy` and `ui_loading`, and allows subsequent loads to succeed.
+#[test]
+fn test_model_loader_worker_panic_contained_and_recovers() {
+    let _hook_guard = test_mid_load_hook_lock();
+    let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+
+    let panic_model = temp_model("lstm.nam");
+    let valid_model = temp_model("a2_example.nam");
+    let valid_name = basename(&valid_model);
+
+    // Install hook that panics during preparation
+    let panic_triggered = Arc::new(AtomicBool::new(false));
+    let panic_triggered_clone = Arc::clone(&panic_triggered);
+    let panic_path = panic_model.clone();
+    set_test_mid_load_hook(Some(move |path: &Path| {
+        if path == panic_path.as_path() {
+            panic_triggered_clone.store(true, Ordering::Release);
+            panic!("simulated panic in model loader worker");
+        }
+    }));
+
+    // 1. Dispatch the model that triggers a panic
+    push_gui(shared, &panic_model);
+    instance.call_on_main_thread_callback();
+
+    // Wait until panic is caught and processed
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !panic_triggered.load(Ordering::Acquire) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        panic_triggered.load(Ordering::Acquire),
+        "Panic hook must have executed"
+    );
+
+    // Poll main thread until error is reported
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !shared.cold.ui_load_error.load(Ordering::Relaxed) && Instant::now() < deadline {
+        instance.call_on_main_thread_callback();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(
+        shared.cold.ui_load_error.load(Ordering::Relaxed),
+        "ui_load_error must be raised after worker panic"
+    );
+    let err_msg = shared.cold.ui_load_error_msg.lock().unwrap().clone();
+    assert!(
+        err_msg.contains(crate::clap::plugin::errors::model_loader::WORKER_PANIC),
+        "Error message must contain typed WORKER_PANIC catalog error, got: {err_msg}"
+    );
+    assert!(
+        !shared.cold.ui_loading.load(Ordering::Relaxed),
+        "ui_loading must be false after panic outcome is polled"
+    );
+
+    // 2. Clear hook and verify the worker is STILL ALIVE and can load subsequent models
+    clear_hook();
+
+    push_gui(shared, &valid_model);
+    instance.call_on_main_thread_callback();
+    test_util::drain_async_model_loading(&mut instance, shared);
+
+    assert!(
+        !shared.cold.ui_load_error.load(Ordering::Relaxed),
+        "ui_load_error must be cleared after successful subsequent load"
+    );
+    assert_eq!(
+        *shared.cold.ui_model_name.lock().unwrap(),
+        valid_name,
+        "Subsequent model must be loaded successfully"
+    );
+    assert!(
+        !shared.cold.ui_loading.load(Ordering::Relaxed),
+        "ui_loading must remain false after successful load"
+    );
+
+    let _ = std::fs::remove_file(&panic_model);
+    let _ = std::fs::remove_file(&valid_model);
+}
+
+/// T-07.1 / F-PLUG-03: Audio epoch revalidation.
+/// Interleaving:
+/// 1. Plugin activated at 48 kHz / 128 frames.
+/// 2. Asynchronous model load dispatched, worker starts preparing with captured epoch (48k / 128).
+/// 3. Host deactivates and reactivates with renegotiated configuration (96 kHz / 256 frames).
+/// 4. Worker completes. Main thread commit observes epoch divergence against active audio config.
+/// 5. Commit adapts the resampler and stream off-RT for 96 kHz / 256 frames before installing.
+/// 6. Audio processing operates with the adapted resource matching the current 96 kHz / 256 config.
+#[test]
+fn test_async_load_interleaved_with_audio_renegotiation_adapts_to_current_config() {
+    let _hook_guard = test_mid_load_hook_lock();
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+
+    // 1. Activate at 48 kHz / 128 frames
+    let cfg_48k = PluginAudioConfiguration {
+        sample_rate: 48000.0,
+        min_frames_count: 128,
+        max_frames_count: 128,
+    };
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), cfg_48k)
+        .expect("activate 48k");
+    let started = stopped.start_processing().expect("start processing");
+
+    let model_file = temp_model("lstm.nam");
+    let model_for_hook = model_file.clone();
+    let expected_name = basename(&model_file);
+
+    let (stall_tx, stall_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    set_test_mid_load_hook(Some(move |path: &Path| {
+        if path == model_for_hook.as_path() {
+            let _ = stall_tx.send(());
+            let _ = resume_rx.recv();
+        }
+    }));
+
+    // 2. Dispatch model load while active at 48k / 128
+    push_gui(shared, &model_file);
+    instance.call_on_main_thread_callback();
+    stall_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker stalled in prepare_model");
+
+    // 3. Renegotiate audio configuration to 96 kHz / 256 frames before worker commits
+    let stopped = started.stop_processing();
+    instance.deactivate(stopped);
+
+    let cfg_96k = PluginAudioConfiguration {
+        sample_rate: 96000.0,
+        min_frames_count: 256,
+        max_frames_count: 256,
+    };
+    let stopped_96k = instance
+        .activate(|_, _| make_harness_audio_processor(&state), cfg_96k)
+        .expect("activate 96k");
+    let mut started_96k = stopped_96k
+        .start_processing()
+        .expect("start processing 96k");
+
+    // 4. Worker resumes and completes prepare
+    let _ = resume_tx.send(());
+    clear_hook();
+
+    // 5. Drain async loading (calls on_main_thread to poll outcome and commit)
+    test_util::drain_async_model_loading(&mut instance, shared);
+
+    // 6. Verify commit succeeded and resource corresponds to 96 kHz / 256
+    assert!(
+        !shared.cold.ui_load_error.load(Ordering::Relaxed),
+        "ui_load_error must be false after adaptation"
+    );
+    assert_eq!(
+        *shared.cold.ui_model_name.lock().unwrap(),
+        expected_name,
+        "Model must be successfully committed"
+    );
+    assert_eq!(
+        shared.cold.sample_rate.load(Ordering::Relaxed),
+        96000,
+        "Host sample rate must be 96000"
+    );
+    assert_eq!(
+        shared.cold.buffer_size.load(Ordering::Relaxed),
+        256,
+        "Host buffer size must be 256"
+    );
+
+    // 7. Verify audio processing succeeds without panic or error at 96 kHz / 256 frames
+    let mut il = vec![0.1f32; 256];
+    let mut ir = vec![0.1f32; 256];
+    let mut ol = vec![0.0f32; 256];
+    let mut or = vec![0.0f32; 256];
+    let _ = crate::clap::host_harness::process_block_harness(
+        &mut started_96k,
+        &mut il,
+        &mut ir,
+        &mut ol,
+        &mut or,
+        None,
+    );
+
+    let _ = std::fs::remove_file(&model_file);
+}

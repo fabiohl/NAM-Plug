@@ -958,7 +958,7 @@ fn synthetic_cab_ir() -> Vec<f32> {
 /// This isolates the final binary's convolution path; the IR-free curve is
 /// certified separately against NAMCore by `test_clap_parity_multi_rate`.
 ///
-/// // Measured: (2026-10-22, wavenet_a1_standard @ 48 kHz) — see the test log.
+/// // Measured: (wavenet_a1_standard @ 48 kHz): ESR=9.95e-14 (130.0 dB), SNR=130.0 dB
 /// // Gate: ESR < 1e-8, SNR > 80 dB.
 #[test]
 #[ignore = "requires release CLAP .so"]
@@ -1024,11 +1024,13 @@ fn test_clap_parity_cabsim() {
     // The final partial host block has no queued convolution output (the
     // adapter delivered only complete partitions), and the first measured
     // partition is excluded conservatively as an activation boundary.
+    // UPOLS algorithmic latency is strictly 1 partition (1024 samples):
+    // convolution of dry_sig[0..partition] emerges during wet_sig[partition..2*partition].
     let measurable = wet_sig.len() - (wet_sig.len() % partition);
     let skip = partition + EDGE_GUARD;
     let common = reference
         .len()
-        .min(measurable)
+        .min(measurable.saturating_sub(partition))
         .saturating_sub(skip + EDGE_GUARD);
     assert!(
         common > 64,
@@ -1037,11 +1039,11 @@ fn test_clap_parity_cabsim() {
 
     let esr = compute_esr(
         &reference[skip..skip + common],
-        &wet_sig[skip..skip + common],
+        &wet_sig[skip + partition..skip + partition + common],
     );
     let snr = compute_snr_db(
         &reference[skip..skip + common],
-        &wet_sig[skip..skip + common],
+        &wet_sig[skip + partition..skip + partition + common],
     );
     let esr_db = if esr > 0.0 {
         10.0 * (1.0 / esr).log10()

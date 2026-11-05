@@ -4,10 +4,12 @@
 #[cfg(test)]
 mod tests {
     use crate::clap::extensions::params::PARAM_BYPASS;
+    use crate::clap::plugin::shared::CONFIG_ID_STEREO;
     use crate::clap::test_util::{self, StereoTestBuffers};
     use clack_common::events::Pckn;
     use clack_common::events::event_types::ParamValueEvent;
     use clack_common::utils::ClapId;
+    use clack_extensions::audio_ports_config::PluginAudioPortsConfig;
     use clack_host::prelude::*;
     use neural_amp_modeler_rs::testing::metrics::max_abs_diff;
 
@@ -18,6 +20,14 @@ mod tests {
 
     fn run_stereo_block(bypass: bool, in_l: &[f32], in_r: &[f32]) -> ProcessedStereo {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+
+        // Declare Stereo layout via audio_ports_config before activate()
+        {
+            let handle = plugin_instance.plugin_handle();
+            if let Some(config_ext) = handle.get_extension::<PluginAudioPortsConfig>() {
+                let _ = config_ext.select(&handle, ClapId::new(CONFIG_ID_STEREO));
+            }
+        }
 
         let audio_config = PluginAudioConfiguration {
             sample_rate: 48000.0,
@@ -75,6 +85,14 @@ mod tests {
     #[test]
     fn test_zero_alloc_process_bypass() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+
+        // Declare Stereo layout via audio_ports_config before activate()
+        {
+            let handle = plugin_instance.plugin_handle();
+            if let Some(config_ext) = handle.get_extension::<PluginAudioPortsConfig>() {
+                let _ = config_ext.select(&handle, ClapId::new(CONFIG_ID_STEREO));
+            }
+        }
 
         let audio_config = PluginAudioConfiguration {
             sample_rate: 48000.0,
@@ -236,6 +254,14 @@ mod tests {
         // scratch before writing outputs back, so L/R stay independent and
         // neither channel corrupts the other.
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+
+        // Declare Stereo layout via audio_ports_config before activate()
+        {
+            let handle = plugin_instance.plugin_handle();
+            if let Some(config_ext) = handle.get_extension::<PluginAudioPortsConfig>() {
+                let _ = config_ext.select(&handle, ClapId::new(CONFIG_ID_STEREO));
+            }
+        }
 
         let audio_config = PluginAudioConfiguration {
             sample_rate: 48000.0,

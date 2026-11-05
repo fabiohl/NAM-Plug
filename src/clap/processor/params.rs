@@ -195,10 +195,12 @@ impl<'a> NamClapProcessor<'a> {
                 .load(Ordering::Relaxed),
         );
         let shared_db = sanitize_param_value(PARAM_INPUT_GAIN, raw_db);
-        if shared_db != self.params.input_gain_db {
+        let target = self.gain_lut.db_to_linear(shared_db + self.mod_input_gain);
+        if shared_db != self.params.input_gain_db
+            || (self.smoother_in.target_value() - target).abs() > 1e-6
+        {
             self.params.input_gain_db = shared_db;
-            self.smoother_in
-                .set_target(self.gain_lut.db_to_linear(shared_db + self.mod_input_gain));
+            self.smoother_in.set_target(target);
         }
     }
 
@@ -215,10 +217,12 @@ impl<'a> NamClapProcessor<'a> {
                 .load(Ordering::Relaxed),
         );
         let shared_db = sanitize_param_value(PARAM_OUTPUT_GAIN, raw_db);
-        if shared_db != self.params.output_gain_db {
+        let target = self.gain_lut.db_to_linear(shared_db + self.mod_output_gain);
+        if shared_db != self.params.output_gain_db
+            || (self.smoother_out.target_value() - target).abs() > 1e-6
+        {
             self.params.output_gain_db = shared_db;
-            self.smoother_out
-                .set_target(self.gain_lut.db_to_linear(shared_db + self.mod_output_gain));
+            self.smoother_out.set_target(target);
         }
     }
 
@@ -266,7 +270,9 @@ impl<'a> NamClapProcessor<'a> {
         let sanitized = sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, raw);
         let shared_adaptive =
             neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(sanitized);
-        if shared_adaptive != self.params.adaptive_compute {
+        if shared_adaptive != self.params.adaptive_compute
+            || shared_adaptive != self.adaptive_compute.mode()
+        {
             self.params.adaptive_compute = shared_adaptive;
             self.adaptive_compute
                 .set_mode(shared_adaptive, &self.rt_status);
@@ -286,7 +292,9 @@ impl<'a> NamClapProcessor<'a> {
         let sanitized = sanitize_param_value(PARAM_SLIM_OVERRIDE, raw);
         let shared_override =
             neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(sanitized);
-        if shared_override != self.params.slim_override {
+        if shared_override != self.params.slim_override
+            || shared_override != self.adaptive_compute.slim_override()
+        {
             self.params.slim_override = shared_override;
             self.adaptive_compute.set_slim_override(shared_override);
         }
@@ -329,6 +337,21 @@ impl<'a> NamClapProcessor<'a> {
             neural_amp_modeler_rs::math::activations::set_activation_tls(shared_mode);
         }
     }
+
+    /// Synchronizes all parameters changed via GUI from shared UI-to-RT atomics,
+    /// retargeting smoothers, flagging gate recalculation, and updating controllers.
+    ///
+    /// This method is idempotent and called by both `process_events` and `flush_inner`.
+    pub(crate) fn sync_params_from_gui(&mut self) {
+        self.sync_input_gain_from_gui();
+        self.sync_output_gain_from_gui();
+        self.sync_gate_thresh_from_gui();
+        self.sync_bypass_from_gui();
+        self.sync_adaptive_compute_from_gui();
+        self.sync_slim_override_from_gui();
+        self.sync_oversample_from_gui();
+        self.sync_activation_from_gui();
+    }
 }
 
 impl ClapCommandSwapHandler<'_, '_> {
@@ -358,7 +381,9 @@ impl ClapCommandSwapHandler<'_, '_> {
                     &self.shared.cold.pending_restart_os_factor,
                     Ordering::Release,
                 );
-                self.host.request_restart();
+                // Note: The orchestrator at block boundaries is the single owner of
+                // self.host.request_restart() (F-PLUG-06 / T-07.3), coalescing multiple
+                // changes within the same block to avoid duplicate restart requests.
             }
         } else {
             // Plugin is not active yet — safe to flag the main thread for

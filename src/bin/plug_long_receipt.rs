@@ -39,8 +39,8 @@ use std::str::FromStr;
 
 use nam_plug::receipt::LONG_ROSTER;
 use nam_plug::receipt::build::{
-    BuildArtifacts, BuildOptimizations, BuildProvenance, BuildReceipt, EngineProvenance,
-    PackageInfo, compare_codegen, hash_file, parse_ab_opt_ceremony_receipt,
+    BuildArtifacts, BuildOptimizations, BuildProvenance, BuildReceipt, PackageInfo,
+    compare_codegen, extract_engine_provenance, hash_file, parse_ab_opt_ceremony_receipt,
     parse_pgo_workload_receipt,
 };
 use nam_plug::receipt::long_artifact::{
@@ -541,52 +541,6 @@ fn die_usage(subcommand: &str, message: &str) -> ! {
     eprintln!("{subcommand}: {message}");
     eprintln!("Run `plug_long_receipt --help` for usage.");
     exit(2);
-}
-
-fn extract_engine_provenance(cargo_lock_path: &Path) -> EngineProvenance {
-    if let Ok(content) = fs::read_to_string(cargo_lock_path) {
-        let mut in_pkg = false;
-        let mut version = "unknown".to_string();
-        let mut checksum = None;
-        let mut dep_type = "workspace_or_path".to_string();
-
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed == "[[package]]" {
-                in_pkg = false;
-            } else if trimmed == "name = \"NeuralAmpModeler-rs\"" {
-                in_pkg = true;
-            } else if in_pkg {
-                if let Some(v) = trimmed.strip_prefix("version = \"") {
-                    version = v.trim_end_matches('"').to_string();
-                } else if let Some(s) = trimmed.strip_prefix("source = \"") {
-                    let src = s.trim_end_matches('"');
-                    if src.starts_with("registry+") {
-                        dep_type = "crates.io".to_string();
-                    } else if src.starts_with("git+") {
-                        dep_type = "git".to_string();
-                    } else {
-                        dep_type = src.to_string();
-                    }
-                } else if let Some(c) = trimmed.strip_prefix("checksum = \"") {
-                    checksum = Some(c.trim_end_matches('"').to_string());
-                } else if trimmed.starts_with("[[") {
-                    break;
-                }
-            }
-        }
-        EngineProvenance {
-            dependency_type: dep_type,
-            version,
-            checksum,
-        }
-    } else {
-        EngineProvenance {
-            dependency_type: "missing_lockfile".to_string(),
-            version: "unknown".to_string(),
-            checksum: None,
-        }
-    }
 }
 
 fn cmd_smoke_load(args: &[String]) {

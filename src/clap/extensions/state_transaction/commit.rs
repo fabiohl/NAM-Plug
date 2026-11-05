@@ -91,10 +91,8 @@ fn atomic_commit(
     };
 
     let cabsim_latency_differs = match txn.ir.as_ref() {
-        Some(maybe_adapter) => {
-            let new_lat = maybe_adapter
-                .as_ref()
-                .map_or(0, |a| a.latency_samples() as u32);
+        Some(maybe_pair) => {
+            let new_lat = maybe_pair.as_ref().map_or(0, |p| p.partition_size() as u32);
             new_lat != current_cabsim_latency
         }
         None => false,
@@ -214,12 +212,13 @@ pub(crate) fn build_restore_package(
         Some(resources) => {
             let ModelResources {
                 mut model_l,
+                model_r,
                 new_resampler,
                 new_stream,
                 input_mult_adj,
                 output_mult_adj,
                 buffer_size,
-                model_rate: _,
+                model_rate,
                 model_metadata: _,
                 model_info: _,
                 model_hash: _,
@@ -239,8 +238,10 @@ pub(crate) fn build_restore_package(
             Some(LoadModelPayload {
                 generation: cold.allocate_model_generation(),
                 model_l,
+                model_r,
                 new_resampler,
                 new_stream,
+                model_rate,
                 input_mult_adj,
                 output_mult_adj,
                 prewarm_cost_ns,
@@ -271,8 +272,10 @@ pub(crate) fn build_restore_package(
                 Some(LoadModelPayload {
                     generation: cold.allocate_model_generation(),
                     model_l: None,
+                    model_r: None,
                     new_resampler: Box::new(new_resampler),
                     new_stream,
+                    model_rate: 48000,
                     input_mult_adj: 1.0,
                     output_mult_adj: 1.0,
                     prewarm_cost_ns: None,
@@ -286,14 +289,14 @@ pub(crate) fn build_restore_package(
     let ir_component = match ir {
         Some(resources) => {
             let IrResources {
-                adapter,
+                pair,
                 samples: _,
                 sample_rate: _,
             } = resources;
-            // `adapter` is already `Option<Box<CabSimAdapter>>` — None clears
+            // `pair` is already `Option<Box<CabSimPair>>` — None clears
             // the IR. The box preserves the RT-safe end-to-end ownership
             // contract.
-            Some(adapter)
+            Some(pair)
         }
         None => match mode {
             RestoreMode::Full => Some(None),
@@ -597,6 +600,7 @@ fn local_commit(
     if let Some(resources) = model {
         let ModelResources {
             model_l,
+            model_r,
             new_resampler: _,
             new_stream: _,
             input_mult_adj,
@@ -635,6 +639,7 @@ fn local_commit(
         *lock_cold(&main_thread.shared.cold.pending_model, "pending_model") = Some(PendingModel {
             generation: main_thread.shared.cold.allocate_model_generation(),
             model: model_l,
+            model_r,
             model_rate,
             input_mult_adj,
             output_mult_adj,
@@ -677,6 +682,7 @@ fn local_commit(
         *lock_cold(&main_thread.shared.cold.pending_model, "pending_model") = Some(PendingModel {
             generation: main_thread.shared.cold.allocate_model_generation(),
             model: None,
+            model_r: None,
             model_rate: 48000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
@@ -698,14 +704,14 @@ fn local_commit(
     // ── Commit IR (local) ──
     if let Some(resources) = ir {
         let IrResources {
-            adapter,
+            pair,
             samples,
             sample_rate,
         } = resources;
-        if let Some(adapter) = adapter {
+        if let Some(pair) = pair {
             let mut staged_swap = main_thread.staged_swap.borrow_mut();
             let staged = staged_swap.get_or_insert_with(StagedSwap::default);
-            staged.ir = Some(Some(adapter));
+            staged.ir = Some(Some(pair));
         }
         *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = ir_path_on_disk.clone();
         *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = ir_hash.clone();

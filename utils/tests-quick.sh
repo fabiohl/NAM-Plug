@@ -17,7 +17,7 @@ PHASE_NAME=tests; CUR_LOG="$LOG_DIR/quick-tests.log"; phase tests
 rc_tests=0
 cargo test --locked --features testing --no-fail-fast > "$CUR_LOG" 2>&1 || rc_tests=$?
 if [ "$rc_tests" -ne 0 ]; then
-  grep -E 'FAILED|panicked at' "$CUR_LOG" || true
+  grep -C 3 -E '(panicked at|FAILED)' "$CUR_LOG" | head -n 50 || true
   grep -q -E '(panicked at|FAILED)' "$CUR_LOG" || { echo "--- Cargo/build failure (tail of $CUR_LOG) ---" >&2; tail -n 25 "$CUR_LOG" >&2; }
 fi
 awk '/test result: / { p+=$4; f+=$6; i+=$8 } END { printf "Tests summary: %d passed, %d failed, %d ignored\n", p, f, i }' "$CUR_LOG"
@@ -29,7 +29,7 @@ PHASE_NAME=heap-audit; CUR_LOG="$LOG_DIR/quick-heap-audit.log"; phase heap-audit
 rc_heap=0
 cargo test --locked --features testing,heap-audit --lib processor_heap_audit_test > "$CUR_LOG" 2>&1 || rc_heap=$?
 if [ "$rc_heap" -ne 0 ]; then
-  grep -E 'FAILED|panicked at' "$CUR_LOG" || true
+  grep -C 3 -E '(panicked at|FAILED)' "$CUR_LOG" | head -n 50 || true
   grep -q -E '(panicked at|FAILED)' "$CUR_LOG" || { echo "--- Cargo/build failure (tail of $CUR_LOG) ---" >&2; tail -n 25 "$CUR_LOG" >&2; }
 fi
 [ "$rc_heap" -eq 0 ] && ran_tests "$CUR_LOG" || { FAILS+=(heap-audit); emit "PHASE: heap-audit FAIL rc=$rc_heap log=$CUR_LOG"; finish || exit 1; exit 1; }

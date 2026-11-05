@@ -16,9 +16,8 @@
 //!    `CLAP_WorstCase_EventFlood`: dense `ParamValueEvent`/`ParamModEvent` floods
 //!    (16/64/256/1024 events) over 64/128/512 blocks, including the degenerate 1-event-per-sample case;
 //!    `CLAP_WorstCase_MonoDualMono`, `CLAP_WorstCase_Crossfade`, `CLAP_WorstCase_RingOut`,
-//!    `CLAP_WorstCase_ThreadHop`: real mono vs. dual-mono with L!=R content, bypass crossfade in flight,
-//!    gate-closed CabSim ring-out, and a 2-thread `process` alternation harness
-//!    (TLS/MXCSR re-priming cost).
+//!    `CLAP_WorstCase_RoundTripIPC`: real mono vs. dual-mono with L!=R content, bypass crossfade in flight,
+//!    gate-closed CabSim ring-out (impulse + drain lote), and a 2-thread `process` round-trip IPC dispatch harness.
 //! 5. `CLAP_Evidence_InferenceE2E`: e2e inference matrix model×block
 //!    (LSTM / WaveNet-A1 / WaveNet-A2 × 64/128/512 host samples), ns/sample via
 //!    `Throughput::Elements` — the block-size evidence anchor for regression
@@ -41,6 +40,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use clack_common::events::Pckn;
 use clack_common::events::event_types::{ParamModEvent, ParamValueEvent};
 use clack_common::utils::ClapId;
+use clack_extensions::audio_ports_config::PluginAudioPortsConfig;
 use clack_extensions::render::{PluginRender, RenderMode};
 use clack_extensions::state::PluginState;
 use clack_host::prelude::*;
@@ -78,6 +78,20 @@ fn create_and_activate_bench_plugin(
     PluginInstance<BenchHost>,
     StoppedPluginAudioProcessor<BenchHost>,
 ) {
+    create_and_activate_bench_plugin_with_config(sample_rate, block_size, params, render_mode, None)
+}
+
+/// Helper to create and activate a `NamClapPlugin` instance with an optional audio port configuration ID.
+fn create_and_activate_bench_plugin_with_config(
+    sample_rate: f64,
+    block_size: usize,
+    params: &ProcessingParams,
+    render_mode: Option<RenderMode>,
+    port_config: Option<u32>,
+) -> (
+    PluginInstance<BenchHost>,
+    StoppedPluginAudioProcessor<BenchHost>,
+) {
     let entry =
         PluginEntry::load_from_clack::<clack_plugin::entry::SinglePluginEntry<NamClapPlugin>>(
             c"/bench",
@@ -100,6 +114,14 @@ fn create_and_activate_bench_plugin(
         &host_info,
     )
     .expect("Failed to create plugin instance");
+
+    // Select audio ports configuration if requested (must be deactivated)
+    if let Some(config_id) = port_config {
+        let handle = plugin_instance.plugin_handle();
+        if let Some(config_ext) = handle.get_extension::<PluginAudioPortsConfig>() {
+            let _ = config_ext.select(&handle, ClapId::new(config_id));
+        }
+    }
 
     // Load state
     let state_ext = plugin_instance
@@ -1262,12 +1284,31 @@ fn bench_worstcase_event_flood_model(c: &mut Criterion) {
 fn bench_worstcase_remaining(c: &mut Criterion) {
     // ── (1) Mono vs. dual-mono with L!=R ──
     {
+        let a1_path = common::model_path("wavenet_a1_standard.nam");
+        assert!(
+            a1_path.exists(),
+            "Mandatory fixture 'wavenet_a1_standard.nam' missing at {}",
+            a1_path.display()
+        );
         let mut group = c.benchmark_group("CLAP_WorstCase_MonoDualMono");
         for (label, same_content) in [("Mono_L_eq_R", true), ("DualMono_L_neq_R", false)] {
             for &block_size in &[32usize, 64, 128] {
-                let params = ProcessingParams::default();
+                let mut params = ProcessingParams::default();
+                params.model_path = Some(a1_path.clone());
+                params.model_hash = asset_hash(&a1_path);
+                let port_cfg = if same_content {
+                    nam_plug::clap::plugin::shared::CONFIG_ID_MONO
+                } else {
+                    nam_plug::clap::plugin::shared::CONFIG_ID_STEREO
+                };
                 let (mut plugin_instance, stopped_processor) =
-                    create_and_activate_bench_plugin(48000.0, block_size, &params, None);
+                    create_and_activate_bench_plugin_with_config(
+                        48000.0,
+                        block_size,
+                        &params,
+                        None,
+                        Some(port_cfg),
+                    );
                 let mut started_processor = stopped_processor
                     .start_processing()
                     .expect("Failed to start processing");
@@ -1317,97 +1358,41 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
     {
         let mut group = c.benchmark_group("CLAP_WorstCase_Crossfade");
         for &block_size in &[64usize, 128] {
-            // Start unbypassed, then flip to bypass at offset 0: the measured
-            // block runs the 64-sample crossfade ramp (wet+dry blend).
+            // Start unbypassed, then toggle bypass between 0 and 1 on each
+            // measured block: every block runs the 64-sample crossfade ramp
+            // (wet+dry blend) without settling into steady-state bypass or wet.
             let params = ProcessingParams::default();
             let (mut plugin_instance, stopped_processor) =
                 create_and_activate_bench_plugin(48000.0, block_size, &params, None);
+            let shared_ptr = nam_plug::clap::test_util::extract_shared(&mut plugin_instance);
             let mut started_processor = stopped_processor
                 .start_processing()
                 .expect("Failed to start processing");
             let sine = generate_sine_440hz(block_size);
             let mut in_l = sine.clone();
-            let mut in_r = sine.clone();
+            let mut in_r = sine;
             let mut out_l = vec![0.0f32; block_size];
             let mut out_r = vec![0.0f32; block_size];
             let mut input_ports = AudioPorts::with_capacity(2, 1);
             let mut output_ports = AudioPorts::with_capacity(2, 1);
             let mut output_events_buffer = EventBuffer::with_capacity(10);
-            let mut input_events_buffer = EventBuffer::new();
-            let ev = ParamValueEvent::new(0, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 1.0);
-            input_events_buffer.push(&ev);
-            group.throughput(Throughput::Elements(block_size as u64));
-            group.bench_with_input(
-                BenchmarkId::from_parameter(format!("{block_size}_samp_xfade")),
-                &block_size,
-                |b, _| {
-                    // Each iteration re-triggers the crossfade: reset the
-                    // bypass target off-RT by alternating the event payload.
-                    // The steady toggle keeps the ramp active on most iterations
-                    // without changing semantics (still just measuring).
-                    run_process_bench(
-                        b,
-                        &mut started_processor,
-                        &mut in_l,
-                        &mut in_r,
-                        &mut out_l,
-                        &mut out_r,
-                        &mut input_ports,
-                        &mut output_ports,
-                        &mut output_events_buffer,
-                        &input_events_buffer,
-                        block_size,
-                    );
-                },
-            );
-            let stopped_processor = started_processor.stop_processing();
-            plugin_instance.deactivate(stopped_processor);
-        }
-        group.finish();
-    }
 
-    // ── (3) Gate closed with IR loaded (ring-out drain) ──
-    {
-        let mut group = c.benchmark_group("CLAP_WorstCase_RingOut");
-        for &block_size in &[64usize, 128] {
-            let mut params = ProcessingParams::default();
-            // Gate fully closed: threshold at max so silence closes the gate
-            // and the measured block runs the CabSim tail-drain path.
-            params.gate_threshold_db = -40.0;
-            let ir_path = common::create_bench_ir_wav(48000);
-            assert!(
-                ir_path.exists(),
-                "Bench IR WAV missing at {}",
-                ir_path.display()
-            );
-            params.ir_path = Some(ir_path.clone());
-            params.ir_hash = asset_hash(&ir_path);
-            let (mut plugin_instance, stopped_processor) =
-                create_and_activate_bench_plugin(48000.0, block_size, &params, None);
-            let mut started_processor = stopped_processor
-                .start_processing()
-                .expect("Failed to start processing");
-            // Impulse to open the gate + arm the tail, then silence: the timed
-            // iterations drain the ring-out under a closed gate.
-            let mut in_l = vec![0.0f32; block_size];
-            let mut in_r = vec![0.0f32; block_size];
-            in_l[0] = 1.0;
-            in_r[0] = 1.0;
-            let mut out_l = vec![0.0f32; block_size];
-            let mut out_r = vec![0.0f32; block_size];
-            let mut input_ports = AudioPorts::with_capacity(2, 1);
-            let mut output_ports = AudioPorts::with_capacity(2, 1);
-            let mut output_events_buffer = EventBuffer::with_capacity(10);
-            let input_events_buffer = EventBuffer::new();
-            // Prime: one impulse (opens gate, rearms tail) + one silence.
-            for prime in [true, false] {
-                if prime {
-                    in_l[0] = 1.0;
-                } else {
-                    in_l[0] = 0.0;
-                    in_r[0] = 0.0;
-                }
-                let input_events = InputEvents::from_buffer(&input_events_buffer);
+            // Pre-built event buffers: toggle bypass target between 1.0 (on) and 0.0 (off)
+            let mut events_bypass_on = EventBuffer::with_capacity(2);
+            let ev_on = ParamValueEvent::new(0, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 1.0);
+            events_bypass_on.push(&ev_on);
+            let mut events_bypass_off = EventBuffer::with_capacity(2);
+            let ev_off = ParamValueEvent::new(0, ClapId::new(PARAM_BYPASS), Pckn::match_all(), 0.0);
+            events_bypass_off.push(&ev_off);
+
+            // Validation outside the timer: the bypass target must actually
+            // alternate and each block must be processed/rewritten (NaN sentinel
+            // replaced by finite samples). `rt_gate` therefore runs every block.
+            for (events, expected_bypass) in [(&events_bypass_on, 1u32), (&events_bypass_off, 0u32)]
+            {
+                out_l.fill(f32::NAN);
+                out_r.fill(f32::NAN);
+                let input_events = InputEvents::from_buffer(events);
                 let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
                 let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
                 let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
@@ -1429,28 +1414,96 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
                     None,
                     None,
                 );
+                assert!(
+                    out_l.iter().all(|s| s.is_finite()) && out_r.iter().all(|s| s.is_finite()),
+                    "crossfade validation block was not fully rewritten with finite samples"
+                );
+                let shared = unsafe { &*shared_ptr };
+                let actual = shared
+                    .ui_to_rt
+                    .param_bypass
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                assert_eq!(
+                    actual, expected_bypass,
+                    "bypass target did not alternate on the validation block"
+                );
             }
-            // Timed phase runs on silence (gate closed → tail drain).
-            in_l.fill(0.0);
-            in_r.fill(0.0);
+
             group.throughput(Throughput::Elements(block_size as u64));
             group.bench_with_input(
-                BenchmarkId::from_parameter(format!("{block_size}_samp_ringout")),
+                BenchmarkId::from_parameter(format!("{block_size}_samp_xfade")),
                 &block_size,
                 |b, _| {
-                    run_process_bench(
-                        b,
-                        &mut started_processor,
-                        &mut in_l,
-                        &mut in_r,
-                        &mut out_l,
-                        &mut out_r,
-                        &mut input_ports,
-                        &mut output_ports,
-                        &mut output_events_buffer,
-                        &input_events_buffer,
-                        block_size,
-                    );
+                    // Pre-warm: one block with bypass OFF outside the measurement timer.
+                    {
+                        let input_events = InputEvents::from_buffer(&events_bypass_off);
+                        let mut output_events =
+                            OutputEvents::from_buffer(&mut output_events_buffer);
+                        let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
+                        let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+                            latency: 0,
+                            channels: AudioPortBufferType::f32_input_only(
+                                input_channels.iter_mut().map(InputChannel::constant),
+                            ),
+                        }]);
+                        let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
+                        let mut output_audio =
+                            output_ports.with_output_buffers([AudioPortBuffer {
+                                latency: 0,
+                                channels: AudioPortBufferType::f32_output_only(
+                                    output_channels.into_iter(),
+                                ),
+                            }]);
+                        let _ = started_processor.process(
+                            &input_audio,
+                            &mut output_audio,
+                            &input_events,
+                            &mut output_events,
+                            None,
+                            None,
+                        );
+                    }
+
+                    // Measured loop: toggles bypass on every block, keeping the
+                    // 64-sample equal-power crossfade ramp continuously active.
+                    let mut bypass_state = false;
+                    b.iter(|| {
+                        bypass_state = !bypass_state;
+                        let active_events = if bypass_state {
+                            &events_bypass_on
+                        } else {
+                            &events_bypass_off
+                        };
+                        let input_events = InputEvents::from_buffer(active_events);
+                        let mut output_events =
+                            OutputEvents::from_buffer(&mut output_events_buffer);
+                        let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
+                        let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+                            latency: 0,
+                            channels: AudioPortBufferType::f32_input_only(
+                                input_channels.iter_mut().map(InputChannel::constant),
+                            ),
+                        }]);
+                        let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
+                        let mut output_audio =
+                            output_ports.with_output_buffers([AudioPortBuffer {
+                                latency: 0,
+                                channels: AudioPortBufferType::f32_output_only(
+                                    output_channels.into_iter(),
+                                ),
+                            }]);
+                        let status = started_processor
+                            .process(
+                                &input_audio,
+                                &mut output_audio,
+                                &input_events,
+                                &mut output_events,
+                                None,
+                                None,
+                            )
+                            .expect("Process failed");
+                        std::hint::black_box(status);
+                    });
                 },
             );
             let stopped_processor = started_processor.stop_processing();
@@ -1459,61 +1512,184 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
         group.finish();
     }
 
-    // ── (4) `process` alternating between 2 host-side threads ──
-    //
-    // Harness, not a fix: each iteration hops to the other thread, so the
-    // measured cost includes TLS re-priming / MXCSR re-application on the new
-    // thread (the thread migration cost).
-    // Implemented by moving the whole `process` call to a worker thread and
-    // alternating between two workers; the Criterion thread only blocks on the
-    // result. The two workers are pre-spawned (spawn cost outside the timer).
+    // ── (3) Gate closed with IR loaded (impulse + ring-out drain batch) ──
     {
-        let mut group = c.benchmark_group("CLAP_WorstCase_ThreadHop");
+        let mut group = c.benchmark_group("CLAP_WorstCase_RingOut");
         for &block_size in &[64usize, 128] {
-            group.throughput(Throughput::Elements(block_size as u64));
-            group.bench_with_input(
-                BenchmarkId::from_parameter(format!("{block_size}_samp_2threads")),
-                &block_size,
-                |b, &block_size| {
-                    use std::sync::mpsc::{Receiver, Sender, channel};
-                    // Per-worker request: fresh input snapshot; reply: output
-                    // snapshot + status. Channels pre-built outside the timer.
-                    struct HopReq {
-                        in_l: Vec<f32>,
-                        in_r: Vec<f32>,
+            let mut params = ProcessingParams::default();
+            // Gate fully closed: threshold at max so silence closes the gate
+            // and the drain blocks run the CabSim tail-drain path.
+            params.gate_threshold_db = -40.0;
+            let ir_path = common::create_bench_ir_wav(48000);
+            assert!(
+                ir_path.exists(),
+                "Bench IR WAV missing at {}",
+                ir_path.display()
+            );
+            params.ir_path = Some(ir_path.clone());
+            params.ir_hash = asset_hash(&ir_path);
+            let (mut plugin_instance, stopped_processor) =
+                create_and_activate_bench_plugin(48000.0, block_size, &params, None);
+            let mut started_processor = stopped_processor
+                .start_processing()
+                .expect("Failed to start processing");
+
+            // IR length is 512 samples. A full batch cycle consists of 1 impulse
+            // block (rearming the convolution tail and opening the gate) followed by
+            // `drain_blocks` silence blocks (gate closed, draining the ring-out tail).
+            let drain_blocks = (512 / block_size).max(1);
+            let total_batch_samples = (1 + drain_blocks) * block_size;
+
+            let mut impulse_l = vec![0.0f32; block_size];
+            let mut impulse_r = vec![0.0f32; block_size];
+            impulse_l[0] = 1.0;
+            impulse_r[0] = 1.0;
+            let mut silent_l = vec![0.0f32; block_size];
+            let mut silent_r = vec![0.0f32; block_size];
+
+            let mut out_l = vec![0.0f32; block_size];
+            let mut out_r = vec![0.0f32; block_size];
+            let mut input_ports = AudioPorts::with_capacity(2, 1);
+            let mut output_ports = AudioPorts::with_capacity(2, 1);
+            let mut output_events_buffer = EventBuffer::with_capacity(10);
+            let input_events_buffer = EventBuffer::new();
+
+            // Pre-flight check: run 1 full impulse + drain cycle and verify that
+            // every block is rewritten with finite, effective tail energy.
+            //
+            // D10: `stalls` counts blocks that produced no effective tail energy
+            // while the dense IR tail should still be ringing. It is an explicit
+            // STALL count (a lost/blocks-stalled drain), never a raw cycle count.
+            let mut drain_energy = 0.0f32;
+            let mut stalls: u32 = 0;
+            {
+                let input_events = InputEvents::from_buffer(&input_events_buffer);
+                let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
+                // NaN sentinel proves the process path rewrites the whole block.
+                out_l.fill(f32::NAN);
+                out_r.fill(f32::NAN);
+                let mut input_channels = [impulse_l.as_mut_slice(), impulse_r.as_mut_slice()];
+                let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_input_only(
+                        input_channels.iter_mut().map(InputChannel::constant),
+                    ),
+                }]);
+                let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
+                let mut output_audio = output_ports.with_output_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+                }]);
+                let _ = started_processor.process(
+                    &input_audio,
+                    &mut output_audio,
+                    &input_events,
+                    &mut output_events,
+                    None,
+                    None,
+                );
+                assert!(
+                    out_l.iter().all(|s| s.is_finite()) && out_r.iter().all(|s| s.is_finite()),
+                    "scenario {block_size}_samp_ringout preflight out was not fully rewritten with finite samples"
+                );
+                let energy: f32 = out_l.iter().map(|s| s * s).sum();
+                assert!(
+                    energy > 1e-9,
+                    "scenario {block_size}_samp_ringout preflight impulse did not produce audio"
+                );
+
+                for _ in 0..drain_blocks {
+                    let input_events = InputEvents::from_buffer(&input_events_buffer);
+                    let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
+                    out_l.fill(f32::NAN);
+                    out_r.fill(f32::NAN);
+                    let mut input_channels = [silent_l.as_mut_slice(), silent_r.as_mut_slice()];
+                    let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+                        latency: 0,
+                        channels: AudioPortBufferType::f32_input_only(
+                            input_channels.iter_mut().map(InputChannel::constant),
+                        ),
+                    }]);
+                    let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
+                    let mut output_audio = output_ports.with_output_buffers([AudioPortBuffer {
+                        latency: 0,
+                        channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+                    }]);
+                    let _ = started_processor.process(
+                        &input_audio,
+                        &mut output_audio,
+                        &input_events,
+                        &mut output_events,
+                        None,
+                        None,
+                    );
+                    assert!(
+                        out_l.iter().all(|s| s.is_finite()) && out_r.iter().all(|s| s.is_finite()),
+                        "scenario {block_size}_samp_ringout preflight drain was not fully rewritten with finite samples"
+                    );
+                    let block_energy: f32 =
+                        out_l.iter().chain(out_r.iter()).map(|s| s * s).sum::<f32>();
+                    if block_energy <= 1e-9 {
+                        stalls += 1;
                     }
-                    let sine = generate_sine_440hz(block_size);
-                    let params = ProcessingParams::default();
-                    // Two independent plugin instances (one per worker thread):
-                    // `StartedPluginAudioProcessor` is `!Sync`, so sharing one
-                    // across threads would be unsound; two instances model the
-                    // host migrating work between threads of a pool while
-                    // keeping the measured path (full `process`) identical.
-                    // A `fn` item (not a capturing closure) builds each worker:
-                    // no borrow of `block_size`/`params` escapes via `spawn`.
-                    fn hop_worker(
-                        block_size: usize,
-                        params: &ProcessingParams,
-                        rx: Receiver<Option<HopReq>>,
-                        tx: Sender<(Vec<f32>, Vec<f32>)>,
-                    ) {
-                        let (mut plugin_instance, stopped_processor) =
-                            create_and_activate_bench_plugin(48000.0, block_size, params, None);
-                        let mut started_processor = stopped_processor
-                            .start_processing()
-                            .expect("Failed to start processing");
-                        let mut out_l = vec![0.0f32; block_size];
-                        let mut out_r = vec![0.0f32; block_size];
-                        let mut input_ports = AudioPorts::with_capacity(2, 1);
-                        let mut output_ports = AudioPorts::with_capacity(2, 1);
-                        let mut output_events_buffer = EventBuffer::with_capacity(10);
-                        let empty_events = EventBuffer::new();
-                        while let Ok(Some(mut req)) = rx.recv() {
-                            let input_events = InputEvents::from_buffer(&empty_events);
+                    drain_energy += block_energy;
+                }
+            }
+            assert!(
+                drain_energy > 1e-9,
+                "scenario {block_size}_samp_ringout drain produced no effective tail energy"
+            );
+            assert_eq!(
+                stalls, 0,
+                "scenario {block_size}_samp_ringout counted {stalls} stalled drain block(s); lost_cycles/stalls must be zero for an observable ring-out"
+            );
+            eprintln!("ringout[{block_size}]: drain_energy={drain_energy:.6e} stalls={stalls}");
+
+            group.throughput(Throughput::Elements(total_batch_samples as u64));
+            group.bench_with_input(
+                BenchmarkId::from_parameter(format!("{block_size}_samp_ringout")),
+                &block_size,
+                |b, _| {
+                    b.iter(|| {
+                        // 1. Impulse block (gate opens, IR tail arms)
+                        let input_events = InputEvents::from_buffer(&input_events_buffer);
+                        let mut output_events =
+                            OutputEvents::from_buffer(&mut output_events_buffer);
+                        let mut input_channels =
+                            [impulse_l.as_mut_slice(), impulse_r.as_mut_slice()];
+                        let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+                            latency: 0,
+                            channels: AudioPortBufferType::f32_input_only(
+                                input_channels.iter_mut().map(InputChannel::constant),
+                            ),
+                        }]);
+                        let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
+                        let mut output_audio =
+                            output_ports.with_output_buffers([AudioPortBuffer {
+                                latency: 0,
+                                channels: AudioPortBufferType::f32_output_only(
+                                    output_channels.into_iter(),
+                                ),
+                            }]);
+                        let status = started_processor
+                            .process(
+                                &input_audio,
+                                &mut output_audio,
+                                &input_events,
+                                &mut output_events,
+                                None,
+                                None,
+                            )
+                            .expect("Process failed");
+                        std::hint::black_box(status);
+
+                        // 2. Silence blocks (gate closes, CabSim ring-out drains to completion)
+                        for _ in 0..drain_blocks {
+                            let input_events = InputEvents::from_buffer(&input_events_buffer);
                             let mut output_events =
                                 OutputEvents::from_buffer(&mut output_events_buffer);
                             let mut input_channels =
-                                [req.in_l.as_mut_slice(), req.in_r.as_mut_slice()];
+                                [silent_l.as_mut_slice(), silent_r.as_mut_slice()];
                             let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
                                 latency: 0,
                                 channels: AudioPortBufferType::f32_input_only(
@@ -1539,54 +1715,134 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
                                 )
                                 .expect("Process failed");
                             std::hint::black_box(status);
-                            tx.send((out_l.clone(), out_r.clone()))
-                                .expect("Hop reply failed");
+                        }
+                    });
+                },
+            );
+
+            // Post-bench check
+            assert!(
+                out_l.iter().all(|s| s.is_finite()) && out_r.iter().all(|s| s.is_finite()),
+                "scenario {block_size}_samp_ringout post-bench output contains non-finite samples"
+            );
+
+            let stopped_processor = started_processor.stop_processing();
+            plugin_instance.deactivate(stopped_processor);
+        }
+        group.finish();
+    }
+
+    // ── (4) `process` alternating between 2 host worker threads (round-trip IPC dispatch) ──
+    //
+    // Measures host-side thread dispatch and round-trip IPC synchronization overhead
+    // between pre-spawned worker threads, with zero heap allocations inside the timed loop.
+    {
+        let mut group = c.benchmark_group("CLAP_WorstCase_RoundTripIPC");
+        for &block_size in &[64usize, 128] {
+            group.throughput(Throughput::Elements(block_size as u64));
+            group.bench_with_input(
+                BenchmarkId::from_parameter(format!("{block_size}_samp_roundtrip_ipc")),
+                &block_size,
+                |b, &block_size| {
+                    use std::sync::mpsc::{Receiver, Sender, channel};
+
+                    // Zero-sized token request: avoids heap allocations on the hot path.
+                    struct HopReq;
+
+                    let sine = generate_sine_440hz(block_size);
+                    let params = ProcessingParams::default();
+
+                    fn hop_worker(
+                        block_size: usize,
+                        params: &ProcessingParams,
+                        sine: Vec<f32>,
+                        rx: Receiver<Option<HopReq>>,
+                        tx: Sender<clack_plugin::process::ProcessStatus>,
+                    ) {
+                        let (mut plugin_instance, stopped_processor) =
+                            create_and_activate_bench_plugin(48000.0, block_size, params, None);
+                        let mut started_processor = stopped_processor
+                            .start_processing()
+                            .expect("Failed to start processing");
+                        let mut in_l = sine.clone();
+                        let mut in_r = sine;
+                        let mut out_l = vec![0.0f32; block_size];
+                        let mut out_r = vec![0.0f32; block_size];
+                        let mut input_ports = AudioPorts::with_capacity(2, 1);
+                        let mut output_ports = AudioPorts::with_capacity(2, 1);
+                        let mut output_events_buffer = EventBuffer::with_capacity(10);
+                        let empty_events = EventBuffer::new();
+
+                        while let Ok(Some(HopReq)) = rx.recv() {
+                            let input_events = InputEvents::from_buffer(&empty_events);
+                            let mut output_events =
+                                OutputEvents::from_buffer(&mut output_events_buffer);
+                            let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
+                            let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+                                latency: 0,
+                                channels: AudioPortBufferType::f32_input_only(
+                                    input_channels.iter_mut().map(InputChannel::constant),
+                                ),
+                            }]);
+                            let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
+                            let mut output_audio =
+                                output_ports.with_output_buffers([AudioPortBuffer {
+                                    latency: 0,
+                                    channels: AudioPortBufferType::f32_output_only(
+                                        output_channels.into_iter(),
+                                    ),
+                                }]);
+                            let status = started_processor
+                                .process(
+                                    &input_audio,
+                                    &mut output_audio,
+                                    &input_events,
+                                    &mut output_events,
+                                    None,
+                                    None,
+                                )
+                                .expect("Process failed");
+                            tx.send(status).expect("Hop reply failed");
                         }
                         let stopped_processor = started_processor.stop_processing();
                         plugin_instance.deactivate(stopped_processor);
                     }
+
                     let (req_tx0, req_rx0) = channel::<Option<HopReq>>();
-                    let (rep_tx0, rep_rx0) = channel::<(Vec<f32>, Vec<f32>)>();
+                    let (rep_tx0, rep_rx0) = channel::<clack_plugin::process::ProcessStatus>();
                     let (req_tx1, req_rx1) = channel::<Option<HopReq>>();
-                    let (rep_tx1, rep_rx1) = channel::<(Vec<f32>, Vec<f32>)>();
-                    // `params` is `Copy`-free: clone the owned fields the
-                    // workers need (none — default params suffice), so each
-                    // `spawn` owns its inputs without borrowing this scope.
+                    let (rep_tx1, rep_rx1) = channel::<clack_plugin::process::ProcessStatus>();
+
+                    let s0 = sine.clone();
                     let h0 = std::thread::spawn(move || {
-                        hop_worker(block_size, &params, req_rx0, rep_tx0);
+                        hop_worker(block_size, &params, s0, req_rx0, rep_tx0);
                     });
-                    // Rebuild default params for the second worker (same value,
-                    // independent owner — no shared borrow across spawns).
                     let params1 = ProcessingParams::default();
+                    let s1 = sine;
                     let h1 = std::thread::spawn(move || {
-                        hop_worker(block_size, &params1, req_rx1, rep_tx1);
+                        hop_worker(block_size, &params1, s1, req_rx1, rep_tx1);
                     });
+
                     // Warm both workers once outside the timer.
                     for (tx, rx) in [(&req_tx0, &rep_rx0), (&req_tx1, &rep_rx1)] {
-                        tx.send(Some(HopReq {
-                            in_l: sine.clone(),
-                            in_r: sine.clone(),
-                        }))
-                        .expect("Hop warmup failed");
+                        tx.send(Some(HopReq)).expect("Hop warmup failed");
                         let _ = rx.recv().expect("Hop warmup reply failed");
                     }
+
                     let mut use_first = false;
                     b.iter(|| {
                         use_first = !use_first;
-                        let req = HopReq {
-                            in_l: sine.clone(),
-                            in_r: sine.clone(),
-                        };
                         if use_first {
-                            req_tx0.send(Some(req)).expect("Hop request failed");
-                            let (o_l, o_r) = rep_rx0.recv().expect("Hop reply failed");
-                            std::hint::black_box((o_l, o_r));
+                            req_tx0.send(Some(HopReq)).expect("Hop request failed");
+                            let status = rep_rx0.recv().expect("Hop reply failed");
+                            std::hint::black_box(status);
                         } else {
-                            req_tx1.send(Some(req)).expect("Hop request failed");
-                            let (o_l, o_r) = rep_rx1.recv().expect("Hop reply failed");
-                            std::hint::black_box((o_l, o_r));
+                            req_tx1.send(Some(HopReq)).expect("Hop request failed");
+                            let status = rep_rx1.recv().expect("Hop reply failed");
+                            std::hint::black_box(status);
                         }
                     });
+
                     // Tear down workers outside the timer.
                     let _ = req_tx0.send(None);
                     let _ = req_tx1.send(None);

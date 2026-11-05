@@ -107,6 +107,11 @@ impl<'a> NamClapProcessor<'a> {
                 model.prewarm_reset();
                 self.prewarm_pending = true;
             }
+            if let Some(model) = self.model_r.as_mut() {
+                model.prewarm_reset();
+                self.prewarm_pending = true;
+            }
+            self.prewarm_zero_budget_count = 0;
             // The dry delay line must not replay pre-fault history (which would
             // leak pre-containment audio through the bypass/crossfade path), and
             // the parameter ramps must not originate in pre-fault state.
@@ -133,9 +138,9 @@ impl<'a> NamClapProcessor<'a> {
             return self.process_dry_contained_block(audio, input_events, start_nanos);
         }
 
-        // Track pending restart factor for latency-policy enforcement.
-        // Decode via `PendingRestartOs` so a pending
-        // transition *to Off* is observable (raw 0 == "no pending").
+        // F-PLUG-06 / T-07.3: Track pending restart factor for latency-policy enforcement.
+        // The orchestrator is the single owner of request_restart() at block boundaries,
+        // coalescing multiple changes within the same block into a single request.
         let pending_before = PendingRestartOs::load(
             &self.shared.cold.pending_restart_os_factor,
             Ordering::Relaxed,
@@ -181,6 +186,12 @@ impl<'a> NamClapProcessor<'a> {
                         .active_channel_count
                         .store(channel_count, Ordering::Relaxed);
                 }
+                let is_stereo_config = self
+                    .shared
+                    .cold
+                    .selected_port_config
+                    .load(Ordering::Relaxed)
+                    == crate::clap::plugin::CONFIG_ID_STEREO;
                 #[cfg(feature = "dual-mono")]
                 {
                     self.process_mono = !has_r_input;
@@ -197,6 +208,12 @@ impl<'a> NamClapProcessor<'a> {
                     .load(Ordering::Acquire)
                 {
                     self.process_mono = true;
+                }
+                if !self.process_mono {
+                    self.cached_gate_params.mono_epsilon =
+                        if is_stereo_config { -1.0 } else { 1e-4 };
+                } else {
+                    self.cached_gate_params.mono_epsilon = 1e-4;
                 }
 
                 if self.gate_dirty {
@@ -240,6 +257,11 @@ impl<'a> NamClapProcessor<'a> {
                     let slice_len = (n_samples_raw - slice_start).min(self.max_frames_count);
                     let is_last_slice = slice_start + slice_len >= n_samples_raw;
 
+                    let port_input_active =
+                        self.shared.cold.port_input_active.load(Ordering::Relaxed);
+                    let port_output_active =
+                        self.shared.cold.port_output_active.load(Ordering::Relaxed);
+
                     channels::copy_channel_input(
                         pair_l.as_ref(),
                         &mut self.buf_host_l,
@@ -254,10 +276,18 @@ impl<'a> NamClapProcessor<'a> {
                             slice_len,
                         );
                     }
-                    let out_l =
-                        channels::get_channel_output(pair_l.as_mut(), slice_start, slice_len);
-                    let out_r =
-                        channels::get_channel_output(pair_r.as_mut(), slice_start, slice_len);
+                    if !port_input_active {
+                        self.buf_host_l[..slice_len].fill(0.0);
+                        self.buf_host_r[..slice_len].fill(0.0);
+                    }
+                    let (out_l, out_r) = if port_output_active {
+                        (
+                            channels::get_channel_output(pair_l.as_mut(), slice_start, slice_len),
+                            channels::get_channel_output(pair_r.as_mut(), slice_start, slice_len),
+                        )
+                    } else {
+                        (None, None)
+                    };
 
                     self.process_wet_sub_blocks(
                         slice_start,
@@ -300,6 +330,9 @@ impl<'a> NamClapProcessor<'a> {
                 self.rt_status.last_n_samples.store(n, Ordering::Relaxed);
             }
 
+            let port_input_active = self.shared.cold.port_input_active.load(Ordering::Relaxed);
+            let port_output_active = self.shared.cold.port_output_active.load(Ordering::Relaxed);
+
             let Some((out_l, out_r)) = channels::extract_channels(
                 &mut port_pair,
                 &mut self.buf_host_l,
@@ -312,11 +345,12 @@ impl<'a> NamClapProcessor<'a> {
                 continue;
             };
 
-            // Non-finite containment (F-UX-04): non-finite containment is handled *before* this
-            // loop by the two-phase window at the top of the function, so a
-            // poisoning block never reaches the wet pipeline and the flag is
-            // consumed exactly once per occurrence.
-
+            let is_stereo_config = self
+                .shared
+                .cold
+                .selected_port_config
+                .load(Ordering::Relaxed)
+                == crate::clap::plugin::CONFIG_ID_STEREO;
             if self
                 .shared
                 .ui_to_rt
@@ -325,6 +359,21 @@ impl<'a> NamClapProcessor<'a> {
             {
                 self.process_mono = true;
             }
+            if !self.process_mono {
+                self.cached_gate_params.mono_epsilon = if is_stereo_config { -1.0 } else { 1e-4 };
+            } else {
+                self.cached_gate_params.mono_epsilon = 1e-4;
+            }
+
+            if !port_input_active {
+                self.buf_host_l[..n_samples].fill(0.0);
+                self.buf_host_r[..n_samples].fill(0.0);
+            }
+            let (out_l, out_r) = if port_output_active {
+                (out_l, out_r)
+            } else {
+                (None, None)
+            };
 
             if self.gate_dirty {
                 let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
@@ -441,10 +490,8 @@ impl<'a> NamClapProcessor<'a> {
             }
         }
 
-        // If an oversampling change was detected during active
-        // processing, request host restart so latency can be updated
-        // legally during the next activate(). A pending *Off* target is
-        // representable and also triggers the restart.
+        // F-PLUG-06 / T-07.3: Request host restart once at block boundary if oversampling
+        // was changed during active processing.
         let pending_after = PendingRestartOs::load(
             &self.shared.cold.pending_restart_os_factor,
             Ordering::Relaxed,
@@ -643,6 +690,20 @@ impl<'a> NamClapProcessor<'a> {
             if sub_n > 0 {
                 let bypass = self.params.bypass;
                 let process_mono = self.process_mono;
+                let is_stereo_config = self
+                    .shared
+                    .cold
+                    .selected_port_config
+                    .load(Ordering::Relaxed)
+                    == crate::clap::plugin::CONFIG_ID_STEREO;
+                let mut dummy_none_model: Option<Box<neural_amp_modeler_rs::models::StaticModel>> =
+                    None;
+                let active_model_r: &mut Option<Box<neural_amp_modeler_rs::models::StaticModel>> =
+                    if is_stereo_config {
+                        &mut self.model_r
+                    } else {
+                        &mut dummy_none_model
+                    };
 
                 let (n_out, gate_state, sub_peak_l, sub_peak_r) = {
                     let mut ctx = DspPipelineContext {
@@ -650,7 +711,7 @@ impl<'a> NamClapProcessor<'a> {
                         os_l: &mut self.os_l,
                         os_r: &mut self.os_r,
                         active_model_l: &mut self.model_l,
-                        active_model_r: &mut None,
+                        active_model_r,
                         input_gain_mult: self.model_input_mult_adj,
                         output_gain_mult: model_output_mult_adj,
                         gate_params: &self.cached_gate_params,
@@ -662,8 +723,8 @@ impl<'a> NamClapProcessor<'a> {
                         rt_status: &self.rt_status,
                         adaptive: &mut self.adaptive_compute,
                         bridge_writer: None,
-                        conv: self.cabsim_adapter.as_deref_mut(),
-                        conv_pair: None,
+                        conv: None,
+                        conv_pair: self.cabsim_pair.as_deref_mut(),
                     };
 
                     let mut scratch = audio_loop::SubBlockScratch {
@@ -925,14 +986,10 @@ impl<'a> NamClapProcessor<'a> {
         input_events: &InputEvents,
         start_nanos: u64,
     ) -> Result<ProcessStatus, PluginError> {
-        // Track pending restart factor for latency-policy enforcement (the
-        // scheduled-event application below can change the oversample
-        // target mid-window, exactly like the wet pipeline).
         let pending_before = PendingRestartOs::load(
             &self.shared.cold.pending_restart_os_factor,
             Ordering::Relaxed,
         );
-
         self.schedule_input_events(input_events);
 
         // Apply every scheduled event in delivery order (the wet path's
@@ -1027,6 +1084,11 @@ impl<'a> NamClapProcessor<'a> {
                 let mut slice_start = 0usize;
                 while slice_start < n_samples_raw {
                     let slice_len = (n_samples_raw - slice_start).min(self.max_frames_count);
+                    let port_input_active =
+                        self.shared.cold.port_input_active.load(Ordering::Relaxed);
+                    let port_output_active =
+                        self.shared.cold.port_output_active.load(Ordering::Relaxed);
+
                     channels::copy_channel_input(
                         pair_l.as_ref(),
                         &mut self.buf_host_l,
@@ -1041,10 +1103,20 @@ impl<'a> NamClapProcessor<'a> {
                             slice_len,
                         );
                     }
-                    let mut out_l =
-                        channels::get_channel_output(pair_l.as_mut(), slice_start, slice_len);
-                    let mut out_r =
-                        channels::get_channel_output(pair_r.as_mut(), slice_start, slice_len);
+                    if !port_input_active {
+                        self.buf_host_l[..slice_len].fill(0.0);
+                        self.buf_host_r[..slice_len].fill(0.0);
+                    }
+                    let mut out_l = if port_output_active {
+                        channels::get_channel_output(pair_l.as_mut(), slice_start, slice_len)
+                    } else {
+                        None
+                    };
+                    let mut out_r = if port_output_active {
+                        channels::get_channel_output(pair_r.as_mut(), slice_start, slice_len)
+                    } else {
+                        None
+                    };
 
                     self.dry_delay.process_block(
                         &self.buf_host_l[..slice_len],
@@ -1078,6 +1150,9 @@ impl<'a> NamClapProcessor<'a> {
                 self.rt_status.last_n_samples.store(n, Ordering::Relaxed);
             }
 
+            let port_input_active = self.shared.cold.port_input_active.load(Ordering::Relaxed);
+            let port_output_active = self.shared.cold.port_output_active.load(Ordering::Relaxed);
+
             let Some((out_l, out_r)) = channels::extract_channels(
                 &mut port_pair,
                 &mut self.buf_host_l,
@@ -1089,7 +1164,15 @@ impl<'a> NamClapProcessor<'a> {
             else {
                 continue;
             };
-            let (mut out_l, mut out_r) = (out_l, out_r);
+            if !port_input_active {
+                self.buf_host_l[..n_samples].fill(0.0);
+                self.buf_host_r[..n_samples].fill(0.0);
+            }
+            let (mut out_l, mut out_r) = if port_output_active {
+                (out_l, out_r)
+            } else {
+                (None, None)
+            };
 
             // Dry leg: feed the ring with the staged host input and publish
             // the delayed dry (single fused sanitize/peak pass). The ring
@@ -1124,8 +1207,6 @@ impl<'a> NamClapProcessor<'a> {
         gate_flags::report_gate_flags(&self.rt_status, GateState::Open);
         peaks::store_peaks(self.shared, peak_l, peak_r);
 
-        // Oversample target change applied mid-window requests the host
-        // restart exactly like the wet pipeline does.
         let pending_after = PendingRestartOs::load(
             &self.shared.cold.pending_restart_os_factor,
             Ordering::Relaxed,

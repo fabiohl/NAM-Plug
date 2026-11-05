@@ -22,8 +22,8 @@ env:
   NAM_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
 
 # Lints and quick QA run as separate jobs so a lint failure cannot suppress functional evidence.
-# The sibling engine (`../NeuralAmpModeler-rs`, required by the [patch.crates-io] path) is
-# checked out from GitHub (main) and symlinked into the runner workspace for CI builds.
+# The sibling engine (`../NeuralAmpModeler-rs`) is checked out from GitHub (main) as an auxiliary
+# checkout for parity oracles, reference fixtures and local testing fallbacks.
 jobs:
   # x86_64 is the reference platform.
   x86_64-linux-lints:
@@ -42,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
-            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libfontconfig1-dev binutils appstream
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
       # Runner images can ship an older preinstalled stable; the crate needs rust-version 1.99.
       - name: Update Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
@@ -54,12 +54,41 @@ jobs:
           mkdir -p target/logs
           sha=$(git rev-parse HEAD)
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if engine_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
-            engine="sha=$engine_sha"
-          else
-            engine="GAP engine_sibling_absent"
+          eng_type="GAP:missing_lockfile"
+          eng_ver="unknown"
+          eng_chk="none"
+          if [ -f Cargo.lock ]; then
+            read -r eng_type eng_ver eng_chk < <(awk '
+              /^\[\[package\]\]/ { in_pkg=0 }
+              /^name = "NeuralAmpModeler-rs"/ { in_pkg=1 }
+              in_pkg && /^version = / { gsub(/"/, "", $3); ver=$3 }
+              in_pkg && /^source = / { gsub(/"/, "", $3); src=$3 }
+              in_pkg && /^checksum = / { gsub(/"/, "", $3); chk=$3 }
+              END {
+                if (!ver) {
+                  print "GAP:engine_not_found unknown none"
+                  exit 0
+                }
+                if (src ~ /^registry\+/) {
+                  type="registry"
+                } else if (src ~ /^git\+/) {
+                  type="git"
+                } else if (src) {
+                  type=src
+                } else {
+                  type="path"
+                }
+                printf "%s %s %s\n", type, ver, (chk ? chk : "none")
+              }
+            ' Cargo.lock)
           fi
-          printf 'PHASE: provenance sha=%s package_version=%s engine=%s\n' "$sha" "$version" "$engine" | tee target/logs/ci-provenance.log
+          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+            aux_engine="sha=$aux_sha"
+          else
+            aux_engine="GAP:sibling_absent"
+          fi
+          printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s\n' \
+            "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" | tee target/logs/ci-provenance.log
       - name: Lints (fmt, check, clippy, doc, policies, packaging)
         run: ./utils/lints.sh
       - name: Publish step summary
@@ -91,7 +120,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
-            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libfontconfig1-dev binutils appstream
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
       - name: Update Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
       - uses: Swatinem/rust-cache@v2
@@ -102,14 +131,43 @@ jobs:
           mkdir -p target/logs
           sha=$(git rev-parse HEAD)
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if engine_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
-            engine="sha=$engine_sha"
-          else
-            engine="GAP engine_sibling_absent"
+          eng_type="GAP:missing_lockfile"
+          eng_ver="unknown"
+          eng_chk="none"
+          if [ -f Cargo.lock ]; then
+            read -r eng_type eng_ver eng_chk < <(awk '
+              /^\[\[package\]\]/ { in_pkg=0 }
+              /^name = "NeuralAmpModeler-rs"/ { in_pkg=1 }
+              in_pkg && /^version = / { gsub(/"/, "", $3); ver=$3 }
+              in_pkg && /^source = / { gsub(/"/, "", $3); src=$3 }
+              in_pkg && /^checksum = / { gsub(/"/, "", $3); chk=$3 }
+              END {
+                if (!ver) {
+                  print "GAP:engine_not_found unknown none"
+                  exit 0
+                }
+                if (src ~ /^registry\+/) {
+                  type="registry"
+                } else if (src ~ /^git\+/) {
+                  type="git"
+                } else if (src) {
+                  type=src
+                } else {
+                  type="path"
+                }
+                printf "%s %s %s\n", type, ver, (chk ? chk : "none")
+              }
+            ' Cargo.lock)
           fi
-          printf 'PHASE: provenance sha=%s package_version=%s engine=%s\n' "$sha" "$version" "$engine" | tee target/logs/ci-provenance.log
+          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+            aux_engine="sha=$aux_sha"
+          else
+            aux_engine="GAP:sibling_absent"
+          fi
+          printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s\n' \
+            "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" | tee target/logs/ci-provenance.log
       - name: Quick QA suite
-        run: ./utils/tests-quick.sh
+        run: xvfb-run -a ./utils/tests-quick.sh
       - name: Publish step summary
         if: always()
         uses: ./.github/actions/qa-summary
@@ -141,7 +199,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
-            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libfontconfig1-dev binutils appstream
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
       - name: Update Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
       - uses: Swatinem/rust-cache@v2
@@ -152,12 +210,41 @@ jobs:
           mkdir -p target/logs
           sha=$(git rev-parse HEAD)
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if engine_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
-            engine="sha=$engine_sha"
-          else
-            engine="GAP engine_sibling_absent"
+          eng_type="GAP:missing_lockfile"
+          eng_ver="unknown"
+          eng_chk="none"
+          if [ -f Cargo.lock ]; then
+            read -r eng_type eng_ver eng_chk < <(awk '
+              /^\[\[package\]\]/ { in_pkg=0 }
+              /^name = "NeuralAmpModeler-rs"/ { in_pkg=1 }
+              in_pkg && /^version = / { gsub(/"/, "", $3); ver=$3 }
+              in_pkg && /^source = / { gsub(/"/, "", $3); src=$3 }
+              in_pkg && /^checksum = / { gsub(/"/, "", $3); chk=$3 }
+              END {
+                if (!ver) {
+                  print "GAP:engine_not_found unknown none"
+                  exit 0
+                }
+                if (src ~ /^registry\+/) {
+                  type="registry"
+                } else if (src ~ /^git\+/) {
+                  type="git"
+                } else if (src) {
+                  type=src
+                } else {
+                  type="path"
+                }
+                printf "%s %s %s\n", type, ver, (chk ? chk : "none")
+              }
+            ' Cargo.lock)
           fi
-          printf 'PHASE: provenance sha=%s package_version=%s engine=%s\n' "$sha" "$version" "$engine" | tee target/logs/ci-provenance.log
+          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+            aux_engine="sha=$aux_sha"
+          else
+            aux_engine="GAP:sibling_absent"
+          fi
+          printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s\n' \
+            "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" | tee target/logs/ci-provenance.log
       - name: Lints (fmt, check, clippy, doc, policies, packaging)
         run: ./utils/lints.sh
       - name: Publish step summary
@@ -191,7 +278,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
-            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libfontconfig1-dev binutils appstream
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
       - name: Update Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
       - uses: Swatinem/rust-cache@v2
@@ -202,14 +289,43 @@ jobs:
           mkdir -p target/logs
           sha=$(git rev-parse HEAD)
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if engine_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
-            engine="sha=$engine_sha"
-          else
-            engine="GAP engine_sibling_absent"
+          eng_type="GAP:missing_lockfile"
+          eng_ver="unknown"
+          eng_chk="none"
+          if [ -f Cargo.lock ]; then
+            read -r eng_type eng_ver eng_chk < <(awk '
+              /^\[\[package\]\]/ { in_pkg=0 }
+              /^name = "NeuralAmpModeler-rs"/ { in_pkg=1 }
+              in_pkg && /^version = / { gsub(/"/, "", $3); ver=$3 }
+              in_pkg && /^source = / { gsub(/"/, "", $3); src=$3 }
+              in_pkg && /^checksum = / { gsub(/"/, "", $3); chk=$3 }
+              END {
+                if (!ver) {
+                  print "GAP:engine_not_found unknown none"
+                  exit 0
+                }
+                if (src ~ /^registry\+/) {
+                  type="registry"
+                } else if (src ~ /^git\+/) {
+                  type="git"
+                } else if (src) {
+                  type=src
+                } else {
+                  type="path"
+                }
+                printf "%s %s %s\n", type, ver, (chk ? chk : "none")
+              }
+            ' Cargo.lock)
           fi
-          printf 'PHASE: provenance sha=%s package_version=%s engine=%s\n' "$sha" "$version" "$engine" | tee target/logs/ci-provenance.log
+          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+            aux_engine="sha=$aux_sha"
+          else
+            aux_engine="GAP:sibling_absent"
+          fi
+          printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s\n' \
+            "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" | tee target/logs/ci-provenance.log
       - name: Quick QA suite
-        run: ./utils/tests-quick.sh
+        run: xvfb-run -a ./utils/tests-quick.sh
       - name: Publish step summary
         if: always()
         uses: ./.github/actions/qa-summary
@@ -246,7 +362,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
-            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libfontconfig1-dev
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev
       - name: Install MSRV toolchain
         run: rustup toolchain install 1.99.0 --no-self-update --profile minimal && rustc --version
       - uses: Swatinem/rust-cache@v2
@@ -258,24 +374,57 @@ jobs:
           sha=$(git rev-parse HEAD)
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           rustc_version=$(rustc --version)
-          if engine_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
-            engine="sha=$engine_sha"
-          else
-            engine="GAP engine_sibling_absent"
+          eng_type="GAP:missing_lockfile"
+          eng_ver="unknown"
+          eng_chk="none"
+          if [ -f Cargo.lock ]; then
+            read -r eng_type eng_ver eng_chk < <(awk '
+              /^\[\[package\]\]/ { in_pkg=0 }
+              /^name = "NeuralAmpModeler-rs"/ { in_pkg=1 }
+              in_pkg && /^version = / { gsub(/"/, "", $3); ver=$3 }
+              in_pkg && /^source = / { gsub(/"/, "", $3); src=$3 }
+              in_pkg && /^checksum = / { gsub(/"/, "", $3); chk=$3 }
+              END {
+                if (!ver) {
+                  print "GAP:engine_not_found unknown none"
+                  exit 0
+                }
+                if (src ~ /^registry\+/) {
+                  type="registry"
+                } else if (src ~ /^git\+/) {
+                  type="git"
+                } else if (src) {
+                  type=src
+                } else {
+                  type="path"
+                }
+                printf "%s %s %s\n", type, ver, (chk ? chk : "none")
+              }
+            ' Cargo.lock)
           fi
-          printf 'PHASE: provenance sha=%s package_version=%s engine=%s rustc=%s toolchain=msrv-1.99.0\n' "$sha" "$version" "$engine" "$rustc_version" | tee target/logs/ci-provenance.log
+          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+            aux_engine="sha=$aux_sha"
+          else
+            aux_engine="GAP:sibling_absent"
+          fi
+          printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s rustc=%s toolchain=msrv-1.99.0\n' \
+            "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" "$rustc_version" | tee target/logs/ci-provenance.log
       - name: Cargo check (MSRV)
         run: |
           mkdir -p target/logs
           echo "PHASE: msrv" | tee -a target/logs/summary.txt
           rc=0
+          t_start=$(date +%s)
           cargo check --locked --all-targets --features testing 2>&1 | tee target/logs/msrv-check.log || rc=$?
+          elapsed=$(( $(date +%s) - t_start ))
           if [ "$rc" -eq 0 ]; then
             echo "PHASE: msrv PASS log=target/logs/msrv-check.log" | tee -a target/logs/summary.txt
-            echo "RESULT: PASS (0s) fails=none gaps=none" | tee -a target/logs/summary.txt
+            echo "RESULT: PASS (${elapsed}s) fails=none gaps=none" | tee -a target/logs/summary.txt
+            printf '%s\t%s\t%s\t%s\n' msrv PASS none none > target/logs/msrv-status.tsv
           else
             echo "PHASE: msrv FAIL rc=$rc log=target/logs/msrv-check.log" | tee -a target/logs/summary.txt
-            echo "RESULT: FAIL (0s) fails=msrv gaps=none" | tee -a target/logs/summary.txt
+            echo "RESULT: FAIL (${elapsed}s) fails=msrv gaps=none" | tee -a target/logs/summary.txt
+            printf '%s\t%s\t%s\t%s\n' msrv FAIL none msrv > target/logs/msrv-status.tsv
             exit "$rc"
           fi
       - name: Publish step summary

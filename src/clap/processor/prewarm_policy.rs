@@ -127,19 +127,29 @@ impl ModelFamily {
     }
 }
 
+/// Maximum plausible measured execution cost in nanoseconds per single sample (50 µs).
+///
+/// Prevents an OS descheduling spike during off-RT calibration or runtime EWMA from
+/// poisoning the per-sample cost to an implausible value that starves the prewarm budget.
+pub(crate) const MAX_PLAUSIBLE_SAMPLE_COST_NS: f64 = 50_000.0;
+
+/// Maximum consecutive zero-budget audio callbacks before latching starvation diagnostics
+/// (`RT_STATUS_HOST_CONTRACT_VIOLATION`) and resetting EWMA cost to attempt recovery.
+pub(crate) const PREWARM_ZERO_BUDGET_STARVATION_LIMIT: u32 = 64;
+
 /// Computes the zeroed-sample stabilization step for the current callback according to
 /// the proportional budget policy:
 ///
-/// `step = clamp(floor(frames_count · fator_família), piso, 1024)`
+/// `step = clamp(floor(frames_count · fator_família / chains), piso, 1024)`
 ///
-/// bounded by the callback's real-time budget. The per-sample cost used for the
-/// budget bound is `measured_cost_ns_per_sample` when it is a positive finite
-/// value (the off-RT calibration of the actually installed model, U-02);
-/// otherwise the conservative per-family table
-/// ([`ModelFamily::worst_case_sample_cost_ns`]) is used as fallback. If even the
-/// minimum step (`piso = 1`) does not safely fit within the estimated callback
-/// deadline budget, returns `0` so the audio callback does not breach real-time
-/// deadlines and remains safely on the dry path.
+/// bounded by the callback's real-time budget across all `chains` active models. The per-sample
+/// cost used for the budget bound is `measured_cost_ns_per_sample` (clamped to
+/// [`MAX_PLAUSIBLE_SAMPLE_COST_NS`]) when it is a positive finite value (the off-RT calibration
+/// of the actually installed model, U-02); otherwise the conservative per-family table
+/// ([`ModelFamily::worst_case_sample_cost_ns`]) is used as fallback. If even the minimum step
+/// (`piso = 1`) across all active chains does not safely fit within the estimated callback
+/// deadline budget, returns `0` so the audio callback does not breach real-time deadlines and
+/// remains safely on the latency-compensated dry path.
 #[inline]
 pub(crate) fn compute_prewarm_step(
     frames_count: usize,
@@ -147,6 +157,7 @@ pub(crate) fn compute_prewarm_step(
     sample_rate: f64,
     family: ModelFamily,
     measured_cost_ns_per_sample: Option<f32>,
+    chains: usize,
 ) -> usize {
     let effective_frames = if frames_count > 0 {
         frames_count
@@ -163,19 +174,25 @@ pub(crate) fn compute_prewarm_step(
 
     // Available RT duration for prewarm after reserving processing overhead and safety margin.
     let available_ns = period_ns * BUDGET_SAFETY_MARGIN - OVERHEAD_NS;
-    let sample_cost_ns = match measured_cost_ns_per_sample {
-        Some(cost) if cost.is_finite() && cost > 0.0 => f64::from(cost),
+    let single_sample_cost_ns = match measured_cost_ns_per_sample {
+        Some(cost) if cost.is_finite() && cost > 0.0 => {
+            (f64::from(cost)).min(MAX_PLAUSIBLE_SAMPLE_COST_NS)
+        }
         _ => family.worst_case_sample_cost_ns(),
     };
 
-    // If available margin cannot accommodate even a single sample, defer prewarm work.
-    if available_ns < sample_cost_ns {
+    let active_chains = (chains.max(1)) as f64;
+    let step_cost_ns = single_sample_cost_ns * active_chains;
+
+    // If available margin cannot accommodate even a single sample across active chains, defer prewarm work.
+    if available_ns < step_cost_ns {
         return 0;
     }
 
-    let raw_step = (effective_frames as f64 * family.family_factor()).floor() as usize;
+    let raw_step =
+        ((effective_frames as f64 * family.family_factor()) / active_chains).floor() as usize;
     let budget_max_samples =
-        ((available_ns / sample_cost_ns).floor() as usize).max(PREWARM_STEP_PISO);
+        ((available_ns / step_cost_ns).floor() as usize).max(PREWARM_STEP_PISO);
 
     raw_step
         .min(budget_max_samples)
@@ -200,7 +217,7 @@ mod tests {
         for &sr in &sample_rates {
             for &bs in &block_sizes {
                 for &fam in &families {
-                    let step = compute_prewarm_step(bs, bs, sr, fam, None);
+                    let step = compute_prewarm_step(bs, bs, sr, fam, None, 1);
                     let period_ns = (bs as f64 / sr) * 1e9;
 
                     if step > 0 {
@@ -234,7 +251,7 @@ mod tests {
             ModelFamily::Lstm,
             ModelFamily::Other,
         ] {
-            let step = compute_prewarm_step(256, 256, 48000.0, fam, None);
+            let step = compute_prewarm_step(256, 256, 48000.0, fam, None, 1);
             assert_eq!(
                 step, 1024,
                 "at block=256, 48 kHz, family {fam:?} must produce step=1024"
@@ -246,16 +263,17 @@ mod tests {
     fn test_prewarm_policy_scaling_at_small_blocks() {
         // At 32 frames @ 48 kHz (deadline 667 µs):
         // WaveNet A2 must scale to 128 samples (cost ~119 µs << 667 µs).
-        let step_a2_32 = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, None);
+        let step_a2_32 = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, None, 1);
         assert_eq!(step_a2_32, 128);
 
         // LSTM at 32 frames @ 48 kHz scales to 512 samples (cost ~38 µs << 667 µs).
-        let step_lstm_32 = compute_prewarm_step(32, 32, 48000.0, ModelFamily::Lstm, None);
+        let step_lstm_32 = compute_prewarm_step(32, 32, 48000.0, ModelFamily::Lstm, None, 1);
         assert_eq!(step_lstm_32, 512);
 
         // At 64 frames @ 192 kHz (deadline 333 µs):
         // WaveNet A2 must stay under 333 µs: 256 samples * 930 ns ≈ 238 µs.
-        let step_a2_64_192k = compute_prewarm_step(64, 64, 192000.0, ModelFamily::WaveNetA2, None);
+        let step_a2_64_192k =
+            compute_prewarm_step(64, 64, 192000.0, ModelFamily::WaveNetA2, None, 1);
         assert_eq!(step_a2_64_192k, 256);
     }
 
@@ -271,7 +289,7 @@ mod tests {
     #[test]
     fn test_prewarm_policy_zero_frames_fallback() {
         // If frames_count == 0, fallback to min_frames_count.
-        let step = compute_prewarm_step(0, 256, 48000.0, ModelFamily::WaveNetA2, None);
+        let step = compute_prewarm_step(0, 256, 48000.0, ModelFamily::WaveNetA2, None, 1);
         assert_eq!(step, 1024);
     }
 
@@ -281,7 +299,8 @@ mod tests {
         // A measured cost of 20 000 ns/sample (≈ 21.5× the A2 table) caps the
         // step at floor(498.5 µs / 20 µs) = 24, far below the family raw 128.
         let high_cost = 20_000.0f32;
-        let step = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, Some(high_cost));
+        let step =
+            compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, Some(high_cost), 1);
         assert_eq!(step, 24, "measured cost must bound the prewarm step");
         // The bound must keep the estimated cost inside 75% of the period.
         let period_ns = (32.0 / 48000.0) * 1e9;
@@ -295,14 +314,14 @@ mod tests {
     fn test_prewarm_policy_measured_cost_rejects_invalid() {
         // Non-finite / non-positive measurements fall back to the family table,
         // yielding the same step as `None`.
-        let table = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, None);
+        let table = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, None, 1);
         for invalid in [
             Some(0.0f32),
             Some(-1.0),
             Some(f32::NAN),
             Some(f32::INFINITY),
         ] {
-            let step = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, invalid);
+            let step = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, invalid, 1);
             assert_eq!(
                 step, table,
                 "invalid measured cost {invalid:?} must fall back"
@@ -314,7 +333,76 @@ mod tests {
     fn test_prewarm_policy_measured_cost_near_table_is_neutral() {
         // A measurement close to the A2 table cost must not change the standard
         // 256-frame / 48 kHz contract step (1024).
-        let step = compute_prewarm_step(256, 256, 48000.0, ModelFamily::WaveNetA2, Some(930.0));
+        let step = compute_prewarm_step(256, 256, 48000.0, ModelFamily::WaveNetA2, Some(930.0), 1);
         assert_eq!(step, 1024);
+    }
+
+    #[test]
+    fn test_prewarm_policy_dual_mono_chains_scales_step() {
+        // In dual-mono (chains = 2), raw step and budget max samples are divided by 2
+        // so that stepping both L and R models fits within the single callback budget.
+        let step_mono = compute_prewarm_step(256, 256, 48000.0, ModelFamily::WaveNetA2, None, 1);
+        let step_stereo = compute_prewarm_step(256, 256, 48000.0, ModelFamily::WaveNetA2, None, 2);
+
+        assert_eq!(step_mono, 1024);
+        assert_eq!(step_stereo, 512, "dual-mono must divide raw step by chains");
+
+        // Small block scaling with dual chains: 32 frames @ 48 kHz
+        let step_mono_32 = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, None, 1);
+        let step_stereo_32 = compute_prewarm_step(32, 32, 48000.0, ModelFamily::WaveNetA2, None, 2);
+        assert_eq!(step_mono_32, 128);
+        assert_eq!(step_stereo_32, 64);
+
+        // Verification of budget safety: total execution time for 2 chains must respect budget
+        let period_ns = (32.0 / 48000.0) * 1e9;
+        let total_cost =
+            (step_stereo_32 * 2) as f64 * ModelFamily::WaveNetA2.worst_case_sample_cost_ns();
+        assert!(
+            total_cost <= 0.75 * period_ns,
+            "dual chain prewarm cost ({total_cost} ns) must not exceed 75% budget ({period_ns} ns)"
+        );
+    }
+
+    #[test]
+    fn test_prewarm_policy_zero_budget_deferral() {
+        // At 1 frame @ 192 kHz with high measured cost, period is 5208 ns.
+        // Available margin is (5208 * 0.75) - 1500 = 2406 ns.
+        // If single sample cost is 10 000 ns, available_ns < step_cost_ns -> returns 0.
+        let step = compute_prewarm_step(1, 1, 192000.0, ModelFamily::WaveNetA2, Some(10_000.0), 1);
+        assert_eq!(
+            step, 0,
+            "must return 0 when callback cannot safely fit even 1 sample"
+        );
+
+        // Dual chains require 2 * 2000 = 4000 ns cost; available is 2406 ns -> returns 0.
+        let step_dual =
+            compute_prewarm_step(1, 1, 192000.0, ModelFamily::WaveNetA2, Some(2000.0), 2);
+        assert_eq!(
+            step_dual, 0,
+            "must return 0 when dual chains cannot fit in available margin"
+        );
+    }
+
+    #[test]
+    fn test_prewarm_policy_measured_cost_ceiling_clamp() {
+        // An implausibly high cost (e.g. 500 000 ns due to OS descheduling)
+        // must be clamped to MAX_PLAUSIBLE_SAMPLE_COST_NS (50 000 ns).
+        // At 256 frames @ 48 kHz (period 5.33 ms, available 4.0 ms - 1.5 µs overhead = 3.9985 ms):
+        // 3.9985 ms / 50 µs = 79 samples max.
+        let clamped_step = compute_prewarm_step(
+            256,
+            256,
+            48000.0,
+            ModelFamily::WaveNetA2,
+            Some(500_000.0),
+            1,
+        );
+        let period_ns = (256.0 / 48000.0) * 1e9;
+        let available_ns = period_ns * BUDGET_SAFETY_MARGIN - OVERHEAD_NS;
+        let expected_max = (available_ns / MAX_PLAUSIBLE_SAMPLE_COST_NS).floor() as usize;
+        assert_eq!(
+            clamped_step, expected_max,
+            "implausible cost must be clamped to MAX_PLAUSIBLE_SAMPLE_COST_NS"
+        );
     }
 }

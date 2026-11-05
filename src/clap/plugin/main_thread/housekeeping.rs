@@ -738,8 +738,10 @@ impl<'a> NamClapMainThread<'a> {
             path: req.path,
             origin: req.origin,
             generation,
-            host_rate: 0,
-            buffer_size: 0,
+            audio_epoch: super::load::AudioEpoch {
+                sample_rate: 0,
+                buffer_size: 0,
+            },
         };
 
         let mut pending = self.pending_async_loads.borrow_mut();
@@ -905,12 +907,17 @@ impl<'a> NamClapMainThread<'a> {
             return;
         };
 
-        // Capture the current host rates at dispatch time (they are stable
-        // while the job runs; a mismatch is handled by the generation check).
-        job.host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
-        job.buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
+        // Capture the current host rates at dispatch time (audio epoch).
+        job.audio_epoch = super::load::AudioEpoch {
+            sample_rate: self.shared.cold.sample_rate.load(Ordering::Relaxed),
+            buffer_size: self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize,
+        };
 
-        let have_loader = self.model_loader.borrow().is_some();
+        let have_loader = self
+            .model_loader
+            .borrow()
+            .as_ref()
+            .is_some_and(|loader| !loader.is_finished());
         if !have_loader && let Err(msg) = self.spawn_model_loader() {
             log::warn!(
                 "NAM-Plug: model loader worker unavailable ({msg}); \
@@ -933,6 +940,13 @@ impl<'a> NamClapMainThread<'a> {
 
         match dispatch_result {
             Some(Ok(())) => {
+                // Published immediately after a non-blocking send. Under the CLAP
+                // contract `request_callback` is asynchronous and re-enters on the
+                // main thread, so the worker cannot observe `housekeeping` before
+                // these Cells are set. Only a non-conforming host that invokes the
+                // main-thread callback synchronously on the worker could reorder
+                // this publication; that case would discard the result via the
+                // generation check, never free state or cause UAF.
                 self.model_worker_busy.set(true);
                 self.dispatched_model_generation.set(job_generation);
                 self.dispatched_model_is_gui.set(job_is_gui);
@@ -941,6 +955,8 @@ impl<'a> NamClapMainThread<'a> {
                 log::warn!(
                     "NAM-Plug: model loader dispatch failed; falling back to synchronous load"
                 );
+                // Clear dead worker so subsequent loads can respawn cleanly (SP-06 / F-PLUG-08).
+                *self.model_loader.borrow_mut() = None;
                 self.run_sync_model_load(PendingModelRequest {
                     path: job.path,
                     origin: job.origin,
@@ -976,6 +992,24 @@ impl<'a> NamClapMainThread<'a> {
     /// available; `false` (spawn failure) makes the caller fall back to the inline
     /// main-thread path (fail-closed).
     fn ensure_rebuild_worker(&self) -> bool {
+        let dead = self
+            .model_loader
+            .borrow()
+            .as_ref()
+            .is_some_and(|loader| loader.is_finished());
+        if dead {
+            log::error!(
+                "NAM-Plug: model loader worker terminated unexpectedly; dropping it and \
+                 respawning on demand"
+            );
+            // Recover the per-job bookkeeping so an outstanding job cannot leave
+            // the UI stuck in the loading state.
+            self.model_worker_busy.set(false);
+            self.dispatched_model_generation.set(0);
+            self.dispatched_model_is_gui.set(false);
+            self.shared.cold.ui_loading.store(false, Ordering::Relaxed);
+            *self.model_loader.borrow_mut() = None;
+        }
         if self.model_loader.borrow().is_some() {
             return true;
         }
@@ -1149,7 +1183,10 @@ impl<'a> NamClapMainThread<'a> {
             }
         }
 
-        // Check if cabsim tail changed (for host tail reporting)
+        // Track cabsim tail changes for UI/telemetry observability.
+        // Note: HostTail notification is strictly an Audio Thread extension
+        // (`[audio-thread]` in CLAP) and is dispatched on the audio thread by
+        // `NamClapProcessor::check_tail_changed` in `process_events` / `flush_inner`.
         let _cabsim_tail = self
             .shared
             .rt_to_ui

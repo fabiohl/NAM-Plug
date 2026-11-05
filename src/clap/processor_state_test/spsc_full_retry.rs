@@ -41,7 +41,7 @@ fn test_model_retained_on_spsc_full_no_ui_desync() {
     for _ in 0..256 {
         mt.cmd_producer
             .borrow_mut()
-            .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+            .push_command(ClapParamPayload::LoadCabIr { pair: None })
             .expect("expected the first 256 pushes to succeed");
     }
 
@@ -119,7 +119,7 @@ fn test_spsc_full_retry_publishes_full_ui_commit() {
     for _ in 0..256 {
         mt.cmd_producer
             .borrow_mut()
-            .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+            .push_command(ClapParamPayload::LoadCabIr { pair: None })
             .expect("expected the first 256 pushes to succeed");
     }
 
@@ -206,7 +206,7 @@ fn test_cabsim_retained_on_spsc_full_no_ui_desync() {
     for _ in 0..256 {
         mt.cmd_producer
             .borrow_mut()
-            .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+            .push_command(ClapParamPayload::LoadCabIr { pair: None })
             .expect("expected the first 256 pushes to succeed");
     }
 

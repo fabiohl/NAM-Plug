@@ -34,7 +34,7 @@ mod tests {
         GcItem, RT_STATUS_STRUCTURAL_DEFERRED, RT_STATUS_STRUCTURAL_SUPERSEDED, RtSwapHandler,
         SwapBudget, SwapTunables,
     };
-    use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+    use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
     use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
     use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
     use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
@@ -122,19 +122,30 @@ mod tests {
         proc.cmd_drain.drain(&mut handler, &mut budget, &mut gc);
     }
 
-    fn make_adapter(ir_len: usize) -> Box<CabSimAdapter> {
+    fn make_pair(ir_len: usize) -> Box<CabSimPair> {
         let ir: Vec<f32> = (0..ir_len)
             .map(|i| {
                 let t = i as f32;
                 (t * 0.05).sin() * (-t * 0.02).exp()
             })
             .collect();
-        Box::new(
+        let l = Box::new(
             CabSimAdapter::new(Box::new(
                 ConvEngine::new(&ir, N).expect("ConvEngine must build"),
             ))
             .expect("CabSimAdapter must build"),
-        )
+        );
+        let r = Box::new(
+            CabSimAdapter::new(Box::new(
+                ConvEngine::new(&ir, N).expect("ConvEngine must build"),
+            ))
+            .expect("CabSimAdapter must build"),
+        );
+        Box::new(CabSimPair {
+            l,
+            r,
+            sample_rate: 48000,
+        })
     }
 
     /// Model envelope with no weights: exercises the resampler/stream swap
@@ -143,12 +154,14 @@ mod tests {
         ClapParamPayload::LoadModel {
             generation,
             model_l: None,
+            model_r: None,
             new_resampler: Box::new(
                 NamResampler::new_simple(48_000, 48_000).expect("bypass resampler"),
             ),
             new_stream: Box::new(
                 StreamingResampleBuffer::new(48_000, 48_000, N).expect("stream adapter"),
             ),
+            model_rate: 48_000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
             prewarm_cost_ns: None,
@@ -185,7 +198,7 @@ mod tests {
 
         let params = ClapParamPayload::Params(RtProcessingParams::default());
         let clear_model = make_clear_model_payload(0);
-        let clear_ir = ClapParamPayload::LoadCabIr { adapter: None };
+        let clear_ir = ClapParamPayload::LoadCabIr { pair: None };
         let oversample = ClapParamPayload::SetOversample {
             os_l: Box::new(
                 OversampleEngine::new(OversampleFactor::Off, MAX_RESAMP_BUF)
@@ -214,6 +227,38 @@ mod tests {
             );
             assert_eq!(handler.coalesce_key(payload), key, "{name}: coalesce key");
         }
+    }
+
+    /// A cab-sim pair built for a stale audio epoch must be rejected visibly
+    /// and never overwrite the active adapter (T-09.4/D8 family).
+    #[test]
+    fn test_drain_rejects_stale_sample_rate_cabsim_pair() {
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let (_started, shared, mt) = activate_plugin(&mut plugin_instance);
+        let proc_ptr = audio_processor_ptr(&mut plugin_instance);
+        let proc = unsafe { &mut *proc_ptr };
+
+        assert!(proc.cabsim_pair.is_none());
+        let mut pair = make_pair(256);
+        pair.sample_rate = 44100;
+        mt.cmd_producer
+            .borrow_mut()
+            .push_command(ClapParamPayload::LoadCabIr { pair: Some(pair) })
+            .expect("stale IR push");
+
+        run_drain(proc);
+
+        assert!(
+            proc.cabsim_pair.is_none(),
+            "a stale-rate pair must never be installed"
+        );
+        assert!(
+            shared
+                .cold
+                .rt_status
+                .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION),
+            "the rejection must be visible via the host-contract flag"
+        );
     }
 
     /// Command budgeting: with one structural slot per callback, a burst of
@@ -302,7 +347,7 @@ mod tests {
             mt.cmd_producer
                 .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr {
-                    adapter: Some(make_adapter(ir_len)),
+                    pair: Some(make_pair(ir_len)),
                 })
                 .expect("command push");
         }
@@ -340,12 +385,12 @@ mod tests {
         assert_eq!(mt.cmd_producer.borrow().last_acked_seq(), 3);
 
         // The retired resources reach the GC cascade: the main thread's GC
-        // consumer observes both superseded adapters.
+        // consumer observes both superseded pairs.
         let mut gc_rx = mt.gc_rx.borrow_mut();
         for _ in 0..2 {
             assert!(
-                matches!(gc_rx.pop(), Ok(GcItem::CabConvAdapter(_))),
-                "both superseded adapters must reach the GC cascade"
+                matches!(gc_rx.pop(), Ok(GcItem::CabSimPair(_))),
+                "both superseded pairs must reach the GC cascade"
             );
         }
     }
@@ -369,7 +414,7 @@ mod tests {
         mt.cmd_producer
             .borrow_mut()
             .push_command(ClapParamPayload::LoadCabIr {
-                adapter: Some(make_adapter(512)),
+                pair: Some(make_pair(512)),
             })
             .expect("push IR");
         mt.cmd_producer
@@ -464,13 +509,13 @@ mod tests {
         mt.cmd_producer
             .borrow_mut()
             .push_command(ClapParamPayload::LoadCabIr {
-                adapter: Some(make_adapter(512)),
+                pair: Some(make_pair(512)),
             })
             .expect("push IR A");
         mt.cmd_producer
             .borrow_mut()
             .push_command(ClapParamPayload::LoadCabIr {
-                adapter: Some(make_adapter(1024)),
+                pair: Some(make_pair(1024)),
             })
             .expect("push IR B");
         mt.cmd_producer

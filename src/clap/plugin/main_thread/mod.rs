@@ -262,6 +262,7 @@ impl<'a> NamClapMainThread<'a> {
 
         let Some(PendingModel {
             model: mut model_l,
+            mut model_r,
             generation,
             model_rate,
             input_mult_adj,
@@ -281,6 +282,7 @@ impl<'a> NamClapMainThread<'a> {
                 restore.pending = Some(PendingModel {
                     generation,
                     model: model_l,
+                    model_r,
                     model_rate,
                     input_mult_adj,
                     output_mult_adj,
@@ -304,6 +306,7 @@ impl<'a> NamClapMainThread<'a> {
                     restore.pending = Some(PendingModel {
                         generation,
                         model: model_l,
+                        model_r,
                         model_rate,
                         input_mult_adj,
                         output_mult_adj,
@@ -324,6 +327,7 @@ impl<'a> NamClapMainThread<'a> {
             restore.pending = Some(PendingModel {
                 generation,
                 model: model_l,
+                model_r,
                 model_rate,
                 input_mult_adj,
                 output_mult_adj,
@@ -335,6 +339,28 @@ impl<'a> NamClapMainThread<'a> {
                 errors::activation::MODEL_RESIZE_FAILED,
                 format_args!(
                     "Failed to resize deferred model buffers for host buffer size ({buffer_size}): {e}"
+                ),
+            ));
+        }
+
+        if let Some(ref mut model) = model_r
+            && let Err(e) = model.set_max_buffer_size(buffer_size)
+        {
+            restore.pending = Some(PendingModel {
+                generation,
+                model: model_l,
+                model_r,
+                model_rate,
+                input_mult_adj,
+                output_mult_adj,
+            });
+            self.note_flush_failure(&format!(
+                "Failed to resize deferred model buffers for host buffer size ({buffer_size}) (R): {e}. Try a smaller host buffer size."
+            ));
+            return Err(static_plugin_error(
+                errors::activation::MODEL_RESIZE_FAILED,
+                format_args!(
+                    "Failed to resize deferred model buffers for host buffer size ({buffer_size}) (R): {e}"
                 ),
             ));
         }
@@ -359,8 +385,10 @@ impl<'a> NamClapMainThread<'a> {
                 .try_push_command(ClapParamPayload::LoadModel {
                     generation,
                     model_l,
+                    model_r,
                     new_resampler,
                     new_stream,
+                    model_rate,
                     input_mult_adj,
                     output_mult_adj,
                     prewarm_cost_ns,
@@ -379,8 +407,10 @@ impl<'a> NamClapMainThread<'a> {
                 if let ClapParamPayload::LoadModel {
                     generation,
                     model_l,
+                    model_r,
                     new_resampler,
                     new_stream,
+                    model_rate: _,
                     input_mult_adj,
                     output_mult_adj,
                     prewarm_cost_ns: _,
@@ -392,6 +422,7 @@ impl<'a> NamClapMainThread<'a> {
                         Some(PendingModel {
                             generation,
                             model: model_l,
+                            model_r,
                             model_rate,
                             input_mult_adj,
                             output_mult_adj,
@@ -549,11 +580,63 @@ impl<'a> NamClapMainThread<'a> {
     }
 }
 
+/// RAII fallback for teardown quiescence.
+///
+/// If any teardown step before the explicit quiescence panics, this guard lowers
+/// the alive fence and runs both quiescence barriers before the shared state is
+/// released, so a foreign host callback can never outlive the plugin resources.
+/// The explicit path disarms it once the normal sequence has quiesced.
+struct TeardownQuiescenceGuard<'a> {
+    shared: &'a NamClapShared,
+    armed: bool,
+}
+
+impl<'a> TeardownQuiescenceGuard<'a> {
+    fn new(shared: &'a NamClapShared) -> Self {
+        Self {
+            shared,
+            armed: true,
+        }
+    }
+
+    fn run(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        self.shared.cold.alive_fence.store(false, Ordering::Release);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.shared
+                .cold
+                .host_log_quiescence
+                .quiesce(std::time::Duration::from_millis(50));
+            self.shared
+                .cold
+                .host_call_quiescence
+                .quiesce(std::time::Duration::from_millis(50));
+        }));
+        if res.is_err() {
+            log::error!(
+                "NAM-Plug: quiescence panicked during teardown; alive fence is down and no \
+                 host callback may run after destroy returns."
+            );
+        }
+    }
+}
+
+impl Drop for TeardownQuiescenceGuard<'_> {
+    fn drop(&mut self) {
+        self.run();
+    }
+}
+
 impl<'a> Drop for NamClapMainThread<'a> {
     fn drop(&mut self) {
         log::info!(
             "NAM-Plug: Plugin instance destroying — sink unregister, quiescence, GUI fence down, teardown + GC drain."
         );
+
+        let mut quiescence_guard = TeardownQuiescenceGuard::new(self.shared);
 
         // Flush any remaining telemetry flags before unregistering
         self.emit_pending_logs();
@@ -565,28 +648,14 @@ impl<'a> Drop for NamClapMainThread<'a> {
             logger.unregister_instance_sink(self.shared.cold.instance_id);
         }
 
-        // 2. Quiesce the host log sink: acquire write lock to guarantee all in-flight try_read
-        // dispatches have completed, then disable future dispatches (*lock = false).
-        // Bounded spin/yield timeout of 50ms to avoid blocking DAW indefinitely if host stalls.
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(50);
-        let mut acquired = false;
-        while start.elapsed() < timeout {
-            if let Ok(mut lock) = self.shared.cold.host_log_quiescence.try_write() {
-                *lock = false;
-                acquired = true;
-                break;
-            }
-            std::thread::yield_now();
-        }
-        if !acquired {
-            log::warn!(
-                "NAM-Plug: Timeout waiting for host_log_quiescence write lock during destroy; forcing write lock"
-            );
-            if let Ok(mut lock) = self.shared.cold.host_log_quiescence.write() {
-                *lock = false;
-            }
-        }
+        // 2. Quiesce the host log sink: reject any subsequent dispatches and wait for
+        // in-flight calls to complete. Bounded 50ms grace period before logging E2130,
+        // followed by unbounded wait to strictly guarantee zero Use-After-Free (UAF) of the
+        // host handle without busy-spinning (D-16 / S08.3 / GAP-HOST-LOG-TEARDOWN-BOUND).
+        self.shared
+            .cold
+            .host_log_quiescence
+            .quiesce(std::time::Duration::from_millis(50));
 
         // 3. Clear host log sink arc in cold shared
         *lock_cold(&self.shared.cold.host_log_sink, "host_log_sink") = None;
@@ -605,10 +674,13 @@ impl<'a> Drop for NamClapMainThread<'a> {
             }
         }
 
-        // 4. Lower the alive fence BEFORE releasing any shared state, so
-        // GUI/dialog threads stop dereferencing `NamClapShared` and the host
-        // handle immediately. Their event loops are no-ops from this point on.
-        self.shared.cold.alive_fence.store(false, Ordering::Release);
+        // 4. Lower the alive fence and quiesce host calls from background threads:
+        // reject any future calls and wait for in-flight host calls to complete.
+        // Bounded 50ms grace period before logging E2131, followed by the wait
+        // that never frees resources while the host may still access them (D1c /
+        // SP-06 / F-PLUG-02 / GAP-HOST-LOG-TEARDOWN-BOUND). The RAII guard has
+        // already done this if an earlier step panicked.
+        quiescence_guard.run();
 
         // 5. Synchronous GUI teardown: close windows and bounded-join their
         // threads before `NamClapShared` is dropped (the wrapper drops the

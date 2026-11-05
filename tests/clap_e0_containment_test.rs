@@ -160,11 +160,16 @@ fn test_cabsim_loaded_and_applied_to_audio() {
         baseline_latency + 256
     );
 
-    // Audio verification: IR-loaded output must differ from no-IR baseline output.
-    let diff = max_abs_diff(&ir_out_l, &baseline_l);
+    // Audio verification: IR-loaded output must differ from no-IR baseline output on both channels.
+    let diff_l = max_abs_diff(&ir_out_l, &baseline_l);
     assert!(
-        diff > 1e-4,
-        "IR-loaded output must differ from no-IR output (diff={diff}). Convolution must be actively applied to the audio buffer."
+        diff_l > 1e-4,
+        "IR-loaded output must differ from no-IR output on L (diff={diff_l}). Convolution must be actively applied to the audio buffer."
+    );
+    let diff_r = max_abs_diff(&ir_out_r, &baseline_r);
+    assert!(
+        diff_r > 1e-4,
+        "IR-loaded output must differ from no-IR output on R (diff={diff_r}). Convolution must be actively applied to the audio buffer."
     );
 }
 

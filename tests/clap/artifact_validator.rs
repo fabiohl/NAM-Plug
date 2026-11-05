@@ -92,8 +92,8 @@ pub fn verify_artifact_freshness(path: &Path) {
 /// Returns the first source input that is strictly newer than `artifact`, or
 /// `None` when the artifact is up to date. Inputs cover this crate's
 /// `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/config.toml` and `src/**`,
-/// plus the patched sibling `../NeuralAmpModeler-rs` tree (`Cargo.toml` +
-/// `src/**`) when present (`[patch.crates-io]` in `Cargo.toml`).
+/// plus the sibling `../NeuralAmpModeler-rs` tree (`Cargo.toml` +
+/// `src/**`) when resolved as a local path dependency in `Cargo.lock`.
 fn first_stale_source_input(artifact: &Path) -> Option<PathBuf> {
     let artifact_mtime = fs::metadata(artifact).ok()?.modified().ok()?;
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into()));
@@ -109,13 +109,17 @@ fn first_stale_source_input(artifact: &Path) -> Option<PathBuf> {
         inputs.push(cargo_config);
     }
     collect_source_inputs(&manifest_dir.join("src"), &mut inputs);
-    let sibling = manifest_dir.join("../NeuralAmpModeler-rs");
-    if sibling.is_dir() {
-        let sib_cargo = sibling.join("Cargo.toml");
-        if sib_cargo.is_file() {
-            inputs.push(sib_cargo);
+    let cargo_lock_path = manifest_dir.join("Cargo.lock");
+    let engine_prov = nam_plug::receipt::build::extract_engine_provenance(&cargo_lock_path);
+    if engine_prov.dependency_type == "workspace_or_path" {
+        let sibling = manifest_dir.join("../NeuralAmpModeler-rs");
+        if sibling.is_dir() {
+            let sib_cargo = sibling.join("Cargo.toml");
+            if sib_cargo.is_file() {
+                inputs.push(sib_cargo);
+            }
+            collect_source_inputs(&sibling.join("src"), &mut inputs);
         }
-        collect_source_inputs(&sibling.join("src"), &mut inputs);
     }
     stale_input_against(artifact_mtime, &inputs).map(PathBuf::from)
 }

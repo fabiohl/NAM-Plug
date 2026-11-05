@@ -47,7 +47,7 @@
 //! It is also fence-gated — once `alive_fence` is lowered no result is
 //! published and no host callback is issued.
 
-use super::load::PreparedModel;
+use super::load::{AudioEpoch, PreparedModel};
 use crate::clap::plugin::GuiSharedState;
 use crate::clap::plugin::shared::{ModelRequestOrigin, SlimmableRebuild};
 use clack_plugin::host::HostSharedHandle;
@@ -85,10 +85,8 @@ pub(crate) struct ModelLoaderJob {
     pub(crate) origin: ModelRequestOrigin,
     /// Monotonic generation allocated for this request by the main thread.
     pub(crate) generation: u64,
-    /// Host sample rate captured at dispatch time.
-    pub(crate) host_rate: u32,
-    /// Host block size captured at dispatch time (0 = pre-activation).
-    pub(crate) buffer_size: usize,
+    /// Audio configuration epoch captured at dispatch time.
+    pub(crate) audio_epoch: AudioEpoch,
 }
 
 /// Result of an asynchronous load, published by the worker and consumed by the
@@ -198,6 +196,17 @@ impl ModelLoader {
         drop(self.tx);
         self.handle.take()
     }
+
+    /// Returns `true` if the worker thread has already terminated.
+    ///
+    /// A finished handle means the loop exited (only expected after
+    /// `shutdown`, since worker panics are contained); callers treat it as a
+    /// dead worker and respawn on demand.
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+    }
 }
 
 /// Builds a WaveNet slimmable rebuild payload off-thread.
@@ -280,9 +289,9 @@ fn poll_rebuilds(
             let outcome = build_slimmable(shared, target_ch, generation);
             *rebuilds.slimmable.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
             *slimmable_built = Some(identity);
-            if shared.cold.alive_fence.load(Ordering::Acquire) {
+            shared.cold.host_call_quiescence.host_call(|| {
                 host_static.request_callback();
-            }
+            });
         }
     } else {
         *slimmable_built = None;
@@ -297,9 +306,9 @@ fn poll_rebuilds(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(outcome);
             *os_built = Some(factor);
-            if shared.cold.alive_fence.load(Ordering::Acquire) {
+            shared.cold.host_call_quiescence.host_call(|| {
                 host_static.request_callback();
-            }
+            });
         }
     } else {
         *os_built = None;
@@ -344,12 +353,27 @@ fn worker_main(
                     break;
                 }
 
-                let outcome = super::load::prepare_model_offthread(
-                    &job.path,
-                    job.host_rate,
-                    job.buffer_size,
-                    &sys,
-                );
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    super::load::prepare_model_offthread(
+                        &job.path,
+                        job.audio_epoch.sample_rate,
+                        job.audio_epoch.buffer_size,
+                        &sys,
+                    )
+                }))
+                .unwrap_or_else(|_| {
+                    log::error!(
+                        "NAM-Plug: model loader worker panicked while preparing model '{}'",
+                        job.path.display()
+                    );
+                    Err(Box::new(
+                        NamDiagnostic::new(
+                            neural_amp_modeler_rs::common::diagnostics::NamErrorCode::ModelBuildFailed,
+                            &sys,
+                        )
+                        .message(crate::clap::plugin::errors::model_loader::WORKER_PANIC),
+                    ))
+                });
 
                 {
                     let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -360,12 +384,11 @@ fn worker_main(
                     });
                 }
 
-                // Publish the wake-up only while the instance is still alive;
-                // after the fence drops, dispatching into a freed instance is
-                // forbidden.
-                if shared.cold.alive_fence.load(Ordering::Acquire) {
+                // Publish the wake-up through the quiescence barrier so after the
+                // fence drops no host callback is issued into a freed instance.
+                shared.cold.host_call_quiescence.host_call(|| {
                     host_static.request_callback();
-                }
+                });
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -376,13 +399,52 @@ fn worker_main(
         }
 
         if let Some(rebuilds) = &rebuilds {
-            poll_rebuilds(
-                &shared,
-                &host_static,
-                rebuilds,
-                &mut slimmable_built,
-                &mut os_built,
-            );
+            let poll_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                poll_rebuilds(
+                    &shared,
+                    &host_static,
+                    rebuilds,
+                    &mut slimmable_built,
+                    &mut os_built,
+                );
+            }));
+            if poll_res.is_err() {
+                // Recover the publication state so the main thread clears
+                // `model_worker_busy` and surfaces the failure on the next tick.
+                log::error!(
+                    "NAM-Plug: model loader worker panicked during adaptive rebuild polling"
+                );
+                slimmable_built = None;
+                os_built = None;
+                {
+                    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+                    *guard = Some(PreparedModelResult {
+                        // Generation 0 is discarded after the busy flag is cleared.
+                        generation: 0,
+                        origin: ModelRequestOrigin::Gui,
+                        outcome: Err(Box::new(
+                            NamDiagnostic::new(
+                                neural_amp_modeler_rs::common::diagnostics::NamErrorCode::ModelBuildFailed,
+                                &sys,
+                            )
+                            .message(crate::clap::plugin::errors::model_loader::WORKER_PANIC),
+                        )),
+                    });
+                }
+                {
+                    let mut msg = shared
+                        .cold
+                        .ui_load_error_msg
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *msg = crate::clap::plugin::errors::model_loader::WORKER_PANIC.to_string();
+                }
+                shared.cold.ui_load_error.store(true, Ordering::Relaxed);
+                shared.cold.ui_loading.store(false, Ordering::Relaxed);
+                shared.cold.host_call_quiescence.host_call(|| {
+                    host_static.request_callback();
+                });
+            }
         }
     }
     log::debug!("NAM-Plug: model loader worker exiting");

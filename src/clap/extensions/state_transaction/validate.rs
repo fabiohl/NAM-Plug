@@ -9,7 +9,7 @@ use crate::clap::plugin::errors::{self, static_plugin_error};
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::{ModelInfo, NamDiagnostic, NamErrorCode};
 use neural_amp_modeler_rs::common::params::ProcessingParams;
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
 use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
 use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 pub(crate) struct ModelResources {
     /// Pre-warmed model instance, boxed for heap transfer across the SPSC ring.
     pub(crate) model_l: Option<Box<StaticModel>>,
+    /// Pre-warmed model instance for right channel in dual-mono mode.
+    pub(crate) model_r: Option<Box<StaticModel>>,
     /// Multi-rate resampler matching host sample rate to model native rate.
     pub(crate) new_resampler: Box<NamResampler>,
     /// Streaming circular buffer for pitch/sample-rate conversion history.
@@ -52,8 +54,8 @@ pub(crate) struct ModelResources {
 
 /// Validated impulse response (IR) resources ready for convolution engine integration.
 pub(crate) struct IrResources {
-    /// Pre-configured convolution adapter ready for atomic swap into the audio pipeline.
-    pub(crate) adapter: Option<Box<CabSimAdapter>>,
+    /// Pre-configured convolution pair ready for atomic swap into the audio pipeline.
+    pub(crate) pair: Option<Box<CabSimPair>>,
     /// Raw floating-point IR samples preserved for UI visualization or state archiving.
     pub(crate) samples: Vec<f32>,
     /// Sampling rate corresponding to the loaded IR waveform.
@@ -285,7 +287,7 @@ pub(crate) fn build_model_resources(
     let model_pair = load_and_build_model(
         path,
         sys,
-        false,
+        true,
         neural_amp_modeler_rs::loader::LoadOptions::default(),
     )
     .map_err(|e| {
@@ -332,6 +334,7 @@ pub(crate) fn build_model_resources(
     let model_info = model_pair.model_info(path);
 
     let mut model_l = model_pair.model_l;
+    let mut model_r = model_pair.model_r;
     let input_mult_adj = model_pair.input_mult_adj;
     let output_mult_adj = model_pair.output_mult_adj;
 
@@ -343,6 +346,18 @@ pub(crate) fn build_model_resources(
         return Err(Box::new(
             NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
                 .message("Failed to resize model buffers for host buffer size")
+                .param("buffer_size", buffer_size.to_string())
+                .param("error", e.to_string()),
+        ));
+    }
+
+    if buffer_size > 0
+        && let Some(ref mut model) = model_r
+        && let Err(e) = model.set_max_buffer_size(buffer_size as usize)
+    {
+        return Err(Box::new(
+            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                .message("Failed to resize model buffers for host buffer size (R)")
                 .param("buffer_size", buffer_size.to_string())
                 .param("error", e.to_string()),
         ));
@@ -400,6 +415,7 @@ pub(crate) fn build_model_resources(
     };
     Ok(ModelResources {
         model_l,
+        model_r,
         new_resampler,
         new_stream,
         input_mult_adj,
@@ -650,9 +666,155 @@ pub(crate) fn validate_model_from_basename(
     ))
 }
 
-/// Builds IR resources from a filesystem path without side-effects.
-pub(crate) fn build_ir_resources(
-    path: &Path,
+/// Computes the SHA-256 hex digest of a byte slice in memory.
+pub(crate) fn compute_bytes_hash(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(bytes);
+    let hash = hasher.finalize();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut digest = String::with_capacity(hash.len() * 2);
+    for &b in hash.iter() {
+        digest.push(HEX[(b >> 4) as usize] as char);
+        digest.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    digest
+}
+
+/// Reads a file into a byte buffer bounded by [`MAX_FILE_HASH_SIZE`].
+pub(crate) fn read_ir_file_bytes(path: &Path) -> Result<Vec<u8>, PluginError> {
+    use std::io::Read;
+
+    let metadata = std::fs::metadata(path).map_err(|e| {
+        static_plugin_error(
+            errors::assets::HASH_METADATA_FAILED,
+            format_args!("{path:?}: {e}"),
+        )
+    })?;
+
+    if !metadata.file_type().is_file() {
+        return Err(static_plugin_error(
+            errors::assets::HASH_TARGET_NOT_REGULAR_FILE,
+            format_args!("{path:?}"),
+        ));
+    }
+
+    let file_size = metadata.len();
+    if file_size > MAX_FILE_HASH_SIZE {
+        return Err(static_plugin_error(
+            errors::assets::HASH_FILE_TOO_LARGE,
+            format_args!("{path:?} ({file_size} > {MAX_FILE_HASH_SIZE})"),
+        ));
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        static_plugin_error(
+            errors::assets::HASH_OPEN_FAILED,
+            format_args!("{path:?}: {e}"),
+        )
+    })?;
+
+    // Cap the allocation at `MAX_FILE_HASH_SIZE + 1`: metadata can be stale
+    // (the file may grow between `metadata()` and the read), and an unbounded
+    // `read_to_end` would let a hostile asset exhaust memory.
+    let mut data = Vec::with_capacity(file_size as usize);
+    file.by_ref()
+        .take(MAX_FILE_HASH_SIZE + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| {
+            static_plugin_error(
+                errors::assets::HASH_READ_FAILED,
+                format_args!("{path:?}: {e}"),
+            )
+        })?;
+    if data.len() as u64 > MAX_FILE_HASH_SIZE {
+        return Err(static_plugin_error(
+            errors::assets::HASH_FILE_TOO_LARGE,
+            format_args!("{path:?} grew past {MAX_FILE_HASH_SIZE} bytes while reading"),
+        ));
+    }
+
+    Ok(data)
+}
+
+/// Loads [`CabSimIr`] from verified in-memory bytes, eliminating TOCTOU races
+/// with external filesystem replacement.
+pub(crate) fn load_cabsim_from_verified_bytes(
+    data: &[u8],
+    host_rate: u32,
+    sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
+    path_for_log: &Path,
+) -> Result<Box<CabSimIr>, Box<NamDiagnostic>> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // GAP(A-01, D7a): the frozen published engine exposes only
+    // `CabSimIr::load(&Path, ..)`; it cannot decode a WAV from an in-memory
+    // slice. The verified bytes therefore have to be staged to a private temp
+    // file and re-opened by the engine. Identity is still coherent because the
+    // exact verified buffer is written (never the source path again) and the
+    // file is created exclusively (`create_new`), so no symlink or pre-existing
+    // file can substitute different content. Escalated to the PO: removing the
+    // temp round-trip requires a new engine API (`CabSimIr::load_from_bytes`).
+    static IR_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+
+    let (tmp_path, mut file) = loop {
+        let count = IR_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = std::env::temp_dir().join(format!("nam_ir_{pid}_{count}.wav"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => break (tmp_path, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(Box::new(
+                    NamDiagnostic::new(NamErrorCode::IrLoadFailed, sys)
+                        .message(format!(
+                            "Failed to stage verified IR bytes: {:?}",
+                            path_for_log
+                        ))
+                        .param("error", e.to_string()),
+                ));
+            }
+        }
+    };
+
+    struct TempFileGuard<'a>(&'a Path);
+    impl Drop for TempFileGuard<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0);
+        }
+    }
+    let _guard = TempFileGuard(&tmp_path);
+
+    file.write_all(data).map_err(|e| {
+        Box::new(
+            NamDiagnostic::new(NamErrorCode::IrLoadFailed, sys)
+                .message(format!(
+                    "Failed to stage verified IR bytes: {:?}",
+                    path_for_log
+                ))
+                .param("error", e.to_string()),
+        )
+    })?;
+    drop(file);
+
+    CabSimIr::load(&tmp_path, host_rate, true).map_err(|e| {
+        Box::new(
+            NamDiagnostic::new(NamErrorCode::IrLoadFailed, sys)
+                .message(format!("Failed to load cab-sim IR: {:?}", path_for_log))
+                .param("error", e.to_string()),
+        )
+    })
+}
+
+/// Builds IR resources directly from an in-memory byte slice without re-reading the target file.
+pub(crate) fn build_ir_resources_from_bytes(
+    data: &[u8],
+    path_for_diagnostic: &Path,
     host_rate: u32,
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
@@ -663,35 +825,58 @@ pub(crate) fn build_ir_resources(
         256
     };
 
-    let cabsim = CabSimIr::load(path, host_rate, true).map_err(|e| {
-        Box::new(
-            NamDiagnostic::new(NamErrorCode::IrLoadFailed, sys)
-                .message(format!("Failed to load cab-sim IR: {:?}", path))
-                .param("error", e.to_string()),
-        )
-    })?;
+    let cabsim = load_cabsim_from_verified_bytes(data, host_rate, sys, path_for_diagnostic)?;
 
-    let engine = ConvEngine::new(&cabsim.samples, partition_size).map_err(|e| {
-        Box::new(
-            NamDiagnostic::new(e, sys)
-                .message("Failed to build convolution engine for cab-sim IR")
-                .hint("The IR samples require more memory than available."),
-        )
-    })?;
-
-    Ok(IrResources {
-        adapter: Some(Box::new(CabSimAdapter::new(Box::new(engine)).map_err(
-            |e| {
+    let build_adapter = || {
+        ConvEngine::new(&cabsim.samples, partition_size)
+            .map_err(|e| {
                 Box::new(
                     NamDiagnostic::new(e, sys)
-                        .message("Failed to build cab-sim convolution adapter")
+                        .message("Failed to build convolution engine for cab-sim IR")
                         .hint("The IR samples require more memory than available."),
                 )
-            },
-        )?)),
+            })
+            .and_then(|engine| {
+                CabSimAdapter::new(Box::new(engine)).map_err(|e| {
+                    Box::new(
+                        NamDiagnostic::new(e, sys)
+                            .message("Failed to build cab-sim convolution adapter")
+                            .hint("The IR samples require more memory than available."),
+                    )
+                })
+            })
+    };
+
+    let l = build_adapter()?;
+    let r = build_adapter()?;
+
+    Ok(IrResources {
+        pair: Some(Box::new(CabSimPair {
+            l: Box::new(l),
+            r: Box::new(r),
+            sample_rate: cabsim.sample_rate,
+        })),
         samples: cabsim.samples,
         sample_rate: cabsim.sample_rate,
     })
+}
+
+/// Builds IR resources from a filesystem path without side-effects (reads bytes once).
+#[expect(dead_code)]
+pub(crate) fn build_ir_resources(
+    path: &Path,
+    host_rate: u32,
+    buffer_size: u32,
+    sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
+) -> Result<IrResources, Box<NamDiagnostic>> {
+    let bytes = read_ir_file_bytes(path).map_err(|e| {
+        Box::new(
+            NamDiagnostic::new(NamErrorCode::IrLoadFailed, sys)
+                .message(format!("Failed to read IR bytes: {:?}", path))
+                .param("error", e.to_string()),
+        )
+    })?;
+    build_ir_resources_from_bytes(&bytes, path, host_rate, buffer_size, sys)
 }
 
 pub(crate) fn validate_ir(
@@ -728,10 +913,13 @@ pub(crate) fn validate_ir(
         return Err(PluginError::Message(errors::state_txn::IR_HASH_MALFORMED));
     }
 
-    let actual_hash = compute_file_hash(ir_path).map_err(|e| {
-        log::error!("NAM-Plug: Failed to hash IR file at {:?}: {}", ir_path, e);
+    // Read bytes once: hash computation and decoding operate on the exact same buffer in memory.
+    let ir_bytes = read_ir_file_bytes(ir_path).map_err(|e| {
+        log::error!("NAM-Plug: Failed to read IR file at {:?}: {}", ir_path, e);
         PluginError::Message(errors::state_txn::IR_HASH_FAILED)
     })?;
+
+    let actual_hash = compute_bytes_hash(&ir_bytes);
     if !actual_hash.eq_ignore_ascii_case(expected_hash) {
         log::error!(
             "NAM-Plug: IR file at {:?} hash mismatch (expected {}, got {})",
@@ -742,7 +930,7 @@ pub(crate) fn validate_ir(
         return Err(PluginError::Message(errors::state_txn::IR_HASH_MISMATCH));
     }
 
-    let resources = build_ir_resources(ir_path, host_rate, buffer_size, sys)
+    let resources = build_ir_resources_from_bytes(&ir_bytes, ir_path, host_rate, buffer_size, sys)
         .map_err(|e| PluginError::Error(e))?;
     Ok((
         Some(resources),

@@ -34,8 +34,8 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
   *Expected:* Both load without host UI freeze or audio dropouts. Amp modeling and IR convolution become audible immediately. Active model name and IR filename update in Zone 1.
 - [ ] **T1.2 Knobs & Double-Click Reset:** Drag **INPUT** knob to +6.0 dB, drag **GATE** to −50.0 dB → Double-click **INPUT**.
   *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to −90.0 dB (off by default).
-- [ ] **T1.3 Bypass & Adaptive VU Meter:** Insert plugin on a mono track (1 bar), then move to a stereo track (2 bars L/R) → Toggle **BYPASS**.
-  *Expected:* VU layout adapts dynamically (1 centered bar for mono vs. 2 bars L/R for stereo). Bypass toggle instantly silences DSP processing via a 64-sample click-free crossfade, yielding a bit-transparent dry signal without audible clicks.
+- [ ] **T1.3 Bypass & VU Meter Layout:** Insert plugin in DAW configured as Mono (Config 0, default: 1 centered meter bar), then instantiate on a Stereo track via `audio-ports-config` (Config 1: 2 meter bars L/R) → Toggle **BYPASS**.
+  *Expected:* Meter layout matches the negotiated port configuration (1 centered bar for Mono vs. 2 bars L/R for Stereo; configuration negotiated strictly via CLAP `audio-ports-config`, without magic content-based auto-adaptation). Bypass toggle instantly silences DSP processing via a 64-sample click-free crossfade, yielding a bit-transparent dry signal without audible clicks.
 - [ ] **T1.4 Host Parameter Automation (`[Bitwig]`):** Draw a quick automation ramp for `input_gain_db` or `output_gain_db` in DAW → start playback.
   *Expected:* GUI knob arc pulses/animates smoothly in sync with host automation; audio volume adjusts smoothly without zipper noise.
 - [ ] **T1.5 Telemetry & Diagnostic Export:** Hover over status bar `"ℹ"` icon → click `"ℹ"` → paste (Ctrl+V) into a text editor.

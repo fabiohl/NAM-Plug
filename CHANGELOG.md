@@ -55,7 +55,7 @@ Control begins formally with version 1.0.0.
 * **CLAP Extensions Compliance**: Supported host extensions include `audio-ports`, `audio-ports-activation`, `params`, `state`, `state-context`, `latency`, `gui`, `track-info`, `remote-controls`, `param-indication`, `preset-discovery`, `render`, `tail`, `timer`, and `log`.
 * **Sample-Accurate Parameter Automation**: Continuous parameter automation with sub-block slicing and smoothing (`ParamSmoother`), maintaining sample-accurate response for gain staging, noise gate, and model parameters.
 * **Dynamic Plugin Delay Compensation (PDC)**: Cold-path cached effective latency reporting via `clap_plugin_latency`, notifying the host (`HostLatency::changed()`) immediately upon oversampling factor or CabSim changes without per-block audio thread overhead.
-* **Bit-Transparent Bypass**: Latency-compensated bypass mode featuring a 32 ms branchless equal-power crossfader with FMA vectorization and phase compensation.
+* **Bit-Transparent Bypass**: Latency-compensated bypass mode featuring a 64-sample click-free linear crossfader with phase compensation.
 * **State Persistence & Asset Identity**: Full project state save/load serialization with mandatory cryptographic SHA-256 asset hashing (`model_hash`, `ir_hash`), ensuring reliable cross-machine project restoration and preset portability.
 
 #### Core Neural DSP Engine (`NeuralAmpModeler-rs`)

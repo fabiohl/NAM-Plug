@@ -89,6 +89,7 @@ mod tests {
         )
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn ensure_isolated_crash_dir() {
         if std::env::var_os("NAM_CRASH_DIR").is_none() {
             let temp_dir = std::env::temp_dir().join("nam_plug_test_crashes");

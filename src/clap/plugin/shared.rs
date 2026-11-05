@@ -13,7 +13,7 @@ use neural_amp_modeler_rs::common::diagnostics::NamErrorCode;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{GcItem, GcOverflowBuffer, RtStatusFlags};
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::StaticModel;
@@ -150,11 +150,15 @@ pub enum ClapParamPayload {
         generation: u64,
         /// The encapsulated model for neural inference (Left Channel)
         model_l: Option<Box<StaticModel>>,
+        /// The encapsulated model for neural inference (Right Channel in dual-mono mode)
+        model_r: Option<Box<StaticModel>>,
         /// Polyphase sinc resampler
         new_resampler: Box<NamResampler>,
         /// Streaming resample adapter with strict host cardinality,
         /// built on the main thread to match the model rate.
         new_stream: Box<neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer>,
+        /// Native sample rate of the model in this payload.
+        model_rate: u32,
         /// Model input gain calibration multiplier (from input_level_dbu metadata).
         input_mult_adj: f32,
         /// Model output gain calibration multiplier (from loudness metadata).
@@ -164,13 +168,13 @@ pub enum ClapParamPayload {
         /// selects the conservative per-family prewarm table.
         prewarm_cost_ns: Option<f32>,
     },
-    /// Loading of a new cab-sim convolution adapter via SPSC.
-    /// Follows the same pattern as `LoadModel`: the adapter is boxed and
+    /// Loading of a new cab-sim convolution pair via SPSC.
+    /// Follows the same pattern as `LoadModel`: the pair is boxed and
     /// constructed outside the RT thread, then swapped atomically in the
     /// audio thread — the old `Box` moves by value to the GC.
     LoadCabIr {
-        /// Pre-built, boxed convolution adapter (None = bypass cabsim).
-        adapter: Option<Box<neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter>>,
+        /// Pre-built, boxed convolution pair (None = bypass cabsim).
+        pair: Option<Box<CabSimPair>>,
     },
     /// Oversampling factor change: carries new pre-built engines for the audio thread.
     SetOversample {
@@ -251,11 +255,16 @@ pub struct LoadModelPayload {
     /// The encapsulated model for neural inference (Left Channel).
     /// `None` explicitly clears the active model.
     pub model_l: Option<Box<StaticModel>>,
+    /// The encapsulated model for neural inference (Right Channel in dual-mono mode).
+    /// `None` in mono mode or when cleared.
+    pub model_r: Option<Box<StaticModel>>,
     /// Polyphase sinc resampler matching the model rate.
     pub new_resampler: Box<NamResampler>,
     /// Streaming resample adapter with strict host cardinality,
     /// matching the model rate and the host buffer size.
     pub new_stream: Box<neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer>,
+    /// Native sample rate of the model in this payload.
+    pub model_rate: u32,
     /// Model input gain calibration multiplier.
     pub input_mult_adj: f32,
     /// Model output gain calibration multiplier.
@@ -286,7 +295,7 @@ pub(crate) struct StagedSwap {
     /// Model component (`model_l: None` clears the model).
     pub(crate) model: Option<LoadModelPayload>,
     /// Cab-sim component (`None` clears the IR).
-    pub(crate) ir: Option<Option<Box<CabSimAdapter>>>,
+    pub(crate) ir: Option<Option<Box<CabSimPair>>>,
 }
 
 impl StagedSwap {
@@ -322,10 +331,10 @@ pub struct RestoreTxn {
     /// Model component: `Some(payload)` loads (or clears when `model_l` is None),
     /// `None` leaves the active model untouched (ForPreset without model).
     pub model: Option<LoadModelPayload>,
-    /// IR component: `Some(Some(adapter))` loads, `Some(None)` clears,
+    /// IR component: `Some(Some(pair))` loads, `Some(None)` clears,
     /// `None` leaves the active IR untouched (ForPreset without IR).
-    /// The adapter travels `Box`ed end-to-end for RT-safe swaps.
-    pub ir: Option<Option<Box<CabSimAdapter>>>,
+    /// The pair travels `Box`ed end-to-end for RT-safe swaps.
+    pub ir: Option<Option<Box<CabSimPair>>>,
     /// Full RT parameter snapshot applied atomically with the model/IR.
     pub params: RtProcessingParams,
 }
@@ -468,6 +477,8 @@ pub struct RtToUi {
     pub xrun_epoch: AtomicU32,
     /// Non-finite input detection epoch counter incremented by RT audio loop.
     pub non_finite_epoch: AtomicU32,
+    /// Prewarm zero-budget starvation transition epoch counter (D-15 / S08.5).
+    pub prewarm_starvation_epoch: AtomicU32,
 }
 
 /// Fields written by the UI/Main thread, read every block by the RT thread.
@@ -512,6 +523,7 @@ impl Default for RtToUi {
             dsp_load_permille: AtomicU16::new(0),
             xrun_epoch: AtomicU32::new(0),
             non_finite_epoch: AtomicU32::new(0),
+            prewarm_starvation_epoch: AtomicU32::new(0),
         }
     }
 }
@@ -745,6 +757,10 @@ pub struct ColdShared {
     /// Last sequence fully drained and processed by the audio thread.
     /// Written by the audio thread (Release), read by the main thread (Acquire).
     pub cmd_last_ack: AtomicU64,
+    /// Non-model commands recovered from the command ring when `activate()`
+    /// failed after extracting the SPSC consumer. Replayed in order by the
+    /// next successful activation; empty in steady state.
+    pub recovered_commands: Mutex<RecoveredCommands>,
     /// Generation of the most recent restore transaction applied atomically by
     /// the audio thread. Written by the audio thread (Relaxed) after applying a
     /// [`RestoreTxn`]; read by tests/main thread to verify which restore is live.
@@ -757,6 +773,10 @@ pub struct ColdShared {
     /// pending transition **to Off** is representable (`1`), so the raw value
     /// no longer doubles as the Off factor.
     pub pending_restart_os_factor: AtomicU32,
+    /// Last tail length in samples reported to the host via `HostTail::changed`.
+    /// Persisted across deactivate/activate cycles so that restart or restore
+    /// only notifies when the active tail actually changes.
+    pub last_reported_tail_samples: AtomicU32,
     /// In-flight parameter snapshot.
     /// When the main-thread `flush()` fails to push params to the SPSC
     /// (channel full), the snapshot is stored here for retry via
@@ -788,18 +808,32 @@ pub struct ColdShared {
         Mutex<Option<Arc<neural_amp_modeler_rs::common::diagnostics::logger::HostLogFn>>>,
     /// Synchronization fence for host log sink quiescence during plugin teardown.
     ///
-    /// Sinks acquire `try_read()` before dispatching to the host logger.
+    /// Sinks acquire an active guard via `host_log_quiescence.enter()` before dispatching to the host logger.
     /// During instance destruction, `NamClapMainThread::drop` unregisters the instance sink
-    /// from `NamLogger` and acquires a write lock (with a bounded 50ms spin/yield timeout),
-    /// setting the value to `false`. This guarantees that no thread is mid-call in `host_log.log()`
-    /// after teardown completes.
-    pub(crate) host_log_quiescence: Arc<std::sync::RwLock<bool>>,
+    /// from `NamLogger` and calls `host_log_quiescence.quiesce(50ms)`.
+    /// This guarantees that no thread is mid-call in `host_log.log()` after teardown completes (D-16).
+    pub(crate) host_log_quiescence: Arc<crate::clap::plugin::quiescence::HostLogQuiescence>,
+    /// Synchronization fence for host calls from detachable threads (SP-06 / F-PLUG-02).
+    ///
+    /// Background threads enter this barrier before calling `request_callback()`,
+    /// `request_flush()`, or GUI extension methods. Quiesced during plugin destruction
+    /// to guarantee zero host calls after `destroy()` returns.
+    pub host_call_quiescence: Arc<crate::clap::plugin::quiescence::HostCallQuiescence>,
     /// Whether the audio processor is currently active in audio processing.
     /// Used by the model loader background worker to adapt its rebuild poll interval
     /// (10ms while processing, 250ms when idle/deactivated, F-RA-06).
     pub is_processing: AtomicBool,
     /// Total wakeups of the background model loader worker thread (telemetry/test observability).
     pub loader_worker_wakeups: AtomicU64,
+    /// Selected audio ports configuration (0 = Mono, 1 = Stereo).
+    /// Controlled by the host via `clap.audio-ports-config` while deactivated.
+    pub selected_port_config: AtomicU32,
+    /// Whether audio port 0 input is active.
+    /// Controlled by the host via `clap.audio-ports-activation`.
+    pub port_input_active: AtomicBool,
+    /// Whether audio port 0 output is active.
+    /// Controlled by the host via `clap.audio-ports-activation`.
+    pub port_output_active: AtomicBool,
 }
 
 /// Model payload deferred from the main thread until `buffer_size` is known
@@ -813,6 +847,8 @@ pub struct PendingModel {
     pub generation: u64,
     /// The encapsulated model for neural inference (Left Channel).
     pub model: Option<Box<StaticModel>>,
+    /// The encapsulated model for neural inference (Right Channel in dual-mono mode).
+    pub model_r: Option<Box<StaticModel>>,
     /// Model native sample rate read from the .nam file metadata.
     /// Used to construct the polyphase resampler at flush time when
     /// `activate()` has set the real host `sample_rate`.
@@ -870,6 +906,8 @@ pub struct GuiSharedState {
 ///
 /// Owns the underlying [`GuiSharedState`] via an [`Arc`], enabling safe reference-counted
 /// ownership across GUI windows and background reaper threads without dangling pointers.
+pub type RecoveredCommands = std::collections::VecDeque<Box<ClapParamPayload>>;
+
 pub struct NamClapShared {
     /// Inner ref-counted GUI and plugin shared state.
     pub gui: Arc<GuiSharedState>,
@@ -909,12 +947,18 @@ pub const RENDER_MODE_REALTIME: u32 = 0;
 /// Render mode: offline (export/bounce, max quality, no soft-degrade).
 pub const RENDER_MODE_OFFLINE: u32 = 1;
 
+/// Port configuration constant: Mono (1 input port [1 channel], 1 output port [1 channel]).
+pub const CONFIG_ID_MONO: u32 = 0;
+/// Port configuration constant: Stereo / Dual-Mono (1 input port [2 channels], 1 output port [2 channels]).
+pub const CONFIG_ID_STEREO: u32 = 1;
+
 impl ColdShared {
     /// Creates a new `ColdShared` instance with default production/test fields and pre-allocated SPSC channels.
     pub fn new(instance_id: u64) -> Self {
         let (param_tx, param_rx) = RingBuffer::new(CMD_QUEUE_CAPACITY);
         let (gc_tx, gc_rx) = RingBuffer::new(32);
         let (slimmable_tx, slimmable_rx) = RingBuffer::new(4);
+        let alive_fence = Arc::new(AtomicBool::new(true));
 
         Self {
             instance_id,
@@ -968,7 +1012,7 @@ impl ColdShared {
             ui_model_info: Mutex::new(None),
             ui_model_memory_bytes: AtomicUsize::new(0),
             ui_clear_model: AtomicBool::new(false),
-            alive_fence: Arc::new(AtomicBool::new(true)),
+            alive_fence: Arc::clone(&alive_fence),
             gui_user_closed: AtomicBool::new(false),
             render_mode: AtomicU32::new(RENDER_MODE_REALTIME),
             gui_scale_factor: AtomicU32::new(0),
@@ -988,8 +1032,10 @@ impl ColdShared {
             full_wavenet_model: Mutex::new(None),
             cmd_next_seq: AtomicU64::new(0),
             cmd_last_ack: AtomicU64::new(0),
+            recovered_commands: Mutex::new(RecoveredCommands::new()),
             last_applied_generation: AtomicU64::new(0),
             pending_restart_os_factor: AtomicU32::new(0),
+            last_reported_tail_samples: AtomicU32::new(0),
             in_flight_params: Mutex::new(None),
             pending_model: Mutex::new(None),
             deactivated_dsp: Mutex::new(None),
@@ -998,9 +1044,15 @@ impl ColdShared {
             dialog_handle_sink: Mutex::new(None),
             ir_dialog_handle_sink: Mutex::new(None),
             host_log_sink: Mutex::new(None),
-            host_log_quiescence: Arc::new(std::sync::RwLock::new(true)),
+            host_log_quiescence: Arc::new(crate::clap::plugin::quiescence::HostLogQuiescence::new()),
+            host_call_quiescence: Arc::new(
+                crate::clap::plugin::quiescence::HostCallQuiescence::new(Arc::clone(&alive_fence)),
+            ),
             is_processing: AtomicBool::new(false),
             loader_worker_wakeups: AtomicU64::new(0),
+            selected_port_config: AtomicU32::new(CONFIG_ID_MONO),
+            port_input_active: AtomicBool::new(true),
+            port_output_active: AtomicBool::new(true),
         }
     }
 

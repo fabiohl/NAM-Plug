@@ -243,7 +243,22 @@ pub(crate) fn process_sub_block(
         buf_xfd_scratch_r,
     );
 
-    if let Some(ref mut conv) = ctx.conv
+    if let Some(ref mut pair) = ctx.conv_pair {
+        if !pair.l.is_passthrough() {
+            if !process_mono {
+                pair.process_block_stereo(
+                    &mut buf_out_l[..n_out],
+                    &mut buf_out_r[..n_out],
+                    Some(ctx.rt_status),
+                );
+                pair.rearm_tail();
+            } else {
+                pair.l
+                    .process_block(&mut buf_out_l[..n_out], Some(ctx.rt_status));
+                pair.l.rearm_tail();
+            }
+        }
+    } else if let Some(ref mut conv) = ctx.conv
         && !conv.is_passthrough()
     {
         // The IR operates directly on the final output scratch: `process_block`
@@ -274,7 +289,7 @@ pub(crate) fn process_sub_block(
         model_output_mult_adj,
         ctx.silence_hysteresis,
         ctx.rt_status,
-        *ctx.process_mono,
+        process_mono,
         ctx.adaptive,
         shared_sample_rate,
     );
@@ -289,7 +304,7 @@ pub(crate) fn process_sub_block(
         false,
         false,
         &mut false,
-        process_mono,
+        *ctx.process_mono,
     );
 
     let (peak_l, peak_r) = copy_output_from_sub_block(
@@ -430,20 +445,41 @@ fn drain_tail_into(
         buf_xfd_scratch_l: _,
         buf_xfd_scratch_r: _,
     } = scratch;
-    let drain = n_samples.min(ctx.conv.as_ref().map_or(0, |conv| {
+    let drain = n_samples.min(if let Some(ref pair) = ctx.conv_pair {
+        if pair.l.is_passthrough() && pair.r.is_passthrough() {
+            0
+        } else if !process_mono {
+            pair.remaining_tail_samples()
+        } else {
+            pair.l.remaining_tail_samples()
+        }
+    } else if let Some(ref conv) = ctx.conv {
         if conv.is_passthrough() {
             0
         } else {
             conv.remaining_tail_samples()
         }
-    }));
+    } else {
+        0
+    });
 
     if drain > 0 {
-        if let Some(ref mut conv) = ctx.conv {
+        if let Some(ref mut pair) = ctx.conv_pair {
+            if !process_mono {
+                pair.drain_tail_stereo(
+                    &mut buf_out_l[..drain],
+                    &mut buf_out_r[..drain],
+                    Some(ctx.rt_status),
+                );
+            } else {
+                pair.l
+                    .drain_tail(&mut buf_out_l[..drain], Some(ctx.rt_status));
+            }
+        } else if let Some(ref mut conv) = ctx.conv {
             conv.drain_tail(&mut buf_out_l[..drain], Some(ctx.rt_status));
-        }
-        if !process_mono {
-            buf_out_r[..drain].copy_from_slice(&buf_out_l[..drain]);
+            if !process_mono {
+                buf_out_r[..drain].copy_from_slice(&buf_out_l[..drain]);
+            }
         }
         apply_output_stage(
             &mut buf_out_l[..drain],
@@ -675,7 +711,22 @@ fn process_crossfade_sub_block(
             scratch.buf_xfd_scratch_r,
         );
 
-        if let Some(ref mut conv) = ctx.conv
+        if let Some(ref mut pair) = ctx.conv_pair {
+            if !pair.l.is_passthrough() {
+                if !process_mono {
+                    pair.process_block_stereo(
+                        &mut scratch.buf_out_l[..n_o],
+                        &mut scratch.buf_out_r[..n_o],
+                        Some(ctx.rt_status),
+                    );
+                    pair.rearm_tail();
+                } else {
+                    pair.l
+                        .process_block(&mut scratch.buf_out_l[..n_o], Some(ctx.rt_status));
+                    pair.l.rearm_tail();
+                }
+            }
+        } else if let Some(ref mut conv) = ctx.conv
             && !conv.is_passthrough()
         {
             // The IR operates directly on the final output scratch (see the

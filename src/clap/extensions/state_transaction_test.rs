@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 fn make_model_resources(mult_adj: f32) -> ModelResources {
     ModelResources {
         model_l: None,
+        model_r: None,
         new_resampler: Box::new(NamResampler::new_simple(48000, 48000).unwrap()),
         new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
         input_mult_adj: mult_adj,
@@ -442,6 +443,32 @@ fn test_validate_ir_valid_hash_accepts_real_wav() {
 }
 
 #[test]
+fn test_validate_ir_uses_exact_in_memory_bytes_immune_to_file_replacement() {
+    let ir_file = std::env::temp_dir().join("nam_test_ir_toctou_immune.wav");
+    let samples: Vec<f32> = (0..64).map(|i| (i as f32 * 0.1).sin()).collect();
+    neural_amp_modeler_rs::testing::wav::write_wav_f32(&ir_file, &samples, 48000)
+        .expect("failed to write synthetic IR WAV");
+    let valid_hash = compute_file_hash(&ir_file).expect("hash IR");
+
+    let mut params = ProcessingParams::default();
+    params.ir_path = Some(ir_file.clone());
+    params.ir_hash = Some(valid_hash.clone());
+
+    // Single-shot load and hash check validates in-memory bytes
+    let result = validate_ir(&params, 48000, 256, &sys_snapshot());
+    assert!(
+        result.is_ok(),
+        "validate_ir must succeed with verified in-memory bytes"
+    );
+    let (resources, path_on_disk, hash) = result.unwrap();
+    assert!(resources.is_some());
+    assert_eq!(path_on_disk, Some(ir_file.to_string_lossy().into_owned()));
+    assert_eq!(hash, Some(valid_hash));
+
+    let _ = std::fs::remove_file(&ir_file);
+}
+
+#[test]
 fn test_validate_model_full_no_model_path_without_basename_is_clear() {
     // Full restore with neither path nor basename = explicit no-model clear.
     let params = ProcessingParams::default();
@@ -780,5 +807,25 @@ fn test_corrupted_states_10000_heap_stable() {
          corrupted-state submissions (baseline {baseline_live} → final {final_live}) — \
          Box::leak regression",
         final_live.saturating_sub(baseline_live)
+    );
+}
+
+#[test]
+fn test_read_ir_file_bytes_rejects_oversize_asset() {
+    let path = std::env::temp_dir().join(format!(
+        "nam_ir_oversize_{}_{}.wav",
+        std::process::id(),
+        MAX_FILE_HASH_SIZE
+    ));
+    {
+        let file = File::create(&path).expect("create sparse oversize IR");
+        file.set_len(MAX_FILE_HASH_SIZE + 1)
+            .expect("extend sparse oversize IR");
+    }
+    let result = read_ir_file_bytes(&path);
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        result.is_err(),
+        "an IR larger than MAX_FILE_HASH_SIZE must be rejected before decoding"
     );
 }

@@ -3,6 +3,7 @@
 
 use crate::clap::gui::dialog_state::{self, DialogSharedState, IrDialogSharedState};
 use crate::clap::plugin::lock::lock_cold;
+use crate::clap::plugin::quiescence::HostCallQuiescence;
 use clack_plugin::host::HostSharedHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ pub(crate) fn spawn_file_dialog(
     state: Arc<DialogSharedState>,
     host_static: HostSharedHandle<'static>,
     alive_fence: Arc<AtomicBool>,
+    quiescence: Arc<HostCallQuiescence>,
 ) -> std::thread::JoinHandle<()> {
     spawn_file_dialog_inner(
         state,
@@ -35,7 +37,11 @@ pub(crate) fn spawn_file_dialog(
                     .pick_file()
             }
         },
-        move || host_static.request_callback(),
+        move || {
+            crate::clap::plugin::quiescence::host_call(&quiescence, || {
+                host_static.request_callback();
+            });
+        },
     )
 }
 
@@ -72,6 +78,7 @@ pub(crate) fn spawn_ir_file_dialog(
     state: Arc<IrDialogSharedState>,
     host_static: HostSharedHandle<'static>,
     alive_fence: Arc<AtomicBool>,
+    quiescence: Arc<HostCallQuiescence>,
 ) -> std::thread::JoinHandle<()> {
     spawn_ir_file_dialog_inner(
         state,
@@ -83,7 +90,11 @@ pub(crate) fn spawn_ir_file_dialog(
                     .pick_file()
             }
         },
-        move || host_static.request_callback(),
+        move || {
+            crate::clap::plugin::quiescence::host_call(&quiescence, || {
+                host_static.request_callback();
+            });
+        },
     )
 }
 

@@ -274,14 +274,14 @@ fn run_window_generation(
             .gui_user_closed
             .store(true, Ordering::Release);
         log::debug!("NAM-Plug: GUI user closed");
-        if shared_close_notify.cold.alive_fence.load(Ordering::Acquire) {
+        shared_close_notify.cold.host_call_quiescence.host_call(|| {
             if let Some(gui_host) =
                 host_close_notify.get_extension::<clack_extensions::gui::HostGui>()
             {
                 gui_host.closed(&host_close_notify, false);
             }
             host_close_notify.request_callback();
-        }
+        });
         slint::CloseRequestResponse::HideWindow
     });
 

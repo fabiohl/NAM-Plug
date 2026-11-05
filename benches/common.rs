@@ -235,11 +235,21 @@ pub fn synth_ir(len: usize, freq: f32, decay: f32) -> Vec<f32> {
 }
 
 /// Writes a synthetic 512-sample IR WAV file for CabSim benchmarking.
+///
+/// The response is a deterministic, densely populated decaying tail (not just
+/// two non-zero taps), so the ring-out drain in `CLAP_WorstCase_RingOut` has
+/// observable energy across the whole IR window (A-07).
 pub fn create_bench_ir_wav(sample_rate: u32) -> PathBuf {
     let ir_path = std::env::temp_dir().join(format!("nam_plug_bench_ir_{sample_rate}.wav"));
-    let mut ir = vec![0.0f32; 512];
+    let mut state = 0x1234_5678u32;
+    let mut ir = Vec::with_capacity(512);
+    for n in 0..512 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let noise = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
+        let envelope = (-6.0 * n as f32 / 512.0).exp();
+        ir.push(noise * envelope * 0.25);
+    }
     ir[0] = 1.0;
-    ir[1] = -0.9;
     neural_amp_modeler_rs::testing::wav::write_wav_f32(&ir_path, &ir, sample_rate)
         .expect("write synthetic bench IR wav");
     ir_path

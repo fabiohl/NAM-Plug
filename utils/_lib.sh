@@ -85,7 +85,7 @@ assert_ran_tests() {
 
 # trap_fail — último comando do ERR trap: o carrier pertence ao pai, nunca a um filho.
 trap_fail() {
-  local rc=$1
+  local rc=$1; [ "${FINISHED:-0}" = 1 ] && return 0
   FAILS+=("${PHASE_NAME:-step}")
   emit "PHASE: ${PHASE_NAME:-step} FAIL rc=$rc log=${CUR_LOG:-none}" || true
   finish || true
@@ -101,7 +101,7 @@ carrier_write() {
 }
 
 finish() {
-  local s=PASS e=0 line
+  local s=PASS e=0 line; FINISHED=1
   [ ${#GAPS[@]} -gt 0 ] && s=PASS_WITH_GAPS
   { [ ${#FAILS[@]} -gt 0 ] || { [ "$STRICT" = 1 ] && [ ${#GAPS[@]} -gt 0 ]; }; } && s=FAIL
   [ "$EMIT_RC" -ne 0 ] && { FAILS+=("emit"); s=FAIL; }

@@ -22,7 +22,7 @@ use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{
     RT_STATUS_STRUCTURAL_DEFERRED, RT_STATUS_STRUCTURAL_SUPERSEDED,
 };
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
 use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
 use std::sync::atomic::Ordering;
 #[cfg(feature = "heap-audit")]
@@ -104,21 +104,32 @@ fn activate_plugin(
     (started, shared_ptr, main_thread_ptr)
 }
 
-/// Builds a cheap, observable cab-sim adapter with a known tail length:
+/// Builds a cheap, observable cab-sim pair with a known tail length:
 /// `ir_len` samples at partition size `N` ⇒ `tail = (ir_len / N) * N`.
-fn make_adapter(ir_len: usize) -> Box<CabSimAdapter> {
+fn make_pair(ir_len: usize) -> Box<CabSimPair> {
     let ir: Vec<f32> = (0..ir_len)
         .map(|i| {
             let t = i as f32;
             (t * 0.05).sin() * (-t * 0.02).exp()
         })
         .collect();
-    Box::new(
+    let l = Box::new(
         CabSimAdapter::new(Box::new(
             ConvEngine::new(&ir, N).expect("ConvEngine must build"),
         ))
         .expect("CabSimAdapter must build"),
-    )
+    );
+    let r = Box::new(
+        CabSimAdapter::new(Box::new(
+            ConvEngine::new(&ir, N).expect("ConvEngine must build"),
+        ))
+        .expect("CabSimAdapter must build"),
+    );
+    Box::new(CabSimPair {
+        l,
+        r,
+        sample_rate: 48000,
+    })
 }
 
 /// Structural command deferred by the final callback must be resolved at
@@ -137,11 +148,11 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
-            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { adapter: None })
+            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: None })
             .expect("push #1 must succeed");
         mt.cmd_producer
             .borrow_mut()
-            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { adapter: None })
+            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: None })
             .expect("push #2 must succeed");
     }
     let mut bufs = StereoTestBuffers::new(N, 0.0, 0.0);
@@ -280,29 +291,23 @@ fn test_structural_coalescing_supersedes_same_kind() {
 
     // Three distinct IRs pushed in one burst: A (512 ⇒ tail 512),
     // B (1024 ⇒ tail 1024), C (2048 ⇒ tail 2048).
-    let ir_a = make_adapter(512);
-    let ir_b = make_adapter(1024);
-    let ir_c = make_adapter(2048);
+    let ir_a = make_pair(512);
+    let ir_b = make_pair(1024);
+    let ir_c = make_pair(2048);
 
     {
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
-            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
-                adapter: Some(ir_a),
-            })
+            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: Some(ir_a) })
             .expect("IR A push must succeed");
         mt.cmd_producer
             .borrow_mut()
-            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
-                adapter: Some(ir_b),
-            })
+            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: Some(ir_b) })
             .expect("IR B push must succeed");
         mt.cmd_producer
             .borrow_mut()
-            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
-                adapter: Some(ir_c),
-            })
+            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: Some(ir_c) })
             .expect("IR C push must succeed");
     }
 
@@ -364,7 +369,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
         mt.cmd_producer
             .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
-                adapter: Some(make_adapter(1024)),
+                pair: Some(make_pair(1024)),
             })
             .expect("IR B2 push must succeed");
     }
@@ -389,7 +394,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
         mt.cmd_producer
             .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
-                adapter: Some(make_adapter(512)),
+                pair: Some(make_pair(512)),
             })
             .expect("IR D push must succeed");
     }

@@ -1002,3 +1002,108 @@ fn test_restore_for_preset_without_model_preserves_active_model() {
 
     let _ = std::fs::remove_file(&ir);
 }
+
+/// T-07.3 / F-PLUG-06: Single owner of oversampling restart with target coalescing.
+/// A single transition from Off to 2x emits exactly one `RestartRequested`.
+/// A repeated event targeting the same 2x factor emits ZERO additional restarts.
+/// A subsequent transition to 4x emits exactly one additional restart.
+#[test]
+fn test_oversample_restart_single_owner_and_target_coalescing() {
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config())
+        .expect("activate");
+    let mut started = stopped.start_processing().expect("start_processing");
+
+    let restarts_count = |events: &[crate::clap::host_harness::HostEvent]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, crate::clap::host_harness::HostEvent::RestartRequested))
+            .count()
+    };
+
+    assert_eq!(restarts_count(&state.snapshot()), 0);
+
+    let mut il = vec![0.3f32; 256];
+    let mut ir = vec![0.3f32; 256];
+    let mut ol = vec![0.0f32; 256];
+    let mut or = vec![0.0f32; 256];
+
+    // 1. First transition: Off -> 2x.
+    let event1 = clack_common::events::event_types::ParamValueEvent::new(
+        0u32,
+        clack_common::utils::ClapId::new(crate::clap::extensions::params::PARAM_OVERSAMPLE),
+        clack_common::events::Pckn::match_all(),
+        1.0, // 2x
+    );
+    let mut event_buffer1 = clack_host::prelude::EventBuffer::new();
+    event_buffer1.push(&event1);
+    let input_events1 = clack_host::prelude::InputEvents::from_buffer(&event_buffer1);
+
+    let _ = process_block_harness(
+        &mut started,
+        &mut il,
+        &mut ir,
+        &mut ol,
+        &mut or,
+        Some(&input_events1),
+    );
+
+    let count_after_first = restarts_count(&state.snapshot());
+    assert_eq!(
+        count_after_first, 1,
+        "Transition from Off to 2x must emit exactly ONE RestartRequested"
+    );
+
+    // 2. Repeated event with the SAME target factor (2x).
+    let event2 = clack_common::events::event_types::ParamValueEvent::new(
+        0u32,
+        clack_common::utils::ClapId::new(crate::clap::extensions::params::PARAM_OVERSAMPLE),
+        clack_common::events::Pckn::match_all(),
+        1.0, // 2x again
+    );
+    let mut event_buffer2 = clack_host::prelude::EventBuffer::new();
+    event_buffer2.push(&event2);
+    let input_events2 = clack_host::prelude::InputEvents::from_buffer(&event_buffer2);
+
+    let _ = process_block_harness(
+        &mut started,
+        &mut il,
+        &mut ir,
+        &mut ol,
+        &mut or,
+        Some(&input_events2),
+    );
+
+    let count_after_repeat = restarts_count(&state.snapshot());
+    assert_eq!(
+        count_after_repeat, 1,
+        "Repeated event targeting the same factor must emit ZERO additional restarts (coalesced)"
+    );
+
+    // 3. Transition to 4x.
+    let event3 = clack_common::events::event_types::ParamValueEvent::new(
+        0u32,
+        clack_common::utils::ClapId::new(crate::clap::extensions::params::PARAM_OVERSAMPLE),
+        clack_common::events::Pckn::match_all(),
+        2.0, // 4x
+    );
+    let mut event_buffer3 = clack_host::prelude::EventBuffer::new();
+    event_buffer3.push(&event3);
+    let input_events3 = clack_host::prelude::InputEvents::from_buffer(&event_buffer3);
+
+    let _ = process_block_harness(
+        &mut started,
+        &mut il,
+        &mut ir,
+        &mut ol,
+        &mut or,
+        Some(&input_events3),
+    );
+
+    let count_after_third = restarts_count(&state.snapshot());
+    assert_eq!(
+        count_after_third, 2,
+        "Transition from 2x to 4x must emit exactly ONE additional RestartRequested"
+    );
+}

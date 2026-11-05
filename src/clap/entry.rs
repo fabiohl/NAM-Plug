@@ -51,12 +51,13 @@ impl Entry for NamEntry {
 /// - BMI2
 ///
 /// Accepts a feature probe closure `has_feature` to allow deterministic unit testing of error paths.
-pub fn validate_cpu_features_with<F>(mut has_feature: F) -> Result<(), String>
+pub fn validate_cpu_features_with<F>(has_feature: F) -> Result<(), String>
 where
     F: FnMut(&str) -> bool,
 {
     #[cfg(target_arch = "x86_64")]
     {
+        let mut has_feature = has_feature;
         const REQUIRED_FEATURES: &[&str] = &["avx2", "fma", "bmi2"];
         let mut missing = Vec::new();
         for &feat in REQUIRED_FEATURES {

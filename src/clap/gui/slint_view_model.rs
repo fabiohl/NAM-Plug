@@ -297,12 +297,14 @@ fn simd_badge_text(isa: InstructionSet) -> &'static str {
 }
 
 #[inline]
-fn flush_params(host: Option<&GuiHostBridge>) {
+fn flush_params(host: Option<&GuiHostBridge>, shared: &GuiSharedState) {
     if let Some(bridge) = host {
         let host_static = bridge.as_static();
-        if let Some(params_ext) = host_static.get_extension::<HostParams>() {
-            params_ext.request_flush(&host_static);
-        }
+        shared.cold.host_call_quiescence.host_call(|| {
+            if let Some(params_ext) = host_static.get_extension::<HostParams>() {
+                params_ext.request_flush(&host_static);
+            }
+        });
     }
 }
 
@@ -891,7 +893,7 @@ impl SlintViewModel {
             let shared = Arc::clone(&shared);
             window.on_input_gain_gesture_begin(move || {
                 shared.begin_gesture(PARAM_INPUT_GAIN);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
         {
@@ -903,14 +905,14 @@ impl SlintViewModel {
                     .store(val.to_bits(), Ordering::Relaxed);
                 shared.bump_generation();
                 shared.mark_param_changed(PARAM_INPUT_GAIN);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
         {
             let shared = Arc::clone(&shared);
             window.on_input_gain_gesture_end(move || {
                 shared.end_gesture(PARAM_INPUT_GAIN);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
 
@@ -919,7 +921,7 @@ impl SlintViewModel {
             let shared = Arc::clone(&shared);
             window.on_output_gain_gesture_begin(move || {
                 shared.begin_gesture(PARAM_OUTPUT_GAIN);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
         {
@@ -931,14 +933,14 @@ impl SlintViewModel {
                     .store(val.to_bits(), Ordering::Relaxed);
                 shared.bump_generation();
                 shared.mark_param_changed(PARAM_OUTPUT_GAIN);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
         {
             let shared = Arc::clone(&shared);
             window.on_output_gain_gesture_end(move || {
                 shared.end_gesture(PARAM_OUTPUT_GAIN);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
 
@@ -947,7 +949,7 @@ impl SlintViewModel {
             let shared = Arc::clone(&shared);
             window.on_gate_thresh_gesture_begin(move || {
                 shared.begin_gesture(PARAM_GATE_THRESH);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
         {
@@ -959,14 +961,14 @@ impl SlintViewModel {
                     .store(val.to_bits(), Ordering::Relaxed);
                 shared.bump_generation();
                 shared.mark_param_changed(PARAM_GATE_THRESH);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
         {
             let shared = Arc::clone(&shared);
             window.on_gate_thresh_gesture_end(move || {
                 shared.end_gesture(PARAM_GATE_THRESH);
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
 
@@ -985,7 +987,7 @@ impl SlintViewModel {
                 shared.mark_param_changed(PARAM_BYPASS);
                 shared.end_gesture(PARAM_BYPASS);
                 shared.bump_generation();
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
                 if let Some(w) = window_weak.upgrade() {
                     w.set_bypass_active(next);
                 }
@@ -1005,7 +1007,7 @@ impl SlintViewModel {
                 shared.mark_param_changed(PARAM_OVERSAMPLE);
                 shared.end_gesture(PARAM_OVERSAMPLE);
                 shared.bump_generation();
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
         {
@@ -1022,7 +1024,7 @@ impl SlintViewModel {
                 shared.mark_param_changed(PARAM_OVERSAMPLE);
                 shared.end_gesture(PARAM_OVERSAMPLE);
                 shared.bump_generation();
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
                 if let Some(w) = window_weak.upgrade() {
                     w.set_oversample_mode(next as i32);
                     w.set_oversample_text(match next {
@@ -1047,7 +1049,7 @@ impl SlintViewModel {
                 shared.mark_param_changed(PARAM_ACTIVATION);
                 shared.end_gesture(PARAM_ACTIVATION);
                 shared.bump_generation();
-                flush_params(host.as_ref());
+                flush_params(host.as_ref(), &shared);
             });
         }
 
@@ -1090,6 +1092,7 @@ impl SlintViewModel {
                             Arc::clone(dialog_state_arc),
                             host_static,
                             Arc::clone(&shared.cold.alive_fence),
+                            Arc::clone(&shared.cold.host_call_quiescence),
                         );
                         *lock_cold(&shared.cold.dialog_handle_sink, "dialog_handle_sink") =
                             Some(handle);
@@ -1106,11 +1109,11 @@ impl SlintViewModel {
                 log::info!("SlintViewModel: Requesting NAM Amp Model clear");
                 shared.note_ui_interaction();
                 shared.cold.ui_clear_model.store(true, Ordering::Relaxed);
-                if let Some(bridge) = host
-                    && shared.cold.alive_fence.load(Ordering::Acquire)
-                {
+                if let Some(bridge) = host {
                     let host_static = bridge.as_static();
-                    host_static.request_callback();
+                    shared.cold.host_call_quiescence.host_call(|| {
+                        host_static.request_callback();
+                    });
                 }
                 if let Some(w) = window_weak.upgrade() {
                     w.set_has_model(false);
@@ -1142,6 +1145,7 @@ impl SlintViewModel {
                             Arc::clone(ir_dialog_state_arc),
                             host_static,
                             Arc::clone(&shared.cold.alive_fence),
+                            Arc::clone(&shared.cold.host_call_quiescence),
                         );
                         *lock_cold(&shared.cold.ir_dialog_handle_sink, "ir_dialog_handle_sink") =
                             Some(handle);
@@ -1158,11 +1162,11 @@ impl SlintViewModel {
                 log::info!("SlintViewModel: Requesting IR CabSim clear");
                 shared.note_ui_interaction();
                 shared.cold.ui_clear_ir.store(true, Ordering::Relaxed);
-                if let Some(bridge) = host
-                    && shared.cold.alive_fence.load(Ordering::Acquire)
-                {
+                if let Some(bridge) = host {
                     let host_static = bridge.as_static();
-                    host_static.request_callback();
+                    shared.cold.host_call_quiescence.host_call(|| {
+                        host_static.request_callback();
+                    });
                 }
                 if let Some(w) = window_weak.upgrade() {
                     w.set_has_ir(false);

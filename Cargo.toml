@@ -22,6 +22,7 @@ clack-plugin = "0.2"
 clack-extensions = { version = "0.2", features = [
     "audio-ports",
     "audio-ports-activation",
+    "audio-ports-config",
     "clack-plugin",
     "gui",
     "latency",
@@ -159,6 +160,3 @@ allow_attributes = "warn"
 [package.metadata.docs.rs]
 features = ["testing"]
 rustdoc-args = ["--cfg", "docsrs"]
-
-[patch.crates-io]
-NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs" }

@@ -324,21 +324,63 @@ mod tests {
         let mut shared_r = [0.7f32; N];
         let l_ptr = shared_l.as_ptr() as usize;
         let r_ptr = shared_r.as_ptr() as usize;
-        let in_l = unsafe { std::slice::from_raw_parts_mut(shared_l.as_mut_ptr(), N) };
-        let out_l = unsafe { std::slice::from_raw_parts_mut(shared_l.as_mut_ptr(), N) };
-        let in_r = unsafe { std::slice::from_raw_parts_mut(shared_r.as_mut_ptr(), N) };
-        let out_r = unsafe { std::slice::from_raw_parts_mut(shared_r.as_mut_ptr(), N) };
-        let mut ins = [in_l, in_r];
-        let mut outs = [out_l, out_r];
 
-        let (buf_l, buf_r, ol, or, process_mono, count) = extract(&mut ins, &mut outs);
+        let mut buf_host_l = vec![f32::NAN; N];
+        let mut buf_host_r = vec![f32::NAN; N];
+        let mut process_mono = false;
+        let active_channel_count = AtomicU32::new(0);
 
-        assert_eq!(buf_l, vec![0.4; N]);
-        assert_eq!(buf_r, vec![0.7; N]);
+        let mut in_ptrs = [shared_l.as_mut_ptr(), shared_r.as_mut_ptr()];
+        let mut out_ptrs = [shared_l.as_mut_ptr(), shared_r.as_mut_ptr()];
+
+        let raw_inputs = [clap_sys::audio_buffer::clap_audio_buffer {
+            data32: in_ptrs.as_mut_ptr(),
+            data64: std::ptr::null_mut(),
+            channel_count: 2,
+            latency: 0,
+            constant_mask: 0,
+        }];
+        let mut raw_outputs = [clap_sys::audio_buffer::clap_audio_buffer {
+            data32: out_ptrs.as_mut_ptr(),
+            data64: std::ptr::null_mut(),
+            channel_count: 2,
+            latency: 0,
+            constant_mask: 0,
+        }];
+
+        let (ol, or) = {
+            let mut audio = unsafe {
+                clack_plugin::process::Audio::from_raw_buffers(
+                    &raw_inputs,
+                    &mut raw_outputs,
+                    N as u32,
+                )
+            };
+            let mut port_pair = audio.port_pair(0).unwrap();
+
+            let result = extract_channels(
+                &mut port_pair,
+                &mut buf_host_l,
+                &mut buf_host_r,
+                &active_channel_count,
+                &mut process_mono,
+                N,
+            )
+            .expect("extract_channels failed");
+
+            let (out_l, out_r) = result.unwrap();
+            (
+                out_l.map(|o| o.as_ptr() as usize),
+                out_r.map(|o| o.as_ptr() as usize),
+            )
+        };
+
+        assert_eq!(buf_host_l, vec![0.4; N]);
+        assert_eq!(buf_host_r, vec![0.7; N]);
         assert_eq!(ol, Some(l_ptr));
         assert_eq!(or, Some(r_ptr));
         assert!(!process_mono);
-        assert_eq!(count, 2);
+        assert_eq!(active_channel_count.load(Ordering::Relaxed), 2);
     }
 
     #[test]

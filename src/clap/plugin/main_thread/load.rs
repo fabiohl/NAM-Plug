@@ -19,9 +19,8 @@ use neural_amp_modeler_rs::models::{NamModel, StaticModel};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
 use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
-use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 
 #[cfg(test)]
 type TestMidLoadHook = Box<dyn Fn(&Path) + Send + 'static>;
@@ -31,13 +30,27 @@ static TEST_MID_LOAD_HOOK: std::sync::Mutex<Option<TestMidLoadHook>> = std::sync
 
 #[cfg(test)]
 pub(crate) fn set_test_mid_load_hook<F: Fn(&Path) + Send + 'static>(f: Option<F>) {
-    *TEST_MID_LOAD_HOOK.lock().unwrap() = f.map(|func| Box::new(func) as _);
+    *TEST_MID_LOAD_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = f.map(|func| Box::new(func) as _);
 }
 
 #[cfg(test)]
 fn run_test_mid_load_hook(path: &Path) {
-    if let Some(ref hook) = *TEST_MID_LOAD_HOOK.lock().unwrap() {
-        hook(path);
+    let mut guard = TEST_MID_LOAD_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hook) = guard.take() {
+        drop(guard);
+        let hook_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hook(path);
+        }));
+        *TEST_MID_LOAD_HOOK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+        if let Err(payload) = hook_res {
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
@@ -49,6 +62,15 @@ pub(crate) fn test_mid_load_hook_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Audio configuration epoch captured at dispatch/prepare time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioEpoch {
+    /// Host sample rate (Hz).
+    pub(crate) sample_rate: u32,
+    /// Host buffer size (frames). 0 indicates pre-activation deferral.
+    pub(crate) buffer_size: usize,
 }
 
 /// Off-RT, side-effect-free model resources produced by
@@ -64,6 +86,8 @@ pub(crate) struct PreparedModel {
     path: PathBuf,
     /// Encapsulated model for neural inference (Left Channel).
     model_l: Option<Box<StaticModel>>,
+    /// Encapsulated model for neural inference (Right Channel in dual-mono mode).
+    model_r: Option<Box<StaticModel>>,
     /// Model native sample rate (Hz).
     model_rate: u32,
     /// Input gain calibration multiplier.
@@ -88,8 +112,8 @@ pub(crate) struct PreparedModel {
     new_stream: Option<Box<StreamingResampleBuffer>>,
     /// Off-RT measured per-sample inference cost (ns) when adaptive cost is on.
     prewarm_cost_ns: Option<f32>,
-    /// Host block size captured at prepare time (0 = pre-activation deferral).
-    buffer_size: usize,
+    /// Audio configuration epoch captured at prepare time.
+    pub(crate) audio_epoch: AudioEpoch,
 }
 
 // `PreparedModel` crosses the main/worker thread boundary, so its
@@ -130,7 +154,7 @@ impl<'a> NamClapMainThread<'a> {
         let model_pair = load_and_build_model(
             path,
             sys,
-            false,
+            true,
             neural_amp_modeler_rs::loader::LoadOptions::default(),
         )
         .map_err(|e| {
@@ -218,6 +242,7 @@ impl<'a> NamClapMainThread<'a> {
         let model_bytes = model_pair.model_memory_bytes().unwrap_or(0);
 
         let mut model_l = model_pair.model_l;
+        let mut model_r = model_pair.model_r;
         let input_mult_adj = model_pair.input_mult_adj;
         let output_mult_adj = model_pair.output_mult_adj;
 
@@ -252,6 +277,15 @@ impl<'a> NamClapMainThread<'a> {
                 return Err(Box::new(
                     NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
                         .message("Failed to set model max buffer size")
+                        .param("error", e.to_string()),
+                ));
+            }
+            if let Some(ref mut model) = model_r
+                && let Err(e) = model.set_max_buffer_size(buffer_size)
+            {
+                return Err(Box::new(
+                    NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                        .message("Failed to set model max buffer size (R)")
                         .param("error", e.to_string()),
                 ));
             }
@@ -291,6 +325,7 @@ impl<'a> NamClapMainThread<'a> {
         Ok(PreparedModel {
             path: path.to_path_buf(),
             model_l,
+            model_r,
             model_rate,
             input_mult_adj,
             output_mult_adj,
@@ -302,7 +337,10 @@ impl<'a> NamClapMainThread<'a> {
             new_resampler,
             new_stream,
             prewarm_cost_ns,
-            buffer_size,
+            audio_epoch: AudioEpoch {
+                sample_rate: host_rate,
+                buffer_size,
+            },
         })
     }
 
@@ -382,7 +420,8 @@ impl<'a> NamClapMainThread<'a> {
     ) {
         let PreparedModel {
             path,
-            model_l,
+            mut model_l,
+            mut model_r,
             model_rate,
             input_mult_adj,
             output_mult_adj,
@@ -391,19 +430,259 @@ impl<'a> NamClapMainThread<'a> {
             model_info,
             model_bytes,
             full_wavenet,
-            new_resampler,
-            new_stream,
-            prewarm_cost_ns,
-            buffer_size,
+            mut new_resampler,
+            mut new_stream,
+            mut prewarm_cost_ns,
+            audio_epoch,
         } = prepared;
 
-        // Identity (path/hash/search-path) is published up-front; the display
-        // metadata (`ui_model_metadata`/`ui_model_info`), name, counter,
-        // rescan, error-clear and dirty bit all land together in
-        // `finish_commit_ui`, which runs in every retaining outcome (F-RB-02).
+        // Identity (path/hash/search-path), DSP epoch and display metadata are
+        // published only after the resources have been committed (or
+        // retained) successfully. A failed revalidation leaves the previous
+        // identity and DSP untouched and surfaces a visible error.
+        let current_host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
+        let current_buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
+
+        if current_buffer_size == 0 {
+            // Plugin not yet activated — defer installation to activate() via pending_model.
+            *lock_cold(&self.shared.cold.pending_model, "pending_model") = Some(PendingModel {
+                generation,
+                model: model_l,
+                model_r,
+                model_rate,
+                input_mult_adj,
+                output_mult_adj,
+            });
+            self.publish_model_identity(&path, model_hash, model_rate, model_bytes, full_wavenet);
+            self.finish_commit_ui(&path, metadata, model_info);
+            return;
+        }
+
+        // F-PLUG-03: Audio epoch revalidation. If the host audio configuration
+        // renegotiated while the asynchronous prepare was in flight (or if buffer_size
+        // was zero at prepare time), rebuild the resampler and streaming adapter
+        // off-RT for the actual active configuration before committing.
+        let divergent = audio_epoch.sample_rate != current_host_rate
+            || audio_epoch.buffer_size != current_buffer_size
+            || new_stream.as_ref().is_none_or(|s| {
+                s.host_rate() != current_host_rate || s.max_block() != current_buffer_size
+            })
+            || new_resampler.is_none();
+
+        if divergent {
+            log::info!(
+                "NAM-Plug: audio configuration divergence detected during model commit \
+                 (epoch: {} Hz/{} frames -> host: {} Hz/{} frames); adapting off-RT",
+                audio_epoch.sample_rate,
+                audio_epoch.buffer_size,
+                current_host_rate,
+                current_buffer_size,
+            );
+
+            let adapted_resampler = match NamResampler::new_simple(current_host_rate, model_rate) {
+                Ok(r) => Box::new(r),
+                Err(e) => {
+                    self.note_commit_failure(
+                        &path,
+                        &format!("failed to build polyphase resampler for the active epoch: {e:?}"),
+                    );
+                    return;
+                }
+            };
+
+            let adapted_stream = match crate::clap::plugin::build_stream_adapter(
+                current_host_rate,
+                model_rate,
+                current_buffer_size,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.note_commit_failure(
+                        &path,
+                        &format!("failed to build stream adapter for the active epoch: {e:?}"),
+                    );
+                    return;
+                }
+            };
+
+            if let Some(ref mut model) = model_l
+                && let Err(e) = model.set_max_buffer_size(current_buffer_size)
+            {
+                self.note_commit_failure(
+                    &path,
+                    &format!("failed to resize left model to {current_buffer_size}: {e:?}"),
+                );
+                return;
+            }
+            if let Some(ref mut model) = model_r
+                && let Err(e) = model.set_max_buffer_size(current_buffer_size)
+            {
+                self.note_commit_failure(
+                    &path,
+                    &format!("failed to resize right model to {current_buffer_size}: {e:?}"),
+                );
+                return;
+            }
+
+            prewarm_cost_ns = if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
+                let measure_frames = crate::clap::processor::prewarm_policy::PREWARM_MEASURE_FRAMES
+                    .min(current_buffer_size);
+                model_l
+                    .as_mut()
+                    .map(|model| model.measure_cost_ns_per_sample(measure_frames))
+            } else {
+                None
+            };
+
+            new_resampler = Some(adapted_resampler);
+            new_stream = Some(adapted_stream);
+        }
+
+        if let (Some(new_resampler), Some(new_stream)) = (new_resampler, new_stream) {
+            // Explicit user load supersedes any pending staged restore.
+            *self.staged_restore.borrow_mut() = None;
+
+            // Strict Restart Policy: a model swap only changes the physical
+            // latency when the streaming adapter's latency changes (i.e. the
+            // model rate differs). The audio thread publishes the latency
+            // contribution of the *installed* stream in
+            // `current_stream_latency`, so comparing it against the new
+            // stream's latency is the authoritative same-latency check.
+            let current_stream_latency = self
+                .shared
+                .cold
+                .current_stream_latency
+                .load(Ordering::Relaxed);
+            let new_stream_latency = new_stream.latency_samples();
+            if new_stream_latency == current_stream_latency {
+                // Same exact latency ⇒ continuous hot swap: deliver through
+                // the SPSC and supersede any previously staged model (latest
+                // user intent already landed).
+                {
+                    let mut staged_swap = self.staged_swap.borrow_mut();
+                    if let Some(staged) = staged_swap.as_mut() {
+                        staged.clear_model();
+                        if staged.is_empty() {
+                            *staged_swap = None;
+                        }
+                    }
+                }
+                let push_result =
+                    self.cmd_producer
+                        .borrow_mut()
+                        .try_push_command(ClapParamPayload::LoadModel {
+                            generation,
+                            model_l,
+                            model_r,
+                            new_resampler,
+                            new_stream,
+                            model_rate,
+                            input_mult_adj,
+                            output_mult_adj,
+                            prewarm_cost_ns,
+                        });
+                match push_result {
+                    Ok(_seq) => {
+                        self.publish_model_identity(
+                            &path,
+                            model_hash,
+                            model_rate,
+                            model_bytes,
+                            full_wavenet,
+                        );
+                        self.finish_commit_ui(&path, metadata, model_info);
+                    }
+                    Err((PushError::Full, payload)) => {
+                        // Fail-closed — retain the model for retry instead of
+                        // dropping it. The model is retained, so the UI
+                        // commit advances together with it (F-RB-02);
+                        // `flush_pending_model` retries on the next cycle.
+                        if let ClapParamPayload::LoadModel {
+                            generation,
+                            model_l,
+                            model_r,
+                            new_resampler,
+                            new_stream,
+                            model_rate: _,
+                            input_mult_adj,
+                            output_mult_adj,
+                            prewarm_cost_ns: _,
+                        } = payload
+                        {
+                            drop(new_resampler); // rebuilt by flush_pending_model()
+                            drop(new_stream); // rebuilt by flush_pending_model()
+                            *lock_cold(&self.shared.cold.pending_model, "pending_model") =
+                                Some(PendingModel {
+                                    generation,
+                                    model: model_l,
+                                    model_r,
+                                    model_rate,
+                                    input_mult_adj,
+                                    output_mult_adj,
+                                });
+                        }
+                        self.host.request_callback();
+                        self.publish_model_identity(
+                            &path,
+                            model_hash,
+                            model_rate,
+                            model_bytes,
+                            full_wavenet,
+                        );
+                        self.finish_commit_ui(&path, metadata, model_info);
+                    }
+                }
+            } else {
+                // Different latency ⇒ Strict Restart Policy: the resources
+                // are staged off-RT and land only on the next host restart
+                // cycle (`activate()` consumes `staged_swap`). The DSP keeps
+                // the old, still-reported latency until then — no sample ever
+                // diverges from `PluginLatency::get()`.
+                {
+                    let mut staged_swap = self.staged_swap.borrow_mut();
+                    let staged = staged_swap.get_or_insert_with(StagedSwap::default);
+                    staged.model = Some(LoadModelPayload {
+                        generation,
+                        model_l,
+                        model_r,
+                        new_resampler,
+                        new_stream,
+                        model_rate,
+                        input_mult_adj,
+                        output_mult_adj,
+                        prewarm_cost_ns,
+                    });
+                }
+                self.host.request_restart();
+                self.publish_model_identity(
+                    &path,
+                    model_hash,
+                    model_rate,
+                    model_bytes,
+                    full_wavenet,
+                );
+                self.finish_commit_ui(&path, metadata, model_info);
+            }
+        } else {
+            self.note_commit_failure(
+                &path,
+                "model resources were not rebuilt for the active audio epoch",
+            );
+        }
+    }
+
+    /// Publishes the adopted model identity only after a valid commit.
+    fn publish_model_identity(
+        &self,
+        path: &Path,
+        model_hash: String,
+        model_rate: u32,
+        model_bytes: usize,
+        full_wavenet: Option<Box<StaticModel>>,
+    ) {
         {
             let mut params = self.params.borrow_mut();
-            params.model_path = Some(path.clone());
+            params.model_path = Some(path.to_path_buf());
             params.model_basename = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -421,149 +700,27 @@ impl<'a> NamClapMainThread<'a> {
             .cold
             .ui_model_memory_bytes
             .store(model_bytes, Ordering::Relaxed);
-
         self.shared
             .cold
             .model_sample_rate
             .store(model_rate, Ordering::Relaxed);
-
-        // The generation tag for this identity is allocated by the caller
-        // *before* the pure/effectful split (`commit_prepared_model` for the
-        // synchronous path, the accepting tick for the asynchronous path), so
-        // the worker can echo it and superseded results can be discarded.
         *lock_cold(&self.shared.cold.full_wavenet_model, "full_wavenet_model") = full_wavenet;
+    }
 
-        if buffer_size > 0 {
-            // `prepare_model` builds both the resampler and the streaming adapter
-            // whenever `buffer_size > 0`; assert that invariant in debug builds.
-            // The `else` arm below is a defensive fallback that defers the model
-            // rather than panicking, so the two halves stay in lockstep even if a
-            // future change breaks the invariant.
-            debug_assert!(
-                new_resampler.is_some() && new_stream.is_some(),
-                "prepare_model must build resampler+stream when buffer_size > 0"
-            );
-            if let (Some(new_resampler), Some(new_stream)) = (new_resampler, new_stream) {
-                // Explicit user load supersedes any pending staged restore.
-                *self.staged_restore.borrow_mut() = None;
-
-                // Strict Restart Policy: a model swap only changes the physical
-                // latency when the streaming adapter's latency changes (i.e. the
-                // model rate differs). The audio thread publishes the latency
-                // contribution of the *installed* stream in
-                // `current_stream_latency`, so comparing it against the new
-                // stream's latency is the authoritative same-latency check.
-                let current_stream_latency = self
-                    .shared
-                    .cold
-                    .current_stream_latency
-                    .load(Ordering::Relaxed);
-                let new_stream_latency = new_stream.latency_samples();
-                if new_stream_latency == current_stream_latency {
-                    // Same exact latency ⇒ continuous hot swap: deliver through
-                    // the SPSC and supersede any previously staged model (latest
-                    // user intent already landed).
-                    {
-                        let mut staged_swap = self.staged_swap.borrow_mut();
-                        if let Some(staged) = staged_swap.as_mut() {
-                            staged.clear_model();
-                            if staged.is_empty() {
-                                *staged_swap = None;
-                            }
-                        }
-                    }
-                    let push_result = self.cmd_producer.borrow_mut().try_push_command(
-                        ClapParamPayload::LoadModel {
-                            generation,
-                            model_l,
-                            new_resampler,
-                            new_stream,
-                            input_mult_adj,
-                            output_mult_adj,
-                            prewarm_cost_ns,
-                        },
-                    );
-                    match push_result {
-                        Ok(_seq) => {
-                            self.finish_commit_ui(&path, metadata, model_info);
-                        }
-                        Err((PushError::Full, payload)) => {
-                            // Fail-closed — retain the model for retry instead of
-                            // dropping it. The model is retained, so the UI
-                            // commit advances together with it (F-RB-02);
-                            // `flush_pending_model` retries on the next cycle.
-                            if let ClapParamPayload::LoadModel {
-                                generation,
-                                model_l,
-                                new_resampler,
-                                new_stream,
-                                input_mult_adj,
-                                output_mult_adj,
-                                prewarm_cost_ns: _,
-                            } = payload
-                            {
-                                drop(new_resampler); // rebuilt by flush_pending_model()
-                                drop(new_stream); // rebuilt by flush_pending_model()
-                                *lock_cold(&self.shared.cold.pending_model, "pending_model") =
-                                    Some(PendingModel {
-                                        generation,
-                                        model: model_l,
-                                        model_rate,
-                                        input_mult_adj,
-                                        output_mult_adj,
-                                    });
-                            }
-                            self.host.request_callback();
-                            self.finish_commit_ui(&path, metadata, model_info);
-                        }
-                    }
-                } else {
-                    // Different latency ⇒ Strict Restart Policy: the resources
-                    // are staged off-RT and land only on the next host restart
-                    // cycle (`activate()` consumes `staged_swap`). The DSP keeps
-                    // the old, still-reported latency until then — no sample ever
-                    // diverges from `PluginLatency::get()`.
-                    {
-                        let mut staged_swap = self.staged_swap.borrow_mut();
-                        let staged = staged_swap.get_or_insert_with(StagedSwap::default);
-                        staged.model = Some(LoadModelPayload {
-                            generation,
-                            model_l,
-                            new_resampler,
-                            new_stream,
-                            input_mult_adj,
-                            output_mult_adj,
-                            prewarm_cost_ns,
-                        });
-                    }
-                    self.host.request_restart();
-                    self.finish_commit_ui(&path, metadata, model_info);
-                }
-            } else {
-                *lock_cold(&self.shared.cold.pending_model, "pending_model") = Some(PendingModel {
-                    generation,
-                    model: model_l,
-                    model_rate,
-                    input_mult_adj,
-                    output_mult_adj,
-                });
-                self.finish_commit_ui(&path, metadata, model_info);
-            }
-        } else {
-            // Defer sending until `buffer_size` and `sample_rate` become known in
-            // `activate()`. The resampler is NOT constructed here because the host
-            // sample rate is unknown during pre-activation state restore
-            // (defaults to 48000). `flush_pending_model()` builds it with the
-            // correct rates determined at activate() time.
-            *lock_cold(&self.shared.cold.pending_model, "pending_model") = Some(PendingModel {
-                generation,
-                model: model_l,
-                model_rate,
-                input_mult_adj,
-                output_mult_adj,
-            });
-            self.finish_commit_ui(&path, metadata, model_info);
-        }
+    /// Surfaces a commit failure without publishing any identity: the previous
+    /// model identity and DSP stay live.
+    fn note_commit_failure(&self, path: &Path, msg: &str) {
+        self.shared
+            .cold
+            .rt_status
+            .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
+        self.shared
+            .cold
+            .ui_load_error
+            .store(true, Ordering::Relaxed);
+        *lock_cold(&self.shared.cold.ui_load_error_msg, "ui_load_error_msg") =
+            format!("Failed to commit model {:?}: {msg}", path);
+        log::error!("NAM-Plug: failed to commit model {path:?}: {msg}");
     }
 
     /// Loads a new neural model from the specified path.
@@ -606,39 +763,48 @@ impl<'a> NamClapMainThread<'a> {
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
         let partition_size = if buffer_size > 0 { buffer_size } else { 256 };
 
-        let cabsim = CabSimIr::load(path, host_rate, true).map_err(|e| {
-            Box::new(
-                NamDiagnostic::new(NamErrorCode::IrLoadFailed, &self.sys)
-                    .message(format!("Failed to load cab-sim IR: {:?}", path))
-                    .param("error", e.to_string()),
-            )
-        })?;
-
-        // The IR digest is computed up-front so persisted state always
-        // carries a valid `ir_hash`. A file whose digest cannot be computed is
-        // never adopted — even on this explicit user override path.
-        let ir_hash =
-            crate::clap::extensions::state_transaction::compute_file_hash(path).map_err(|e| {
+        // Single read: the digest and the decoded samples are derived from
+        // the exact same byte buffer, so a file replaced between hash and
+        // adoption cannot desynchronise `ir_hash` from the installed IR.
+        let ir_bytes = crate::clap::extensions::state_transaction::read_ir_file_bytes(path)
+            .map_err(|e| {
                 Box::new(
                     NamDiagnostic::new(NamErrorCode::IrLoadFailed, &self.sys)
-                        .message(format!("Failed to compute IR SHA-256 ({path:?}): {e}"))
+                        .message(format!("Failed to read IR file ({path:?}): {e}"))
                         .hint("Assets are adopted only with a verified SHA-256 digest."),
                 )
             })?;
+        let ir_hash = crate::clap::extensions::state_transaction::compute_bytes_hash(&ir_bytes);
 
-        let engine = ConvEngine::new(&cabsim.samples, partition_size).map_err(|e| {
-            Box::new(
-                NamDiagnostic::new(e, &self.sys)
-                    .message("Failed to build convolution engine for cab-sim IR")
-                    .hint("The IR samples require more memory than available."),
-            )
-        })?;
+        let cabsim = crate::clap::extensions::state_transaction::load_cabsim_from_verified_bytes(
+            &ir_bytes, host_rate, &self.sys, path,
+        )?;
 
-        // When the plugin is already active, build and deliver the adapter
+        let build_adapter = || {
+            ConvEngine::new(&cabsim.samples, partition_size)
+                .map_err(|e| {
+                    Box::new(
+                        NamDiagnostic::new(e, &self.sys)
+                            .message("Failed to build convolution engine for cab-sim IR")
+                            .hint("The IR samples require more memory than available."),
+                    )
+                })
+                .and_then(|engine| {
+                    CabSimAdapter::new(Box::new(engine)).map_err(|e| {
+                        Box::new(
+                            NamDiagnostic::new(e, &self.sys)
+                                .message("Failed to build cab-sim convolution adapter")
+                                .hint("The IR samples require more memory than available."),
+                        )
+                    })
+                })
+        };
+
+        // When the plugin is already active, build and deliver the pair
         // with the host partition size. When not yet active (buffer_size == 0),
-        // skip the push: `activate()` rebuilds the adapter from `ir_raw_samples`
+        // skip the push: `activate()` rebuilds the pair from `ir_raw_samples`
         // with the correct partition size, avoiding a stale fallback-sized
-        // adapter overwriting the activate-built one.
+        // pair overwriting the activate-built one.
         //
         // Strict Restart Policy: the cabsim latency contribution is
         // exactly the partition size (0 without an IR). Loading the *first* IR
@@ -646,22 +812,31 @@ impl<'a> NamClapMainThread<'a> {
         // physical latency, so the swap is staged and a host restart is
         // requested; swapping one IR for another (same partition) keeps the
         // exact same latency and applies continuously through the SPSC.
-        let delivered = if buffer_size > 0 {
+        // Only deliver through the SPSC while a processor owns the command
+        // consumer. After a deactivation the cached `sample_rate`/`buffer_size`
+        // describe the previous epoch, so pushing a pair built from them would
+        // install a stale-rate adapter on the next activation. Deferring leaves
+        // the IR in `ir_raw_samples`, and `activate()` rebuilds it for the real
+        // epoch.
+        let processor_active = self
+            .shared
+            .cold
+            .param_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none();
+        let delivered = if processor_active && buffer_size > 0 {
             // Explicit user IR load supersedes any pending staged restore.
             *self.staged_restore.borrow_mut() = None;
 
             // Box here on the main thread so the SPSC payload
-            // carries `Box<CabSimAdapter>` and the audio-thread swap moves the
+            // carries `Box<CabSimPair>` and the audio-thread swap moves the
             // old `Box` by value to the GC with zero allocations.
-            let adapter = Some(Box::new(CabSimAdapter::new(Box::new(engine)).map_err(
-                |e| {
-                    Box::new(
-                        NamDiagnostic::new(e, &self.sys)
-                            .message("Failed to build cab-sim convolution adapter")
-                            .hint("The IR samples require more memory than available."),
-                    )
-                },
-            )?));
+            let pair = Some(Box::new(CabSimPair {
+                l: Box::new(build_adapter()?),
+                r: Box::new(build_adapter()?),
+                sample_rate: cabsim.sample_rate,
+            }));
 
             let current_cabsim_latency = self
                 .shared
@@ -690,7 +865,7 @@ impl<'a> NamClapMainThread<'a> {
                 match self
                     .cmd_producer
                     .borrow_mut()
-                    .try_push_command(ClapParamPayload::LoadCabIr { adapter })
+                    .try_push_command(ClapParamPayload::LoadCabIr { pair })
                 {
                     Ok(_) => true,
                     Err(_) => {
@@ -708,7 +883,7 @@ impl<'a> NamClapMainThread<'a> {
                 {
                     let mut staged_swap = self.staged_swap.borrow_mut();
                     let staged = staged_swap.get_or_insert_with(StagedSwap::default);
-                    staged.ir = Some(adapter);
+                    staged.ir = Some(pair);
                 }
                 self.host.request_restart();
                 true
@@ -815,8 +990,10 @@ impl<'a> NamClapMainThread<'a> {
                         .try_push_command(ClapParamPayload::LoadModel {
                             generation,
                             model_l: None,
+                            model_r: None,
                             new_resampler,
                             new_stream,
+                            model_rate: host_rate,
                             input_mult_adj: 1.0,
                             output_mult_adj: 1.0,
                             prewarm_cost_ns: None,
@@ -827,6 +1004,7 @@ impl<'a> NamClapMainThread<'a> {
                         if let ClapParamPayload::LoadModel {
                             generation,
                             model_l,
+                            model_r,
                             input_mult_adj,
                             output_mult_adj,
                             ..
@@ -836,6 +1014,7 @@ impl<'a> NamClapMainThread<'a> {
                                 Some(PendingModel {
                                     generation,
                                     model: model_l,
+                                    model_r,
                                     model_rate: host_rate,
                                     input_mult_adj,
                                     output_mult_adj,
@@ -850,8 +1029,10 @@ impl<'a> NamClapMainThread<'a> {
                     staged.model = Some(LoadModelPayload {
                         generation,
                         model_l: None,
+                        model_r: None,
                         new_resampler,
                         new_stream,
+                        model_rate: host_rate,
                         input_mult_adj: 1.0,
                         output_mult_adj: 1.0,
                         prewarm_cost_ns: None,
@@ -863,6 +1044,7 @@ impl<'a> NamClapMainThread<'a> {
             *lock_cold(&self.shared.cold.pending_model, "pending_model") = Some(PendingModel {
                 generation,
                 model: None,
+                model_r: None,
                 model_rate: host_rate,
                 input_mult_adj: 1.0,
                 output_mult_adj: 1.0,

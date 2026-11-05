@@ -19,7 +19,7 @@ use clack_plugin::prelude::OutputEvents;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{GcItem, GcSink, RtSwapHandler, SwapBudget};
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
@@ -34,6 +34,10 @@ impl<'a> NamClapProcessor<'a> {
     /// `process_dsp_audio`.
     pub(super) fn process_events(&mut self, output: &mut OutputEvents) {
         self.shared.write_gui_events(output);
+
+        // 0a. Replay commands recovered from a failed activation, in their
+        //     original ring order, before any newer ring command.
+        self.replay_recovered_commands();
 
         // 0. Drain parking lot: re-try items parked during previous swaps
         //    when the GC SPSC channel was full.
@@ -84,16 +88,8 @@ impl<'a> NamClapProcessor<'a> {
             .gui_param_generation
             .load(Ordering::Acquire); // pairs with Release fetch_add em plugin/shared.rs:313, gui/ui/bypass.rs:62, gui/ui/knob.rs:281
         if generation != self.last_seen_generation {
+            self.sync_params_from_gui();
             self.last_seen_generation = generation;
-
-            self.sync_input_gain_from_gui();
-            self.sync_output_gain_from_gui();
-            self.sync_gate_thresh_from_gui();
-            self.sync_bypass_from_gui();
-            self.sync_adaptive_compute_from_gui();
-            self.sync_slim_override_from_gui();
-            self.sync_oversample_from_gui();
-            self.sync_activation_from_gui();
         } // generation guard
 
         // Dynamic latency monitoring on the Audio Thread.
@@ -115,6 +111,8 @@ impl<'a> NamClapProcessor<'a> {
                 .current_latency
                 .store(effective_latency, Ordering::Relaxed);
         }
+
+        self.check_tail_changed();
 
         // Honor render mode override: in offline mode, force adaptive compute to Off
         // for deterministic maximum-quality output. The Main Thread writes render_mode
@@ -172,6 +170,22 @@ impl<'a> NamClapProcessor<'a> {
         self.signal_slimmable_rebuild();
     }
 
+    /// Applies the commands staged by [`ActivateRollbackGuard`] after a failed
+    /// activation. The vector is moved into the processor by `activate()`, so
+    /// this path never locks or allocates; it runs at most once per
+    /// activation.
+    #[cold]
+    fn replay_recovered_commands(&mut self) {
+        if self.recovered_commands.is_empty() {
+            return;
+        }
+        let recovered = std::mem::take(&mut self.recovered_commands);
+        let (mut handler, mut gc) = command_swap_parts!(self);
+        for payload in recovered {
+            handler.install(payload, &mut gc);
+        }
+    }
+
     /// Checks if the adaptive FSM demands a WaveNet channel count change
     /// and signals the main thread to perform the rebuild off the audio thread.
     ///
@@ -198,6 +212,36 @@ impl<'a> NamClapProcessor<'a> {
             neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD,
         );
     }
+
+    /// Checks if the plugin's tail length changed (pipeline latency + CabSim tail),
+    /// and notifies the host on the audio thread if changed.
+    ///
+    /// Preserves RT safety: zero heap allocation, zero locks, and exactly
+    /// one notification per state change.
+    #[inline(always)]
+    pub(crate) fn check_tail_changed(&mut self) {
+        let base = self.cached_effective_latency;
+        let cabsim_tail = self
+            .shared
+            .rt_to_ui
+            .cabsim_tail_samples
+            .load(Ordering::Relaxed);
+        let current_tail = base.saturating_add(cabsim_tail);
+        let last_reported = self
+            .shared
+            .cold
+            .last_reported_tail_samples
+            .load(Ordering::Relaxed);
+        if current_tail != last_reported {
+            self.shared
+                .cold
+                .last_reported_tail_samples
+                .store(current_tail, Ordering::Relaxed);
+            if let Some(tail_ext) = self.host.get_extension::<HostTail>() {
+                tail_ext.changed(&mut self.host);
+            }
+        }
+    }
 }
 
 /// Splits a `&mut NamClapProcessor` into the two disjoint borrow domains the
@@ -218,12 +262,13 @@ macro_rules! command_swap_parts {
         (
             $crate::clap::processor::events::ClapCommandSwapHandler {
                 model_l: &mut $s.model_l,
+                model_r: &mut $s.model_r,
                 model_generation: &mut $s.model_generation,
                 resampler: &mut $s.resampler,
                 stream: &mut $s.stream,
                 os_l: &mut $s.os_l,
                 os_r: &mut $s.os_r,
-                cabsim_adapter: &mut $s.cabsim_adapter,
+                cabsim_pair: &mut $s.cabsim_pair,
                 params: &mut $s.params,
                 applied_os_factor: &mut $s.applied_os_factor,
                 model_input_mult_adj: &mut $s.model_input_mult_adj,
@@ -238,6 +283,7 @@ macro_rules! command_swap_parts {
                 gate_dirty: &mut $s.gate_dirty,
                 prewarm_pending: &mut $s.prewarm_pending,
                 prewarm_cost_ns_per_sample: &mut $s.prewarm_cost_ns_per_sample,
+                prewarm_zero_budget_count: &mut $s.prewarm_zero_budget_count,
                 shared: $s.shared,
                 rt_status: &$s.rt_status,
                 gain_lut: $s.gain_lut,
@@ -410,6 +456,8 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     // ── Swap domain: fields the cold install/discard paths mutate ──
     /// Active neural model (mono/primary chain), if any.
     pub(super) model_l: &'p mut Option<Box<StaticModel>>,
+    /// Active neural model (R channel, dual-mono chain), if any.
+    pub(super) model_r: &'p mut Option<Box<StaticModel>>,
     /// Generation of the active model (slimmable staleness anchor).
     pub(super) model_generation: &'p mut u64,
     /// Polyphase sinc resampler between host and model rate.
@@ -419,8 +467,8 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     /// Oversample engines (L/R) and the factor they were actually built for.
     pub(super) os_l: &'p mut Box<OversampleEngine>,
     pub(super) os_r: &'p mut Box<OversampleEngine>,
-    /// Cab-sim convolution adapter (`None` = bypass cabsim).
-    pub(super) cabsim_adapter: &'p mut Option<Box<CabSimAdapter>>,
+    /// Cab-sim convolution pair (`None` = bypass cabsim).
+    pub(super) cabsim_pair: &'p mut Option<Box<CabSimPair>>,
     /// Last full parameter snapshot applied from the ring.
     pub(super) params: &'p mut RtProcessingParams,
     /// Oversampling factor of the installed engines.
@@ -450,6 +498,8 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     /// Installed-model measured per-sample cost (ns) for the adaptive prewarm
     /// budget; `None` = per-family table (F-PR-10 / U-02).
     pub(super) prewarm_cost_ns_per_sample: &'p mut Option<f32>,
+    /// Starvation counter tracking zero-budget callbacks (D-15).
+    pub(super) prewarm_zero_budget_count: &'p mut u32,
 
     // ── Ambient references (not owned by the swap domain) ──
     /// Shared main↔RT state (latency publications, ack atomic, restart state).
@@ -536,8 +586,10 @@ impl ClapCommandSwapHandler<'_, '_> {
             ClapParamPayload::LoadModel {
                 generation,
                 model_l,
+                model_r,
                 new_resampler,
                 new_stream,
+                model_rate,
                 input_mult_adj,
                 output_mult_adj,
                 prewarm_cost_ns,
@@ -545,16 +597,18 @@ impl ClapCommandSwapHandler<'_, '_> {
                 crate::clap::plugin::shared::LoadModelPayload {
                     generation,
                     model_l,
+                    model_r,
                     new_resampler,
                     new_stream,
+                    model_rate,
                     input_mult_adj,
                     output_mult_adj,
                     prewarm_cost_ns,
                 },
                 gc,
             ),
-            ClapParamPayload::LoadCabIr { adapter } => {
-                self.cold_load_cabsim(adapter, gc);
+            ClapParamPayload::LoadCabIr { pair } => {
+                self.cold_load_cabsim(pair, gc);
             }
             ClapParamPayload::SetOversample { os_l, os_r } => {
                 self.cold_load_os(os_l, os_r, gc);
@@ -580,6 +634,7 @@ impl ClapCommandSwapHandler<'_, '_> {
         match payload {
             ClapParamPayload::LoadModel {
                 model_l,
+                model_r,
                 new_resampler,
                 new_stream,
                 ..
@@ -587,12 +642,15 @@ impl ClapCommandSwapHandler<'_, '_> {
                 if let Some(old_l) = model_l {
                     gc.retire(GcItem::Model(old_l));
                 }
+                if let Some(old_r) = model_r {
+                    gc.retire(GcItem::Model(old_r));
+                }
                 gc.retire(GcItem::Resampler(new_resampler));
                 gc.retire(GcItem::Streaming(new_stream));
             }
-            ClapParamPayload::LoadCabIr { adapter } => {
-                if let Some(old) = adapter {
-                    gc.retire(GcItem::CabConvAdapter(old));
+            ClapParamPayload::LoadCabIr { pair } => {
+                if let Some(old) = pair {
+                    gc.retire(GcItem::CabSimPair(old));
                 }
             }
             ClapParamPayload::SetOversample { os_l, os_r } => {
@@ -624,8 +682,10 @@ impl ClapCommandSwapHandler<'_, '_> {
         let crate::clap::plugin::shared::LoadModelPayload {
             generation,
             model_l,
+            model_r,
             new_resampler,
             new_stream,
+            model_rate: _,
             input_mult_adj,
             output_mult_adj,
             prewarm_cost_ns,
@@ -639,11 +699,15 @@ impl ClapCommandSwapHandler<'_, '_> {
         if let Some(old_l) = std::mem::replace(self.model_l, model_l) {
             gc.retire(GcItem::Model(old_l));
         }
+        if let Some(old_r) = std::mem::replace(self.model_r, model_r) {
+            gc.retire(GcItem::Model(old_r));
+        }
         // Swap clears the two-phase reset latch: a freshly installed model
         // arrives converged from the off-RT loader, so a model swapped in
         // mid-drain restarts converged (never half-drained) and the next
         // callback runs the normal wet path.
         *self.prewarm_pending = false;
+        *self.prewarm_zero_budget_count = 0;
         // Adopt the measured per-sample cost carried with this model (U-02 /
         // F-PR-10); `None` for a cleared model or a missing calibration, which
         // falls back to the per-family table in the prewarm policy.
@@ -654,6 +718,9 @@ impl ClapCommandSwapHandler<'_, '_> {
             // (load.rs when buffer_size > 0, or flush_pending_model() in activate/housekeeping
             // when buffer_size was 0). set_max_buffer_size is NEVER called here anymore.
             // The heap-audit CI lane catches any regression.
+        }
+        if let Some(model) = self.model_r.as_mut() {
+            model.inject_rt_status(std::sync::Arc::clone(&self.shared.cold.rt_status));
         }
 
         let old_resampler = std::mem::replace(self.resampler, new_resampler);
@@ -699,37 +766,53 @@ impl ClapCommandSwapHandler<'_, '_> {
         // samples, so its value is authoritative.
         let mut effective_latency = self.stream.latency_samples();
         effective_latency += self.os_l.latency_samples() as u32;
-        if let Some(adapter) = self.cabsim_adapter.as_ref() {
-            effective_latency += adapter.latency_samples() as u32;
+        if let Some(pair) = self.cabsim_pair.as_ref() {
+            effective_latency += pair.partition_size() as u32;
         }
         *self.cached_effective_latency = effective_latency;
         self.dry_delay.set_delay(effective_latency as usize);
     }
 
-    /// Installs a new cab-sim convolution adapter (or clears to bypass),
+    /// Installs a new cab-sim convolution pair (or clears to bypass),
     /// retiring the replaced one to the GC, and notifies the host that the
     /// plugin tail changed.
     #[cold]
-    fn cold_load_cabsim(&mut self, adapter: Option<Box<CabSimAdapter>>, gc: &mut GcSink<'_>) {
-        // The incoming adapter is already heap-boxed by the main thread;
+    fn cold_load_cabsim(&mut self, pair: Option<Box<CabSimPair>>, gc: &mut GcSink<'_>) {
+        // A pair built for an older audio epoch must never overwrite the
+        // active one: its FFT partitions were resampled to a stale host rate.
+        // Reject it visibly (host contract violation) and retire it off-RT;
+        // the next explicit load or activation rebuilds it for the live epoch.
+        if let Some(ref candidate) = pair {
+            let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
+            if host_rate != 0 && candidate.sample_rate != host_rate {
+                self.rt_status.set_flag(
+                    neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION,
+                );
+                if let Some(stale) = pair {
+                    gc.retire(GcItem::CabSimPair(stale));
+                }
+                return;
+            }
+        }
+        // The incoming pair is already heap-boxed by the main thread;
         // `mem::replace` moves the old `Box` by value into the GC queue with
         // zero allocations on the audio thread. The off-RT GC drops it.
-        if let Some(old_adapter) = std::mem::replace(self.cabsim_adapter, adapter) {
-            gc.retire(GcItem::CabConvAdapter(old_adapter));
+        if let Some(old_pair) = std::mem::replace(self.cabsim_pair, pair) {
+            gc.retire(GcItem::CabSimPair(old_pair));
         }
-        // Publish the cabsim latency contribution of the *installed* adapter
+        // Publish the cabsim latency contribution of the *installed* pair
         // (0 = no IR). The main thread reads this to decide whether an IR
         // load/clear changes the physical latency.
         self.shared.cold.current_cabsim_latency.store(
-            self.cabsim_adapter
+            self.cabsim_pair
                 .as_ref()
-                .map_or(0, |a| a.latency_samples() as u32),
+                .map_or(0, |p| p.partition_size() as u32),
             Ordering::Relaxed,
         );
         let cabsim_tail = self
-            .cabsim_adapter
+            .cabsim_pair
             .as_ref()
-            .map(|a| (a.num_partitions() * a.latency_samples()) as u32)
+            .map(|p| (p.l.num_partitions() * p.l.latency_samples()) as u32)
             .unwrap_or(0);
         self.shared
             .rt_to_ui
@@ -739,11 +822,22 @@ impl ClapCommandSwapHandler<'_, '_> {
         self.recompute_effective_latency();
 
         // Notify the host of tail changes from the audio thread,
-        // which owns the valid HostAudioProcessorHandle. Eliminates the
-        // unsafe main-thread → audio-thread pointer cast previously in
-        // housekeeping.rs.
-        if let Some(tail_ext) = self.host.get_extension::<HostTail>() {
-            tail_ext.changed(self.host);
+        // which owns the valid HostAudioProcessorHandle.
+        let base = *self.cached_effective_latency;
+        let current_tail = base.saturating_add(cabsim_tail);
+        let last_reported = self
+            .shared
+            .cold
+            .last_reported_tail_samples
+            .load(Ordering::Relaxed);
+        if current_tail != last_reported {
+            self.shared
+                .cold
+                .last_reported_tail_samples
+                .store(current_tail, Ordering::Relaxed);
+            if let Some(tail_ext) = self.host.get_extension::<HostTail>() {
+                tail_ext.changed(self.host);
+            }
         }
     }
 

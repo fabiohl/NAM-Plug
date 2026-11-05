@@ -121,7 +121,7 @@ fn test_restore_ui_not_published_until_ack() {
         for _ in 0..256 {
             mt.cmd_producer
                 .borrow_mut()
-                .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { adapter: None })
+                .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: None })
                 .expect("expected the first 256 pushes to succeed");
         }
     }

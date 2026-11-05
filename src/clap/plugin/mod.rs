@@ -6,18 +6,20 @@
 pub mod command_scheduler;
 pub mod errors;
 pub(crate) mod lock;
+pub mod quiescence;
 pub mod shared;
 pub use command_scheduler::{
     CMD_QUEUE_CAPACITY, CommandConsumer, CommandProducer, CommandScheduler,
     CommandSchedulerChannels,
 };
+pub use quiescence::HostLogQuiescence;
 pub(crate) use shared::PendingRestartOs;
 pub(crate) use shared::build_stream_adapter;
 pub use shared::{
-    ClapParamPayload, ColdShared, GuiSharedState, LoadModelPayload, NamClapShared,
-    NamModelMetadata, PendingModel, PendingRestore, RENDER_MODE_OFFLINE, RENDER_MODE_REALTIME,
-    RestoreModelPublish, RestorePublish, RestoreTxn, RtToUi, SlimmableRebuild, StagedRestore,
-    StructuralKind, UiToRt,
+    CONFIG_ID_MONO, CONFIG_ID_STEREO, ClapParamPayload, ColdShared, GuiSharedState,
+    LoadModelPayload, NamClapShared, NamModelMetadata, PendingModel, PendingRestore,
+    RENDER_MODE_OFFLINE, RENDER_MODE_REALTIME, RestoreModelPublish, RestorePublish, RestoreTxn,
+    RtToUi, SlimmableRebuild, StagedRestore, StructuralKind, UiToRt,
 };
 
 pub(crate) mod main_thread;
@@ -47,6 +49,8 @@ impl Plugin for NamClapPlugin {
         _shared: Option<&Self::Shared<'_>>,
     ) {
         builder.register::<clack_extensions::audio_ports::PluginAudioPorts>();
+        builder.register::<clack_extensions::audio_ports_config::PluginAudioPortsConfig>();
+        builder.register::<clack_extensions::audio_ports_config::PluginAudioPortsConfigInfo>();
         builder.register::<clack_extensions::audio_ports_activation::PluginAudioPortsActivation>();
         builder.register::<clack_extensions::params::PluginParams>();
         builder.register::<clack_extensions::state::PluginState>();
@@ -170,14 +174,10 @@ impl DefaultPluginFactory for NamClapPlugin {
                 let host_bridge = crate::clap::gui::GuiHostBridge::new(&host);
 
                 let sink: Arc<HostLogFn> = Arc::new(move |severity_str, msg| {
-                    let Ok(guard) = quiescence.try_read() else {
-                        // Teardown in progress or lock contended — discard log
+                    let Some(_guard) = quiescence.enter() else {
+                        // Teardown in progress or plugin destroyed — discard log
                         return;
                     };
-                    if !*guard {
-                        // Plugin destroyed — never dereference the host handle
-                        return;
-                    }
                     let severity = match severity_str {
                         "ERROR" => LogSeverity::Error,
                         "WARN" => LogSeverity::Warning,

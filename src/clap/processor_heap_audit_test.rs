@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn test_heap_audit_cabsim_swap_cycle_zero_alloc() {
         use crate::clap::plugin::ClapParamPayload;
-        use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+        use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
         use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
 
         let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
@@ -246,14 +246,23 @@ mod tests {
                 (t * 0.05 + 1.3).sin() * (-t * 0.01).exp()
             })
             .collect();
-        let adapter_a = CabSimAdapter::new(Box::new(
-            ConvEngine::new(&ir_a, n).expect("ConvEngine A must build"),
-        ))
-        .expect("CabSimAdapter A must build");
-        let adapter_b = CabSimAdapter::new(Box::new(
-            ConvEngine::new(&ir_b, n).expect("ConvEngine B must build"),
-        ))
-        .expect("CabSimAdapter B must build");
+        let make_test_pair = |ir: &[f32]| -> CabSimPair {
+            let l = CabSimAdapter::new(Box::new(
+                ConvEngine::new(ir, n).expect("ConvEngine L must build"),
+            ))
+            .expect("CabSimAdapter L must build");
+            let r = CabSimAdapter::new(Box::new(
+                ConvEngine::new(ir, n).expect("ConvEngine R must build"),
+            ))
+            .expect("CabSimAdapter R must build");
+            CabSimPair {
+                l: Box::new(l),
+                r: Box::new(r),
+                sample_rate: 48000,
+            }
+        };
+        let pair_a = make_test_pair(&ir_a);
+        let pair_b = make_test_pair(&ir_b);
 
         let _audit_guard = AuditEnabledGuard::new();
         shared
@@ -267,7 +276,7 @@ mod tests {
             mt.cmd_producer
                 .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr {
-                    adapter: Some(Box::new(adapter_a)),
+                    pair: Some(Box::new(pair_a)),
                 })
                 .expect("Load IR 1 push must succeed");
         }
@@ -301,7 +310,7 @@ mod tests {
             mt.cmd_producer
                 .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr {
-                    adapter: Some(Box::new(adapter_b)),
+                    pair: Some(Box::new(pair_b)),
                 })
                 .expect("Swap IR 2 push must succeed");
         }
@@ -333,7 +342,7 @@ mod tests {
             let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
                 .borrow_mut()
-                .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+                .push_command(ClapParamPayload::LoadCabIr { pair: None })
                 .expect("Clear IR push must succeed");
         }
         let status = process_block(&mut started_processor, &mut bufs);
@@ -452,7 +461,7 @@ mod tests {
             RT_STATUS_GC_OVERFLOW, RT_STATUS_HEAP_ALLOC, RT_STATUS_STRUCTURAL_DEFERRED,
             RT_STATUS_STRUCTURAL_SUPERSEDED,
         };
-        use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
+        use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
         use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
         use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
         use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
@@ -520,19 +529,26 @@ mod tests {
         // invisible to the audit lane (exactly like the DAW main thread building
         // models/IRs asynchronously while the audio thread keeps processing).
         let sys = SystemSnapshot::capture();
-        let build_ir = |ir_len: usize| -> Box<CabSimAdapter> {
+        let build_ir = |ir_len: usize| -> Box<CabSimPair> {
             let ir: Vec<f32> = (0..ir_len)
                 .map(|i| {
                     let t = i as f32;
                     (t * 0.05).sin() * (-t * 0.02).exp()
                 })
                 .collect();
-            Box::new(
-                CabSimAdapter::new(Box::new(
-                    ConvEngine::new(&ir, BLOCK).expect("ConvEngine must build"),
-                ))
-                .expect("CabSimAdapter must build"),
-            )
+            let adapter_l = CabSimAdapter::new(Box::new(
+                ConvEngine::new(&ir, BLOCK).expect("ConvEngine L must build"),
+            ))
+            .expect("CabSimAdapter L must build");
+            let adapter_r = CabSimAdapter::new(Box::new(
+                ConvEngine::new(&ir, BLOCK).expect("ConvEngine R must build"),
+            ))
+            .expect("CabSimAdapter R must build");
+            Box::new(CabSimPair {
+                l: Box::new(adapter_l),
+                r: Box::new(adapter_r),
+                sample_rate: HOST_RATE,
+            })
         };
         let build_model = |name: &str| -> (
             Option<Box<StaticModel>>,
@@ -590,7 +606,7 @@ mod tests {
                     mt.cmd_producer
                         .borrow_mut()
                         .push_command(ClapParamPayload::LoadCabIr {
-                            adapter: Some(build_ir(len)),
+                            pair: Some(build_ir(len)),
                         })
                         .expect("IR burst push must succeed");
                 }
@@ -637,8 +653,10 @@ mod tests {
                         .push_command(ClapParamPayload::LoadModel {
                             generation: 0,
                             model_l,
+                            model_r: None,
                             new_resampler,
                             new_stream,
+                            model_rate: 48000,
                             input_mult_adj,
                             output_mult_adj,
                             prewarm_cost_ns: None,
@@ -686,8 +704,10 @@ mod tests {
                         model: Some(LoadModelPayload {
                             generation: 0,
                             model_l,
+                            model_r: None,
                             new_resampler,
                             new_stream,
+                            model_rate: 48000,
                             input_mult_adj,
                             output_mult_adj,
                             prewarm_cost_ns: None,

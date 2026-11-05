@@ -16,7 +16,10 @@ pub(crate) mod commit;
 pub(crate) mod validate;
 
 pub(crate) use commit::publish_restore;
-pub(crate) use validate::{compute_file_hash, is_valid_sha256_hex};
+pub(crate) use validate::{
+    compute_bytes_hash, compute_file_hash, is_valid_sha256_hex, load_cabsim_from_verified_bytes,
+    read_ir_file_bytes,
+};
 
 #[cfg(test)]
 pub(crate) use commit::*;

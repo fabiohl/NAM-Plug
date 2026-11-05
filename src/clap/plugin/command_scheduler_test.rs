@@ -30,8 +30,10 @@ fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
         model: Some(crate::clap::plugin::LoadModelPayload {
             generation,
             model_l: None,
+            model_r: None,
             new_resampler: Box::new(NamResampler::new_simple(48000, 48000).unwrap()),
             new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
+            model_rate: 48000,
             input_mult_adj: mult_adj,
             output_mult_adj: mult_adj,
             prewarm_cost_ns: None,
@@ -131,7 +133,7 @@ fn non_coalescable_flushes_pending_params_first() {
     assert!(producer.push_params(p));
 
     let seq = producer
-        .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+        .push_command(ClapParamPayload::LoadCabIr { pair: None })
         .unwrap();
     assert!(seq > 0, "command should get a sequence number");
 
@@ -266,7 +268,7 @@ fn interleaved_commands_preserve_ordering() {
     producer.push_params(p);
 
     let _ = producer
-        .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+        .push_command(ClapParamPayload::LoadCabIr { pair: None })
         .unwrap();
 
     p.output_gain_db = -6.0;
@@ -414,14 +416,14 @@ fn try_push_command_returns_payload_on_full() {
     // Saturate the ring with 4 non-coalescable commands.
     for _ in 0..4 {
         producer
-            .push_command(ClapParamPayload::LoadCabIr { adapter: None })
+            .push_command(ClapParamPayload::LoadCabIr { pair: None })
             .expect("first 4 pushes should succeed");
     }
 
     // The 5th push must fail and return the command back (fail-closed),
     // instead of dropping it.
     let err = producer
-        .try_push_command(ClapParamPayload::LoadCabIr { adapter: None })
+        .try_push_command(ClapParamPayload::LoadCabIr { pair: None })
         .expect_err("5th push must saturate the ring");
     assert!(
         matches!(err, (PushError::Full, ClapParamPayload::LoadCabIr { .. })),
@@ -632,13 +634,15 @@ fn structural_classification_light_vs_heavy() {
         ClapParamPayload::LoadModel {
             generation: 0,
             model_l: None,
+            model_r: None,
             new_resampler: Box::new(NamResampler::new_simple(48000, 48000).unwrap()),
             new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
+            model_rate: 48000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
             prewarm_cost_ns: None,
         },
-        ClapParamPayload::LoadCabIr { adapter: None },
+        ClapParamPayload::LoadCabIr { pair: None },
         ClapParamPayload::SetOversample {
             os_l: Box::new(
                 neural_amp_modeler_rs::dsp::oversample::OversampleEngine::new(
@@ -725,7 +729,7 @@ fn consumer_peek_does_not_consume() {
     let (mut tx, rx) = rtrb::RingBuffer::new(16);
     let mut consumer = CommandConsumer::new(rx, &last_ack);
 
-    tx.push(Box::new(ClapParamPayload::LoadCabIr { adapter: None }))
+    tx.push(Box::new(ClapParamPayload::LoadCabIr { pair: None }))
         .unwrap();
 
     // Peek returns the head without consuming it.
@@ -757,7 +761,7 @@ fn swap_ring_hooks_mirror_sequence_bookkeeping() {
     assert!(SwapRing::is_empty(&consumer), "fresh ring must be empty");
     assert_eq!(SwapRing::occupied(&consumer), 0);
 
-    tx.push(Box::new(ClapParamPayload::LoadCabIr { adapter: None }))
+    tx.push(Box::new(ClapParamPayload::LoadCabIr { pair: None }))
         .unwrap();
     assert!(!SwapRing::is_empty(&consumer));
     assert_eq!(SwapRing::occupied(&consumer), 1);
@@ -806,7 +810,7 @@ fn consumer_sequence_survives_deactivate_reactivate() {
 
     // A command parked in the new cycle must not regress the ack below the
     // reactivation seed.
-    tx.push(Box::new(ClapParamPayload::LoadCabIr { adapter: None }))
+    tx.push(Box::new(ClapParamPayload::LoadCabIr { pair: None }))
         .unwrap();
     assert!(SwapRing::pop(&mut consumer).is_some());
     SwapRing::rollback_last_pop(&mut consumer);
@@ -896,7 +900,7 @@ fn test_sequence_ack_gapless_under_deferral() {
 
     // Two different-key structural commands under a one-swap budget: the
     // first flush-installs, the second parks (engine Phase 2).
-    tx.push(Box::new(ClapParamPayload::LoadCabIr { adapter: None }))
+    tx.push(Box::new(ClapParamPayload::LoadCabIr { pair: None }))
         .unwrap();
     tx.push(Box::new(ClapParamPayload::SetOversample {
         os_l: Box::new(OversampleEngine::new(OversampleFactor::X2, 256).unwrap()),
