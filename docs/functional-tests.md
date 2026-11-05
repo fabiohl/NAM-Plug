@@ -179,7 +179,7 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 Before signing off on manual QA, verify that the automated release gates and mathematical parity checks have passed:
 
 - [ ] **3.5.1 Automated Quick Verification:** Run `./utils/tests-quick.sh` (or inspect `target/logs/quick-tests.log` and `target/logs/quick-heap-audit.log`).
-  *Expected:* Output confirms structural tests, C++ NAMCore parity, oversampling parity, CabSim IR validation, and RT codegen pass. Overall result must be `RESULT: PASS`, with the typed carrier `target/logs/tests-quick-status.tsv` (`tests-quick\tPASS|PASS_WITH_GAPS|FAIL\t<gaps|none>\t<fails|none>`). Every failure path emits exactly one `RESULT:` line; a missing carrier or RESULT is never success.
+  *Expected:* Output confirms structural tests, C++ NAMCore parity, oversampling parity, CabSim IR validation, and RT codegen pass. Overall result must be `RESULT: PASS`, with the typed carrier `target/logs/tests-quick-status.tsv` (`tests-quick\tPASS|PASS_WITH_GAPS|FAIL\t<gaps|none>\t<fails|none>\t<scope=full|scope=partial>`). Every failure path emits exactly one `RESULT:` line; a missing carrier or RESULT is never success.
 - [ ] **3.5.2 Parity Standards:** Confirm that multi-rate C++ NAMCore parity, oversampling (2×/4×), and CabSim IR convolution satisfy `ESR < 1e-8` and `SNR > 80 dB` across certification rates (44.1, 48, and 96 kHz). For detailed oracle methodology and baseline figures, see [`testing.md`](testing.md#321-multi-rate-resampling-reference-oracle).
 - [ ] **3.5.3 Release Receipt:** For production builds (`utils/build-release.sh`), inspect `target/dist/release-receipt.json` to verify `status: "CERTIFIED"` with zero unapproved skipped gates.
 

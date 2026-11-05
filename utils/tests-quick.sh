@@ -21,7 +21,8 @@ if [ "$rc_tests" -ne 0 ]; then
   grep -q -E '(panicked at|FAILED)' "$CUR_LOG" || { echo "--- Cargo/build failure (tail of $CUR_LOG) ---" >&2; tail -n 25 "$CUR_LOG" >&2; }
 fi
 awk '/test result: / { p+=$4; f+=$6; i+=$8 } END { printf "Tests summary: %d passed, %d failed, %d ignored\n", p, f, i }' "$CUR_LOG"
-[ "$rc_tests" -eq 0 ] && ran_tests "$CUR_LOG" || { FAILS+=(tests); emit "PHASE: tests FAIL rc=$rc_tests log=$CUR_LOG"; finish || exit 1; exit 1; }
+# Measured: x86=453 passed, aarch64=441 passed (run 42075116266-1); threshold=400
+[ "$rc_tests" -eq 0 ] && assert_ran_tests "$CUR_LOG" 400 || { FAILS+=(tests); emit "PHASE: tests FAIL rc=$rc_tests log=$CUR_LOG"; finish || exit 1; exit 1; }
 emit "PHASE: tests PASS log=$CUR_LOG"
 
 # S9-T05: mantido no quick (custo medido 12.4% <= 20% do quick total; zero-alloc RT gate)
@@ -32,7 +33,8 @@ if [ "$rc_heap" -ne 0 ]; then
   grep -C 3 -E '(panicked at|FAILED)' "$CUR_LOG" | head -n 50 || true
   grep -q -E '(panicked at|FAILED)' "$CUR_LOG" || { echo "--- Cargo/build failure (tail of $CUR_LOG) ---" >&2; tail -n 25 "$CUR_LOG" >&2; }
 fi
-[ "$rc_heap" -eq 0 ] && ran_tests "$CUR_LOG" || { FAILS+=(heap-audit); emit "PHASE: heap-audit FAIL rc=$rc_heap log=$CUR_LOG"; finish || exit 1; exit 1; }
+# Measured: 1 passed (processor_heap_audit_test); threshold=1
+[ "$rc_heap" -eq 0 ] && assert_ran_tests "$CUR_LOG" 1 || { FAILS+=(heap-audit); emit "PHASE: heap-audit FAIL rc=$rc_heap log=$CUR_LOG"; finish || exit 1; exit 1; }
 emit "PHASE: heap-audit PASS log=$CUR_LOG"
 
 finish || exit 1

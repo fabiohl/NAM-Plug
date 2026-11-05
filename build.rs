@@ -23,7 +23,7 @@
 // there for why that approach failed).
 fn main() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    // `rust-lld` (the linker used by default in this toolchain, rustc 1.97.1)
+    // `rust-lld` (the linker used by default in this toolchain, rustc 1.99)
     // errors by default on any version-script entry naming a symbol that
     // isn't actually defined in a given binary (unlike GNU `bfd`, which just
     // ignores it). Our map intentionally lists the *entire* standard libm
@@ -31,10 +31,19 @@ fn main() {
     // future dependency change ends up shadowing — most binaries will only
     // ever define a few of these locally, and that's fine, so restore the
     // lenient behavior.
-    println!("cargo:rustc-link-arg=-Wl,--undefined-version");
-    println!(
-        "cargo:rustc-link-arg=-Wl,--version-script={manifest_dir}/.cargo/hide-libm-shadow.map"
-    );
+    //
+    // GNU `ld.bfd` rejects two version scripts when either one is anonymous
+    // ("anonymous version tag cannot be combined with other version tags").
+    // For a `cdylib`, rustc already emits its own anonymous export list
+    // (`global: clap_entry + Slint vtables; local: *`), which by itself keeps
+    // every libm shadow symbol local. We therefore apply our map only to
+    // executables (bins/tests/benches/examples), where it is the sole script
+    // and remains compatible with both `rust-lld` and GNU `ld.bfd`.
+    let map = format!("{manifest_dir}/.cargo/hide-libm-shadow.map");
+    for kind in ["bins", "tests", "benches", "examples"] {
+        println!("cargo:rustc-link-arg-{kind}=-Wl,--undefined-version");
+        println!("cargo:rustc-link-arg-{kind}=-Wl,--version-script={map}");
+    }
     println!("cargo:rerun-if-changed=.cargo/hide-libm-shadow.map");
 
     slint_build::compile("src/clap/gui/slint/main.slint").expect("slint compilation failed");

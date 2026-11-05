@@ -145,6 +145,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_validate_cpu_features_missing_avx2() {
         let result = validate_cpu_features_with(|f| f != "avx2");
         assert!(result.is_err());
@@ -155,6 +156,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_validate_cpu_features_missing_fma() {
         let result = validate_cpu_features_with(|f| f != "fma");
         assert!(result.is_err());
@@ -165,6 +167,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_validate_cpu_features_missing_bmi2() {
         let result = validate_cpu_features_with(|f| f != "bmi2");
         assert!(result.is_err());
@@ -175,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_validate_cpu_features_missing_multiple() {
         let result = validate_cpu_features_with(|f| f != "avx2" && f != "bmi2");
         assert!(result.is_err());
@@ -182,6 +186,16 @@ mod tests {
         assert!(err.contains("avx2"));
         assert!(err.contains("bmi2"));
         assert!(!err.contains("fma"));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "x86_64"))]
+    fn test_validate_cpu_features_non_x86_contract() {
+        let result = validate_cpu_features_with(|_| false);
+        assert!(
+            result.is_ok(),
+            "Non-x86 architectures must succeed unconditionally per architecture contract"
+        );
     }
 
     #[test]

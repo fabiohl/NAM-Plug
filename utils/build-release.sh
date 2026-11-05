@@ -83,6 +83,12 @@ if [ "$DO_CERTIFY" = true ]; then
     # A failed certification must not leave a previous CERTIFIED receipt behind.
     rm -f "target/dist/release-receipt.json"
     phase "certify"
+    if [ -f "$LOG_DIR/tests-long-status.tsv" ] && grep -q 'scope=partial' "$LOG_DIR/tests-long-status.tsv"; then
+        FAILS+=("certify")
+        emit "PHASE: certify FAIL rc=1 log=$LOG_DIR/build-release-certify.log (tests-long ran with partial scope)"
+        finish || true
+        exit 1
+    fi
     CERT_ARGS=("--artifact" "$CLAP_TARGET" "--build-receipt" "$BUILD_RECEIPT")
     if [ "$DO_STRICT" -eq 1 ]; then
         CERT_ARGS+=("--strict")
@@ -190,20 +196,30 @@ elif command -v llvm-profdata >/dev/null 2>&1; then
 fi
 
 LLVM_BOLT=""
-for candidate in llvm-bolt llvm-bolt-19 llvm-bolt-18; do
+for candidate in llvm-bolt llvm-bolt-22 llvm-bolt-21 llvm-bolt-20 llvm-bolt-19 llvm-bolt-18; do
     if command -v "$candidate" >/dev/null 2>&1; then
         LLVM_BOLT="$candidate"
         break
     fi
 done
+if [ -z "$LLVM_BOLT" ]; then
+    for candidate in /usr/lib/llvm-*/bin/llvm-bolt; do
+        if [ -x "$candidate" ]; then LLVM_BOLT="$candidate"; break; fi
+    done
+fi
 
 MERGE_FDATA=""
-for candidate in merge-fdata merge-fdata-19 merge-fdata-18; do
+for candidate in merge-fdata merge-fdata-22 merge-fdata-21 merge-fdata-20 merge-fdata-19 merge-fdata-18; do
     if command -v "$candidate" >/dev/null 2>&1; then
         MERGE_FDATA="$candidate"
         break
     fi
 done
+if [ -z "$MERGE_FDATA" ]; then
+    for candidate in /usr/lib/llvm-*/bin/merge-fdata; do
+        if [ -x "$candidate" ]; then MERGE_FDATA="$candidate"; break; fi
+    done
+fi
 
 OBJDUMP_TOOL=""
 for candidate in llvm-objdump objdump; do

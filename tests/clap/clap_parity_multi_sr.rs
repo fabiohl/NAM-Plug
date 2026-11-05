@@ -526,6 +526,19 @@ fn parity_gates(model_name: &str, host_sr: f64) -> (f64, f64, &'static str) {
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Window RMS used to report the absolute gain ratio between the oracle and
+/// the artifact. Loudness calibration (`input_mult_adj`/`output_mult_adj`)
+/// normalizes the ESR/SNR comparison; this diagnostic exposes the residual
+/// absolute gain so a gain/metadata regression stays visible in the log
+/// without weakening the ESR/SNR gates.
+fn rms(samples: &[f32]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum / samples.len() as f64).sqrt()
+}
+
 /// Outcome of a parity matrix cell group. `OracleUnsupported` is a typed gap,
 /// not a silent skip: the caller aggregates it and fails the suite unless the
 /// fixture is explicitly known to be unsupported by the render tool.
@@ -691,6 +704,14 @@ fn run_multi_rate_parity(
         };
 
         let (esr_gate, snr_gate, gate_comment) = parity_gates(model_name, host_sr);
+        let ref_rms = rms(ref_win);
+        let clap_rms = rms(clap_win);
+        let absolute_gain_db = 20.0 * (clap_rms / ref_rms).log10();
+        eprintln!(
+            "  Absolute gain: oracle_rms={ref_rms:.6e} artifact_rms={clap_rms:.6e} \
+             ratio={absolute_gain_db:+.4} dB (input_mult_adj={input_mult_adj:.6}, \
+             output_mult_adj={output_mult_adj:.6})"
+        );
         eprintln!(
             "  ESR  = {esr:.2e}  ({:.1} dB)  [threshold < {esr_gate:.0e}]",
             esr_db

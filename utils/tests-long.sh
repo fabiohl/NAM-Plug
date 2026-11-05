@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # tests-long.sh — suíte longa de auditoria, certificação e provas de artefato. Classe B.
 # Uso: utils/tests-long.sh [--strict] [--only <fase>[,<fase>]] [--artifact] [-h|--help]
-# Orçamento: 340
+# Orçamento: 380
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -o pipefail
 cd "$(dirname "$0")/.."
@@ -27,11 +27,12 @@ Uso: utils/tests-long.sh [OPÇÕES]
   -h, --help             Exibe esta mensagem de ajuda
 
 Fases:
-  catch-all     cargo test --release --include-ignored, exceto gui_x11_ e micro-latência
+  catch-all     cargo test release não-ignorado (build separado do timeout de execução)
   gui           testes gui_x11_ ignorados sob xvfb-run, um a um
   artifact      paridade CLAP/CabSim e clap-validator contra o artefato
   perf          nam_perf_guard certify no artefato (--artifact)
-  heap-audit    GC, teardown, RT priority/latency e soak de heap
+  heap-audit    GC, teardown, prioridade RT e soaks de heap (sem tempo)
+  rt-heap       limiares de tempo RT (operador-only; nunca no CI hospedado)
 EOF
 }
 
@@ -53,7 +54,7 @@ if [ -z "${NAM_RUN_ID:-}" ] && [ -s target/logs/build-run-id ]; then
 fi
 lib_init
 
-PHASES=(catch-all gui artifact perf heap-audit)
+PHASES=(catch-all gui artifact perf heap-audit rt-heap)
 if [ -n "$ONLY_PHASES" ]; then
     IFS=',' read -ra requested <<< "$ONLY_PHASES"
     for p in "${requested[@]}"; do
@@ -125,7 +126,7 @@ close_phase() {
         emit "PHASE: $pname PASS log=$plog"
     else
         FAILS+=("$pid")
-        emit "PHASE: $pname FAIL rc=$rc log=$plog"
+        emit "PHASE: $pname FAIL rc=$rc log=$plog"; tail -n 40 "$plog" >&2
         st=FAILED
     fi
     append_receipt "$pid" "$pname" "$st" "$plog" "$dur" "$tests" "$ex" "$pgaps"
@@ -147,15 +148,26 @@ run_named() {
     pst=("${PIPESTATUS[@]}")
     [ "${pst[0]}" -eq 0 ] && [ "${pst[1]}" -eq 0 ] && ran_tests "$sublog"
 }
-
+# Declared subcase cardinality for receipt counts: matrix/property tests execute
+# more cases than the single Cargo invocation the log parser can observe.
+subcase_count() {
+    case "$1" in
+        *test_clap_parity_multi_rate) echo 9 ;;   # 3 fixtures x 3 host rates
+        *test_clap_parity_oversample) echo 2 ;;   # X2 + X4
+        *prop_gc_swap_idempotence) echo 500 ;;    # proptest cases
+        *) echo 1 ;;
+    esac
+}
 # ── Fase catch-all ───────────────────────────────────────────────────────────
 if should_run "catch-all"; then
     t_start=$SECONDS; plog="$LOG_DIR/long-catch-all.log"; phase "catch-all"
-    # timeout: pior comando ~230s (build LTO + testes); 2x p100 ≈ 500s
-    timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-500}" cargo test --locked --release --features testing --no-fail-fast \
-        -- --include-ignored 2>&1 | tee "$plog"
-    pst=("${PIPESTATUS[@]}"); catch_rc=${pst[0]}
-    [ "${pst[1]}" -eq 0 ] || catch_rc=1
+    # Build outside the execution timeout; every #[ignore] suite has a dedicated phase.
+    timeout --kill-after=30 1200 cargo test --locked --release --features testing --no-run > "$plog" 2>&1; catch_rc=$?
+    if [ "$catch_rc" -eq 0 ]; then
+        timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-300}" cargo test --locked --release --features testing --no-fail-fast --lib --bins --tests 2>&1 | tee -a "$plog"
+        pst=("${PIPESTATUS[@]}"); catch_rc=${pst[0]}
+        [ "${pst[1]}" -eq 0 ] || catch_rc=1
+    fi
     close_phase "phase1" "catch-all" "$catch_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "" false
 else
     skip_phase "phase1" "catch-all"
@@ -188,7 +200,6 @@ if should_run "gui"; then
 else
     skip_phase "phase2" "gui"
 fi
-
 # ── Fase artifact ────────────────────────────────────────────────────────────
 if should_run "artifact"; then
     t_start=$SECONDS; phase "artifact"
@@ -209,32 +220,42 @@ if should_run "artifact"; then
     fi
 
     art_rc=0
-    art_passed=0
+    art_cases=0
     if [ -n "$plugin_under_test" ] && [ -f "$plugin_under_test" ]; then
         export CLAP_PLUGIN_UNDER_TEST="$plugin_under_test"
-        [ "$STRICT" = "1" ] && { export NAM_RT_STRICT=1; export NAM_REQUIRE_CPP_ORACLE=1; }
-
-        # Locate NAMCore C++ render binary if available
         render_bin="${NAM_CORE_RENDER_BIN:-}"
-        [ -z "$render_bin" ] && [ -x "build/namcore_render" ] && render_bin="build/namcore_render"
-        if [ -n "$render_bin" ] && [ -x "$render_bin" ]; then
+        if [ -z "$render_bin" ]; then
+            for cand in build/namcore_render/tools/render build/namcore_render/Release/render build/namcore_render/Debug/render build/namcore_render/render; do
+                if [ -f "$cand" ] && [ -x "$cand" ]; then
+                    render_bin="$cand"
+                    break
+                fi
+            done
+        fi
+        oracle_ok=0; [ -n "$render_bin" ] && [ -f "$render_bin" ] && [ -x "$render_bin" ] && oracle_ok=1
+        [ "$STRICT" = "1" ] && export NAM_RT_STRICT=1
+        if [ "$oracle_ok" = 1 ]; then
             export NAM_CORE_RENDER_BIN="$render_bin"
+            [ "$STRICT" = "1" ] && export NAM_REQUIRE_CPP_ORACLE=1
         else
             gap "clap_parity:missing_cpp_oracle"; art_gaps="${art_gaps:+$art_gaps,}clap_parity:missing_cpp_oracle"
         fi
 
-        # Run parity and CabSim tests against the plugin artifact
+        # Oracle-free tests always run; oracle-backed parity only with a render binary.
         ARTIFACT_TESTS=(
-            clap_parity_multi_sr::test_clap_parity_multi_rate
-            clap_parity_multi_sr::test_clap_parity_oversample
             clap_cabsim_ir::test_cabsim_ir_changes_audio_release_artifact
             clap_parity_multi_sr::test_clap_parity_cabsim
         )
+        [ "$oracle_ok" = 1 ] && ARTIFACT_TESTS+=(
+            clap_parity_multi_sr::test_clap_parity_multi_rate
+            clap_parity_multi_sr::test_clap_parity_oversample
+        )
         for atest in "${ARTIFACT_TESTS[@]}"; do
+            art_cases=$((art_cases + $(subcase_count "$atest")))
             run_named "artifact" "$atest" timeout --kill-after=30 "$art_to" \
                 cargo test --locked --features testing --release --test clap "$atest" \
                 -- --ignored --exact --nocapture \
-                && art_passed=$((art_passed + 1)) || art_rc=1
+                || art_rc=1
         done
 
         # clap-validator if installed
@@ -252,7 +273,7 @@ if should_run "artifact"; then
     fi
 
     close_phase "phase3" "artifact" "$art_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) \
-        "$art_passed" "$exercised" "$art_gaps"
+        "$art_cases" "$exercised" "$art_gaps"
 else
     skip_phase "phase3" "artifact"
 fi
@@ -289,49 +310,71 @@ if should_run "perf"; then
 else
     skip_phase "phase4" "perf"
 fi
-# ── Fase heap-audit ──────────────────────────────────────────────────────────
+# ── Fase heap-audit (determinística; hospedada) ──────────────────────────────
 if should_run "heap-audit"; then
     t_start=$SECONDS; phase "heap-audit"
     plog="$LOG_DIR/long-heap-audit.log"; : > "$plog"
     # timeout: pior comando ~215s (build heap-audit + soak); 2x p100 ≈ 500s
-    heap_rc=0; heap_passed=0; heap_to=${NAM_PHASE_TIMEOUT_S:-500}
+    heap_rc=0; heap_cases=0; heap_to=${NAM_PHASE_TIMEOUT_S:-500}
     run_heap_test() {
+        local tname="$2" sublog pst
+        [ "$1" = "--test" ] && tname="$2-$3"
+        sublog="$LOG_DIR/long-heap-${tname##*::}.log"
         echo "--- Running heap/RT test: $* ---" >> "$plog"
-        timeout --kill-after=30 "$heap_to" cargo test --locked --features testing,heap-audit --release "$@" 2>&1 | tee -a "$plog"
-        local rc=${PIPESTATUS[0]}
-        [ "$rc" -eq 0 ] && heap_passed=$((heap_passed + 1)) || heap_rc=1
+        timeout --kill-after=30 "$heap_to" cargo test --locked --features testing,heap-audit --release "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"
+        pst=("${PIPESTATUS[@]}")
+        if [ "${pst[0]}" -ne 0 ] || [ "${pst[1]}" -ne 0 ] || ! ran_tests "$sublog"; then
+            heap_rc=1
+        fi
     }
 
-    run_heap_test --lib test_gc_stress_1000_swaps -- --ignored
-    run_heap_test --lib test_gc_drain_on_destroy_no_leak -- --ignored
-    run_heap_test --lib test_teardown_drains_rt_parking_lot_off_rt -- --ignored
-    run_heap_test --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1
-    run_heap_test --test heap_audit prop_gc_swap_idempotence -- --ignored
-    run_heap_test --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1
-    run_heap_test --lib processor_drain_latency_test -- --ignored --test-threads=1
-    run_heap_test --lib test_reset_wall_clock_time_within_contract -- --ignored --test-threads=1
+    run_heap_test --lib test_gc_stress_1000_swaps -- --ignored; heap_cases=$((heap_cases + 1))
+    run_heap_test --lib test_gc_drain_on_destroy_no_leak -- --ignored; heap_cases=$((heap_cases + 1))
+    run_heap_test --lib test_teardown_drains_rt_parking_lot_off_rt -- --ignored; heap_cases=$((heap_cases + 1))
+    run_heap_test --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1; heap_cases=$((heap_cases + 1))
+    run_heap_test --test heap_audit prop_gc_swap_idempotence -- --ignored; heap_cases=$((heap_cases + 500))
+    run_heap_test --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1; heap_cases=$((heap_cases + 1))
 
-    echo "--- Running TLS heap-stability soak ---" >> "$plog"
-    timeout --kill-after=30 "$heap_to" cargo test --locked --features testing,heap-audit --release --lib \
-        test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1 2>&1 | tee -a "$plog"
-    tls_rc=${PIPESTATUS[0]}
-    [ "$tls_rc" -eq 0 ] && heap_passed=$((heap_passed + 1)) || heap_rc=1
-
-    close_phase "phase5" "heap-audit" "$heap_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$heap_passed"
+    close_phase "phase5" "heap-audit" "$heap_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$heap_cases"
 else
     skip_phase "phase5" "heap-audit"
 fi
+# ── Fase rt-heap (limiares de tempo; operador-only, nunca no CI hospedado) ────
+if should_run "rt-heap"; then
+    t_start=$SECONDS; phase "rt-heap"
+    plog="$LOG_DIR/long-rt-heap.log"; : > "$plog"
+    rt_rc=0; rt_cases=0; rt_to=${NAM_PHASE_TIMEOUT_S:-500}
+    run_rt_heap_test() {
+        local tname="$2" sublog pst
+        [ "$1" = "--test" ] && tname="$2-$3"
+        sublog="$LOG_DIR/long-rt-heap-${tname##*::}.log"
+        echo "--- Running RT timing test: $* ---" >> "$plog"
+        timeout --kill-after=30 "$rt_to" cargo test --locked --features testing,heap-audit --release "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"
+        pst=("${PIPESTATUS[@]}")
+        if [ "${pst[0]}" -ne 0 ] || [ "${pst[1]}" -ne 0 ] || ! ran_tests "$sublog"; then
+            rt_rc=1
+        fi
+    }
 
-if [ -n "$ONLY_PHASES" ]; then
-    gap "only-subset:${ONLY_PHASES//,/}"
+    run_rt_heap_test --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1; rt_cases=$((rt_cases + 1))
+    run_rt_heap_test --lib processor_drain_latency_test -- --ignored --test-threads=1; rt_cases=$((rt_cases + 2))
+    run_rt_heap_test --lib test_reset_wall_clock_time_within_contract -- --ignored --test-threads=1; rt_cases=$((rt_cases + 1))
+
+    close_phase "phase6" "rt-heap" "$rt_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$rt_cases"
+else
+    skip_phase "phase6" "rt-heap"
 fi
 
-# ── Terminal receipt derivation & verification ───────────────────────────────
-"$PLUG_LONG_RECEIPT_BIN" summary --out "$RECEIPT" >> "$LOG_DIR/tests-long-receipt.log" 2>&1 \
-    || { FAILS+=("receipt-summary"); emit "PHASE: receipt-summary FAIL"; }
-
-val_cmd=("$PLUG_LONG_RECEIPT_BIN" validate --out "$RECEIPT")
-[ "$STRICT" = "1" ] && val_cmd+=(--strict)
-"${val_cmd[@]}" >> "$LOG_DIR/tests-long-receipt.log" 2>&1 || FAILS+=("receipt_validation")
+if [ -n "$ONLY_PHASES" ]; then
+    SCOPE=partial; subset_tag=${ONLY_PHASES#,}; subset_tag=${subset_tag%,}
+    emit "PHASE: phase-selection PASS only-subset:${subset_tag//,/+}"
+else
+    # ── Terminal receipt derivation & verification (full runs only) ─────────────
+    "$PLUG_LONG_RECEIPT_BIN" summary --out "$RECEIPT" >> "$LOG_DIR/tests-long-receipt.log" 2>&1 \
+        || { FAILS+=("receipt-summary"); emit "PHASE: receipt-summary FAIL"; }
+    val_cmd=("$PLUG_LONG_RECEIPT_BIN" validate --out "$RECEIPT")
+    [ "$STRICT" = "1" ] && val_cmd+=(--strict)
+    "${val_cmd[@]}" >> "$LOG_DIR/tests-long-receipt.log" 2>&1 || FAILS+=("receipt_validation")
+fi
 
 finish

@@ -5,13 +5,14 @@ name: Long QA Suite
 
 # Release chain, decoupled: build-release.sh -> tests-long.sh --artifact -> build-release.sh --certify.
 # This hosted workflow never certifies: certification runs on the operator's isolated host.
-# Hosted runners lack an isolated CPU, BOLT, clap-validator and the C++ oracle render binary:
-# those surface as typed GAPs. The `perf` phase is never selected here.
+# Hosted runners lack an isolated CPU and SCHED_FIFO privileges: those surface as
+# typed GAPs. BOLT, clap-validator and the C++ parity oracle are provisioned below.
+# The `perf` and `rt-heap` (time-threshold) phases are never selected here.
 on:
   workflow_dispatch:
     inputs:
       phases:
-        description: 'Comma-separated phase IDs (empty = hosted-safe default; perf is rejected)'
+        description: 'Comma-separated phase IDs (empty = hosted-safe default; perf/rt-heap rejected)'
         type: string
         default: ''
       strict:
@@ -38,18 +39,42 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
+      - name: Load environment variables
+        run: |
+          while IFS='=' read -r key val; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [ -z "$key" ] && continue
+            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < variables.env
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
         uses: actions/checkout@v7
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
+          ref: ${{ env.ENGINE_COMMIT }}
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake libgl1-mesa-dev \
-            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils xvfb
+            libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils xvfb \
+            llvm-bolt
+      - name: Install clap-validator
+        run: |
+          curl -sL "$CLAP_VALIDATOR_URL" -o /tmp/clap-val.zip
+          unzip -p /tmp/clap-val.zip | sudo tar -xz -C /usr/local/bin clap-validator
+          sudo chmod +x /usr/local/bin/clap-validator
+          rm -f /tmp/clap-val.zip
+          clap-validator validate --help >/dev/null 2>&1 || true
+      - name: Provision C++ parity oracle
+        run: |
+          cd "$GITHUB_WORKSPACE/NeuralAmpModeler-rs"
+          utils/setup-third-party.sh
+          oracle=$(utils/ensure_namcore_render.sh)
+          test -x "$oracle"
+          echo "NAM_CORE_RENDER_BIN=$oracle" >> "$GITHUB_ENV"
       # Runner images can ship an older preinstalled stable; the crate needs rust-version 1.99.
       - name: Update Rust toolchain
         run: |
@@ -100,7 +125,12 @@ jobs:
           printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s\n' \
             "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" | tee target/logs/ci-provenance.log
       - name: Build canonical artifact
-        run: ./utils/build-release.sh
+        env:
+          STRICT_INPUT: ${{ inputs.strict }}
+        run: |
+          STRICT_FLAG=""
+          if [ "$STRICT_INPUT" = "true" ]; then STRICT_FLAG="--strict"; fi
+          ./utils/build-release.sh $STRICT_FLAG
       - name: Long QA Suite (artifact)
         env:
           PHASES_INPUT: ${{ inputs.phases }}
@@ -108,16 +138,18 @@ jobs:
         run: |
           STRICT_FLAG=""
           if [ "$STRICT_INPUT" = "true" ]; then STRICT_FLAG="--strict"; fi
-          # Hosted runners are not a comparable speed gate: the `perf` phase is
-          # never selected here. Explicit phases are transported through the
-          # environment, never interpolated into the shell command line.
+          # Hosted runners are not a comparable speed gate: the `perf` and
+          # `rt-heap` timing phases are never selected here. Explicit phases are
+          # transported through the environment, never interpolated into the
+          # shell command line.
           if [ -n "$PHASES_INPUT" ]; then
             case ",$PHASES_INPUT," in
               *,perf,*) echo "perf is not permitted on hosted runners" >&2; exit 2 ;;
+              *,rt-heap,*) echo "rt-heap is not permitted on hosted runners" >&2; exit 2 ;;
             esac
             ONLY_ARGS=(--only "$PHASES_INPUT")
           else
-            ONLY_ARGS=(--only "catch-all,gui,artifact")
+            ONLY_ARGS=(--only "catch-all,gui,artifact,heap-audit")
           fi
           xvfb-run -a ./utils/tests-long.sh $STRICT_FLAG --artifact "${ONLY_ARGS[@]}"
       - name: Publish step summary
@@ -134,4 +166,5 @@ jobs:
             target/logs/**
             target/dist/build-receipt.json
             target/dist/release-receipt.json
+          if-no-files-found: error
           retention-days: 14

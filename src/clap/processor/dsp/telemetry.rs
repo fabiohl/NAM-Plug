@@ -35,9 +35,9 @@ impl<'a> NamClapProcessor<'a> {
     #[inline(always)]
     pub(super) fn process_telemetry(&mut self, start_nanos: u64) {
         if start_nanos > 0 {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let raw_elapsed = rdtsc_nanos().wrapping_sub(start_nanos);
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             let raw_elapsed = 0;
 
             // Test-only synthetic stall injection (T-P1.3.2, one-shot):

@@ -1620,13 +1620,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // cada 16 estouros de deadline e enviesaria o histograma p99 e o
             // FSM adaptativo; medir todo bloco não precisa de decimação.
             //
-            // NOTE (Architecture): rdtsc_nanos() relies on hardware TSC reading (x86_64).
-            // While x86-64-v3 is the mandatory baseline target architecture for this project,
-            // conditionally guarding the call with target_arch ensures transparent compilation
-            // and fallback (returning 0) on non-x86_64 targets (e.g. ARM64 / AArch64).
-            #[cfg(target_arch = "x86_64")]
+            // NOTE (Architecture): rdtsc_nanos() is backed by serialized cycle counters:
+            // RDTSC on x86_64, and CNTVCT_EL0 generic timer on aarch64.
+            // On other architectures, fallback returns 0u64.
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let start_nanos = rdtsc_nanos();
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             let start_nanos = 0u64;
 
             // Event drainage (SPSC + Host + GUI sync + Latency)
@@ -1667,7 +1666,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     );
                     if step > 0 {
                         self.prewarm_zero_budget_count = 0;
-                        #[cfg(target_arch = "x86_64")]
+                        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                         let step_start = rdtsc_nanos();
                         let _ = model.prewarm_step(step);
                         if let Some(model_r) = self.model_r.as_mut() {
@@ -1678,7 +1677,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         // overran half the callback period folds in the worst
                         // observed cost immediately so the next callback's
                         // budget shrinks before it can breach the deadline.
-                        #[cfg(target_arch = "x86_64")]
+                        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                         {
                             if !self.prewarm_static {
                                 #[cfg(any(test, feature = "testing"))]

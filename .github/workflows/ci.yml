@@ -31,11 +31,20 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
+      - name: Load environment variables
+        run: |
+          while IFS='=' read -r key val; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [ -z "$key" ] && continue
+            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < variables.env
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
         uses: actions/checkout@v7
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
+          ref: ${{ env.ENGINE_COMMIT }}
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -109,11 +118,20 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
+      - name: Load environment variables
+        run: |
+          while IFS='=' read -r key val; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [ -z "$key" ] && continue
+            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < variables.env
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
         uses: actions/checkout@v7
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
+          ref: ${{ env.ENGINE_COMMIT }}
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -181,18 +199,27 @@ jobs:
           path: target/logs/**
           retention-days: 14
 
-  # linux-arm64 is experimental (non-blocking) until a native aarch64 execution is approved.
+  # linux-arm64 compilation is blocking; tests remain non-blocking (`continue-on-error: true`)
+  # until native ARM test execution stabilizes (D1).
   linux-arm64-lints:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
+      - name: Load environment variables
+        run: |
+          while IFS='=' read -r key val; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [ -z "$key" ] && continue
+            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < variables.env
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
         uses: actions/checkout@v7
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
+          ref: ${{ env.ENGINE_COMMIT }}
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -252,7 +279,7 @@ jobs:
         uses: ./.github/actions/qa-summary
         with:
           title: linux-arm64-lints
-          note: 'ARM64 experimental: non-blocking (continue-on-error) until native execution is approved.'
+          note: 'ARM64 compilation: blocking CI gate (D1).'
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -267,11 +294,20 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
+      - name: Load environment variables
+        run: |
+          while IFS='=' read -r key val; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [ -z "$key" ] && continue
+            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < variables.env
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
         uses: actions/checkout@v7
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
+          ref: ${{ env.ENGINE_COMMIT }}
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -331,7 +367,7 @@ jobs:
         uses: ./.github/actions/qa-summary
         with:
           title: linux-arm64-quick
-          note: 'ARM64 experimental: non-blocking (continue-on-error) until native execution is approved.'
+          note: 'ARM64 experimental: non-blocking test execution until stabilization (D1).'
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -351,11 +387,20 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.99.0
     steps:
       - uses: actions/checkout@v7
+      - name: Load environment variables
+        run: |
+          while IFS='=' read -r key val; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [ -z "$key" ] && continue
+            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < variables.env
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
         uses: actions/checkout@v7
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
+          ref: ${{ env.ENGINE_COMMIT }}
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -415,7 +460,7 @@ jobs:
           echo "PHASE: msrv" | tee -a target/logs/summary.txt
           rc=0
           t_start=$(date +%s)
-          cargo check --locked --all-targets --features testing 2>&1 | tee target/logs/msrv-check.log || rc=$?
+          cargo check --locked --all-targets --all-features 2>&1 | tee target/logs/msrv-check.log || rc=$?
           elapsed=$(( $(date +%s) - t_start ))
           if [ "$rc" -eq 0 ]; then
             echo "PHASE: msrv PASS log=target/logs/msrv-check.log" | tee -a target/logs/summary.txt
