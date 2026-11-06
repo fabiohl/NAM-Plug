@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # lints.sh — Análise estática, formatação e conformidade textual. Classe A.
 # Uso: utils/lints.sh
-# Orçamento: 110
+# Orçamento: 115
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -31,6 +31,12 @@ phase_clippy() {
   cargo clippy --locked --all-targets --no-default-features -- -D warnings
 }
 run_step clippy phase_clippy
+# Cross-checks target-specific cfg branches (N-26). Native aarch64 already ran clippy in phase_clippy;
+# x86_64 hosts only emit .rmeta with PKG_CONFIG_ALLOW_CROSS=1 for pkg-config metadata discovery.
+PHASE_NAME=cross_aarch64_check
+if [ "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu ]; then run_step cross_aarch64_check true
+elif ! rustup target list --installed | grep -qx aarch64-unknown-linux-gnu; then gap "cross_aarch64_check:target-not-installed"
+else run_step cross_aarch64_check env PKG_CONFIG_ALLOW_CROSS=1 cargo clippy --locked --lib --target aarch64-unknown-linux-gnu -- -D warnings; fi
 
 phase_doc() {
   RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features

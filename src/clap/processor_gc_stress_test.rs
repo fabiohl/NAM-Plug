@@ -360,10 +360,10 @@ mod tests {
     }
 
     // Teardown contract: plugin teardown must hand the RT parking lot to the final off-RT
-    // drain. With current GcItem layout (Model + Resampler + Streaming = 3 per swap):
-    // swap #1 pushes 2 (model None → no Model, only resampler + stream), each later
-    // swap pushes 3: 2 + 24 * 3 = 74 items (SPSC 32 + lot 16 + overflow 26).
-    // Before the parking-lot handoff fix only SPSC + overflow were drained (58 items).
+    // drain. With current dual-mono GcItem layout (Model L + Model R + Resampler + Streaming = 4 per swap):
+    // swap #1 pushes 2 (models None → no Models, only resampler + stream), each later
+    // swap pushes 4: 2 + 24 * 4 = 98 items (SPSC 32 + lot 16 + overflow 50).
+    // Before the parking-lot handoff fix only SPSC + overflow were drained (82 items).
     #[test]
     #[ignore = "Teardown stress: 25 model swaps"]
     fn test_teardown_drains_rt_parking_lot_off_rt() {
@@ -391,9 +391,9 @@ mod tests {
         // 25 swaps WITHOUT main-thread housekeeping: the GC SPSC (32) fills up,
         // then the 16-slot RT parking lot parks items (gc_cascade), and remaining
         // items spill into the 64-slot overflow buffer. Total in flight:
-        // 32 (SPSC) + 16 (lot) + 26 (overflow) = 74 GcItems.
-        // Swap #1 pushes 2 items (old resampler + old stream — model was None); each later
-        // swap pushes 3 (old model + old resampler + old stream): 2 + 24 * 3 = 74.
+        // 32 (SPSC) + 16 (lot) + 50 (overflow) = 98 GcItems.
+        // Swap #1 pushes 2 items (old resampler + old stream — models were None); each later
+        // swap pushes 4 (old model_l + old model_r + old resampler + old stream): 2 + 24 * 4 = 98.
         for i in 0..25 {
             let model_name = models[i % models.len()];
             let path = crate::clap::test_util::model_path(model_name);
@@ -451,10 +451,10 @@ mod tests {
 
         let drains_delta = rt_status.drains.load(Ordering::Relaxed) - drains_before;
         assert_eq!(
-            drains_delta, 74,
-            "deactivate must account for all 74 in-flight GcItems \
-             (32 SPSC + 16 RT parking lot + 26 overflow); before the fix the \
-             parking lot was invisible and only 58 were drained"
+            drains_delta, 98,
+            "deactivate must account for all 98 in-flight GcItems \
+             (32 SPSC + 16 RT parking lot + 50 overflow); before the fix the \
+             parking lot was invisible and only 82 were drained"
         );
 
         // The last quantum must not have allocated on the audio thread.

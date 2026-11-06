@@ -5,7 +5,7 @@ use super::super::MAX_PLAUSIBLE_ELAPSED_NS;
 use super::super::NamClapProcessor;
 use std::sync::atomic::Ordering;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use neural_amp_modeler_rs::common::tsc::rdtsc_nanos;
 
 impl<'a> NamClapProcessor<'a> {

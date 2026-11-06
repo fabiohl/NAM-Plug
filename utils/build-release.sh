@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # build-release.sh — Compila e empacota artefato release canônico (nam_plug.clap). Classe C.
-# Uso: utils/build-release.sh [--strict] [--package] [--install] [--certify] [-h|--help]
+# Uso: utils/build-release.sh [--strict] [--package] [--certify] [--install (com --certify)] [-h|--help]
 # Orçamento: 1000
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
@@ -33,8 +33,8 @@ Usage:
 Canonical Flags:
   --strict       Fail-closed mode: any optimization or verification gap aborts with exit code 1.
   --package      Generate distribution tarball (.tar.zst) and Flatpak extension (.flatpak) in target/dist/.
-  --install      Install the compiled CLAP plugin into ~/.clap/ (and flatpak if packaged).
   --certify      Do not compile; strictly validate and certify canonical artifacts against receipts.
+  --install      Only with --certify: install the certified CLAP plugin into ~/.clap/ (and the Flatpak bundle, if declared).
   -h, --help     Show this help message.
 EOF
 }
@@ -67,6 +67,9 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+if [ "$DO_INSTALL" = true ] && [ "$DO_CERTIFY" != true ]; then
+    usage_fail "build-release.sh: --install exige --certify"
+fi
 
 lib_init
 trap 'trap_fail $?' ERR
@@ -75,6 +78,35 @@ if [ "$DO_CERTIFY" != true ]; then
     # Never let a failed build inherit the previous build's run id or receipt.
     rm -f "$LOG_DIR/build-run-id" "$BUILD_RECEIPT"
 fi
+
+# install_certified <receipt-bin> — instala somente após verify-release (CERTIFIED, SHA e pacotes).
+install_certified() {
+    local bin=$1 log="$LOG_DIR/build-release-install_artifact.log" sha stage frc=0 fpath dest="${HOME}/.clap/nam_plug.clap"
+    phase "install_artifact"
+    if ! sha=$("$bin" verify-release --release-receipt "target/dist/release-receipt.json" --artifact "$CLAP_TARGET" 2>"$log"); then
+        FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=1 log=$log"; finish || true; exit 1
+    fi
+    mkdir -p "${HOME}/.clap"
+    stage=$(mktemp "${HOME}/.clap/.nam_plug.XXXXXX")
+    if ! { cp "$CLAP_TARGET" "$stage" && chmod 755 "$stage" && mv -T "$stage" "$dest"; } >> "$log" 2>&1; then
+        rm -f "$stage"; FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=1 log=$log"; finish || true; exit 1
+    fi
+    if [ "$(sha256sum "$dest" | cut -d' ' -f1)" != "$sha" ]; then
+        FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=1 log=$log"; finish || true; exit 1
+    fi
+    echo "installed: $dest sha256=$sha" >> "$log"
+    fpath=$("$bin" flatpak-path --release-receipt "target/dist/release-receipt.json" 2>>"$log") || frc=$?
+    if [ "$frc" -eq 0 ]; then
+        if ! flatpak install --user --reinstall -y "$fpath" >> "$log" 2>&1; then
+            FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=1 log=$log"; finish || true; exit 1
+        fi
+        echo "flatpak installed: $fpath" >> "$log"
+    elif [ "$frc" -ne 3 ]; then
+        FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=$frc log=$log"; finish || true; exit 1
+    fi
+    ok "installed: $dest (sha256=$sha)"
+    emit "PHASE: install_artifact PASS log=$log"
+}
 
 # -----------------------------------------------------------------------------
 # MODE: --certify (Pure receipt & artifact validation without compilation)
@@ -125,6 +157,7 @@ if [ "$DO_CERTIFY" = true ]; then
         emit "PHASE: certify FAIL rc=$TRC log=$LOG_DIR/build-release-certify.log (tee)"
     else
         emit "PHASE: certify PASS log=$LOG_DIR/build-release-certify.log"
+        if [ "$DO_INSTALL" = true ]; then install_certified "$CERT_BIN"; fi
     fi
     finish
     exit $?
@@ -570,35 +603,6 @@ EOF
 fi
 
 # -----------------------------------------------------------------------------
-# PHASE 7: Local Installation
-# -----------------------------------------------------------------------------
-INSTALLED_PATH=""
-if [ "$DO_INSTALL" = true ]; then
-    phase "install"
-    INST_LOG="$LOG_DIR/build-release-install.log"
-    CLAP_INSTALL_DIR="${HOME}/.clap"
-    {
-        mkdir -p "$CLAP_INSTALL_DIR"
-        cp "$CLAP_TARGET" "$CLAP_INSTALL_DIR/nam_plug.clap"
-        INSTALLED_PATH="$CLAP_INSTALL_DIR/nam_plug.clap"
-        echo "Installed to $INSTALLED_PATH"
-        if [ -n "$FLATPAK_PATH" ] && [ -f "$FLATPAK_PATH" ]; then
-            flatpak install --user --reinstall -y "$FLATPAK_PATH"
-        fi
-    } 2>&1 | tee "$INST_LOG"
-    RC=${PIPESTATUS[0]}
-    if [ "$RC" -eq 0 ]; then
-        if [ -f "$CLAP_INSTALL_DIR/nam_plug.clap" ]; then
-            INSTALLED_PATH="$CLAP_INSTALL_DIR/nam_plug.clap"
-        fi
-        emit "PHASE: install PASS log=$INST_LOG"
-    else
-        FAILS+=("install")
-        emit "PHASE: install FAIL rc=$RC log=$INST_LOG"
-    fi
-fi
-
-# -----------------------------------------------------------------------------
 # PHASE 8: Build Provenance Receipt Emission (via Rust)
 # -----------------------------------------------------------------------------
 phase "build_receipt"
@@ -626,7 +630,6 @@ RECEIPT_ARGS=(
 [ -f "$CODEGEN_POST_JSON" ] && RECEIPT_ARGS+=("--codegen-csv-post" "$CODEGEN_POST_JSON")
 [ -n "$TARBALL_PATH" ] && RECEIPT_ARGS+=("--tarball-path" "$TARBALL_PATH")
 [ -n "$FLATPAK_PATH" ] && RECEIPT_ARGS+=("--flatpak-path" "$FLATPAK_PATH")
-[ -n "$INSTALLED_PATH" ] && RECEIPT_ARGS+=("--installed-path" "$INSTALLED_PATH")
 
 if [ ${#GAPS[@]} -gt 0 ]; then
     GAPS_JOINED=$(IFS=,; echo "${GAPS[*]}")

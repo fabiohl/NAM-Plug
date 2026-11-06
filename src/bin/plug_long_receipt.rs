@@ -10,7 +10,7 @@
 //! every producer. The suite-level `overall` line is derived in Rust by
 //! `summary`, never re-derived from logs by the shell.
 //!
-//! The phase roster of this suite is `phase1`..`phase5` + terminal `overall`.
+//! The phase roster of this suite is `phase1`..`phase6` + terminal `overall`.
 //!
 //! Subcommands:
 //! - `append`:  validate one phase outcome and append its JSONL line. Plug-local
@@ -55,7 +55,7 @@ use neural_amp_modeler_rs::testing::receipt::{
 const DEFAULT_OUT: &str = "target/logs/long-audit-receipt.jsonl";
 
 /// Canonical phase roster of the NAM-Plug long audit suite.
-pub const PLUG_LONG_ROSTER: [&str; 6] = LONG_ROSTER;
+pub const PLUG_LONG_ROSTER: [&str; 7] = LONG_ROSTER;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -72,6 +72,8 @@ fn main() {
         "build-receipt" => cmd_build_receipt(&args[1..]),
         "smoke-load" => cmd_smoke_load(&args[1..]),
         "certify" => cmd_certify(&args[1..]),
+        "verify-release" => cmd_verify_release(&args[1..]),
+        "flatpak-path" => cmd_flatpak_path(&args[1..]),
         "-h" | "--help" => {
             print_help();
             exit(0);
@@ -98,6 +100,12 @@ fn print_help() {
     println!("  plug_long_receipt artifact-status --out <file> --expected-sha256 <hex>");
     println!("  plug_long_receipt build-receipt [--out <file>] [--artifact <path>] [options...]");
     println!("  plug_long_receipt smoke-load --artifact <path>");
+    println!(
+        "  plug_long_receipt verify-release [--release-receipt <path>] [--artifact <path>]   (prints artifact SHA-256)"
+    );
+    println!(
+        "  plug_long_receipt flatpak-path [--release-receipt <path>]   (exit 3 when no bundle)"
+    );
     println!(
         "  plug_long_receipt certify [--artifact <path>] [--build-receipt <path>] [--long-receipt <path>] [--out <file>] [--strict] [--run-id <id>]"
     );
@@ -607,6 +615,59 @@ fn cmd_smoke_load(args: &[String]) {
 
     println!("SMOKE_LOAD: PASS (dlopen OK, clap_entry resolved)");
     exit(0);
+}
+
+fn cmd_verify_release(args: &[String]) {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => die_usage("verify-release", &e),
+    };
+    let release = flags
+        .get("release-receipt")
+        .cloned()
+        .unwrap_or_else(|| "target/dist/release-receipt.json".to_string());
+    let artifact = flags
+        .get("artifact")
+        .cloned()
+        .unwrap_or_else(|| "target/dist/nam_plug.clap".to_string());
+    match nam_plug::receipt::release::verify_release_receipt(
+        Path::new(&release),
+        Path::new(&artifact),
+    ) {
+        Ok(sha) => {
+            println!("{sha}");
+            exit(0);
+        }
+        Err(problems) => {
+            for problem in &problems {
+                eprintln!("verify-release: {problem}");
+            }
+            eprintln!("RELEASE_VERIFY: FAIL reasons={}", problems.len());
+            exit(1);
+        }
+    }
+}
+
+fn cmd_flatpak_path(args: &[String]) {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => die_usage("flatpak-path", &e),
+    };
+    let release = flags
+        .get("release-receipt")
+        .cloned()
+        .unwrap_or_else(|| "target/dist/release-receipt.json".to_string());
+    match nam_plug::receipt::release::declared_flatpak_path(Path::new(&release)) {
+        Ok(Some(path)) => {
+            println!("{path}");
+            exit(0);
+        }
+        Ok(None) => exit(3),
+        Err(e) => {
+            eprintln!("flatpak-path: cannot read {release}: {e}");
+            exit(1);
+        }
+    }
 }
 
 fn cmd_certify(args: &[String]) {

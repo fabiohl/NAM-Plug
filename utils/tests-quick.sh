@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # tests-quick.sh — Execução da disciplina rápida de testes. Classe A.
 # Uso: utils/tests-quick.sh [-h|--help]
-# Orçamento: 40
+# Orçamento: 44          # +4: log de fase inicializado antes do trap (S3-T3)
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -11,6 +11,7 @@ cd "$(dirname "$0")/.."
 
 case "${1:-}" in "") ;; -h|--help) echo "Uso: utils/tests-quick.sh"; exit 0 ;; *) usage_fail "tests-quick.sh aceita apenas -h/--help" ;; esac
 lib_init
+PHASE_NAME=init; CUR_LOG="$LOG_DIR/quick-init.log"
 trap 'trap_fail $?' ERR
 
 PHASE_NAME=tests; CUR_LOG="$LOG_DIR/quick-tests.log"; phase tests

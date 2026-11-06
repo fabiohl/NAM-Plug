@@ -30,7 +30,9 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load environment variables
         run: |
           while IFS='=' read -r key val; do
@@ -39,12 +41,15 @@ jobs:
             val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
             echo "$key=$val" >> "$GITHUB_ENV"
           done < variables.env
+          . ./variables.env
+          [ -n "${ENGINE_COMMIT:-}" ] || { echo "ERROR: ENGINE_COMMIT missing in variables.env" >&2; exit 1; }
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
           ref: ${{ env.ENGINE_COMMIT }}
+          persist-credentials: false
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -54,8 +59,8 @@ jobs:
             libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
       # Runner images can ship an older preinstalled stable; the crate needs rust-version 1.99.
       - name: Update Rust toolchain
-        run: rustup update --no-self-update stable && rustc --version
-      - uses: Swatinem/rust-cache@v2
+        run: rustup update --no-self-update stable && rustup target add aarch64-unknown-linux-gnu && rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
       - name: Record provenance
@@ -91,7 +96,7 @@ jobs:
               }
             ' Cargo.lock)
           fi
-          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+          if aux_sha=$(git -C "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" rev-parse HEAD 2>/dev/null); then
             aux_engine="sha=$aux_sha"
           else
             aux_engine="GAP:sibling_absent"
@@ -107,7 +112,7 @@ jobs:
           title: x86_64-linux-lints
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-x86_64-linux-lints
           path: target/logs/**
@@ -117,7 +122,9 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load environment variables
         run: |
           while IFS='=' read -r key val; do
@@ -126,12 +133,15 @@ jobs:
             val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
             echo "$key=$val" >> "$GITHUB_ENV"
           done < variables.env
+          . ./variables.env
+          [ -n "${ENGINE_COMMIT:-}" ] || { echo "ERROR: ENGINE_COMMIT missing in variables.env" >&2; exit 1; }
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
           ref: ${{ env.ENGINE_COMMIT }}
+          persist-credentials: false
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -141,7 +151,7 @@ jobs:
             libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
       - name: Update Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
       - name: Record provenance
@@ -177,7 +187,7 @@ jobs:
               }
             ' Cargo.lock)
           fi
-          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+          if aux_sha=$(git -C "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" rev-parse HEAD 2>/dev/null); then
             aux_engine="sha=$aux_sha"
           else
             aux_engine="GAP:sibling_absent"
@@ -193,7 +203,7 @@ jobs:
           title: x86_64-linux-quick
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-x86_64-linux-quick
           path: target/logs/**
@@ -205,7 +215,9 @@ jobs:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load environment variables
         run: |
           while IFS='=' read -r key val; do
@@ -214,12 +226,15 @@ jobs:
             val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
             echo "$key=$val" >> "$GITHUB_ENV"
           done < variables.env
+          . ./variables.env
+          [ -n "${ENGINE_COMMIT:-}" ] || { echo "ERROR: ENGINE_COMMIT missing in variables.env" >&2; exit 1; }
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
           ref: ${{ env.ENGINE_COMMIT }}
+          persist-credentials: false
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -229,7 +244,7 @@ jobs:
             libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
       - name: Update Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
       - name: Record provenance
@@ -265,7 +280,7 @@ jobs:
               }
             ' Cargo.lock)
           fi
-          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+          if aux_sha=$(git -C "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" rev-parse HEAD 2>/dev/null); then
             aux_engine="sha=$aux_sha"
           else
             aux_engine="GAP:sibling_absent"
@@ -282,7 +297,7 @@ jobs:
           note: 'ARM64 compilation: blocking CI gate (D1).'
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-linux-arm64-lints
           path: target/logs/**
@@ -293,7 +308,9 @@ jobs:
     timeout-minutes: 30
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load environment variables
         run: |
           while IFS='=' read -r key val; do
@@ -302,12 +319,15 @@ jobs:
             val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
             echo "$key=$val" >> "$GITHUB_ENV"
           done < variables.env
+          . ./variables.env
+          [ -n "${ENGINE_COMMIT:-}" ] || { echo "ERROR: ENGINE_COMMIT missing in variables.env" >&2; exit 1; }
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
           ref: ${{ env.ENGINE_COMMIT }}
+          persist-credentials: false
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -317,7 +337,7 @@ jobs:
             libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
       - name: Update Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
       - name: Record provenance
@@ -353,7 +373,7 @@ jobs:
               }
             ' Cargo.lock)
           fi
-          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+          if aux_sha=$(git -C "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" rev-parse HEAD 2>/dev/null); then
             aux_engine="sha=$aux_sha"
           else
             aux_engine="GAP:sibling_absent"
@@ -370,7 +390,7 @@ jobs:
           note: 'ARM64 experimental: non-blocking test execution until stabilization (D1).'
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-linux-arm64-quick
           path: target/logs/**
@@ -386,7 +406,9 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: 1.99.0
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load environment variables
         run: |
           while IFS='=' read -r key val; do
@@ -395,12 +417,15 @@ jobs:
             val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
             echo "$key=$val" >> "$GITHUB_ENV"
           done < variables.env
+          . ./variables.env
+          [ -n "${ENGINE_COMMIT:-}" ] || { echo "ERROR: ENGINE_COMMIT missing in variables.env" >&2; exit 1; }
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: fabiohl/NeuralAmpModeler-rs
           path: NeuralAmpModeler-rs
           ref: ${{ env.ENGINE_COMMIT }}
+          persist-credentials: false
       - name: Set up engine sibling symlink
         run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
@@ -410,7 +435,7 @@ jobs:
             libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev
       - name: Install MSRV toolchain
         run: rustup toolchain install 1.99.0 --no-self-update --profile minimal && rustc --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
       - name: Record provenance
@@ -447,7 +472,7 @@ jobs:
               }
             ' Cargo.lock)
           fi
-          if aux_sha=$(git -C ../NeuralAmpModeler-rs rev-parse HEAD 2>/dev/null); then
+          if aux_sha=$(git -C "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" rev-parse HEAD 2>/dev/null); then
             aux_engine="sha=$aux_sha"
           else
             aux_engine="GAP:sibling_absent"
@@ -455,23 +480,18 @@ jobs:
           printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s rustc=%s toolchain=msrv-1.99.0\n' \
             "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" "$rustc_version" | tee target/logs/ci-provenance.log
       - name: Cargo check (MSRV)
+        shell: bash
         run: |
-          mkdir -p target/logs
-          echo "PHASE: msrv" | tee -a target/logs/summary.txt
-          rc=0
-          t_start=$(date +%s)
-          cargo check --locked --all-targets --all-features 2>&1 | tee target/logs/msrv-check.log || rc=$?
-          elapsed=$(( $(date +%s) - t_start ))
-          if [ "$rc" -eq 0 ]; then
-            echo "PHASE: msrv PASS log=target/logs/msrv-check.log" | tee -a target/logs/summary.txt
-            echo "RESULT: PASS (${elapsed}s) fails=none gaps=none" | tee -a target/logs/summary.txt
-            printf '%s\t%s\t%s\t%s\n' msrv PASS none none > target/logs/msrv-status.tsv
-          else
-            echo "PHASE: msrv FAIL rc=$rc log=target/logs/msrv-check.log" | tee -a target/logs/summary.txt
-            echo "RESULT: FAIL (${elapsed}s) fails=msrv gaps=none" | tee -a target/logs/summary.txt
-            printf '%s\t%s\t%s\t%s\n' msrv FAIL none msrv > target/logs/msrv-status.tsv
-            exit "$rc"
-          fi
+          set -euo pipefail
+          . utils/_lib.sh
+          SCRIPT_NAME=msrv
+          STATUS_NAME=msrv
+          lib_init
+          trap 'trap_fail $?' ERR
+          # run_step is the repository's canonical phase runner (equivalent to
+          # the `run_phase` contract in .agents/rules/scripts.md §5.1).
+          run_step msrv_check cargo check --locked --workspace --all-targets --all-features
+          finish
       - name: Publish step summary
         if: always()
         uses: ./.github/actions/qa-summary
@@ -480,7 +500,7 @@ jobs:
           note: ${{ job.status == 'success' && 'MSRV cargo check passed.' || 'MSRV cargo check failed.' }}
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-msrv
           path: target/logs/**

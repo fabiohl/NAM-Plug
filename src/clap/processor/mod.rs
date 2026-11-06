@@ -90,7 +90,7 @@ use crate::clap::processor::dsp::dry_delay::{DRY_DELAY_MAX_EXTRA, DryDelayLine};
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::RtSwapDrain;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use neural_amp_modeler_rs::common::tsc::rdtsc_nanos;
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
 use neural_amp_modeler_rs::dsp::gate::{DynamicHysteresis, GateParams};
@@ -451,7 +451,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             // 3. DSP component initialization
             let model_rate = shared.cold.model_sample_rate.load(Ordering::Relaxed);
             let model_rate = if model_rate == 0 { 48000 } else { model_rate };
-            let host_rate = audio_config.sample_rate as u32;
+            let host_rate = (audio_config.sample_rate as u32).clamp(4_000, 384_000);
             let host_buffer = audio_config.max_frames_count;
 
             // Resolve the oversampling factor for this activation.
@@ -1269,10 +1269,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 .rt_to_ui
                 .current_latency
                 .store(initial_latency, Ordering::Relaxed);
-            shared
-                .cold
-                .sample_rate
-                .store(audio_config.sample_rate as u32, Ordering::Relaxed);
+            shared.cold.sample_rate.store(host_rate, Ordering::Relaxed);
             shared
                 .cold
                 .buffer_size
@@ -1723,7 +1720,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                                 }
                             }
                         }
-                        #[cfg(not(target_arch = "x86_64"))]
+                        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                         {
                             #[cfg(any(test, feature = "testing"))]
                             let _ = TEST_PREWARM_ELAPSED_NS.swap(0, Ordering::Relaxed);

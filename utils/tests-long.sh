@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # tests-long.sh — suíte longa de auditoria, certificação e provas de artefato. Classe B.
 # Uso: utils/tests-long.sh [--strict] [--only <fase>[,<fase>]] [--artifact] [-h|--help]
-# Orçamento: 380
+# Orçamento: 400         # +20: recibo por rodada em .partial com mv atômico e publicação condicional (S3-T2)
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -o pipefail
 cd "$(dirname "$0")/.."
@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 SCRIPT_NAME="tests-long"
 LOG_DIR=target/logs
 DEFAULT_TARGET_DIR="target/long"
-RECEIPT="$LOG_DIR/long-audit-receipt.jsonl"
+RECEIPT_FINAL="$LOG_DIR/long-audit-receipt.jsonl"
 
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$DEFAULT_TARGET_DIR}"
 export CARGO_TARGET_DIR
@@ -64,10 +64,8 @@ if [ -n "$ONLY_PHASES" ]; then
 fi
 
 # Only an unrestricted run may replace the canonical receipt. A partial --only
-# run writes a sibling receipt and preserves the previous full evidence.
-if [ -n "$ONLY_PHASES" ]; then
-    RECEIPT="$LOG_DIR/long-audit-receipt.partial.jsonl"
-fi
+# run writes a per-run sibling receipt and preserves the previous full evidence.
+RECEIPT="$LOG_DIR/long-audit-receipt.${NAM_RUN_ID}.partial.jsonl"
 
 # target/long is removed by default unless --only is specified to accelerate
 # iterative reruns. A custom CARGO_TARGET_DIR is operator data and is never
@@ -79,7 +77,7 @@ if [ -z "$ONLY_PHASES" ]; then
         emit "PHASE: long-cleanup SKIPPED custom_cargo_target_dir=$CARGO_TARGET_DIR"
     fi
 fi
-rm -f "$RECEIPT" "$LOG_DIR/tests-long-status.tsv"
+rm -f "$RECEIPT"
 
 ARTIFACT_PATH=""
 ARTIFACT_SHA256=""
@@ -121,7 +119,7 @@ append_receipt() {
 # `requires_tests=0` is used by phases that certify an artifact instead of
 # running a Cargo test binary (perf), so `ran_tests` does not apply.
 close_phase() {
-    local pid=$1 pname=$2 rc=$3 plog=$4 dur=$5 tests=$6 ex=$7 pgaps=${8:-} req_tests=${9:-1} st=PASSED
+    local pid=$1 pname=$2 rc=$3 plog=$4 dur=$5 tests=$6 ex=${7:-false} pgaps=${8:-} req_tests=${9:-1} st=PASSED
     if [ "$rc" -eq 0 ] && { [ "$req_tests" = "0" ] || ran_tests "$plog"; }; then
         emit "PHASE: $pname PASS log=$plog"
     else
@@ -335,7 +333,7 @@ if should_run "heap-audit"; then
     run_heap_test --test heap_audit prop_gc_swap_idempotence -- --ignored; heap_cases=$((heap_cases + 500))
     run_heap_test --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1; heap_cases=$((heap_cases + 1))
 
-    close_phase "phase5" "heap-audit" "$heap_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$heap_cases"
+    close_phase "phase5" "heap-audit" "$heap_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$heap_cases" false
 else
     skip_phase "phase5" "heap-audit"
 fi
@@ -360,7 +358,7 @@ if should_run "rt-heap"; then
     run_rt_heap_test --lib processor_drain_latency_test -- --ignored --test-threads=1; rt_cases=$((rt_cases + 2))
     run_rt_heap_test --lib test_reset_wall_clock_time_within_contract -- --ignored --test-threads=1; rt_cases=$((rt_cases + 1))
 
-    close_phase "phase6" "rt-heap" "$rt_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$rt_cases"
+    close_phase "phase6" "rt-heap" "$rt_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$rt_cases" false
 else
     skip_phase "phase6" "rt-heap"
 fi
@@ -370,11 +368,25 @@ if [ -n "$ONLY_PHASES" ]; then
     emit "PHASE: phase-selection PASS only-subset:${subset_tag//,/+}"
 else
     # ── Terminal receipt derivation & verification (full runs only) ─────────────
-    "$PLUG_LONG_RECEIPT_BIN" summary --out "$RECEIPT" >> "$LOG_DIR/tests-long-receipt.log" 2>&1 \
-        || { FAILS+=("receipt-summary"); emit "PHASE: receipt-summary FAIL"; }
-    val_cmd=("$PLUG_LONG_RECEIPT_BIN" validate --out "$RECEIPT")
-    [ "$STRICT" = "1" ] && val_cmd+=(--strict)
-    "${val_cmd[@]}" >> "$LOG_DIR/tests-long-receipt.log" 2>&1 || FAILS+=("receipt_validation")
+    RECEIPT_READY=0
+    if "$PLUG_LONG_RECEIPT_BIN" summary --out "$RECEIPT" >> "$LOG_DIR/tests-long-receipt.log" 2>&1; then
+        val_cmd=("$PLUG_LONG_RECEIPT_BIN" validate --out "$RECEIPT")
+        [ "$STRICT" = "1" ] && val_cmd+=(--strict)
+        if "${val_cmd[@]}" >> "$LOG_DIR/tests-long-receipt.log" 2>&1; then
+            RECEIPT_READY=1
+        else
+            FAILS+=("receipt_validation")
+        fi
+    else
+        FAILS+=("receipt-summary"); emit "PHASE: receipt-summary FAIL"
+    fi
+    if [ "$RECEIPT_READY" = "1" ]; then
+        if mv -f "$RECEIPT" "$RECEIPT_FINAL"; then
+            emit "PHASE: receipt-publish PASS log=$RECEIPT_FINAL"
+        else
+            FAILS+=("receipt-publish"); emit "PHASE: receipt-publish FAIL"
+        fi
+    fi
 fi
 
 finish

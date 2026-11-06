@@ -129,6 +129,97 @@ pub struct ReleaseLongPhaseSummary {
     pub artifact_exercised: Option<bool>,
 }
 
+/// Re-checks a `CERTIFIED` release receipt against the bytes about to be installed.
+/// Returns the verified artifact SHA-256, or every reconciliation problem found.
+pub fn verify_release_receipt(
+    release_path: &Path,
+    artifact_path: &Path,
+) -> Result<String, Vec<String>> {
+    let receipt: ReleaseReceipt = fs::read_to_string(release_path)
+        .map_err(|e| e.to_string())
+        .and_then(|c| serde_json::from_str(&c).map_err(|e| e.to_string()))
+        .map_err(|e| {
+            vec![format!(
+                "release receipt {} unreadable or invalid: {e}",
+                release_path.display()
+            )]
+        })?;
+    let actual = hash_file(artifact_path).map_err(|e| {
+        vec![format!(
+            "cannot hash artifact {}: {e}",
+            artifact_path.display()
+        )]
+    })?;
+
+    let mut problems = Vec::new();
+    if receipt.status != "CERTIFIED" {
+        problems.push(format!(
+            "release receipt status is '{}', expected 'CERTIFIED'",
+            receipt.status
+        ));
+    }
+    if !receipt.fails.is_empty() || !receipt.gaps.is_empty() {
+        problems.push("release receipt declares fails or gaps".to_string());
+    }
+    if receipt.artifacts.artifact_consistency != "match" {
+        problems.push(format!(
+            "release receipt artifact consistency is '{}', expected 'match'",
+            receipt.artifacts.artifact_consistency
+        ));
+    }
+    if actual != receipt.artifacts.artifact_sha256 {
+        problems.push(format!(
+            "artifact SHA-256 {actual} differs from release receipt {}",
+            receipt.artifacts.artifact_sha256
+        ));
+    }
+    match verify_receipt_artifact(Path::new(&receipt.long_audit.receipt_path), artifact_path) {
+        ArtifactConsistency::Match { declared } if declared == actual => {}
+        ArtifactConsistency::Mismatch { reason, .. }
+        | ArtifactConsistency::Absent { reason }
+        | ArtifactConsistency::Incomplete { reason, .. } => {
+            problems.push(format!("long audit artifact provenance: {reason}"));
+        }
+        ArtifactConsistency::Match { .. } => {
+            problems.push("long audit declares a different artifact SHA".to_string());
+        }
+    }
+    match (
+        receipt.provenance.run_id.as_deref(),
+        receipt.long_audit.run_id.as_deref(),
+    ) {
+        (Some(build), Some(long)) if !build.is_empty() && build == long => {}
+        _ => problems.push(
+            "build and long audit run_id do not reconcile with the release receipt".to_string(),
+        ),
+    }
+    if let (Some(path), Some(expected)) = (
+        receipt.artifacts.flatpak_path.as_deref(),
+        receipt.artifacts.flatpak_sha256.as_deref(),
+    ) {
+        match hash_file(path) {
+            Ok(sha) if sha == expected => {}
+            Ok(sha) => problems.push(format!(
+                "flatpak SHA-256 mismatch at {path}: disk ({sha}) != release receipt ({expected})"
+            )),
+            Err(e) => problems.push(format!("cannot hash flatpak at {path}: {e}")),
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(actual)
+    } else {
+        Err(problems)
+    }
+}
+
+/// Flatpak bundle path declared by a release receipt; `None` when no bundle was packaged.
+pub fn declared_flatpak_path(release_path: &Path) -> Result<Option<String>, String> {
+    let content = fs::read_to_string(release_path).map_err(|e| e.to_string())?;
+    let receipt: ReleaseReceipt = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(receipt.artifacts.flatpak_path)
+}
+
 /// Evaluates release certification against canonical artifact, build receipt, and long audit receipt.
 pub fn evaluate_certification(
     artifact_path: &Path,

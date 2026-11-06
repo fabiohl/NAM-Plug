@@ -7,7 +7,9 @@ pub mod build;
 pub mod long_artifact;
 pub mod release;
 
-/// Canonical phase roster of the NAM-Plug long audit suite: `phase1`..`phase5`
+/// Canonical phase roster of the NAM-Plug long audit suite: `phase1`..`phase6`
 /// plus the terminal `overall` line. Shared by the `plug_long_receipt` binary
 /// and the integration tests so validation and emission can never drift.
-pub const LONG_ROSTER: [&str; 6] = ["phase1", "phase2", "phase3", "phase4", "phase5", "overall"];
+pub const LONG_ROSTER: [&str; 7] = [
+    "phase1", "phase2", "phase3", "phase4", "phase5", "phase6", "overall",
+];

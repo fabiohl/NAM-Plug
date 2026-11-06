@@ -18,10 +18,13 @@ Control begins formally with version 1.0.0.
 ### Fixed
 
 - **Performance certification evidence:** `nam_perf_guard` now applies and verifies CPU affinity in-process, writes the report fail-closed to `target/logs/perf-certification-report.json`, blocks certification on a degraded host or missing paired reference, and records `run_id`.
+- **Activation sample rate:** `activate()` clamps the host rate to `[4_000, 384_000]` Hz so out-of-range hosts such as `clap-validator` at 768 kHz activate safely.
+- **Dual-mono teardown contract:** the GC stress test accounts for all 98 in-flight items of the dual-mono layout (32 SPSC + 16 parking lot + 50 overflow) drained off the audio thread.
 - **Long audit safety:** a partial `--only` run preserves the previous full receipt, dedicated GUI/heap suites are selected by Cargo features instead of a shell `--skip` list, custom `CARGO_TARGET_DIR` is never deleted, and all Cargo calls use `--locked`.
+- **Long audit roster:** `phase6` is registered in `plug_long_receipt` and `utils/tests-long.sh`, with the explicit 7th `ex` argument on phases 5 and 6.
 - **Release packaging:** `LICENSE.txt` and the engine `NOTICE` are included in the tarball and Flatpak, `--install` uses `~/.clap`, Flatpak installation failures are no longer suppressed, and `--package` fails when a requested bundle is absent.
 - **Release certification:** `build-release.sh` persists `target/logs/build-run-id`, the long audit reuses it, and `--certify` removes a stale release receipt before failing.
-- **CI:** hosted long runs exclude the speed gate, phase input is no longer interpolated into shell code, and the MSRV job proves the 1.99.0 toolchain and uploads provenance.
+- **CI:** hosted long runs exclude the speed gate, phase input is no longer interpolated into shell code, the MSRV job proves the 1.99.0 toolchain and uploads provenance, the `x86_64-linux-lints` job installs the `aarch64-unknown-linux-gnu` target, and `cross_aarch64_check` no longer reports a GAP on non-ARM hosts.
 
 ## [1.1.0] - 2026-11-01
 

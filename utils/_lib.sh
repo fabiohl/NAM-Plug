@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # utils/_lib.sh — execução, logs e carrier tipado de NAM-Plug. Classe D (biblioteca). Sem cópia pinada, sem hash.
 # Uso: chamar lib_init após o parsing de help; concluir com trap_fail + finish.
-# Orçamento: 125
+# Orçamento: 136          # wc -l + 10: lib_init com marcador RUN: de rodada local
 LOG_DIR=target/logs
 NAM_RUN_ID="${NAM_RUN_ID:-}"
 PROJECT_DIR="$PWD"
@@ -25,18 +25,22 @@ phase() { PHASE_NAME="$1"; emit "PHASE: $1"; }
 gap()   { GAPS+=("$1"); emit "PHASE: ${PHASE_NAME:-$1} GAP $1"; }
 
 # lib_init — ÚNICO ponto que cria target/logs e trunca summary.txt. Depois do help.
+# NAM_RUN_ID pré-exportado (CI/topo) trunca summary.txt quando .summary-run difere;
+# id gerado localmente não trunca: acumula e emite a linha RUN: <id>.
 # lib_quiet (filho dentro de fase do pai) só inibe summary/marker: o carrier obsoleto do
 # próprio filho continua sendo removido, então crash antes de finish nunca deixa veredito velho.
 lib_init() {
   mkdir -p "$LOG_DIR" || die "cannot create $LOG_DIR"
-  if [ -z "$NAM_RUN_ID" ]; then NAM_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"; fi
+  local fresh=0
+  if [ -z "$NAM_RUN_ID" ]; then NAM_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"; fresh=1; fi
   export NAM_RUN_ID
   rm -f "$LOG_DIR/${STATUS_NAME}-status.tsv"
   if [ "${lib_quiet:-}" = "1" ]; then return 0; fi
   if [ "$(cat "$LOG_DIR/.summary-run" 2>/dev/null)" != "$NAM_RUN_ID" ]; then
-    : > "$LOG_DIR/summary.txt" || die "cannot reset $LOG_DIR/summary.txt"
+    if [ "$fresh" = 0 ]; then : > "$LOG_DIR/summary.txt" || die "cannot reset $LOG_DIR/summary.txt"; fi
     printf '%s\n' "$NAM_RUN_ID" > "$LOG_DIR/.summary-run" || die "cannot write $LOG_DIR/.summary-run"
   fi
+  if [ "$fresh" = 1 ]; then emit "RUN: $NAM_RUN_ID"; fi
 }
 
 # usage_fail <msg> — flag inválida: exatamente um RESULT e exit 2, sem tocar em evidência.
@@ -89,7 +93,7 @@ assert_ran_tests() {
 trap_fail() {
   local rc=$1; [ "${FINISHED:-0}" = 1 ] && return 0
   FAILS+=("${PHASE_NAME:-step}")
-  emit "PHASE: ${PHASE_NAME:-step} FAIL rc=$rc log=${CUR_LOG:-none}" || true
+  emit "PHASE: ${PHASE_NAME:-step} FAIL rc=$rc log=${CUR_LOG:-$LOG_DIR/${SCRIPT_NAME}-${PHASE_NAME:-step}.log}" || true
   finish || true
 }
 
