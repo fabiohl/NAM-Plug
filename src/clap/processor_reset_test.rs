@@ -1189,17 +1189,6 @@ mod tests {
                 let pattern = noise_pattern(TIMING_BLOCK, 0xABCD, 0.4);
                 let silence = [0.0f32; TIMING_BLOCK];
 
-                // Expected callbacks to the first wet block for this fixture, at
-                // 48 kHz with k = PREWARM_STEP_SAMPLES_PER_CALLBACK.
-                // Dual-mono (2 chains) halves the per-callback step budget, doubling callbacks.
-                let expected_to_wet = match (fixture_name, layout_id) {
-                    ("lstm.nam", CONFIG_ID_STEREO) => EXPECTED_CALLBACKS_TO_WET_LSTM * 2,
-                    ("lstm.nam", _) => EXPECTED_CALLBACKS_TO_WET_LSTM,
-                    ("wavenet_a1_standard.nam", _) => EXPECTED_CALLBACKS_TO_WET_A1,
-                    (_, CONFIG_ID_STEREO) => EXPECTED_CALLBACKS_TO_WET_A2 * 2,
-                    _ => EXPECTED_CALLBACKS_TO_WET_A2,
-                };
-
                 // Warm-up: block 0 installs the model from the SPSC ring (the
                 // first prealloc call also warms the ports' internal view state
                 // outside every counted window).
@@ -1256,15 +1245,16 @@ mod tests {
                 // replace the loader's build-time prewarm one-for-one) and the
                 // same pipeline age, so the probe runs over state identical to
                 // the fresh reference's.
-                if expected_to_wet > 1 {
-                    for _ in 0..(expected_to_wet - 2) {
-                        bufs.in_l.copy_from_slice(&silence);
-                        bufs.in_r.copy_from_slice(&silence);
-                        process_stereo_block_prealloc(&mut started, &mut bufs, None);
-                    }
+                let mut drain_count = 0;
+                while shared.rt_to_ui.prewarm_pending.load(Ordering::Relaxed) {
                     bufs.in_l.copy_from_slice(&silence);
                     bufs.in_r.copy_from_slice(&silence);
                     process_stereo_block_prealloc(&mut started, &mut bufs, None);
+                    drain_count += 1;
+                    assert!(
+                        drain_count < 200,
+                        "{fixture_name}: prewarm drain did not converge within 200 callbacks"
+                    );
                 }
                 bufs.in_l.copy_from_slice(&silence);
                 bufs.in_r.copy_from_slice(&silence);
@@ -1284,11 +1274,21 @@ mod tests {
 
                 let pollute = noise_pattern(TIMING_BLOCK, 0x1234, 0.9);
 
-                let mut reset_times: Vec<u128> = Vec::with_capacity(N_ITERS);
-                let mut block_times: Vec<u128> = Vec::with_capacity(N_ITERS);
-                let mut total_times: Vec<u128> = Vec::with_capacity(N_ITERS);
+                let mut reset_times = vec![0u128; N_ITERS];
+                let mut block_times = vec![0u128; N_ITERS];
+                let mut total_times = vec![0u128; N_ITERS];
 
-                for _ in 0..N_ITERS {
+                // Prefault measurement vectors outside the timing loop to prevent minor page faults
+                for (r, (b, t)) in reset_times
+                    .iter_mut()
+                    .zip(block_times.iter_mut().zip(total_times.iter_mut()))
+                {
+                    std::hint::black_box(*r);
+                    std::hint::black_box(*b);
+                    std::hint::black_box(*t);
+                }
+
+                for iter in 0..N_ITERS {
                     // Exercise / pollute neural state with dynamic content before reset
                     bufs.in_l.copy_from_slice(&pollute);
                     bufs.in_r.copy_from_slice(&pollute);
@@ -1313,9 +1313,9 @@ mod tests {
                     let d_block = t3.duration_since(t2).as_nanos();
                     let d_total = t3.duration_since(t1).as_nanos();
 
-                    reset_times.push(d_reset);
-                    block_times.push(d_block);
-                    total_times.push(d_total);
+                    reset_times[iter] = d_reset;
+                    block_times[iter] = d_block;
+                    total_times[iter] = d_total;
 
                     // Finish the window (contained silences + wet-silence
                     // convergence + one repayment silence blocking the fresh
@@ -1323,15 +1323,16 @@ mod tests {
                     // the parity probe runs over the exact same pipeline age and
                     // model state as the reference, and the next iteration's
                     // pollution starts from a converged state.
-                    if expected_to_wet > 1 {
-                        for _ in 0..(expected_to_wet - 2) {
-                            bufs.in_l.copy_from_slice(&silence);
-                            bufs.in_r.copy_from_slice(&silence);
-                            process_stereo_block_prealloc(&mut started, &mut bufs, None);
-                        }
+                    let mut drain_count = 0;
+                    while shared.rt_to_ui.prewarm_pending.load(Ordering::Relaxed) {
                         bufs.in_l.copy_from_slice(&silence);
                         bufs.in_r.copy_from_slice(&silence);
                         process_stereo_block_prealloc(&mut started, &mut bufs, None);
+                        drain_count += 1;
+                        assert!(
+                            drain_count < 200,
+                            "{fixture_name}: prewarm drain did not converge within 200 callbacks in iteration loop"
+                        );
                     }
                     bufs.in_l.copy_from_slice(&silence);
                     bufs.in_r.copy_from_slice(&silence);

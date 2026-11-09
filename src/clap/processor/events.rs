@@ -707,6 +707,10 @@ impl ClapCommandSwapHandler<'_, '_> {
         // mid-drain restarts converged (never half-drained) and the next
         // callback runs the normal wet path.
         *self.prewarm_pending = false;
+        self.shared
+            .rt_to_ui
+            .prewarm_pending
+            .store(false, Ordering::Relaxed);
         *self.prewarm_zero_budget_count = 0;
         // Adopt the measured per-sample cost carried with this model (U-02 /
         // F-PR-10); `None` for a cleared model or a missing calibration, which

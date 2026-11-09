@@ -479,6 +479,8 @@ pub struct RtToUi {
     pub non_finite_epoch: AtomicU32,
     /// Prewarm zero-budget starvation transition epoch counter (D-15 / S08.5).
     pub prewarm_starvation_epoch: AtomicU32,
+    /// Indicates whether the real-time audio thread is actively draining prewarm amortization.
+    pub prewarm_pending: AtomicBool,
 }
 
 /// Fields written by the UI/Main thread, read every block by the RT thread.
@@ -524,6 +526,7 @@ impl Default for RtToUi {
             xrun_epoch: AtomicU32::new(0),
             non_finite_epoch: AtomicU32::new(0),
             prewarm_starvation_epoch: AtomicU32::new(0),
+            prewarm_pending: AtomicBool::new(false),
         }
     }
 }

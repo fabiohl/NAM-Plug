@@ -100,6 +100,14 @@ name = "nam_perf_guard"
 path = "src/bin/nam_perf_guard.rs"
 required-features = ["testing"]
 
+[[bin]]
+name = "ab_opt_bench"
+path = "src/bin/ab_opt_bench.rs"
+required-features = ["testing"]
+
+[[bin]]
+name = "plug_ab_opt"
+path = "src/bin/plug_ab_opt.rs"
 
 # Unified-schema (engine `testing::receipt`) emitter/verifier for the long-suite
 # receipt (target/logs/long-audit-receipt.jsonl). Testing-only because it reuses

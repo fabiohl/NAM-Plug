@@ -42,9 +42,23 @@ GATE_KEYS = ("zmm", "libm", "alloc", "div", "tls")
 SYNTHETIC_VIOLATION = "SYNTHETIC: violation injected by --test-synthetic-violation"
 
 
-def is_kept_section(section: str, sections: tuple[str, ...]) -> bool:
-    """Accept .text and .text.cold* (reject pre-BOLT duplicates)."""
+def is_primary_section(section: str, sections: tuple[str, ...]) -> bool:
+    """Accept .text and .text.cold*."""
     return any(section == s or section.startswith(s + ".") for s in sections)
+
+
+def is_bolt_org_section(section: str, sections: tuple[str, ...]) -> bool:
+    """Accept .bolt.org.<sec> where <sec> is a primary section (e.g. .bolt.org.text)."""
+    prefix = ".bolt.org"
+    if not section.startswith(prefix):
+        return False
+    underlying = section[len(prefix):]
+    return is_primary_section(underlying, sections)
+
+
+def is_kept_section(section: str, sections: tuple[str, ...]) -> bool:
+    """Backward compatibility alias for is_primary_section."""
+    return is_primary_section(section, sections)
 
 
 def parse_args() -> argparse.Namespace:
@@ -148,64 +162,126 @@ def main() -> int:
         print(f"[FATAL] cannot read {args.full}: {exc}", file=sys.stderr)
         return 1
 
+    # Partition dump into section blocks: (section_name, lines_in_section)
+    section_blocks: list[tuple[str, list[str]]] = []
+    current_sec = ""
+    current_lines: list[str] = []
+    for raw in lines:
+        sm = SECTION_RE.match(raw.rstrip("\n"))
+        if sm:
+            if current_lines or current_sec:
+                section_blocks.append((current_sec, current_lines))
+            current_sec = sm.group(1)
+            current_lines = [raw]
+        else:
+            current_lines.append(raw)
+    if current_lines or current_sec:
+        section_blocks.append((current_sec, current_lines))
+
+    primary_blocks = [
+        (sec, lns) for sec, lns in section_blocks if is_primary_section(sec, sections)
+    ]
+    bolt_org_blocks = [
+        (sec, lns) for sec, lns in section_blocks if is_bolt_org_section(sec, sections)
+    ]
+
     kept: list[str] = []
     matched: dict[tuple[str, str], dict] = {}
     failures: list[str] = []
-    cur_section = ""
-    cur_symbol: str | None = None
-    cur_targets: list[dict] = []
 
-    for raw in lines:
-        line = raw.rstrip("\n")
-        sm = SECTION_RE.match(line)
-        if sm:
-            cur_section = sm.group(1)
-            cur_symbol = None
-            cur_targets = []
-            if is_kept_section(cur_section, sections):
+    def process_block(
+        sec_name: str,
+        sec_lines: list[str],
+        is_fallback: bool,
+        primary_keys: set[tuple[str, str]],
+    ) -> None:
+        cur_symbol: str | None = None
+        cur_targets: list[dict] = []
+        skip_symbol = False
+        for raw in sec_lines:
+            line = raw.rstrip("\n")
+            sm = SECTION_RE.match(line)
+            if sm:
+                cur_symbol = None
+                cur_targets = []
+                skip_symbol = False
                 kept.append(raw)
-            continue
-        if not is_kept_section(cur_section, sections):
-            continue
-        sym_m = SYMBOL_RE.match(line.strip()) or SYMBOL_RE.match(line)
-        if sym_m:
-            cur_symbol = sym_m.group(2)
-            cur_targets = [t for t in targets if t["_regex"].search(cur_symbol)]
+                continue
+            sym_m = SYMBOL_RE.match(line.strip()) or SYMBOL_RE.match(line)
+            if sym_m:
+                cur_symbol = sym_m.group(2)
+                matching = [t for t in targets if t["_regex"].search(cur_symbol)]
+                if is_fallback:
+                    cur_targets = [
+                        t for t in matching if (cur_symbol, t["id"]) not in primary_keys
+                    ]
+                    if not cur_targets:
+                        skip_symbol = True
+                        continue
+                else:
+                    cur_targets = matching
+                skip_symbol = False
+                for t in cur_targets:
+                    if t["expected_methods"] and not any(
+                        m in cur_symbol for m in t["expected_methods"]
+                    ):
+                        failures.append(
+                            f"target '{t['id']}': unexpected method '{cur_symbol}'"
+                        )
+                    key = (cur_symbol, t["id"])
+                    matched.setdefault(
+                        key,
+                        {
+                            "symbol": cur_symbol,
+                            "target": t,
+                            "stats": {
+                                "instructions": 0,
+                                "vfmadd": 0,
+                                "call": 0,
+                                "spills": 0,
+                            },
+                            "hits": {k: [] for k in GATE_KEYS},
+                            "exceptions": {k: [] for k in GATE_KEYS},
+                        },
+                    )
+                if cur_targets:
+                    kept.append(raw)
+                continue
+            if skip_symbol or not cur_symbol or not cur_targets:
+                continue
+            if not INSTR_RE.match(line):
+                continue
+            kept.append(raw)
             for t in cur_targets:
-                if t["expected_methods"] and not any(m in cur_symbol for m in t["expected_methods"]):
-                    failures.append(f"target '{t['id']}': unexpected method '{cur_symbol}'")
-                key = (cur_symbol, t["id"])
-                matched.setdefault(key, {
-                    "symbol": cur_symbol, "target": t,
-                    "stats": {"instructions": 0, "vfmadd": 0, "call": 0, "spills": 0},
-                    "hits": {k: [] for k in GATE_KEYS},
-                    "exceptions": {k: [] for k in GATE_KEYS},
-                })
-            if cur_targets:
-                kept.append(raw)
-            continue
-        if not cur_symbol or not cur_targets:
-            continue
-        if not INSTR_RE.match(line):
-            continue
-        kept.append(raw)
-        for t in cur_targets:
-            entry = matched[(cur_symbol, t["id"])]
-            entry["stats"]["instructions"] += 1
-            if VFMADD_RE.search(line):
-                entry["stats"]["vfmadd"] += 1
-            if CALL_RE.search(line):
-                entry["stats"]["call"] += 1
-            if SPILL_RE.search(line):
-                entry["stats"]["spills"] += 1
-            for k, regex in (("zmm", ZMM_RE), ("libm", LIBM_RE), ("alloc", ALLOC_RE),
-                             ("div", DIV_RE), ("tls", TLS_RE)):
-                if regex.search(line):
-                    excs = t["exceptions"].get(k, [])
-                    if any(e in line for e in excs):
-                        entry["exceptions"][k].append(line.strip())
-                    else:
-                        entry["hits"][k].append(line.strip())
+                entry = matched[(cur_symbol, t["id"])]
+                entry["stats"]["instructions"] += 1
+                if VFMADD_RE.search(line):
+                    entry["stats"]["vfmadd"] += 1
+                if CALL_RE.search(line):
+                    entry["stats"]["call"] += 1
+                if SPILL_RE.search(line):
+                    entry["stats"]["spills"] += 1
+                for k, regex in (
+                    ("zmm", ZMM_RE),
+                    ("libm", LIBM_RE),
+                    ("alloc", ALLOC_RE),
+                    ("div", DIV_RE),
+                    ("tls", TLS_RE),
+                ):
+                    if regex.search(line):
+                        excs = t["exceptions"].get(k, [])
+                        if any(e in line for e in excs):
+                            entry["exceptions"][k].append(line.strip())
+                        else:
+                            entry["hits"][k].append(line.strip())
+
+    for sec, lns in primary_blocks:
+        process_block(sec, lns, False, set())
+
+    primary_matched = set(matched.keys())
+
+    for sec, lns in bolt_org_blocks:
+        process_block(sec, lns, True, primary_matched)
 
     header = (
         "# DSP hotspot report (filtered) — critical DSP loops only\n"

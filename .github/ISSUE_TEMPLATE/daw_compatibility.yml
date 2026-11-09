@@ -91,7 +91,9 @@ body:
     attributes:
       label: Confirmation
       options:
-        - label: I checked if the DAW has the latest updates installed.
+        - label: I have searched existing issues to ensure this is not a duplicate.
           required: true
-        - label: I tested if other CLAP plugins work properly in this DAW.
-          required: true
+        - label: I checked if the DAW has the latest updates installed (if feasible).
+          required: false
+        - label: I tested if other CLAP plugins work properly in this DAW (if applicable).
+          required: false

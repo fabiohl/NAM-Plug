@@ -215,10 +215,10 @@ fn test_drain_p99_automation_burst_under_1us() {
         }
     }
 
-    let mut samples: Vec<u64> = Vec::with_capacity(BURST_COMMANDS);
-    for _ in 0..BURST_COMMANDS {
+    let mut samples: Vec<u64> = vec![0u64; BURST_COMMANDS];
+    for slot in samples.iter_mut() {
         process_block(&mut started, &mut bufs);
-        samples.push(read_probe());
+        *slot = read_probe();
     }
 
     print_stats("drain automation burst", &samples);
@@ -285,10 +285,10 @@ fn test_drain_scalar_saturation_within_deadline_budget() {
         }
     }
 
-    let mut samples: Vec<u64> = Vec::with_capacity(SATURATION_ROUNDS);
-    for _ in 0..SATURATION_ROUNDS {
+    let mut samples: Vec<u64> = vec![0u64; SATURATION_ROUNDS];
+    for slot in samples.iter_mut() {
         process_block(&mut started, &mut bufs);
-        samples.push(read_probe());
+        *slot = read_probe();
 
         let mt = unsafe { &*main_thread_ptr };
         for _ in 0..SATURATION_TOPUP {

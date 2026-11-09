@@ -3,6 +3,7 @@
 
 //! Receipt verification for the NAM-Plug QA suites.
 
+pub mod ab_opt;
 pub mod build;
 pub mod long_artifact;
 pub mod release;

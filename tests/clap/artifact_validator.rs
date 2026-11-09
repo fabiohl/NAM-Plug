@@ -18,6 +18,7 @@ use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 /// A validated CLAP plugin artifact with its resolved path and SHA256 hash.
@@ -29,6 +30,8 @@ pub struct TestedArtifact {
     #[expect(dead_code)]
     pub sha256: String,
 }
+
+static CACHED_ARTIFACT: OnceLock<TestedArtifact> = OnceLock::new();
 
 impl TestedArtifact {
     /// Resolves the freshly built CLAP plugin artifact and computes its SHA256.
@@ -48,15 +51,19 @@ impl TestedArtifact {
     /// Panics if no artifact can be found at any of the above paths.
     /// Callers must ensure a build has completed before running tests.
     pub fn resolve_and_hash() -> Self {
-        let path = resolve_plugin_artifact_path();
-        verify_artifact_freshness(&path);
-        let sha256 = compute_sha256(&path);
-        log::info!("CLAP plugin artifact: {}  SHA256: {sha256}", path.display());
-        eprintln!(
-            "=== CLAP Artifact ===\npath: {}\nsha256: {sha256}",
-            path.display()
-        );
-        Self { path, sha256 }
+        CACHED_ARTIFACT
+            .get_or_init(|| {
+                let path = resolve_plugin_artifact_path();
+                verify_artifact_freshness(&path);
+                let sha256 = compute_sha256(&path);
+                log::info!("CLAP plugin artifact: {}  SHA256: {sha256}", path.display());
+                eprintln!(
+                    "=== CLAP Artifact ===\npath: {}\nsha256: {sha256}",
+                    path.display()
+                );
+                Self { path, sha256 }
+            })
+            .clone()
     }
 }
 

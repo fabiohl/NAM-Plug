@@ -103,13 +103,25 @@ impl<'a> NamClapProcessor<'a> {
             self.rt_status.clear_flag(
                 neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED,
             );
+            let is_stereo_config = self
+                .shared
+                .cold
+                .selected_port_config
+                .load(Ordering::Relaxed)
+                == crate::clap::plugin::CONFIG_ID_STEREO;
             if let Some(model) = self.model_l.as_mut() {
                 model.prewarm_reset();
                 self.prewarm_pending = true;
             }
-            if let Some(model) = self.model_r.as_mut() {
+            if is_stereo_config && let Some(model) = self.model_r.as_mut() {
                 model.prewarm_reset();
                 self.prewarm_pending = true;
+            }
+            if self.prewarm_pending {
+                self.shared
+                    .rt_to_ui
+                    .prewarm_pending
+                    .store(true, Ordering::Relaxed);
             }
             self.prewarm_zero_budget_count = 0;
             // The dry delay line must not replay pre-fault history (which would

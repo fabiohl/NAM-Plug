@@ -612,9 +612,9 @@ Floating window lifecycles and clipboard integration are validated under a virtu
 
 Measures statistical latency distributions (p50, p95, p99, ns/sample) across core topologies (WaveNet A1, WaveNet A2 Slimmable, LSTM) and block sizes (64 and 128 samples), validating real-time deadline margins against strict thresholds.
 
-#### 9.7.1 BOLT Win-Proof Policy
+#### 9.7.1 A/B Optimization Ceremony & Promotion Fallback Policy
 
-LLVM-BOLT is opt-out in `NAM-Plug`. Passing the performance gate certifies real-time deadline compliance under the label `bolt_proof: "gate-pass-only"`, without asserting unverified A/B optimization wins; the receipt names that limit explicitly in `optimizations.unproven_claims` (`["bolt_win"]`). See [`docs/testing.md` §5.4.1](./testing.md#541-bolt-win-proof-ceremony--opt-out-architectural-decision).
+`NAM-Plug` requires empirical proof via `utils/ab-opt-ceremony.sh` (`plug_ab_opt compare`) before promoting PGO or LLVM-BOLT in `utils/build-release.sh`. When hardware LBR is unavailable (e.g., AMD Zen `bolt_lbr_unsupported`) or when PGO/BOLT does not beat the unoptimized release baseline by $\ge 1.0\%$ across all three canonical topologies (`wavenet_a1`, `wavenet_a2`, `lstm` — e.g., hand-tuned AVX2/FMA kernels already saturating execution ports with `verdict: "UNOPTIMIZED"`, `verdict_reason: "pgo_margin_not_met"`), `build-release.sh` automatically promotes the deterministic plain release artifact (`bolt_status: "not_proven"`, `bolt_proof: "fallback_plain"`, `pgo_status: "skipped_unproven"`), recording `"unproven_claims": ["pgo_win", "bolt_win"]` in `build-receipt.json` and `release-receipt.json`. See [`docs/testing.md` §5.4.2](./testing.md#542-ab-optimization-ceremony--llvm-bolt-promotion-policy).
 
 ---
 
@@ -717,8 +717,10 @@ Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh`:
 ### 10.6 Developer Commands
 
 ```bash
-# 1. Build release plugin and Flatpak bundle
-./utils/build-release.sh --install
+# 1. Build canonical release plugin and Flatpak bundle, then audit and certify/install
+./utils/build-release.sh --strict --package
+./utils/tests-long.sh --strict --artifact
+./utils/build-release.sh --strict --certify --install
 
 # 2. Validate AppStream metadata
 appstreamcli validate packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml

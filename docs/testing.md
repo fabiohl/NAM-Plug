@@ -54,7 +54,7 @@ Real-time audio processing strictly prohibits dynamic memory allocations, blocki
 - **Static AST-Light Scanner ([`utils/verify_no_rt_alloc.sh`](../utils/verify_no_rt_alloc.sh) / [`utils/rt_alloc_scan.awk`](../utils/rt_alloc_scan.awk)):**
   Executes during static analysis (`lints.sh`). Scans `src/clap/processor/` sources, tracks brace scoping while ignoring comments and string literals, excludes authorized off-RT lifecycle hooks (`activate`, `deactivate`, panic handlers), and flags forbidden heap patterns (`Box::new`, `Vec::new`, `format!`, `Arc::new`, `HashMap`).
 - **Static Machine-Code Codegen Guard ([`utils/verify_rt_codegen.sh`](../utils/verify_rt_codegen.sh)):**
-  Executes during artifact certification (`tests-long.sh` `artifact` phase) and packaging (`build-release.sh`). Operates under the canonical Class D lifecycle (installing `trap_fail`, emitting `PHASE: codegen`, generating `target/logs/verify_rt_codegen-status.tsv`, and concluding via `finish`). Disassembles the compiled `.so` using `objdump` and runs the unified filter ([`utils/dsp-hotpath-filter.py`](../utils/dsp-hotpath-filter.py)) with the repository symbol profile ([`utils/codegen-profile.json`](../utils/codegen-profile.json)) to verify:
+  Executes during artifact certification (`tests-long.sh` `artifact` phase) and packaging (`build-release.sh`). Operates under the canonical Class D lifecycle (installing `trap_fail`, emitting `PHASE: codegen`, generating `target/logs/verify_rt_codegen-status.tsv`, and concluding via `finish`). Disassembles the compiled `.so` using `objdump` and runs the unified filter ([`utils/dsp-hotpath-filter.py`](../utils/dsp-hotpath-filter.py)) with the repository symbol profile ([`utils/codegen-profile.json`](../utils/codegen-profile.json) — 7 hotpath symbols, 17,549 instructions, 14 `vfmadd` instructions, 0 allocations, 0 `div`/`idiv`, 0 TLS accesses, 0 ZMM registers, 0 `libm` calls) to verify:
   - **Fail-closed disassembly:** Every invocation of `objdump` (full or per-symbol) validates exit status and rejects empty/truncated output.
   - **Zero heap calls:** No `malloc`, `free`, or `realloc` instructions.
   - **Zero integer divisions:** No `div` or `idiv` in the core DSP loop.
@@ -118,6 +118,11 @@ The matrix evaluates three topologies (`wavenet_a1_standard.nam`, `a2_example.na
 | `wavenet_a1_standard`    | 9.01e-12 / 110.5 dB | 7.98e-12 / 111.0 dB | 8.13e-12 / 110.9 dB | ESR < 1e-8, SNR > 80 |
 | `a2_example` (Slimmable) | 2.77e-12 / 115.6 dB | 2.75e-12 / 115.6 dB | 2.76e-12 / 115.6 dB | ESR < 1e-8, SNR > 80 |
 | `lstm`                   | 1.91e-11 / 107.2 dB | 2.05e-11 / 106.9 dB | 2.03e-11 / 106.9 dB | ESR < 1e-8, SNR > 80 |
+
+Additional artifact parity gates verified in `phase3` (`artifact`):
+- **Oversampling Parity (`test_clap_parity_oversample`):** `2x` oversampling achieves `ESR = 8.43e-12` (`SNR = 110.7 dB`); `4x` oversampling achieves `ESR = 7.99e-12` (`SNR = 111.0 dB`).
+- **CabSim IR Parity (`test_clap_parity_cabsim`):** `ESR = 9.95e-14` (`SNR = 130.0 dB`).
+- **External `clap-validator` (`clap-validator 0.3.2`):** 21 plugin tests executed (`19 passed`, `0 failed`, `2 skipped` for unimplemented `clap.note-ports`), `1 ms` scan-time.
 
 All configurations pass the uniform gate `ESR < 1e-8, SNR > 80 dB`. The definitive certified artifact hash is recorded in `target/release-receipt.json`.
 
@@ -233,17 +238,17 @@ All commands must be executed from inside `./NAM-Plug/`:
 The long suite uses the canonical phase names below; `utils/tests-long.sh --help` prints the same table. Each phase writes `target/logs/long-<name>.log`, and the typed receipt is staged at `target/logs/long-audit-receipt.<NAM_RUN_ID>.partial.jsonl` then published atomically as `target/logs/long-audit-receipt.jsonl` only after `summary`+`validate` succeed on a full run (with `phase_ids` `phase1`–`phase6` kept as the receipt contract). Timeouts per command are calibrated to $\approx 2\times$ observed $p_{100}$ (overridable via `NAM_PHASE_TIMEOUT_S`):
 
 | Receipt `phase_id` | Canonical phase | Command, Invariant & Timeout | Log |
-|:------------------ |:--------------- |:---------------------------- |:--- |
-| `phase1` | `catch-all` | `cargo test --locked --release --features testing --no-run` first under its own 1200s build guard (outside `NAM_PHASE_TIMEOUT_S`), then `cargo test --locked --release --features testing --no-fail-fast --lib --bins --tests` (execution timeout 300s). Only non-ignored tests run; every `#[ignore]` suite has a dedicated phase (`gui`, `artifact`, `heap-audit`, `rt-heap`), so nothing is orphaned and the build no longer consumes the test timeout. | `target/logs/long-catch-all.log` |
-| `phase2` | `gui` | Individual named tests executed with `--exact` under `xvfb-run` via `run_named` (timeout 300s; worst command $p_{100} \approx 120$s cold / 1.2s warm); each invocation writes `target/logs/long-gui-<nome>.log` validated with `ran_tests`; emits `gui:xvfb_not_found` when `xvfb-run` is absent. | `target/logs/long-gui.log` |
-| `phase3` | `artifact` | Parity and CabSim tests executed individually with `--exact` against a neutral release `.so` (or `target/dist/nam_plug.clap` with `--artifact`) via `run_named` (timeout 400s; worst command $p_{100} \approx 180$s). Oracle-backed parity (`test_clap_parity_multi_rate`, `test_clap_parity_oversample`) runs only when `NAM_CORE_RENDER_BIN` or `build/namcore_render` is executable — then `NAM_REQUIRE_CPP_ORACLE=1` is exported under `--strict`; otherwise the phase records the typed `clap_parity:missing_cpp_oracle` GAP but still runs the oracle-free CabSim tests (`test_clap_parity_cabsim`, `test_cabsim_ir_changes_audio_release_artifact`), so `--strict` fails cleanly on the GAP instead of a contradictory `rc=101` panic. Each invocation writes `target/logs/long-artifact-<nome>.log` validated with `ran_tests`; optional `clap-validator` gate. On failure, `close_phase` prints the last 40 log lines to stderr. | `target/logs/long-artifact.log` |
-| `phase4` | `perf` | `nam_perf_guard certify --clap target/dist/nam_plug.clap --reference <paired-series> --out target/logs/perf-certification-report.json` (timeout 120s; worst command $p_{100} \approx 30$s); requires `--artifact` and a paired series (`perf-reference.json` or the previous report), otherwise `SKIPPED` with a typed GAP. | `target/logs/long-perf.log` |
-| `phase5` | `heap-audit` | Deterministic GC swap/destroy, off-RT teardown, RT-priority stress and TLS heap-stability soak tests under `--features testing,heap-audit` (timeout 500s; worst command $p_{100} \approx 215$s under release heap-audit LTO). Each filter executes via `run_heap_test` writing a sublog `long-heap-<test>.log` verified with `ran_tests` fail-closed (PLUG-D). The receipt declares the real subcase cardinality (including the 500 proptest cases). This phase never measures time thresholds, so it is hosted-safe. | `target/logs/long-heap-audit.log` |
-| `phase6` | `rt-heap` | Operator-only time-threshold certification (`test_structural_burst_p99_within_contract`, `processor_drain_latency_test`, `test_reset_wall_clock_time_within_contract`) under `--features testing,heap-audit` on a pinned core; never selected by the hosted workflow because hosted runners are not a comparable speed gate. | `target/logs/long-rt-heap.log` |
+| :------------------ | :--------------- | :---------------------------- | :--- |
+| `phase1` | `catch-all` | `cargo test --locked --release --features testing --no-run` first under its own 1200s build guard (outside `NAM_PHASE_TIMEOUT_S`), then `cargo test --locked --release --features testing --no-fail-fast --lib --bins --tests` (execution timeout 300s; 485 tests executed). Only non-ignored tests run; every `#[ignore]` suite has a dedicated phase (`artifact`, `perf`, `gui`, `heap-audit`, `rt-heap`), so nothing is orphaned and the build no longer consumes the test timeout. | `target/logs/long-catch-all.log` |
+| `phase3` | `artifact` | Parity and CabSim tests executed immediately after `catch-all` (sharing the `--features testing` Cargo fingerprint without recompilation) with `--exact` against a neutral release `.so` (or `target/dist/nam_plug.clap` with `--artifact`) via `run_named` (timeout 400s; 14 subcases + `clap-validator`). Oracle-backed parity (`test_clap_parity_multi_rate`, `test_clap_parity_oversample`) runs only when `NAM_CORE_RENDER_BIN` or `build/namcore_render` is executable — then `NAM_REQUIRE_CPP_ORACLE=1` is exported under `--strict`; otherwise the phase records the typed `clap_parity:missing_cpp_oracle` GAP but still runs the oracle-free CabSim tests (`test_clap_parity_cabsim`, `test_cabsim_ir_changes_audio_release_artifact`), so `--strict` fails cleanly on the GAP instead of a contradictory `rc=101` panic. Each invocation writes `target/logs/long-artifact-<nome>.log` validated with `ran_tests`; optional `clap-validator` gate. On failure, `close_phase` prints the last 40 log lines to stderr. | `target/logs/long-artifact.log` |
+| `phase4` | `perf` | `nam_perf_guard certify --clap target/dist/nam_plug.clap --reference <paired-series> --out target/logs/perf-certification-report.json` (timeout 120s; worst command $p_{100} \approx 30$s); reuses `--features testing`; requires `--artifact`. When `target/logs/perf-reference.json` is absent or from an earlier artifact SHA-256, `tests-long.sh` automatically captures a baseline reference series for the current `.clap` artifact before running the paired certification pass. | `target/logs/long-perf.log` |
+| `phase2` | `gui` | Individual named tests executed with `--exact` under `xvfb-run` via `run_named` (timeout 300s; 5 tests; worst command $p_{100} \approx 120$s cold / 1.2s warm) under `--features testing,gui-x11`; each invocation writes `target/logs/long-gui-<nome>.log` validated with `ran_tests`; emits `gui:xvfb_not_found` when `xvfb-run` is absent. | `target/logs/long-gui.log` |
+| `phase5` | `heap-audit` | Deterministic GC swap/destroy, off-RT teardown, RT-priority stress and TLS heap-stability soak tests under `--features testing,heap-audit` (timeout 500s; 505 subcases; worst command $p_{100} \approx 215$s under release heap-audit LTO). Each filter executes via `run_heap_test` writing a sublog `long-heap-<test>.log` verified with `ran_tests` fail-closed (PLUG-D). The receipt declares the real subcase cardinality (including the 500 proptest cases). This phase never measures time thresholds, so it is hosted-safe. | `target/logs/long-heap-audit.log` |
+| `phase6` | `rt-heap` | Operator-only time-threshold certification (`test_structural_burst_p99_within_contract`, `processor_drain_latency_test` [automation burst p50=214ns / p99=279ns < 1.0µs; scalar saturation p50=2,501ns / p99=2,630ns < 13.3µs], `test_reset_wall_clock_time_within_contract` [4 subcases total]) under `--features testing,heap-audit` on a pinned core; never selected by the hosted workflow because hosted runners are not a comparable speed gate. | `target/logs/long-rt-heap.log` |
 
 Dedicated suites are selected by Cargo features instead of a shell skip list: the five `gui_x11_*` tests require `gui-x11`, and the micro-latency/timing tests (`processor_drain_latency_test`, `test_reset_wall_clock_time_within_contract`, `test_structural_burst_p99_within_contract`) require `heap-audit`. The catch-all phase compiles neither feature and never passes `--include-ignored`, so it cannot run them without a display or pinned core; the dedicated phases enable the corresponding feature explicitly and own every `#[ignore]` target. Time-threshold tests belong exclusively to `rt-heap` (operator-only); `heap-audit` contains only deterministic, hosted-safe cases.
 
-`--only <name>[,<name>]` accepts only canonical phase names. Unselected phases are still appended to the receipt as `SKIPPED`, and `target/long` is preserved for iterative reruns (it is removed only when `--only` is absent). A partial run keeps its run-scoped staging receipt `target/logs/long-audit-receipt.<NAM_RUN_ID>.partial.jsonl`, emits `PHASE: phase-selection PASS only-subset:<fase>+<fase>`, records `scope=partial` in the summary and carrier (without counting as a GAP), and never deletes or replaces `target/logs/long-audit-receipt.jsonl` from a previous full run; a failed full run likewise keeps only its `.partial` for diagnosis. `target/dist`, logs and receipts are never removed. Certification (`utils/build-release.sh --certify`) strictly rejects partial scope. `RESULT:` lists are always comma-separated with no spaces (`fails=a,b gaps=c scope=partial`), matching the typed carrier.
+`--only <name>[,<name>]` accepts only canonical phase names. Unselected phases are still appended to the receipt as `NOT_RUN` (with typed GAP), and `target/long` is preserved for iterative reruns (it is removed only when `--only` is absent). A partial run keeps its run-scoped staging receipt `target/logs/long-audit-receipt.<NAM_RUN_ID>.partial.jsonl`, emits `PHASE: phase-selection PASS only-subset:<fase>+<fase>`, records `scope=partial` in the summary and carrier (without counting as a GAP), and never deletes or replaces `target/logs/long-audit-receipt.jsonl` from a previous full run; a failed full run likewise keeps only its `.partial` for diagnosis. `target/dist`, logs and receipts are never removed. Certification (`utils/build-release.sh --certify`) strictly rejects partial scope. `RESULT:` lists are always comma-separated with no spaces (`fails=a,b gaps=c scope=partial`), matching the typed carrier.
 
 **Absolute gain observability (PLUG-I):** the parity matrix normalizes the comparison with the model's loudness calibration (`input_mult_adj`, `output_mult_adj`). To keep a gain or metadata regression visible, every matrix row logs `Absolute gain: oracle_rms=… artifact_rms=… ratio=±… dB` alongside both multipliers. The ratio is diagnostic only; the ESR/SNR gates are unchanged (measured cross-implementation floor above). Treating a gain drift as a hard gate requires an operator-measured threshold and a separate decision.
 
@@ -294,7 +299,7 @@ NAM_REQUIRE_CPP_ORACLE=1 cargo test --features testing --release --test clap \
 
 - **`ci.yml`:** lints and quick run as separate jobs (`x86_64-linux-lints`, `x86_64-linux-quick`, `linux-arm64-lints`, `linux-arm64-quick`) plus `msrv` (which checks `--locked --all-targets --all-features`), so a lint failure cannot hide the functional suite. The ARM64 lint job is blocking; the ARM64 quick job is `continue-on-error` (experimental) until a native aarch64 execution is approved. Sibling checkout ref is pinned deterministically via [`variables.env`](../variables.env) (`ENGINE_COMMIT`). Each job, including `msrv`, writes `target/logs/ci-provenance.log` recording package version, git SHA, compiled engine provenance resolved from `Cargo.lock` (`engine_type`, `engine_version`, `engine_checksum`) and auxiliary sibling engine status (`auxiliary_engine`), uploading `target/logs/**` with `if: always()`. The MSRV job sets `RUSTUP_TOOLCHAIN=1.99.0` so the repository's `rust-toolchain.toml` cannot silently select stable. Its cargo-check step uses the canonical `utils/_lib.sh` lifecycle (`lib_init`, `run_step`, `finish`), so the five-column `target/logs/msrv-status.tsv` carrier (`msrv`, verdict, gaps, fails, `scope=full`) and the single `RESULT:` line are produced by the same code path as every other discipline. Every `Load environment variables` step also fails closed if `ENGINE_COMMIT` is empty after sourcing [`variables.env`](../variables.env), preventing `actions/checkout` from silently falling back to a branch head; provenance steps resolve the sibling through `$GITHUB_WORKSPACE/NeuralAmpModeler-rs` instead of a relative path.
 - **Engine Provenance & Auxiliary Checkout:** `NeuralAmpModeler-rs` is compiled from its locked crates.io package release (`version = "2.0.0"` in `Cargo.lock`), ensuring deterministic builds independent of sibling checkout branches. The sibling repository `../NeuralAmpModeler-rs` is retained strictly as an auxiliary checkout providing the C++ parity oracle (`namcore_render`), reference fixtures, and fallback models pursuant to §5.3, pinned by commit in [`variables.env`](../variables.env). If the auxiliary checkout is absent, `auxiliary_engine=GAP:sibling_absent` is logged while the compiled engine provenance remains intact.
-- **`long.yml`:** `workflow_dispatch` only, operator-triggered, `timeout-minutes: 120`. Hosted runs select `--only catch-all,gui,artifact,heap-audit`; the `perf` and `rt-heap` timing phases are not selected because a hosted runner is not a comparable speed gate (`heap-audit` is deterministic and therefore hosted-safe). The runner provisions BOLT (`llvm-bolt`), `clap-validator` (pinned via `variables.env`), and the C++ parity oracle (by running `utils/setup-third-party.sh` and `utils/ensure_namcore_render.sh` inside the `NeuralAmpModeler-rs` checkout and exporting `NAM_CORE_RENDER_BIN`), so the `artifact` phase executes the full CLAP × NAMCore matrix without GAPs. Receipt and log upload enforces `if-no-files-found: error`. A supplied `phases` value is transported through the environment and passed as one argument, never interpolated into shell code; `perf` and `rt-heap` are rejected. An optional `ref` input checks out an exact SHA/tag for a release candidate. Certification is not performed in this workflow by default; the operator runs `build-release.sh --certify` on the isolated host. The optional `rehearse_certify` boolean input (default `false`) exercises that chain on the hosted runner: it runs `./utils/tests-long.sh --artifact` in full scope (no `--only`, no `--strict`, so timing phases emit controlled `GAP`s) and then `./utils/build-release.sh --certify`, asserting that `target/dist/release-receipt.json` was generated. `clap-validator` is pinned by URL and SHA-256 in [`variables.env`](../variables.env) and the archive is verified with `sha256sum -c` before extraction.
+- **`long.yml`:** `workflow_dispatch` only, operator-triggered, **zero inputs**: the GitHub "Run workflow" button always uses the single recommended configuration. `timeout-minutes: 120`. Hosted runs select the fixed `--only catch-all,artifact,gui,heap-audit`; the `perf` and `rt-heap` timing phases are never selected because a hosted runner is not a comparable speed gate (`heap-audit` is deterministic and therefore hosted-safe). The hosted build is never strict; the operator release chain owns `--strict`. The runner provisions BOLT (`llvm-bolt`), `clap-validator` (pinned via `variables.env`), and the C++ parity oracle (by running `utils/setup-third-party.sh` and `utils/ensure_namcore_render.sh` inside the `NeuralAmpModeler-rs` checkout and exporting `NAM_CORE_RENDER_BIN`), so the `artifact` phase executes the full CLAP × NAMCore matrix without GAPs. Receipt and log upload enforces `if-no-files-found: error`. Certification and certification rehearsal are not performed in this workflow; the operator runs `build-release.sh --certify` on the isolated host. `clap-validator` is pinned by URL and SHA-256 in [`variables.env`](../variables.env) and the archive is verified with `sha256sum -c` before extraction.
 - **Fidelity & parity ownership (`D1`/`B3`):** `docs/quality-contract.json` and `utils/quality-dashboard.sh` live in the upstream engine repository (`NeuralAmpModeler-rs`), not in `NAM-Plug`. Downstream fidelity is proven by the parity suites executed in `utils/tests-long.sh` (`catch-all` and `artifact` phases), which compare `f32` against the in-process `f64` oracle and, when `NAM_CORE_RENDER_BIN` is provisioned, against the C++ `NAMCore` oracle. `--strict` (which promotes GAPs to failures) is reserved for the operator's calibrated host; on the hosted runner the PGO/BOLT build remains the canonical artifact, while timing-sensitive phases stay typed GAPs rather than false failures.
 
 ### 5.4 Release Architecture & Verification Gates (`build-release.sh` & `plug_long_receipt certify`)
@@ -306,6 +311,9 @@ Production builds compile the **`dist`** profile (inherits `release`, PGO + opti
 The canonical release workflow strictly decouples artifact compilation, long-audit stress testing, and final certification:
 
 ```text
+[Step 0: Ceremony] utils/ab-opt-ceremony.sh --runs 3
+                   -> target/logs/ab-opt-ceremony-receipt.json (empirical PGO / BOLT / PLAIN verdict)
+
 [Step 1: Build]    utils/build-release.sh --strict [--package]
                    -> target/dist/nam_plug.clap (.sha256)
                    -> target/dist/build-receipt.json (preliminary build provenance)
@@ -313,7 +321,7 @@ The canonical release workflow strictly decouples artifact compilation, long-aud
 [Step 2: Audit]    utils/tests-long.sh --strict --artifact
                    -> target/logs/long-audit-receipt.jsonl (stamps target/dist/nam_plug.clap SHA)
 
-[Step 3: Certify]  utils/build-release.sh --certify [--install]
+[Step 3: Certify]  utils/build-release.sh --strict --certify [--install]
                    -> Invokes plug_long_receipt certify (no artifact recompilation)
                    -> target/dist/release-receipt.json (authoritative CERTIFIED status)
                    -> with --install, only after CERTIFIED: plug_long_receipt verify-release,
@@ -321,10 +329,11 @@ The canonical release workflow strictly decouples artifact compilation, long-aud
 ```
 
 | Step / Action | Script & Command | Role & Guarantees |
-|:------------- |:---------------- |:----------------- |
-| **1. Canonical Build** | `utils/build-release.sh --strict [--package]` | Compiles PGO + BOLT artifact into `target/dist/nam_plug.clap`. Packages distribution tarball and Flatpak extension if requested. Emits `target/dist/build-receipt.json`. Never installs. |
-| **2. Artifact Stress Audit** | `utils/tests-long.sh --strict --artifact` | Executes the full pre-release stress suite directly against the canonical artifact `target/dist/nam_plug.clap` via `dlopen`. Records results in `target/logs/long-audit-receipt.jsonl`. |
-| **3. Final Certification** | `utils/build-release.sh --certify [--install]` | Validates cryptographic identity and release gates across receipts without recompilation. Emits final `target/dist/release-receipt.json`. `--install` (valid only with `--certify`) installs the verified artifact to `~/.clap/` after `certify PASS`, emitting `PHASE: install_artifact PASS`. |
+| :------------- | :---------------- | :----------------- |
+| **0. A/B Ceremony** | `utils/ab-opt-ceremony.sh --runs 3` | Benchmarks `plain`, `pgo`, and `pgo+bolt` across `wavenet_a1`, `wavenet_a2`, and `lstm` on an isolated core, emitting `target/logs/ab-opt-ceremony-receipt.json`. |
+| **1. Canonical Build** | `utils/build-release.sh --strict [--package]` | Compiles `target/dist/nam_plug.clap` according to the ceremony verdict (`PGO+BOLT`, `PGO-ONLY`, or `UNOPTIMIZED` → `fallback_plain`). Packages distribution tarball and Flatpak extension if requested. Emits `target/dist/build-receipt.json`. Never installs. |
+| **2. Artifact Stress Audit** | `utils/tests-long.sh --strict --artifact` | Executes the full pre-release stress suite (1,014 test subcases across 6 phases) directly against `target/dist/nam_plug.clap` via `dlopen`. Records results in `target/logs/long-audit-receipt.jsonl`. |
+| **3. Final Certification** | `utils/build-release.sh --strict --certify [--install]` | Validates cryptographic identity and release gates across receipts without recompilation. Emits final `target/dist/release-receipt.json`. `--install` (valid only with `--certify`) installs the verified artifact to `~/.clap/` after `certify PASS`, emitting `PHASE: install_artifact PASS`. |
 
 #### Five Mandatory Release Gates
 
@@ -344,26 +353,51 @@ sha256(long-audit receipt) == sha256(build receipt) == sha256(target/dist/nam_pl
 
 Any divergence aborts immediately with a `F-CER-01` diagnostic error instead of rebuilding silently. The reused codegen/PGO evidence must match the preliminary `target/dist/build-receipt.json`: the PGO log and workload receipt are bound by SHA, and the source must match the certified checkout (`provenance.git_commit == HEAD`, `git_dirty == false`, plus `Cargo.lock`, `rustc` and engine provenance), ensuring that an artifact built from commit A or a dirty tree cannot be certified as commit B.
 
-#### 5.4.2 LLVM-BOLT Policy & Deterministic Instrumentation
+#### 5.4.2 A/B Optimization Ceremony & LLVM-BOLT Promotion Policy
 
-Unlike standalone host binaries that may rely on external sampling harnesses, `NAM-Plug` directly integrates deterministic compiler instrumentation (`-instrument` and `merge-fdata`) within its build pipeline. Therefore:
+The A/B optimization ceremony (`utils/ab-opt-ceremony.sh` and `plug_ab_opt compare`) evaluates DSP cycles across canonical topologies (`wavenet_a1`, `wavenet_a2`, `lstm`) over at least 3 measured runs. The promotion rule operates on median `p99` cycles per topology with an explicit 1.0% margin (`PROMOTION_MARGIN_PCT = 1.0%`):
 
-- **LLVM-BOLT is applied deterministically in `NAM-Plug`.**
-- Passing the deadline envelope gate (`nam_perf_guard`) records `bolt_proof: "gate-pass-only"`, certifying real-time viability under the official benchmark suite.
-- An applied BOLT without a passing gate stays a typed gap (`bolt_proof:missing_ceremony`) in every mode.
-- The receipt records verification status explicitly: `optimizations.unproven_claims` is `["bolt_win"]` whenever `bolt_proof == "gate-pass-only"`, and `[]` when full optimization evidence is verified. `CERTIFIED` certifies that the shipped bytes passed every functional and real-time gate.
+- **`PGO-ONLY`**: Satisfied when, for **all** topologies $t$:
+  $$\text{median}(p99_{\text{pgo}}[t]) \le \text{median}(p99_{\text{plain}}[t]) \times (1 - 0.010)$$
+- **`PGO+BOLT`**: Satisfied when `PGO-ONLY` holds **and**, for **all** topologies $t$:
+  $$\text{median}(p99_{\text{bolt}}[t]) \le \text{median}(p99_{\text{pgo}}[t]) \times (1 - 0.010)$$
+
+##### Hardware LBR Requirements and Profiling Integrity
+
+LLVM BOLT requires hardware branch sampling via Intel Last Branch Records (LBR, `perf record -j any,u` or `-b`).
+
+- **Intel Hardware**: LBR captures exact basic-block branch transitions, enabling accurate profile-guided basic block layout.
+- **AMD Hardware (Zen 1–4) & Virtualization**: Hardware LBR is unavailable (`perf record -j any,u` fails with `not supported`). In fallback sampling mode (`cycles:u`), perf cannot trace branch history, causing LLVM BOLT to operate with control-flow graph (CFG) discontinuity.
+- **Automated Guard**: `ab-opt-ceremony.sh` actively probes for LBR support (`perf record -j any,u -o /dev/null -- true`). When LBR is absent (`LBR=0`), BOLT optimization is automatically bypassed, emitting gap `bolt_lbr_unsupported`.
+
+##### Promotion Fallback Invariants & Measured Ceremony Baseline
+
+1. `build-release.sh` detects `PGO+BOLT`, `PGO-ONLY`, or `UNOPTIMIZED` automatically via `plug_long_receipt ceremony-proof`.
+2. **`PGO-ONLY` Fallback**: When `PGO-ONLY` is proven ($\ge 1.0\%$ win across all topologies) but BOLT does not beat PGO by $\ge 1.0\%$ (`verdict_reason=bolt_margin_not_met`) or LBR is absent: `build-release.sh` sets `bolt_status=not_proven` and `bolt_proof=fallback_pgo_only` in the build receipt, promoting the PGO-optimized binary.
+3. **`PLAIN-ONLY` Fallback (`UNOPTIMIZED`)**: When PGO does not beat the plain release build by $\ge 1.0\%$ across all three topologies (`verdict=UNOPTIMIZED`, `verdict_reason=pgo_margin_not_met`), `build-release.sh` skips PGO/BOLT and promotes the deterministic plain release artifact (`bolt_status=not_proven`, `bolt_proof=fallback_plain`, `pgo_status=skipped_unproven`, `unproven_claims=["pgo_win", "bolt_win"]`).
+4. **Fail-Closed BOLT Policy**: An applied BOLT binary (`bolt_status == "applied"`) without a valid ceremony receipt records a typed GAP (`bolt_not_proven`) and is strictly rejected under `--strict`. `release-ceremony` (`evaluate_certification`) strictly rejects `unverified` BOLT builds and dirty checkouts.
+
+Measured A/B optimization ceremony baseline on isolated core 8 (AMD Ryzen 7 5700U, `performance` governor, 64-sample block @ 48 kHz, 3 runs):
+
+| Topology     | Plain Median `p99` (cycles / µs) | PGO Median `p99` (cycles / µs) | $\Delta$ PGO vs. Plain | Promotion Gate ($\le -1.0\%$) |
+|:------------ |:-------------------------------- |:------------------------------ |:---------------------- |:----------------------------- |
+| `wavenet_a1` | 315,900 cyc (~175.9 µs)          | 315,162 cyc (~175.5 µs)        | `-0.23%`               | Not met (within 1.0% margin)  |
+| `wavenet_a2` | 191,700 cyc (~106.7 µs)          | 190,764 cyc (~106.1 µs)        | `-0.49%`               | Not met (within 1.0% margin)  |
+| `lstm`       | 50,130 cyc (~27.9 µs)            | 47,052 cyc (~26.2 µs)          | `-6.14%`               | Met ($\ge 1.0\%$ improvement) |
+
+Because `wavenet_a1` and `wavenet_a2` are compute-bound inside hand-unrolled AVX2/FMA SIMD kernels (`sum0..sum3`), PGO yields `< 0.5%` delta and hardware LBR is unavailable on AMD Zen (`bolt_lbr_unsupported`), resulting in `VERDICT: UNOPTIMIZED` (`fallback_plain`).
 
 #### 5.4.3 Measurement Host vs. Measurement Noise
 
-`nam_perf_guard` reports two independent properties of a run:
+`nam_perf_guard` applies in-process real-time hardening (`mlockall(MCL_CURRENT | MCL_FUTURE)`, 64 KiB stack prefaulting, `SCHED_FIFO` priority 80 promotion, and `sched_setaffinity` to the isolated benchmark core) before sampling, and reports two independent properties of a run:
 
 | Field | Meaning | Effect on the gate |
-|:----- |:------- |:------------------ |
+| :----- | :------- | :------------------ |
 | `environment_stable` | Coefficient of variation ≤ 1.2 across the sampled series (noise/thermal). | `false` ⇒ `INCONCLUSIVE` (exit `2`). |
-| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy (no `isolcpus`/`nohz_full`, shared IRQ affinity, non-RT scheduling, non-`performance` governor, boost enabled, affinity not applied/observed on the selected core). | `true` ⇒ `INCONCLUSIVE` (exit `2`); certification is blocked. |
-| paired reference series | `--reference` report supplied to `nam_perf_guard certify`. | Absent ⇒ `INCONCLUSIVE` (exit `2`); the script records `perf:reference_missing`. |
+| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy (no `isolcpus`/`nohz_full`, shared effective IRQ affinity, non-RT scheduling, non-`performance` governor, affinity not applied/observed on the selected core). | `true` ⇒ `INCONCLUSIVE` (exit `2`); certification is blocked. |
+| paired reference series | `--reference` report supplied to `nam_perf_guard certify`. | Absent ⇒ `INCONCLUSIVE` (exit `2`); `tests-long.sh` bootstraps `perf-reference.json` automatically on the first pass when absent. |
 
-The receipt mirrors both fields under `performance_certification`, and the pipeline prints `[DEGRADED HOST]` with the typed reasons. Reasons are stable tokens such as `bench_core_not_isolated:<N>`, `irq_isolation_shared:<N>`, `sched_policy_not_realtime:SCHED_OTHER`, `governor_not_performance:powersave`, `governor_unknown`, `cpu_boost_enabled`, `boost_unknown`, `affinity_apply_failed:<detail>`, `affinity_observed_mismatch:<requested>:<observed>`. A degraded host blocks certification instead of promoting the run to `PASS`.
+The receipt mirrors both fields under `performance_certification`, and the pipeline prints `[DEGRADED HOST]` with the typed reasons. Reasons are stable tokens such as `bench_core_not_isolated:<N>`, `irq_isolation_shared:<N>:<count>` (evaluated against kernel `effective_affinity_list` so managed multi-queue PCI-MSIX masks that route away from the isolated core do not false-positive), `sched_policy_not_realtime:SCHED_OTHER`, `governor_not_performance:powersave`, `governor_unknown`, `affinity_apply_failed:<detail>`, `affinity_observed_mismatch:<requested>:<observed>`. A degraded host blocks certification instead of promoting the run to `PASS`.
 
 `perf-certification-report.json` is written to `target/logs/` and uses `schema_version: "1.4"` with the optional `run_id`, the requested/applied/observed affinity fields and an ISO-8601 `timestamp_utc` (`YYYY-MM-DDTHH:MM:SSZ`), like the release receipt, so reports sort chronologically as text.
 
@@ -373,7 +407,7 @@ Gate 2 records the validator outcome under `clap_validator` (`status`, `tests_ru
 
 #### 5.4.5 Long-Audit Artifact Exercise Coverage
 
-`utils/tests-long.sh` stamps every receipt line with `artifact_exercised`. With `--artifact`, the `artifact` phase (`phase3`) loads `target/dist/nam_plug.clap` via `dlopen` and the `perf` phase (`phase4`) certifies that same file, so both record `true`; `catch-all` (`phase1`), `gui` (`phase2`), `heap-audit` (`phase5`) and `rt-heap` (`phase6`) run library/harness tests and record `false`. Without `--artifact`, the artifact phase uses a neutral release `.so` and records `false`, while `perf` is `SKIPPED` with `perf:requires_artifact`. The certifier summarizes this in the release receipt:
+`utils/tests-long.sh` stamps every receipt line with `artifact_exercised`. With `--artifact`, the `artifact` phase (`phase3`) loads `target/dist/nam_plug.clap` via `dlopen` and the `perf` phase (`phase4`) certifies that same file, so both record `true`; `catch-all` (`phase1`), `gui` (`phase2`), `heap-audit` (`phase5`) and `rt-heap` (`phase6`) run library/harness tests and record `false`. Without `--artifact`, the artifact phase uses a neutral release `.so` and records `false`, while `perf` is recorded with status `SKIP_CAPABILITY` and GAP `perf:requires_artifact`. The certifier summarizes this in the release receipt:
 
 ```json
 "artifacts": {
@@ -537,7 +571,7 @@ All automation scripts in `utils/` adhere to a lean, predictable execution contr
 Each script strictly adheres to one of four architectural classes:
 
 | Class | Typical Scripts | Error Handling Policy | Architectural Rationale |
-|:----- |:--------------- |:--------------------- |:----------------------- |
+| :----- | :--------------- | :--------------------- | :----------------------- |
 | **Class A — Interactive** | `lints.sh`, `tests-quick.sh` | `set -euo pipefail`; aborts on first failure; `ERR` trap emits `RESULT: FAIL` | Real-time developer loops. Immediate failure surfaces bugs fast and conserves developer cycles. |
 | **Class B — Decoupled Audit** | `tests-long.sh` | `set -o pipefail` (no `-e`, no `-u`); each phase records status independently; collects all failures; exit `1` at end if any phase failed | Nightly and pre-release audits. Collects all phase evidence without aborting prematurely. |
 | **Class C — Build** | `build-release.sh` | `set -euo pipefail`; aborts on first failure | Build pipelines where intermediate failure invalidates downstream artifacts. |
@@ -548,20 +582,26 @@ Each script strictly adheres to one of four architectural classes:
 Script output follows a structured stream suitable for automated parsing:
 
 1. **Phase Announcement:**
+
    ```text
    PHASE: <phase_name>
    ```
+
 2. **Phase Completion:**
+
    ```text
    PHASE: <phase_name> PASS log=<path>
    PHASE: <phase_name> FAIL rc=<exit_code> log=<path>
    PHASE: <phase_name> GAP <technical_reason>
    ```
+
 3. **Unified Final Result Line:**
    Every script terminates by emitting exactly one final summary line:
+
    ```text
    RESULT: PASS|PASS_WITH_GAPS|FAIL (<seconds>s) fails=<list|none> gaps=<list|none> scope=<full|partial>
    ```
+
 4. **Exit Codes:**
    - `0`: Complete success (`PASS`), or success with documented gaps (`PASS_WITH_GAPS`) when not in strict mode.
    - `1`: Execution failure (`FAIL`), or unfulfilled `GAP` when invoked with `--strict`.
@@ -590,11 +630,11 @@ Detailed execution logs are written to `target/logs/<script>-<phase>.log` via `t
 Only canonical flags are supported across scripts (no legacy aliases):
 
 | Script | Supported Flags | Notes |
-|:------ |:--------------- |:----- |
+| :------ | :--------------- | :----- |
 | **All scripts** | `-h`, `--help` | Displays concise usage and exits 0. |
 | `lints.sh` | None | Strict zero-flag policy; formatting is applied in-place during local development and verified via `CI=true` on CI. |
 | `tests-quick.sh` | None | Fast first-line discipline; no allow-gaps switch and no simulation mode. |
-| `tests-long.sh` | `--strict`, `--only <name>[,<name>]`, `--artifact` | `--strict` promotes any `GAP` to `FAIL` (exit 1); `--only` runs only the named canonical phases, records the others as `SKIPPED`, and preserves `target/long`; `--artifact` tests canonical `target/dist/nam_plug.clap`. |
+| `tests-long.sh` | `--strict`, `--only <name>[,<name>]`, `--artifact` | `--strict` promotes any `GAP` to `FAIL` (exit 1); `--only` runs only the named canonical phases, records the others as `NOT_RUN` (typed GAP), and preserves `target/long`; `--artifact` tests canonical `target/dist/nam_plug.clap`. |
 | `build-release.sh` | `--strict`, `--package`, `--certify`, `--install` | `--package` builds tarball and Flatpak; `--certify` validates receipts without recompiling; `--install` (only with `--certify`) installs the verified artifact to `~/.clap/` and the declared Flatpak bundle. |
 
 ### 7.5 Canonical Environment Variables
@@ -602,7 +642,7 @@ Only canonical flags are supported across scripts (no legacy aliases):
 #### Interface Variables (User & CI Control)
 
 | Variable | Default | Scope | Purpose & Semantics |
-|:-------- |:------- |:----- |:------------------- |
+| :-------- | :------- | :----- | :------------------- |
 | `CI` | Unset | CI Runner | When `true`, instructs `lints.sh` to execute `cargo fmt --check` instead of modifying files in-place. |
 | `NAM_BENCH_CORE` | `auto` | Benchmark | Core pinning: explicit CPU ID, isolated core if online, first allowed CPU, or unpinned fallback (`GAP`). |
 | `NAM_PHASE_TIMEOUT_S` | Per-phase default | `tests-long.sh` | Overrides timeout duration across all audit phases for emergency debugging. |
@@ -611,13 +651,14 @@ Only canonical flags are supported across scripts (no legacy aliases):
 #### Harness Variables (Internal Script → Rust Communication)
 
 | Variable | Configured By | Read By | Purpose |
-|:-------- |:------------- |:------- |:------- |
+| :-------- | :------------- | :------- | :------- |
 | `NAM_RUN_ID` | `utils/_lib.sh` | Test harnesses | Unique timestamped run identifier for logging and receipt isolation. |
 | `NAM_REQUIRE_CPP_ORACLE` | `tests-long.sh --strict` | Parity suites | Enforces hard failure if the C++ reference render binary is unavailable. |
 | `NAM_RT_STRICT` | `tests-long.sh --strict` | RT deadline tests | Rejects latency outliers and deadline budget misses fail-closed. |
 | `CLAP_PLUGIN_UNDER_TEST` | `tests-long.sh --artifact` | Long audit harnesses | Specifies path to the canonical compiled `.clap` binary under test. |
 | `NAM_GUI_DEDICATED_X11` | `tests-long.sh` (`gui` phase) | GUI lifecycle tests | Requests a dedicated X11 display path for the headless GUI tests. |
 | `NAM_CORE_RENDER_BIN` | `_lib.sh` / preflights | C++ Parity tests | Absolute path to the compiled upstream C++ `render` CLI binary. |
+| `NAM_THERMAL_COOLDOWN_S` | `2` | `utils/ab-opt-ceremony.sh` | Operator | Cooling sleep in seconds between benchmark runs during A/B optimization ceremony. |
 | `NAM_FIXTURES_DIR` | `_lib.sh` / preflights | Model loaders | Explicit path to test model fixtures directory. |
 
 ### 7.6 Measured Durations & Budgets
@@ -625,7 +666,7 @@ Only canonical flags are supported across scripts (no legacy aliases):
 Execution times measured on standard development hardware (16-core, SSD):
 
 | Discipline / Script | Measured Duration | Budget Ceiling | Notes |
-|:------------------- |:----------------- |:-------------- |:----- |
+| :------------------- | :----------------- | :-------------- | :----- |
 | `utils/lints.sh` | ~8s (warm cache, 2026-10-27) to ~45s (clean build) | $\le 2$ min | Covers fmt, check (3 permutations), clippy (`-D warnings`), cross-target `aarch64-unknown-linux-gnu` clippy (native aarch64 hosts reuse the earlier clippy pass; x86_64 hosts set `PKG_CONFIG_ALLOW_CROSS=1`), doc, SPDX, policies, and RT allocation verification. |
 | `utils/tests-quick.sh` | ~36s (warm cache, 2026-10-27) to ~90s | $\le 5$ min | Covers structural unit/integration tests and RT-safety heap audit. C++ NAMCore parity, oversampling, CabSim, and codegen run in Long (`artifact`) and build (D9). |
 | `utils/tests-long.sh` | ~19.7 min (measured runs `42075116266-1` / `42076290250-1`) | $\le 25$ min | Catch-all, headless Xvfb GUI, neutral artifact / C++ NAMCore parity, oversampling, CabSim IR, perf certification, and heap-audit soak. |

@@ -3,31 +3,14 @@
 
 name: Long QA Suite
 
-# Release chain, decoupled: build-release.sh -> tests-long.sh --artifact -> build-release.sh --certify.
-# This hosted workflow never certifies: certification runs on the operator's isolated host.
-# Hosted runners lack an isolated CPU and SCHED_FIFO privileges: those surface as
-# typed GAPs. BOLT, clap-validator and the C++ parity oracle are provisioned below.
-# The `perf` and `rt-heap` (time-threshold) phases are never selected here.
+# Hosted QA workflow with a single, recommended configuration. It is
+# intentionally zero-input: the GitHub "Run workflow" button must not ask
+# questions. The hosted build is never strict, the QA runs the hosted-safe
+# phase list (catch-all,gui,artifact,heap-audit) and certification remains
+# operator-only. BOLT, clap-validator and the C++ parity oracle are
+# provisioned below. `perf` and `rt-heap` are never selected here.
 on:
   workflow_dispatch:
-    inputs:
-      phases:
-        description: 'Comma-separated phase IDs (empty = hosted-safe default; perf/rt-heap rejected)'
-        type: string
-        default: ''
-      strict:
-        description: 'Strict mode (treat gaps as failures)'
-        type: boolean
-        default: false
-      rehearse_certify:
-        description: 'Rehearse full-scope certification: tests-long.sh --artifact (full) + build-release.sh --certify'
-        type: boolean
-        default: false
-      ref:
-        description: 'Git ref or SHA to test (empty = selected branch)'
-        type: string
-        required: false
-        default: ''
 
 permissions:
   contents: read
@@ -49,7 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
       - name: Load environment variables
         run: |
@@ -93,6 +75,7 @@ jobs:
           oracle=$(utils/ensure_namcore_render.sh)
           test -x "$oracle"
           echo "NAM_CORE_RENDER_BIN=$oracle" >> "$GITHUB_ENV"
+          echo "NAM_REQUIRE_CPP_ORACLE=1" >> "$GITHUB_ENV"
       # Runner images can ship an older preinstalled stable; the crate needs rust-version 1.99.
       - name: Update Rust toolchain
         run: |
@@ -140,46 +123,30 @@ jobs:
           else
             aux_engine="GAP:sibling_absent"
           fi
-          printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s\n' \
-            "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" | tee target/logs/ci-provenance.log
+          rustc_v=$(rustc --version)
+          cargo_v=$(cargo --version)
+          printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s rustc=%s cargo=%s\n' \
+            "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" "$rustc_v" "$cargo_v" | tee target/logs/ci-provenance.log
       - name: Build canonical artifact
-        env:
-          STRICT_INPUT: ${{ inputs.strict }}
-        run: |
-          STRICT_FLAG=""
-          if [ "$STRICT_INPUT" = "true" ]; then STRICT_FLAG="--strict"; fi
-          ./utils/build-release.sh $STRICT_FLAG
+        # Hosted QA builds are never strict; the operator release chain owns it.
+        run: ./utils/build-release.sh
       - name: Long QA Suite (artifact)
-        if: ${{ !inputs.rehearse_certify }}
-        env:
-          PHASES_INPUT: ${{ inputs.phases }}
-          STRICT_INPUT: ${{ inputs.strict }}
+        # Recommended hosted-safe configuration, fixed by design. `perf` and
+        # `rt-heap` are reserved for the operator's isolated host.
+        run: xvfb-run -a ./utils/tests-long.sh --artifact --only 'catch-all,artifact,gui,heap-audit'
+      - name: Write evidence manifest
+        if: always()
         run: |
-          STRICT_FLAG=""
-          if [ "$STRICT_INPUT" = "true" ]; then STRICT_FLAG="--strict"; fi
-          # Hosted runners are not a comparable speed gate: the `perf` and
-          # `rt-heap` timing phases are never selected here. Explicit phases are
-          # transported through the environment, never interpolated into the
-          # shell command line.
-          if [ -n "$PHASES_INPUT" ]; then
-            case ",$PHASES_INPUT," in
-              *,perf,*) echo "perf is not permitted on hosted runners" >&2; exit 2 ;;
-              *,rt-heap,*) echo "rt-heap is not permitted on hosted runners" >&2; exit 2 ;;
-            esac
-            ONLY_ARGS=(--only "$PHASES_INPUT")
-          else
-            ONLY_ARGS=(--only "catch-all,gui,artifact,heap-audit")
+          mkdir -p target/logs
+          build=false; if [ -f target/dist/build-receipt.json ]; then build=true; fi
+          long_scope=none
+          if [ -f target/logs/long-audit-receipt.jsonl ]; then long_scope=full
+          elif [ -f target/logs/long-audit-receipt.*.partial.jsonl ]; then long_scope=partial
           fi
-          xvfb-run -a ./utils/tests-long.sh $STRICT_FLAG --artifact "${ONLY_ARGS[@]}"
-      # Optional certification rehearsal: full scope, no --strict, so timing
-      # phases emit controlled GAPs on the hosted runner. This exercises the
-      # same release chain used by the operator's isolated host.
-      - name: Rehearse release certification (full scope)
-        if: ${{ inputs.rehearse_certify }}
-        run: |
-          xvfb-run -a ./utils/tests-long.sh --artifact
-          ./utils/build-release.sh --certify
-          test -f target/dist/release-receipt.json
+          certify=false
+          if [ -f target/dist/release-receipt.json ]; then certify=true; fi
+          printf '{"run_id":"%s","build_receipt":%s,"long_receipt_scope":"%s","certification_receipt":%s}\n' \
+            "${{ github.run_id }}-${{ github.run_attempt }}" "$build" "$long_scope" "$certify" > target/logs/evidence-manifest.json
       - name: Publish step summary
         if: always()
         uses: ./.github/actions/qa-summary

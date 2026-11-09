@@ -1646,7 +1646,17 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 if let Some(model) = self.model_l.as_mut() {
                     let frames_count = audio.frames_count() as usize;
                     let family = ModelFamily::from_model(model);
-                    let chains = if self.model_r.is_some() { 2 } else { 1 };
+                    let is_stereo_config = self
+                        .shared
+                        .cold
+                        .selected_port_config
+                        .load(Ordering::Relaxed)
+                        == crate::clap::plugin::CONFIG_ID_STEREO;
+                    let chains = if is_stereo_config && self.model_r.is_some() {
+                        2
+                    } else {
+                        1
+                    };
                     // The frozen family table replaces the runtime EWMA when the latch is set.
                     let measured_cost = if self.prewarm_static {
                         None
@@ -1666,7 +1676,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                         let step_start = rdtsc_nanos();
                         let _ = model.prewarm_step(step);
-                        if let Some(model_r) = self.model_r.as_mut() {
+                        if is_stereo_config && let Some(model_r) = self.model_r.as_mut() {
                             let _ = model_r.prewarm_step(step);
                         }
                         // Refine the per-sample cost estimate from the real
@@ -1746,9 +1756,9 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                             self.host.request_callback();
                         }
                     }
-                    if !model.prewarm_complete()
-                        || self.model_r.as_ref().is_some_and(|m| !m.prewarm_complete())
-                    {
+                    let right_incomplete = is_stereo_config
+                        && self.model_r.as_ref().is_some_and(|m| !m.prewarm_complete());
+                    if !model.prewarm_complete() || right_incomplete {
                         return self.process_dry_contained_block(
                             &mut audio,
                             events.input,
@@ -1757,6 +1767,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                     }
                 }
                 self.prewarm_pending = false;
+                self.shared
+                    .rt_to_ui
+                    .prewarm_pending
+                    .store(false, Ordering::Relaxed);
                 self.prewarm_zero_budget_count = 0;
             }
 
@@ -1820,9 +1834,21 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 model.prewarm_reset();
                 self.prewarm_pending = true;
             }
-            if let Some(model) = &mut self.model_r {
+            let is_stereo_config = self
+                .shared
+                .cold
+                .selected_port_config
+                .load(Ordering::Relaxed)
+                == crate::clap::plugin::CONFIG_ID_STEREO;
+            if is_stereo_config && let Some(model) = &mut self.model_r {
                 model.prewarm_reset();
                 self.prewarm_pending = true;
+            }
+            if self.prewarm_pending {
+                self.shared
+                    .rt_to_ui
+                    .prewarm_pending
+                    .store(true, Ordering::Relaxed);
             }
             self.prewarm_zero_budget_count = 0;
 

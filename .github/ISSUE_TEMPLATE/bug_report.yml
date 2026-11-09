@@ -111,9 +111,9 @@ body:
     attributes:
       label: Pre-submission Checklist
       options:
-        - label: I verified this issue with the latest version of NAM-Plug.
-          required: true
         - label: I have searched existing issues to ensure this is not a duplicate.
           required: true
+        - label: I verified this issue with the latest version or main branch of NAM-Plug (if feasible).
+          required: false
         - label: I confirmed this is a native CLAP build (or tested with official DAW release).
-          required: true
+          required: false

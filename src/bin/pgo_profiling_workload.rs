@@ -104,6 +104,37 @@ pub struct ScenarioExecutionResult {
 fn main() {
     let start_time = Instant::now();
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut receipt_path = PathBuf::from("target/pgo-workload-receipt.json");
+    let mut clap_only = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--receipt" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("pgo_profiling_workload: --receipt requires a path");
+                    std::process::exit(2);
+                }
+                receipt_path = PathBuf::from(&args[i]);
+            }
+            "--clap-only" => {
+                clap_only = true;
+            }
+            "-h" | "--help" => {
+                println!(
+                    "Usage: pgo_profiling_workload [--receipt <path>] [--clap-only] [-h|--help]"
+                );
+                std::process::exit(0);
+            }
+            unknown => {
+                eprintln!("pgo_profiling_workload: unknown argument '{unknown}'");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+
     // 1. Initialize panic hook and logger backend
     neural_amp_modeler_rs::common::panic_hook::install_panic_hook("pgo_profiler");
     NamLogger::init(LoggerConfig::new(log::LevelFilter::Info).with_stderr(true))
@@ -220,26 +251,28 @@ fn main() {
         scenario_results.push(result);
     }
 
-    // 8. Execute Standalone DSP direct paths
-    for (name, fixture_key) in &[
-        ("standalone_dsp_wavenet_a1", "wavenet_a1_standard.nam"),
-        ("standalone_dsp_wavenet_a2", "a2_example.nam"),
-        ("standalone_dsp_lstm", "lstm.nam"),
-    ] {
-        log::info!("🚀 Executing Standalone DSP Scenario [{name}]");
-        let model_path = Path::new(&fixture_map[*fixture_key].path);
-        let result = match run_standalone_scenario(name, model_path, &sys, &signal_48k) {
-            Ok(res) => res,
-            Err(err) => {
-                log::error!(
-                    "❌ FATAL: Standalone DSP scenario [{name}] failed (Fail-Closed): {err}"
-                );
-                std::process::exit(1);
-            }
-        };
-        total_callbacks += result.callbacks_executed;
-        total_samples_processed += result.samples_executed;
-        scenario_results.push(result);
+    // 8. Execute Standalone DSP direct paths (skipped under --clap-only for BOLT shared lib profiling)
+    if !clap_only {
+        for (name, fixture_key) in &[
+            ("standalone_dsp_wavenet_a1", "wavenet_a1_standard.nam"),
+            ("standalone_dsp_wavenet_a2", "a2_example.nam"),
+            ("standalone_dsp_lstm", "lstm.nam"),
+        ] {
+            log::info!("🚀 Executing Standalone DSP Scenario [{name}]");
+            let model_path = Path::new(&fixture_map[*fixture_key].path);
+            let result = match run_standalone_scenario(name, model_path, &sys, &signal_48k) {
+                Ok(res) => res,
+                Err(err) => {
+                    log::error!(
+                        "❌ FATAL: Standalone DSP scenario [{name}] failed (Fail-Closed): {err}"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            total_callbacks += result.callbacks_executed;
+            total_samples_processed += result.samples_executed;
+            scenario_results.push(result);
+        }
     }
 
     let elapsed = start_time.elapsed();
@@ -264,8 +297,6 @@ fn main() {
         fixtures: fixture_map,
         scenario_results,
     };
-
-    let receipt_path = PathBuf::from("target/pgo-workload-receipt.json");
 
     if let Some(parent) = receipt_path.parent() {
         let _ = std::fs::create_dir_all(parent);

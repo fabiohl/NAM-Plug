@@ -22,7 +22,7 @@ if [ "$rc_tests" -ne 0 ]; then
   grep -q -E '(panicked at|FAILED)' "$CUR_LOG" || { echo "--- Cargo/build failure (tail of $CUR_LOG) ---" >&2; tail -n 25 "$CUR_LOG" >&2; }
 fi
 awk '/test result: / { p+=$4; f+=$6; i+=$8 } END { printf "Tests summary: %d passed, %d failed, %d ignored\n", p, f, i }' "$CUR_LOG"
-# Measured: x86=453 passed, aarch64=441 passed (run 42075116266-1); threshold=400
+# Measured: x86=453 passed, aarch64=446 passed (run 42441495302); threshold=400
 [ "$rc_tests" -eq 0 ] && assert_ran_tests "$CUR_LOG" 400 || { FAILS+=(tests); emit "PHASE: tests FAIL rc=$rc_tests log=$CUR_LOG"; finish || exit 1; exit 1; }
 emit "PHASE: tests PASS log=$CUR_LOG"
 

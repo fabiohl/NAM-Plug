@@ -625,6 +625,13 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
         let mut lifecycle = self.gui_lifecycle.get();
         lifecycle.transition(GuiEvent::Show)?;
         self.gui_lifecycle.set(lifecycle);
+        if !self.shared.cold.alive_fence.load(Ordering::Acquire) {
+            log::warn!(
+                "NAM-Plug: show dispatch failed \
+                 (gui_lifecycle={lifecycle:?}, teardown active / alive fence lowered)"
+            );
+            return Ok(());
+        }
         if let Some(weak) = self.slint_window.borrow().as_ref().cloned() {
             let lifecycle = self.gui_lifecycle.get();
             if let Err(e) = weak.upgrade_in_event_loop(move |w| {
@@ -665,6 +672,13 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
         let mut lifecycle = self.gui_lifecycle.get();
         lifecycle.transition(GuiEvent::Hide)?;
         self.gui_lifecycle.set(lifecycle);
+        if !self.shared.cold.alive_fence.load(Ordering::Acquire) {
+            log::warn!(
+                "NAM-Plug: hide dispatch failed \
+                 (gui_lifecycle={lifecycle:?}, teardown active / alive fence lowered)"
+            );
+            return Ok(());
+        }
         if let Some(weak) = self.slint_window.borrow().as_ref().cloned() {
             let lifecycle = self.gui_lifecycle.get();
             if let Err(e) = weak.upgrade_in_event_loop(move |w| {

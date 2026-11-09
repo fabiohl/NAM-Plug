@@ -143,43 +143,140 @@ pub fn hash_file<P: AsRef<Path>>(path: P) -> Result<String, std::io::Error> {
     Ok(digest_to_hex(hasher.finalize()))
 }
 
-/// Parse ab-opt-ceremony-receipt.json to extract `(proof_id, lbr_samples, lbr_fdata_sha256)`.
-pub fn parse_ab_opt_ceremony_receipt<P: AsRef<Path>>(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CeremonyProofRejection {
+    MissingReceipt,
+    InvalidJson(String),
+    SchemaMismatch,
+    ToolMismatch,
+    CeremonyStaleCommit { expected: String, actual: String },
+    CeremonyDirtyTree,
+    CeremonyLockMismatch { expected: String, actual: String },
+    VerdictNotOptimized(String),
+    CeremonyBoltFailed(String),
+}
+
+impl CeremonyProofRejection {
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::MissingReceipt => "ceremony_missing_receipt",
+            Self::InvalidJson(_) => "ceremony_invalid_json",
+            Self::SchemaMismatch => "ceremony_schema_mismatch",
+            Self::ToolMismatch => "ceremony_tool_mismatch",
+            Self::CeremonyStaleCommit { .. } => "ceremony_stale_commit",
+            Self::CeremonyDirtyTree => "ceremony_dirty_tree",
+            Self::CeremonyLockMismatch { .. } => "ceremony_lock_mismatch",
+            Self::VerdictNotOptimized(_) => "verdict_not_optimized",
+            Self::CeremonyBoltFailed(_) => "ceremony_bolt_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for CeremonyProofRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingReceipt => write!(f, "ceremony_missing_receipt"),
+            Self::InvalidJson(msg) => write!(f, "ceremony_invalid_json: {msg}"),
+            Self::SchemaMismatch => write!(f, "ceremony_schema_mismatch"),
+            Self::ToolMismatch => write!(f, "ceremony_tool_mismatch"),
+            Self::CeremonyStaleCommit { expected, actual } => {
+                write!(
+                    f,
+                    "ceremony_stale_commit: expected {expected}, got {actual}"
+                )
+            }
+            Self::CeremonyDirtyTree => write!(f, "ceremony_dirty_tree"),
+            Self::CeremonyLockMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "ceremony_lock_mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::VerdictNotOptimized(v) => write!(f, "ceremony_verdict_not_optimized: {v}"),
+            Self::CeremonyBoltFailed(cause) => write!(f, "ceremony_bolt_failed: {cause}"),
+        }
+    }
+}
+
+/// Fail-closed validation of the A/B optimization ceremony receipt.
+pub fn validate_ab_opt_ceremony_receipt<P: AsRef<Path>>(
     path: P,
-) -> Option<(String, Option<String>, Option<String>)> {
-    let content = fs::read_to_string(path).ok()?;
-    let doc: serde_json::Value = serde_json::from_str(&content).ok()?;
-    if doc.get("verdict").and_then(|v| v.as_str()) != Some("PGO+BOLT") {
-        return None;
+    expected_git_sha: Option<&str>,
+    expected_lock_sha: Option<&str>,
+) -> Result<(String, Option<String>, Option<String>, String), CeremonyProofRejection> {
+    let p = path.as_ref();
+    if !p.exists() {
+        return Err(CeremonyProofRejection::MissingReceipt);
     }
-    let runs = doc
-        .get("runs")
-        .and_then(|r| r.as_u64().or_else(|| r.as_str()?.parse().ok()))
-        .unwrap_or(0);
-    if runs < 3 {
-        return None;
+    let content =
+        fs::read_to_string(p).map_err(|e| CeremonyProofRejection::InvalidJson(e.to_string()))?;
+    let doc: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| CeremonyProofRejection::InvalidJson(e.to_string()))?;
+
+    if doc.get("schema_version").and_then(|v| v.as_u64()) != Some(2) {
+        return Err(CeremonyProofRejection::SchemaMismatch);
     }
-    // Check positive gain
-    let gain_ok = if let Some(gain_ci) = doc.get("gain_ci_low").and_then(|g| g.as_f64()) {
-        gain_ci > 0.0
-    } else if let Some(mean) = doc
-        .get("bolt_gain_pct")
-        .and_then(|b| b.get("mean"))
-        .and_then(|m| m.as_f64())
-    {
-        mean < 0.0
-    } else {
-        false
-    };
-    if !gain_ok {
-        return None;
+    if doc.get("tool").and_then(|v| v.as_str()) != Some("ab-opt-ceremony") {
+        return Err(CeremonyProofRejection::ToolMismatch);
+    }
+
+    if let Some(prov) = doc.get("provenance") {
+        if prov.get("git_dirty").and_then(|v| v.as_bool()) == Some(true) {
+            return Err(CeremonyProofRejection::CeremonyDirtyTree);
+        }
+        if let Some(expected_sha) = expected_git_sha {
+            let actual = prov.get("git_sha").and_then(|v| v.as_str()).unwrap_or("");
+            if actual != expected_sha {
+                return Err(CeremonyProofRejection::CeremonyStaleCommit {
+                    expected: expected_sha.to_string(),
+                    actual: actual.to_string(),
+                });
+            }
+        }
+        if let Some(expected_lock) = expected_lock_sha {
+            let actual = prov
+                .get("cargo_lock_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if actual != expected_lock {
+                return Err(CeremonyProofRejection::CeremonyLockMismatch {
+                    expected: expected_lock.to_string(),
+                    actual: actual.to_string(),
+                });
+            }
+        }
+    }
+
+    let verdict = doc
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNOPTIMIZED");
+    if verdict != "PGO+BOLT" && verdict != "PGO-ONLY" && verdict != "UNOPTIMIZED" {
+        return Err(CeremonyProofRejection::VerdictNotOptimized(
+            verdict.to_string(),
+        ));
+    }
+    if verdict == "PGO-ONLY" && doc.get("bolt_applied").and_then(|v| v.as_bool()) != Some(true) {
+        let cause = doc
+            .get("bolt_cause")
+            .and_then(|v| v.as_str())
+            .unwrap_or("BOLT not applied");
+        let is_skipped = cause.starts_with("BOLT_SKIPPED:")
+            || cause == "BOLT not applied"
+            || doc.get("verdict_reason").and_then(|v| v.as_str()) == Some("bolt_not_applied");
+        if !is_skipped {
+            return Err(CeremonyProofRejection::CeremonyBoltFailed(
+                cause.to_string(),
+            ));
+        }
     }
 
     let lbr = doc.get("bolt_lbr");
-    let samples = lbr
-        .and_then(|l| l.get("samples"))
-        .and_then(|s| s.as_str().or_else(|| s.as_u64().map(|_| "")))
-        .map(|s| s.to_string());
+    let samples = lbr.and_then(|l| l.get("samples")).and_then(|s| {
+        s.as_str()
+            .map(|v| v.to_string())
+            .or_else(|| s.as_u64().map(|u| u.to_string()))
+    });
     let fdata_sha = lbr
         .and_then(|l| l.get("fdata_sha256"))
         .and_then(|s| s.as_str())
@@ -190,12 +287,75 @@ pub fn parse_ab_opt_ceremony_receipt<P: AsRef<Path>>(
     let hex = digest_to_hex(hasher.finalize());
     let proof_id = format!("ab-opt-ceremony:{}", &hex[..16.min(hex.len())]);
 
-    Some((proof_id, samples, fdata_sha))
+    Ok((proof_id, samples, fdata_sha, verdict.to_string()))
+}
+
+/// Parse ab-opt-ceremony-receipt.json to extract `(proof_id, lbr_samples, lbr_fdata_sha256)`.
+pub fn parse_ab_opt_ceremony_receipt<P: AsRef<Path>>(
+    path: P,
+) -> Option<(String, Option<String>, Option<String>)> {
+    validate_ab_opt_ceremony_receipt(path, None, None)
+        .ok()
+        .map(|(proof_id, samples, fdata, _)| (proof_id, samples, fdata))
+}
+
+/// Fail-closed validation of PGO profiling workload receipt and log.
+pub fn validate_pgo_workload<P: AsRef<Path>>(
+    receipt_path: P,
+    log_path: Option<&Path>,
+) -> Result<String, String> {
+    let path = receipt_path.as_ref();
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("cannot read PGO receipt {}: {e}", path.display()))?;
+    let doc: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("cannot parse PGO receipt {}: {e}", path.display()))?;
+    if doc.get("status").and_then(|v| v.as_str()) != Some("SUCCESS") {
+        return Err("PGO workload status must be SUCCESS".to_string());
+    }
+    let total_scenarios = doc
+        .get("total_scenarios")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if total_scenarios < 12 {
+        return Err(format!(
+            "PGO workload total_scenarios = {total_scenarios} (required >= 12)"
+        ));
+    }
+    let total_callbacks = doc
+        .get("total_callbacks")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if total_callbacks == 0 {
+        return Err("PGO workload executed 0 callbacks".to_string());
+    }
+    if content.contains(": NaN")
+        || content.contains(": Infinity")
+        || content.contains(": -Infinity")
+    {
+        return Err("PGO receipt contains NaN or Infinity".to_string());
+    }
+    if let Some(Ok(log_content)) = log_path.map(fs::read_to_string) {
+        if log_content.contains("Output clipping detected") {
+            return Err("PGO workload log detected audio clipping".to_string());
+        }
+        if log_content.contains("FATAL:") || log_content.contains("panicked at") {
+            return Err("PGO workload log detected errors/panics".to_string());
+        }
+    }
+    Ok(format!(
+        "PGO workload valid: scenarios={total_scenarios} callbacks={total_callbacks}"
+    ))
 }
 
 /// Parse `pgo-workload-receipt.json` if present.
-pub fn parse_pgo_workload_receipt<P: AsRef<Path>>(path: P) -> Option<PgoWorkloadInfo> {
-    let content = fs::read_to_string(path).ok()?;
+pub fn parse_pgo_workload_receipt<P: AsRef<Path>>(
+    path: P,
+    log_path: Option<&Path>,
+    clipping_phase1: Option<u64>,
+    clipping_bolt: Option<u64>,
+) -> Option<PgoWorkloadInfo> {
+    let r_path = path.as_ref();
+    let content = fs::read_to_string(r_path).ok()?;
     let doc: serde_json::Value = serde_json::from_str(&content).ok()?;
     let status = doc
         .get("status")
@@ -205,15 +365,17 @@ pub fn parse_pgo_workload_receipt<P: AsRef<Path>>(path: P) -> Option<PgoWorkload
     let gain = doc.get("excitation_gain").and_then(|g| g.as_f64());
     let scenarios = doc.get("total_scenarios").and_then(|s| s.as_u64());
     let callbacks = doc.get("total_callbacks").and_then(|c| c.as_u64());
+    let receipt_sha256 = hash_file(r_path).ok();
+    let log_sha256 = log_path.and_then(|p| hash_file(p).ok());
     Some(PgoWorkloadInfo {
         status,
         excitation_gain: gain,
         total_scenarios: scenarios,
         total_callbacks: callbacks,
-        clipping_count_phase1: None,
-        clipping_count_bolt: None,
-        log_sha256: None,
-        receipt_sha256: None,
+        clipping_count_phase1: clipping_phase1,
+        clipping_count_bolt: clipping_bolt,
+        log_sha256,
+        receipt_sha256,
     })
 }
 
@@ -307,3 +469,7 @@ pub fn extract_engine_provenance(cargo_lock_path: &Path) -> EngineProvenance {
         checksum,
     }
 }
+
+#[cfg(test)]
+#[path = "build_test.rs"]
+mod tests;

@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # lints.sh — Análise estática, formatação e conformidade textual. Classe A.
 # Uso: utils/lints.sh
-# Orçamento: 115
+# Orçamento: 125         # +10: cross_target bidirecional e scan spdx python/shell
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -34,9 +34,18 @@ run_step clippy phase_clippy
 # Cross-checks target-specific cfg branches (N-26). Native aarch64 already ran clippy in phase_clippy;
 # x86_64 hosts only emit .rmeta with PKG_CONFIG_ALLOW_CROSS=1 for pkg-config metadata discovery.
 PHASE_NAME=cross_aarch64_check
-if [ "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu ]; then run_step cross_aarch64_check true
-elif ! rustup target list --installed | grep -qx aarch64-unknown-linux-gnu; then gap "cross_aarch64_check:target-not-installed"
-else run_step cross_aarch64_check env PKG_CONFIG_ALLOW_CROSS=1 cargo clippy --locked --lib --target aarch64-unknown-linux-gnu -- -D warnings; fi
+HOST_ARCH="$(rustc -vV | sed -n 's/^host: //p')"
+if [ "$HOST_ARCH" = aarch64-unknown-linux-gnu ]; then
+  if rustup target list --installed | grep -qx x86_64-unknown-linux-gnu; then
+    run_step cross_aarch64_check env PKG_CONFIG_ALLOW_CROSS=1 cargo clippy --locked --lib --target x86_64-unknown-linux-gnu -- -D warnings
+  else
+    gap "cross_aarch64_check:native-host-x86-target-not-installed"
+  fi
+elif ! rustup target list --installed | grep -qx aarch64-unknown-linux-gnu; then
+  gap "cross_aarch64_check:target-not-installed"
+else
+  run_step cross_aarch64_check env PKG_CONFIG_ALLOW_CROSS=1 cargo clippy --locked --lib --target aarch64-unknown-linux-gnu -- -D warnings
+fi
 
 phase_doc() {
   RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
@@ -44,19 +53,18 @@ phase_doc() {
 run_step doc phase_doc
 
 phase_spdx() {
-  local listing files missing invalid
-  listing=$(git ls-files 'src/*.rs' 'tests/*.rs' 'benches/*.rs' 'utils/*.sh' 'build.rs' 'Cargo.toml') \
+  local files=() missing=() f rc listing
+  listing=$(git ls-files '*.rs' '*.sh' '*.py' 'build.rs' 'Cargo.toml') \
     || { echo "SPDX scan failed: git ls-files failed" >&2; return 1; }
   [ -n "$listing" ] || { echo "SPDX scan failed: git ls-files returned no files" >&2; return 1; }
   mapfile -t files <<< "$listing"
-  missing=$(grep -L "SPDX-License-Identifier" "${files[@]}" || true)
-  if [ -n "$missing" ]; then
-    echo "Missing SPDX header:" >&2; echo "$missing" | sed 's/^/  /' >&2; exit 1
-  fi
-  invalid=$(grep -l "SPDX-License-Identifier" "${files[@]}" | xargs grep -L -E "SPDX-License-Identifier: (GPL-3\.0-or-later|MIT)" || true)
-  if [ -n "$invalid" ]; then
-    echo "Invalid SPDX identifier:" >&2; echo "$invalid" | sed 's/^/  /' >&2; exit 1
-  fi
+  for f in "${files[@]}"; do
+    grep -qE "SPDX-License-Identifier: (GPL-3\.0-or-later|MIT)" "$f"; rc=$?
+    [ "$rc" -eq 0 ] && continue
+    [ "$rc" -eq 1 ] || { echo "SPDX scan failed: $f" >&2; return 1; }
+    missing+=("$f")
+  done
+  [ ${#missing[@]} -eq 0 ] || { echo "Missing or invalid SPDX header:" >&2; printf '  %s\n' "${missing[@]}" >&2; return 1; }
 }
 run_step spdx phase_spdx
 

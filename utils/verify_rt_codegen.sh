@@ -13,6 +13,8 @@ FILTER="utils/dsp-hotpath-filter.py"
 REPORT="utils/codegen-report.py"
 PROFILE="utils/codegen-profile.json"
 JSON_OUT=""
+PRE_ASM_FULL=""
+PHASE_NAME="codegen"
 BUILD_IF_MISSING=0
 TEST_SYNTHETIC=0
 TARGET_BIN=""
@@ -21,10 +23,12 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --build-if-missing) BUILD_IF_MISSING=1 ;;
         --test-synthetic-violation) TEST_SYNTHETIC=1 ;;
+        --phase-name) shift; [ "$#" -gt 0 ] || usage_fail "--phase-name requires a value"; PHASE_NAME="$1" ;;
+        --full-dump) shift; [ "$#" -gt 0 ] || usage_fail "--full-dump requires a path"; PRE_ASM_FULL="$1" ;;
         --profile) shift; [ "$#" -gt 0 ] || usage_fail "--profile requires a path"; PROFILE="$1" ;;
         --json-out) shift; [ "$#" -gt 0 ] || usage_fail "--json-out requires a path"; JSON_OUT="$1" ;;
         -h|--help)
-            echo "Uso: utils/verify_rt_codegen.sh [binário] [--profile <path>] [--json-out <path>] [--build-if-missing] [--test-synthetic-violation] [-h|--help]"
+            echo "Uso: utils/verify_rt_codegen.sh [binário] [--profile <path>] [--json-out <path>] [--phase-name <name>] [--full-dump <path>] [--build-if-missing] [--test-synthetic-violation] [-h|--help]"
             exit 0
             ;;
         -*) usage_fail "Unknown option: $1" ;;
@@ -38,7 +42,6 @@ done
 lib_init
 trap 'trap_fail $?' ERR
 
-PHASE_NAME="codegen"
 CUR_LOG="$LOG_DIR/${SCRIPT_NAME}-${PHASE_NAME}.log"
 phase "$PHASE_NAME"
 
@@ -105,39 +108,46 @@ fi
 
 if [ ! -f "$TARGET_BIN" ] || [ ! -s "$TARGET_BIN" ]; then
     FAILS+=("target_bin_invalid")
-    emit "PHASE: codegen FAIL rc=1 log=none (Target binary invalid or empty: $TARGET_BIN)"
+    emit "PHASE: $PHASE_NAME FAIL rc=1 log=none (Target binary invalid or empty: $TARGET_BIN)"
     finish || true
     exit 1
 fi
 
-ASM_FULL="$(mktemp -t nam-plug-rt-codegen.XXXXXX.asm)"
+ASM_FULL=""
 ASM_BOUNDED="$(mktemp -t nam-plug-rt-codegen-bounded.XXXXXX.asm)"
 HOT_SYMBOLS="$(mktemp -t nam-plug-rt-codegen-symbols.XXXXXX.txt)"
 ASM_FILTERED="$(mktemp -t nam-plug-rt-codegen-filtered.XXXXXX.asm)"
 ASM_SUMMARY="$(mktemp -t nam-plug-rt-codegen-summary.XXXXXX.txt)"
 TMP_ERR="$(mktemp -t nam-plug-rt-codegen-err.XXXXXX.log)"
-trap 'rm -f "$ASM_FULL" "$ASM_BOUNDED" "$HOT_SYMBOLS" "$ASM_FILTERED" "$ASM_SUMMARY" "$TMP_ERR"' EXIT
 
-if ! LC_ALL=C "$OBJDUMP_TOOL" -d --demangle --no-show-raw-insn "$TARGET_BIN" > "$ASM_FULL" 2> "$TMP_ERR"; then
-    cat "$TMP_ERR" >&2
-    cat "$TMP_ERR" >> "$CUR_LOG"
-    FAILS+=("objdump_full")
-    emit "PHASE: codegen FAIL rc=1 log=$CUR_LOG (objdump full disassembly failed)"
-    finish || true
-    exit 1
+if [ -n "$PRE_ASM_FULL" ] && [ -s "$PRE_ASM_FULL" ]; then
+    ASM_FULL="$PRE_ASM_FULL"
+    trap 'rm -f "$ASM_BOUNDED" "$HOT_SYMBOLS" "$ASM_FILTERED" "$ASM_SUMMARY" "$TMP_ERR"' EXIT
+else
+    ASM_FULL="$(mktemp -t nam-plug-rt-codegen.XXXXXX.asm)"
+    trap 'rm -f "$ASM_FULL" "$ASM_BOUNDED" "$HOT_SYMBOLS" "$ASM_FILTERED" "$ASM_SUMMARY" "$TMP_ERR"' EXIT
+
+    if ! LC_ALL=C "$OBJDUMP_TOOL" -d --demangle --no-show-raw-insn "$TARGET_BIN" > "$ASM_FULL" 2> "$TMP_ERR"; then
+        cat "$TMP_ERR" >&2
+        cat "$TMP_ERR" >> "$CUR_LOG"
+        FAILS+=("objdump_full")
+        emit "PHASE: $PHASE_NAME FAIL rc=1 log=$CUR_LOG (objdump full disassembly failed)"
+        finish || true
+        exit 1
+    fi
 fi
 
 if [ ! -s "$ASM_FULL" ]; then
     echo "Disassembly produced empty output for $TARGET_BIN" >> "$CUR_LOG"
     FAILS+=("objdump_empty")
-    emit "PHASE: codegen FAIL rc=1 log=$CUR_LOG (Disassembly produced empty output for $TARGET_BIN)"
+    emit "PHASE: $PHASE_NAME FAIL rc=1 log=$CUR_LOG (Disassembly produced empty output for $TARGET_BIN)"
     finish || true
     exit 1
 fi
 
 if ! "$REPORT" hot-symbols "$PROFILE" "$ASM_FULL" > "$HOT_SYMBOLS" 2>> "$CUR_LOG"; then
     FAILS+=("hot_symbols")
-    emit "PHASE: codegen FAIL rc=1 log=$CUR_LOG (hot-symbols extraction failed)"
+    emit "PHASE: $PHASE_NAME FAIL rc=1 log=$CUR_LOG (hot-symbols extraction failed)"
     finish || true
     exit 1
 fi
@@ -155,7 +165,7 @@ if [ -s "$HOT_SYMBOLS" ] && LC_ALL=C "$OBJDUMP_TOOL" --help 2>&1 | grep -q -- '-
             cat "$TMP_SYM_ERR" >> "$CUR_LOG"
             rm -f "$TMP_SYM_ASM" "$TMP_SYM_ERR"
             FAILS+=("objdump:$symbol")
-            emit "PHASE: codegen FAIL rc=1 log=$CUR_LOG (failed to disassemble $symbol)"
+            emit "PHASE: $PHASE_NAME FAIL rc=1 log=$CUR_LOG (failed to disassemble $symbol)"
             finish || true
             exit 1
         fi
@@ -163,7 +173,7 @@ if [ -s "$HOT_SYMBOLS" ] && LC_ALL=C "$OBJDUMP_TOOL" --help 2>&1 | grep -q -- '-
             echo "Empty disassembly for symbol: $symbol" >> "$CUR_LOG"
             rm -f "$TMP_SYM_ASM" "$TMP_SYM_ERR"
             FAILS+=("objdump:$symbol")
-            emit "PHASE: codegen FAIL rc=1 log=$CUR_LOG (empty disassembly for $symbol)"
+            emit "PHASE: $PHASE_NAME FAIL rc=1 log=$CUR_LOG (empty disassembly for $symbol)"
             finish || true
             exit 1
         fi
@@ -188,7 +198,7 @@ if ! "$FILTER" "${FILTER_ARGS[@]}" >> "$CUR_LOG" 2>&1; then
     cat "$ASM_SUMMARY" 2>/dev/null >> "$CUR_LOG" || true
     echo "RT codegen gate FAILED (see summary above)." >&2
     FAILS+=("filter")
-    emit "PHASE: codegen FAIL rc=1 log=$CUR_LOG (RT codegen verification failed for $TARGET_BIN)"
+    emit "PHASE: $PHASE_NAME FAIL rc=1 log=$CUR_LOG (RT codegen verification failed for $TARGET_BIN)"
     finish || true
     exit 1
 fi
@@ -197,6 +207,6 @@ cat "$ASM_SUMMARY" 2>/dev/null >> "$CUR_LOG" || true
 METRICS_LINE="$("$REPORT" metrics "$PROFILE" "$ASM_SUMMARY" "$TARGET_BIN" "$JSON_OUT")"
 echo "RT_CODEGEN_METRICS: $METRICS_LINE"
 
-emit "PHASE: codegen PASS log=$CUR_LOG"
+emit "PHASE: $PHASE_NAME PASS log=$CUR_LOG"
 ok "RT codegen verification passed cleanly."
 finish

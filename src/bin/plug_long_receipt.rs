@@ -40,8 +40,8 @@ use std::str::FromStr;
 use nam_plug::receipt::LONG_ROSTER;
 use nam_plug::receipt::build::{
     BuildArtifacts, BuildOptimizations, BuildProvenance, BuildReceipt, PackageInfo,
-    compare_codegen, extract_engine_provenance, hash_file, parse_ab_opt_ceremony_receipt,
-    parse_pgo_workload_receipt,
+    compare_codegen, extract_engine_provenance, hash_file, parse_pgo_workload_receipt,
+    validate_ab_opt_ceremony_receipt, validate_pgo_workload,
 };
 use nam_plug::receipt::long_artifact::{
     ARTIFACT_EXERCISED_KEY, ARTIFACT_PATH_KEY, ARTIFACT_SHA256_KEY, ArtifactConsistency,
@@ -74,6 +74,8 @@ fn main() {
         "certify" => cmd_certify(&args[1..]),
         "verify-release" => cmd_verify_release(&args[1..]),
         "flatpak-path" => cmd_flatpak_path(&args[1..]),
+        "pgo-check" => cmd_pgo_check(&args[1..]),
+        "ceremony-proof" => cmd_ceremony_proof(&args[1..]),
         "-h" | "--help" => {
             print_help();
             exit(0);
@@ -99,6 +101,10 @@ fn print_help() {
     println!("  plug_long_receipt verify-artifact --out <file> --artifact <path>");
     println!("  plug_long_receipt artifact-status --out <file> --expected-sha256 <hex>");
     println!("  plug_long_receipt build-receipt [--out <file>] [--artifact <path>] [options...]");
+    println!("  plug_long_receipt pgo-check --receipt <file> [--log <file>]");
+    println!(
+        "  plug_long_receipt ceremony-proof --receipt <file> [--git-sha <sha>] [--cargo-lock-sha256 <sha>]"
+    );
     println!("  plug_long_receipt smoke-load --artifact <path>");
     println!(
         "  plug_long_receipt verify-release [--release-receipt <path>] [--artifact <path>]   (prints artifact SHA-256)"
@@ -733,6 +739,52 @@ fn cmd_certify(args: &[String]) {
     }
 }
 
+fn cmd_pgo_check(args: &[String]) {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => die_usage("pgo-check", &e),
+    };
+    let receipt = match required(&flags, "receipt") {
+        Ok(v) => v.clone(),
+        Err(e) => die_usage("pgo-check", &e),
+    };
+    let log = flags.get("log").cloned();
+    match validate_pgo_workload(&receipt, log.as_deref().map(Path::new)) {
+        Ok(summary) => {
+            println!("PGO_RECEIPT: PASS {summary}");
+            exit(0);
+        }
+        Err(e) => {
+            eprintln!("PGO_RECEIPT: FAIL {e}");
+            exit(1);
+        }
+    }
+}
+
+fn cmd_ceremony_proof(args: &[String]) {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => die_usage("ceremony-proof", &e),
+    };
+    let receipt = match required(&flags, "receipt") {
+        Ok(v) => v.clone(),
+        Err(e) => die_usage("ceremony-proof", &e),
+    };
+    let git_sha = flags.get("git-sha").map(|s| s.as_str());
+    let cargo_lock = flags.get("cargo-lock-sha256").map(|s| s.as_str());
+
+    match validate_ab_opt_ceremony_receipt(&receipt, git_sha, cargo_lock) {
+        Ok((_proof_id, _samples, _fdata_sha, verdict)) => {
+            println!("{verdict}");
+            exit(0);
+        }
+        Err(rejection) => {
+            eprintln!("CEREMONY_PROOF_REJECTED: {}", rejection.reason_code());
+            exit(1);
+        }
+    }
+}
+
 fn cmd_build_receipt(args: &[String]) {
     let flags = match parse_flags(args) {
         Ok(f) => f,
@@ -788,6 +840,13 @@ fn cmd_build_receipt(args: &[String]) {
     let bolt_profile = flags.get("bolt-profile").cloned();
     let ceremony_receipt = flags.get("ceremony-receipt").cloned();
     let pgo_workload_receipt = flags.get("pgo-workload-receipt").cloned();
+    let pgo_workload_log = flags.get("pgo-workload-log").cloned();
+    let clipping_phase1 = flags
+        .get("clipping-count-phase1")
+        .and_then(|c| c.parse::<u64>().ok());
+    let clipping_bolt = flags
+        .get("clipping-count-bolt")
+        .and_then(|c| c.parse::<u64>().ok());
     let codegen_csv_pre = flags.get("codegen-csv-pre").cloned();
     let codegen_csv_post = flags.get("codegen-csv-post").cloned();
     let tarball_path = flags.get("tarball-path").cloned();
@@ -837,24 +896,36 @@ fn cmd_build_receipt(args: &[String]) {
         .as_ref()
         .and_then(|p| hash_file(Path::new(p)).ok());
 
-    let (bolt_proof, bolt_lbr_samples, bolt_lbr_fdata_sha256) =
-        if let Some(cr) = ceremony_receipt.as_deref() {
-            match parse_ab_opt_ceremony_receipt(cr) {
-                Some((proof_id, samples, fdata)) => (proof_id, samples, fdata),
-                None => {
-                    if bolt_status == "applied" {
-                        gaps.push("bolt_proof_unverified".to_string());
-                        ("unverified".to_string(), None, None)
-                    } else {
-                        ("skipped".to_string(), None, None)
-                    }
+    let (bolt_proof, bolt_lbr_samples, bolt_lbr_fdata_sha256) = if let Some(cr) =
+        ceremony_receipt.as_deref()
+    {
+        match validate_ab_opt_ceremony_receipt(cr, Some(&git_commit), Some(&cargo_lock_sha256)) {
+            Ok((proof_id, samples, fdata, verdict)) => {
+                if verdict == "UNOPTIMIZED" {
+                    ("fallback_plain".to_string(), samples, fdata)
+                } else if verdict == "PGO-ONLY" || bolt_status == "not_proven" {
+                    ("fallback_pgo_only".to_string(), samples, fdata)
+                } else {
+                    (proof_id, samples, fdata)
                 }
             }
-        } else if bolt_status == "applied" {
-            ("unverified".to_string(), None, None)
-        } else {
-            ("skipped".to_string(), None, None)
-        };
+            Err(e) => {
+                if bolt_status == "applied" {
+                    gaps.push("bolt_proof_unverified".to_string());
+                    gaps.push("bolt_not_proven".to_string());
+                }
+                (format!("unverified:{}", e.reason_code()), None, None)
+            }
+        }
+    } else if bolt_status == "not_proven" {
+        ("fallback_pgo_only".to_string(), None, None)
+    } else {
+        if bolt_status == "applied" {
+            gaps.push("bolt_proof_unverified".to_string());
+            gaps.push("bolt_not_proven".to_string());
+        }
+        ("skipped".to_string(), None, None)
+    };
 
     let bolt_profile_sha256 = bolt_profile
         .as_ref()
@@ -865,9 +936,14 @@ fn cmd_build_receipt(args: &[String]) {
         codegen_csv_post.as_deref().map(Path::new),
     );
 
-    let pgo_workload = pgo_workload_receipt
-        .as_deref()
-        .and_then(parse_pgo_workload_receipt);
+    let pgo_workload = pgo_workload_receipt.as_deref().and_then(|r| {
+        parse_pgo_workload_receipt(
+            r,
+            pgo_workload_log.as_deref().map(Path::new),
+            clipping_phase1,
+            clipping_bolt,
+        )
+    });
 
     let pgo_applied = pgo_status == "applied";
     let bolt_applied = bolt_status == "applied";
@@ -875,20 +951,16 @@ fn cmd_build_receipt(args: &[String]) {
     if !pgo_applied {
         gaps.push("pgo_not_applied".to_string());
     }
-    if !bolt_applied {
+    if bolt_status == "not_proven" {
+        gaps.push("bolt_not_proven".to_string());
+    } else if !bolt_applied {
         gaps.push("bolt_not_applied".to_string());
     }
 
     gaps.sort();
     gaps.dedup();
 
-    let status = if !gaps.is_empty() && strict {
-        "FAILED".to_string()
-    } else if !gaps.is_empty() {
-        "PASS_WITH_GAPS".to_string()
-    } else {
-        "PASSED".to_string()
-    };
+    let (status, _fatal_strict_gaps) = compute_build_status(&gaps, &bolt_proof, strict);
 
     let receipt = BuildReceipt {
         schema_version: "1.0.0".to_string(),
@@ -955,5 +1027,111 @@ fn cmd_build_receipt(args: &[String]) {
     } else {
         println!("BUILD_RECEIPT: PASS log={out} sha256={artifact_sha256}");
         exit(0);
+    }
+}
+
+fn compute_build_status(gaps: &[String], bolt_proof: &str, strict: bool) -> (String, Vec<String>) {
+    let fatal_strict_gaps: Vec<String> = gaps
+        .iter()
+        .filter(|g| {
+            if bolt_proof == "fallback_plain" {
+                g.as_str() != "bolt_not_proven"
+                    && g.as_str() != "pgo_not_applied"
+                    && g.as_str() != "bolt_not_applied"
+            } else if bolt_proof == "fallback_pgo_only" {
+                g.as_str() != "bolt_not_proven" && g.as_str() != "bolt_not_applied"
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+
+    let status = if !fatal_strict_gaps.is_empty() && strict {
+        "FAILED".to_string()
+    } else if !gaps.is_empty() {
+        "PASS_WITH_GAPS".to_string()
+    } else {
+        "PASSED".to_string()
+    };
+
+    (status, fatal_strict_gaps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_build_status_strict_fatal_gaps() {
+        let gaps = vec!["pgo_not_applied".to_string()];
+        let (status, fatal) = compute_build_status(&gaps, "skipped", true);
+        assert_eq!(status, "FAILED");
+        assert_eq!(fatal, vec!["pgo_not_applied"]);
+
+        let gaps = vec!["bolt_not_applied".to_string()];
+        let (status, fatal) = compute_build_status(&gaps, "unverified:missing", true);
+        assert_eq!(status, "FAILED");
+        assert_eq!(fatal, vec!["bolt_not_applied"]);
+    }
+
+    #[test]
+    fn test_compute_build_status_fallback_plain() {
+        let gaps = vec![
+            "bolt_not_applied".to_string(),
+            "bolt_not_proven".to_string(),
+            "pgo_not_applied".to_string(),
+        ];
+        let (status, fatal) = compute_build_status(&gaps, "fallback_plain", true);
+        assert_eq!(status, "PASS_WITH_GAPS");
+        assert!(fatal.is_empty());
+
+        let gaps = vec!["bolt_not_applied".to_string(), "tool_missing".to_string()];
+        let (status, fatal) = compute_build_status(&gaps, "fallback_plain", true);
+        assert_eq!(status, "FAILED");
+        assert_eq!(fatal, vec!["tool_missing"]);
+    }
+
+    #[test]
+    fn test_compute_build_status_fallback_pgo_only() {
+        let gaps = vec![
+            "bolt_not_applied".to_string(),
+            "bolt_not_proven".to_string(),
+        ];
+        let (status, fatal) = compute_build_status(&gaps, "fallback_pgo_only", true);
+        assert_eq!(status, "PASS_WITH_GAPS");
+        assert!(fatal.is_empty());
+
+        let gaps = vec!["bolt_not_proven".to_string(), "pgo_not_applied".to_string()];
+        let (status, fatal) = compute_build_status(&gaps, "fallback_pgo_only", true);
+        assert_eq!(status, "FAILED");
+        assert_eq!(fatal, vec!["pgo_not_applied"]);
+    }
+
+    #[test]
+    fn test_compute_build_status_non_strict() {
+        let gaps = vec!["pgo_not_applied".to_string()];
+        let (status, fatal) = compute_build_status(&gaps, "skipped", false);
+        assert_eq!(status, "PASS_WITH_GAPS");
+        assert_eq!(fatal, vec!["pgo_not_applied"]);
+    }
+
+    #[test]
+    fn test_compute_build_status_clean_pass() {
+        let gaps = Vec::new();
+        let (status, fatal) = compute_build_status(&gaps, "applied", true);
+        assert_eq!(status, "PASSED");
+        assert!(fatal.is_empty());
+    }
+
+    #[test]
+    fn test_ceremony_proof_missing_file_rejected() {
+        let res = validate_ab_opt_ceremony_receipt(
+            std::path::Path::new("target/logs/non_existent_ceremony.json"),
+            None,
+            None,
+        );
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().reason_code(), "ceremony_missing_receipt");
     }
 }

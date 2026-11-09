@@ -11,6 +11,9 @@ cd "$(dirname "$0")/.."
 
 case "${1:-}" in "") ;; -h|--help) echo "Uso: utils/verify_no_rt_alloc.sh"; exit 0 ;; *) usage_fail "verify_no_rt_alloc.sh aceita apenas -h/--help" ;; esac
 lib_init
+PHASE_NAME=rt_alloc_scan; CUR_LOG="$LOG_DIR/verify_no_rt_alloc.log"
+trap 'trap_fail $?' ERR
+phase rt_alloc_scan
 
 AWK_PROG="utils/rt_alloc_scan.awk"
 PROC_DIR="src/clap/processor"
@@ -26,8 +29,13 @@ SCAN_FILES="$(printf '%s\n' "$RT_FILES" | grep -vE '(^|/)[A-Za-z0-9_]*_test\.rs$
 if ! matches=$(awk -f "$AWK_PROG" $SCAN_FILES 2>&1); then
     echo "RT-hostile allocation pattern found in src/clap/processor/:" >&2
     printf '%s\n' "$matches" | sed 's/^/    /' >&2
-    die "RT static allocation scan FAILED"
+    printf '%s\n' "$matches" >> "$CUR_LOG"
+    FAILS+=("rt_alloc_scan")
+    emit "PHASE: rt_alloc_scan FAIL rc=1 log=$CUR_LOG"
+    finish || exit 1
+    exit 1
 fi
 
+emit "PHASE: rt_alloc_scan PASS log=$CUR_LOG"
 ok "RT allocation scan clean: no Box::new / implicit allocations on the audio-thread path (src/clap/processor/)."
-exit 0
+finish

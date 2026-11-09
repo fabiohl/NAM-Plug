@@ -317,14 +317,17 @@ All automation scripts adhere to a unified execution contract (Class A interacti
 The official release sequence strictly decouples compilation from certification:
 
 ```bash
-# 1. Build canonical release artifact (nam_plug.clap) into target/dist/
-./utils/build-release.sh --strict --package --install
+# 1. Run the A/B optimization ceremony (Plain vs. PGO vs. PGO+BOLT)
+./utils/ab-opt-ceremony.sh --runs 3
 
-# 2. Audit the canonical artifact under heavy stress
+# 2. Build canonical release artifact (nam_plug.clap) and packages into target/dist/
+./utils/build-release.sh --strict --package
+
+# 3. Audit the canonical artifact under heavy stress
 ./utils/tests-long.sh --strict --artifact
 
-# 3. Certify release evidence atomically without recompilation
-./utils/build-release.sh --certify
+# 4. Certify release evidence atomically without recompilation and install
+./utils/build-release.sh --strict --certify --install
 ```
 
 For full details on script classes, exit codes, interface variables, and measured execution budgets, see [`docs/testing.md`](docs/testing.md).

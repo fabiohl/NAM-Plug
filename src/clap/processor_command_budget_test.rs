@@ -504,12 +504,12 @@ fn test_structural_burst_p99_within_contract() {
         process_block(&mut started, &mut bufs);
     }
 
-    // Steady-state baseline: 64 empty blocks.
-    let mut steady: Vec<u128> = Vec::with_capacity(64);
-    for _ in 0..64 {
+    // Steady-state baseline: 64 empty blocks (prefaulted vector).
+    let mut steady: Vec<u128> = vec![0u128; 64];
+    for slot in steady.iter_mut() {
         let t0 = Instant::now();
         process_block(&mut started, &mut bufs);
-        steady.push(t0.elapsed().as_nanos());
+        *slot = t0.elapsed().as_nanos();
     }
 
     // Burst: enqueue 64 non-coalescible structural commands (atomic restores)
@@ -533,11 +533,11 @@ fn test_structural_burst_p99_within_contract() {
         }
     }
 
-    let mut burst: Vec<u128> = Vec::with_capacity(64);
-    for _ in 0..64 {
+    let mut burst: Vec<u128> = vec![0u128; 64];
+    for slot in burst.iter_mut() {
         let t0 = Instant::now();
         process_block(&mut started, &mut bufs);
-        burst.push(t0.elapsed().as_nanos());
+        *slot = t0.elapsed().as_nanos();
     }
 
     // Deterministic part: all 64 commands were drained (one apply + one defer

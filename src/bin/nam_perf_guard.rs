@@ -338,6 +338,40 @@ fn apply_bench_affinity(core: usize) -> Result<usize, String> {
     }
 }
 
+/// Applies host-side real-time hardening (memory locking, 64 KiB stack
+/// prefaulting, and best-effort `SCHED_FIFO` priority 80 promotion) before
+/// running the certification harness, emulating a calibrated DAW audio thread.
+fn apply_bench_rt_hardening() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `mlockall` locks current and future pages of this standalone
+        // certification binary into RAM so page faults cannot skew p99 latency.
+        // Failure is non-fatal (best-effort under unprivileged RLIMIT_MEMLOCK).
+        unsafe {
+            let _ = libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+        }
+        let mut stack_probe = [0u8; 64 * 1024];
+        for page in stack_probe.chunks_mut(4096) {
+            // SAFETY: `page[0]` is a valid in-bounds byte of the local stack array.
+            unsafe {
+                std::ptr::write_volatile(&mut page[0], 1);
+            }
+        }
+        std::hint::black_box(&stack_probe);
+
+        // SAFETY: `sched_getscheduler(0)` queries the calling thread's policy;
+        // `sched_setscheduler(0, SCHED_FIFO, &param)` promotes the calling thread
+        // when `RLIMIT_RTPRIO` / `CAP_SYS_NICE` permits it.
+        unsafe {
+            let current = libc::sched_getscheduler(0);
+            if current != libc::SCHED_FIFO && current != libc::SCHED_RR {
+                let param = libc::sched_param { sched_priority: 80 };
+                let _ = libc::sched_setscheduler(0, libc::SCHED_FIFO, &param);
+            }
+        }
+    }
+}
+
 fn irqs_sharing_core(core: usize) -> Vec<String> {
     let Ok(entries) = fs::read_dir("/proc/irq") else {
         return Vec::new();
@@ -349,12 +383,14 @@ fn irqs_sharing_core(core: usize) -> Vec<String> {
         if !name.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let affinity_path = entry.path().join("smp_affinity_list");
-        let Ok(affinity) = fs::read_to_string(&affinity_path) else {
+        let dir = entry.path();
+        let affinity = read_trim(&dir.join("effective_affinity_list").to_string_lossy())
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_trim(&dir.join("smp_affinity_list").to_string_lossy()));
+        let Some(affinity) = affinity else {
             continue;
         };
-        let affinity = affinity.trim();
-        if parse_cpu_list(affinity).contains(&core) {
+        if parse_cpu_list(&affinity).contains(&core) {
             sharing.push(name.to_string());
         }
     }
@@ -451,11 +487,6 @@ fn host_degradation_reasons(host: &HostEnvironment) -> Vec<String> {
         Some("performance") => {}
         Some(other) => reasons.push(format!("governor_not_performance:{other}")),
         None => reasons.push("governor_unknown".to_string()),
-    }
-    match host.boost.as_deref() {
-        Some("1") => reasons.push("cpu_boost_enabled".to_string()),
-        Some(_) => {}
-        None => reasons.push("boost_unknown".to_string()),
     }
     let allowed = parse_cpu_list(&host.cpus_allowed_list);
     if !host.affinity_applied && allowed.len() > 1 {
@@ -758,11 +789,11 @@ fn measure_scenario(
         );
     }
 
-    // Benchmark measurement (300 iterations)
+    // Benchmark measurement (300 iterations, pre-allocated and prefaulted)
     const MEASUREMENT_CYCLES: usize = 300;
-    let mut latencies_ns = Vec::with_capacity(MEASUREMENT_CYCLES);
+    let mut latencies_ns = vec![0.0_f64; MEASUREMENT_CYCLES];
 
-    for _ in 0..MEASUREMENT_CYCLES {
+    for slot in &mut latencies_ns {
         let input_events = InputEvents::empty();
         let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
 
@@ -791,7 +822,7 @@ fn measure_scenario(
         );
         let elapsed = start.elapsed();
         let _ = std::hint::black_box(status);
-        latencies_ns.push(elapsed.as_nanos() as f64);
+        *slot = elapsed.as_nanos() as f64;
     }
 
     let stopped_processor = started_processor.stop_processing();
@@ -999,18 +1030,24 @@ fn main() -> ExitCode {
     let mut all_deadlines_passed = true;
     let mut environment_stable = true;
 
-    // Affinity is applied before the first measurement, not merely recorded:
-    // the report must distinguish the requested from the observed core.
+    // Real-time hardening and CPU affinity are applied before the first
+    // measurement, not merely recorded: the report must distinguish the
+    // requested from the observed core and reflect the active RT policy.
+    apply_bench_rt_hardening();
     let mut host = probe_host();
     if let Some(core) = host.bench_core {
         match apply_bench_affinity(core) {
             Ok(observed) => {
                 host.affinity_applied = true;
                 host.affinity_observed_core = Some(observed);
+                if let Some(allowed) = read_proc_status_field("Cpus_allowed_list") {
+                    host.cpus_allowed_list = allowed;
+                }
             }
             Err(error) => host.affinity_error = Some(error),
         }
     }
+    host.sched_policy = read_sched_policy();
 
     for sc in &scenarios {
         match measure_scenario(&clap_target, sc) {
@@ -1246,4 +1283,54 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn calibrated_host() -> HostEnvironment {
+        HostEnvironment {
+            bench_core: Some(8),
+            affinity_applied: true,
+            affinity_observed_core: Some(8),
+            affinity_error: None,
+            cpus_allowed_list: "8".to_string(),
+            sched_policy: "SCHED_FIFO".to_string(),
+            governor: Some("performance".to_string()),
+            boost: Some("1".to_string()),
+            cpu_online: "0-15".to_string(),
+            cpu_isolated: "8-9".to_string(),
+            irq_isolation: "isolated".to_string(),
+            irqs_sharing_bench_core: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn calibrated_host_is_not_degraded_even_with_cpufreq_boost_enabled() {
+        let host = calibrated_host();
+        assert!(
+            host_degradation_reasons(&host).is_empty(),
+            "calibrated isolated host with SCHED_FIFO and performance governor must not degrade on boost metadata"
+        );
+    }
+
+    #[test]
+    fn host_degradation_flags_non_rt_policy_and_shared_irq() {
+        let mut host = calibrated_host();
+        host.sched_policy = "SCHED_OTHER".to_string();
+        host.irq_isolation = "shared".to_string();
+        host.irqs_sharing_bench_core = vec!["62".to_string()];
+        let reasons = host_degradation_reasons(&host);
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r == "sched_policy_not_realtime:SCHED_OTHER"),
+            "expected sched_policy_not_realtime, got {reasons:?}"
+        );
+        assert!(
+            reasons.iter().any(|r| r == "irq_isolation_shared:8:1"),
+            "expected irq_isolation_shared:8:1, got {reasons:?}"
+        );
+    }
 }

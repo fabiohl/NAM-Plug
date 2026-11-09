@@ -17,6 +17,14 @@ Control begins formally with version 1.0.0.
 
 ### Fixed
 
+- **Performance certification harness (`nam_perf_guard` & `tests-long.sh`):**
+  - `utils/tests-long.sh` now automatically bootstraps the paired baseline series (`target/logs/perf-reference.json`) for the current `nam_plug.clap` SHA-256 when absent or stale after a clean build, eliminating the `perf:reference_missing` deadlock on fresh release ceremonies.
+  - `nam_perf_guard` now applies in-process real-time hardening (`mlockall`, 64 KiB stack prefaulting, and `SCHED_FIFO` priority 80 promotion), pre-allocates and prefaults the measurement latency buffer before timing, checks kernel `effective_affinity_list` (with fallback to `smp_affinity_list`) when detecting shared IRQs on `isolcpus=managed_irq` hosts, and records `cpufreq/boost` as diagnostic provenance without falsely marking calibrated hosts as degraded.
+  - Pre-allocated and prefaulted timing vectors in `processor_command_budget_test` and `processor_drain_latency_test` to avoid page-fault jitter during `rt-heap` micro-latency certification.
+- **Long audit & ceremony script hardening:**
+  - `utils/tests-long.sh` now uses `set -o pipefail` (Class B decoupled audit contract), derives `tests=` counts automatically for `catch-all` in `long-receipt.txt`, and executes `catch-all`, `artifact`, and `perf` consecutively before `gui` (`--features testing,gui-x11`) to eliminate redundant ~3 min release recompilations.
+  - `utils/ab-opt-ceremony.sh` now sources `variables.env` before emitting `ab-opt-provenance.json` and `ab-opt-ceremony-receipt.json` so `engine_commit` records the pinned engine SHA instead of `"unknown"`.
+  - `.github/workflows/long.yml` no longer copies `summary.txt` directly outside `utils/_lib.sh` and `.github/actions/qa-summary`.
 - **Performance certification evidence:** `nam_perf_guard` now applies and verifies CPU affinity in-process, writes the report fail-closed to `target/logs/perf-certification-report.json`, blocks certification on a degraded host or missing paired reference, and records `run_id`.
 - **Activation sample rate:** `activate()` clamps the host rate to `[4_000, 384_000]` Hz so out-of-range hosts such as `clap-validator` at 768 kHz activate safely.
 - **Dual-mono teardown contract:** the GC stress test accounts for all 98 in-flight items of the dual-mono layout (32 SPSC + 16 parking lot + 50 overflow) drained off the audio thread.

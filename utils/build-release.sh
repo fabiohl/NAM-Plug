@@ -72,7 +72,26 @@ if [ "$DO_INSTALL" = true ] && [ "$DO_CERTIFY" != true ]; then
 fi
 
 lib_init
-trap 'trap_fail $?' ERR
+
+PARANOID_ORIG=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)
+restore_paranoid() {
+    local cur
+    cur=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)
+    if [ "$cur" != "$PARANOID_ORIG" ]; then
+        if ! sudo -n sysctl -q -w kernel.perf_event_paranoid="$PARANOID_ORIG" 2>/dev/null; then
+            if [ "${FINISHED:-0}" = 1 ]; then
+                echo "WARN: perf_event_paranoid not restored after RESULT" >&2
+            else
+                gap "bolt_optimize:perf_paranoid_not_restored"
+            fi
+        fi
+    fi
+}
+trap restore_paranoid EXIT
+trap 'restore_paranoid; trap_fail $?' ERR
+if [ "$PARANOID_ORIG" -gt 1 ]; then
+    sudo -n sysctl -q -w kernel.perf_event_paranoid=1 2>/dev/null || true
+fi
 mkdir -p "$DIST_DIR" "$LOG_DIR"
 if [ "$DO_CERTIFY" != true ]; then
     # Never let a failed build inherit the previous build's run id or receipt.
@@ -127,10 +146,10 @@ if [ "$DO_CERTIFY" = true ]; then
     fi
 
     CERT_BIN=""
-    if [ -x "$PROJECT_DIR/target/long/release/plug_long_receipt" ]; then
-        CERT_BIN="$PROJECT_DIR/target/long/release/plug_long_receipt"
-    elif [ -x "$PROJECT_DIR/target/release/plug_long_receipt" ]; then
+    if [ -x "$PROJECT_DIR/target/release/plug_long_receipt" ]; then
         CERT_BIN="$PROJECT_DIR/target/release/plug_long_receipt"
+    elif [ -x "$PROJECT_DIR/target/long/release/plug_long_receipt" ]; then
+        CERT_BIN="$PROJECT_DIR/target/long/release/plug_long_receipt"
     fi
 
     RC=0
@@ -262,8 +281,37 @@ for candidate in llvm-objdump objdump; do
     fi
 done
 
-# Pre-build plug_long_receipt tool
-cargo build --locked --features testing --bin plug_long_receipt >/dev/null 2>&1 || true
+# Pre-build plug_long_receipt tool in release profile (reused by tests-long.sh and --certify)
+if ! cargo build --locked --release --features testing --bin plug_long_receipt >> "$ENV_LOG" 2>&1; then
+    FAILS+=("env_verify")
+    emit "PHASE: env_verify FAIL rc=1 log=$ENV_LOG (failed to build plug_long_receipt)"
+    finish
+    die "cannot build the typed receipt tool (plug_long_receipt)"
+fi
+
+CEREMONY_RECEIPT="$LOG_DIR/ab-opt-ceremony-receipt.json"
+CEREMONY_PREFLIGHT_VERDICT=""
+if [ "$DO_STRICT" -eq 1 ] && [ -f "$CEREMONY_RECEIPT" ]; then
+    CEREMONY_PREFLIGHT_LOG="$LOG_DIR/build-release-ceremony_preflight.log"
+    if ! CEREMONY_PREFLIGHT_VERDICT=$(cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- \
+        ceremony-proof --receipt "$CEREMONY_RECEIPT" --git-sha "$GIT_COMMIT" 2>"$CEREMONY_PREFLIGHT_LOG"); then
+        echo "ERROR: --strict rejected the A/B ceremony receipt (see $CEREMONY_PREFLIGHT_LOG)" | tee -a "$CEREMONY_PREFLIGHT_LOG" >&2
+        FAILS+=("env_verify")
+        emit "PHASE: env_verify FAIL rc=1 log=$CEREMONY_PREFLIGHT_LOG"
+        finish
+        exit 1
+    fi
+    case "$CEREMONY_PREFLIGHT_VERDICT" in
+        PGO+BOLT|PGO-ONLY|UNOPTIMIZED) ;;
+        *)
+            echo "ERROR: --strict requires a PGO+BOLT, PGO-ONLY or UNOPTIMIZED ceremony verdict, got '$CEREMONY_PREFLIGHT_VERDICT'" | tee -a "$CEREMONY_PREFLIGHT_LOG" >&2
+            FAILS+=("env_verify")
+            emit "PHASE: env_verify FAIL rc=1 log=$CEREMONY_PREFLIGHT_LOG"
+            finish
+            exit 1
+            ;;
+    esac
+fi
 
 # -----------------------------------------------------------------------------
 # PHASE 2: PGO Workload Profiling
@@ -271,11 +319,19 @@ cargo build --locked --features testing --bin plug_long_receipt >/dev/null 2>&1 
 PGO_TARGET_DIR="$PROJECT_DIR/target/pgo-profile"
 PROFRAW_DIR="$PGO_TARGET_DIR/profraw"
 MERGED_PROFILE="$PGO_TARGET_DIR/merged.profdata"
-PGO_WORKLOAD_LOG="$PROJECT_DIR/target/logs/pgo-workload.log"
-PGO_WORKLOAD_RECEIPT="$PROJECT_DIR/target/pgo-workload-receipt.json"
+PGO_WORKLOAD_LOG="$LOG_DIR/pgo-workload.log"
+PGO_WORKLOAD_RECEIPT="$LOG_DIR/pgo-workload-receipt.json"
+CLIPPING_COUNT_PHASE1=0
+CLIPPING_COUNT_BOLT=0
 PGO_STATUS="skipped"
 
-if [ -n "$LLVM_PROFDATA" ]; then
+if [ "${CEREMONY_PREFLIGHT_VERDICT:-}" = "UNOPTIMIZED" ]; then
+    phase "pgo_profile"
+    PGO_LOG="$LOG_DIR/build-release-pgo_profile.log"
+    echo "A/B ceremony proved PGO unoptimized (verdict: UNOPTIMIZED); skipping PGO to preserve optimal Plain performance" | tee "$PGO_LOG"
+    PGO_STATUS="skipped"
+    emit "PHASE: pgo_profile PASS log=$PGO_LOG"
+elif [ -n "$LLVM_PROFDATA" ]; then
     phase "pgo_profile"
     PGO_LOG="$LOG_DIR/build-release-pgo_profile.log"
     rm -rf "$PROFRAW_DIR" "$MERGED_PROFILE"
@@ -286,7 +342,8 @@ if [ -n "$LLVM_PROFDATA" ]; then
         echo "Compiling PGO profiling workload..."
         RUSTFLAGS="$PGO_GEN_RUSTFLAGS" cargo build --locked --profile dist --features testing --bin pgo_profiling_workload
         echo "Executing PGO profiling workload..."
-        LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw" timeout 60 "$PROJECT_DIR/target/dist/pgo_profiling_workload" 2>&1 | tee "$PGO_WORKLOAD_LOG"
+        LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw" timeout 60 "$PROJECT_DIR/target/dist/pgo_profiling_workload" --receipt "$PGO_WORKLOAD_RECEIPT" 2>&1 | tee "$PGO_WORKLOAD_LOG"
+        CLIPPING_COUNT_PHASE1=$(grep -c "Output clipping detected" "$PGO_WORKLOAD_LOG" 2>/dev/null || echo 0)
 
         PROFRAW_COUNT=$(find "$PROFRAW_DIR" -name "*.profraw" 2>/dev/null | wc -l)
         if [ "$PROFRAW_COUNT" -gt 0 ]; then
@@ -296,6 +353,10 @@ if [ -n "$LLVM_PROFDATA" ]; then
             echo "No .profraw profiles generated."
             exit 1
         fi
+
+        echo "Validating PGO workload receipt..."
+        cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- \
+            pgo-check --receipt "$PGO_WORKLOAD_RECEIPT" --log "$PGO_WORKLOAD_LOG"
     } 2>&1 | tee "$PGO_LOG"
     RC=${PIPESTATUS[0]}
     rm -rf "$PROFRAW_DIR"
@@ -358,7 +419,25 @@ BOLT_PROFILE="$BOLT_DIR/libnam_plug.merged.fdata"
 BOLT_VERSION=""
 mkdir -p "$BOLT_DIR"
 
-if [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
+CEREMONY_VERDICT=""
+if [ -f "$CEREMONY_RECEIPT" ]; then
+    CEREMONY_VERDICT=$(cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- \
+        ceremony-proof --receipt "$CEREMONY_RECEIPT" --git-sha "$GIT_COMMIT" 2>"$LOG_DIR/build-release-ceremony_proof.err" || true)
+fi
+
+if [ -n "$CEREMONY_VERDICT" ] && [ "$CEREMONY_VERDICT" != "PGO+BOLT" ]; then
+    phase "bolt_optimize"
+    BOLT_LOG="$LOG_DIR/build-release-bolt_optimize.log"
+    if [ "$CEREMONY_VERDICT" = "UNOPTIMIZED" ]; then
+        echo "A/B ceremony proved UNOPTIMIZED (neither PGO nor BOLT met margin); fallback_plain per promotion policy" | tee -a "$BOLT_LOG"
+        BOLT_STATUS="not_proven"
+        emit "PHASE: bolt_optimize PASS log=$BOLT_LOG"
+    elif [ "$CEREMONY_VERDICT" = "PGO-ONLY" ]; then
+        echo "A/B ceremony proved PGO-ONLY (BOLT applied, margin not met); fallback_pgo_only per promotion policy" | tee -a "$BOLT_LOG"
+        BOLT_STATUS="not_proven"
+        emit "PHASE: bolt_optimize PASS log=$BOLT_LOG"
+    fi
+elif [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
     phase "bolt_optimize"
     BOLT_LOG="$LOG_DIR/build-release-bolt_optimize.log"
     {
@@ -371,11 +450,14 @@ if [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
             --instrumentation-file-append-pid > "$BOLT_DIR/bolt-instrument.log" 2>&1
 
         echo "[Step 2/3] Collecting BOLT workload profiles..."
-        RUSTFLAGS="$BASE_RUSTFLAGS" cargo build --locked --profile dist --features testing --bin pgo_profiling_workload >/dev/null 2>&1
+        RUSTFLAGS="$BASE_RUSTFLAGS" cargo build --locked --profile dist --features testing --bin pgo_profiling_workload
         rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.* "$BOLT_PROFILE"
+        BOLT_WORKLOAD_RECEIPT="$LOG_DIR/bolt-workload-receipt.json"
+        BOLT_WORKLOAD_LOG="$LOG_DIR/build-release-bolt_workload.log"
 
         NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
-            "$PROJECT_DIR/target/dist/pgo_profiling_workload" >> "$PGO_WORKLOAD_LOG" 2>&1 || true
+            "$PROJECT_DIR/target/dist/pgo_profiling_workload" --clap-only --receipt "$BOLT_WORKLOAD_RECEIPT" 2>&1 | tee "$BOLT_WORKLOAD_LOG"
+        CLIPPING_COUNT_BOLT=$(grep -c "Output clipping detected" "$BOLT_WORKLOAD_LOG" 2>/dev/null || echo 0)
 
         CLAP_FDATA_FILES=()
         while IFS= read -r -d '' f; do
@@ -472,9 +554,9 @@ if [ -z "$OBJDUMP_TOOL" ]; then
     if [ "$DO_STRICT" -eq 1 ]; then CODEGEN_RC=1; fi
 else
     if [ "$BOLT_STATUS" = "applied" ] && [ -f "$COMPILED_SO" ]; then
-        lib_quiet=1 "$SCRIPT_DIR/verify_rt_codegen.sh" "$COMPILED_SO" --json-out "$CODEGEN_PRE_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
+        lib_quiet=1 "$SCRIPT_DIR/verify_rt_codegen.sh" "$COMPILED_SO" --phase-name codegen_pre --json-out "$CODEGEN_PRE_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
     fi
-    lib_quiet=1 "$SCRIPT_DIR/verify_rt_codegen.sh" "$ACTIVE_SO" --json-out "$CODEGEN_POST_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
+    lib_quiet=1 "$SCRIPT_DIR/verify_rt_codegen.sh" "$ACTIVE_SO" --phase-name codegen_post --json-out "$CODEGEN_POST_JSON" >> "$CODEGEN_LOG" 2>&1 || CODEGEN_RC=1
 fi
 if [ "$CODEGEN_RC" -eq 0 ]; then
     emit "PHASE: codegen_report PASS log=$CODEGEN_LOG"
@@ -504,7 +586,7 @@ if {
     nm -D "$STAGE_CLAP" | grep -w "clap_entry" >/dev/null || { echo "Missing clap_entry symbol!"; exit 1; }
     readelf -d "$STAGE_CLAP" | grep SONAME >/dev/null || { echo "Missing SONAME!"; exit 1; }
     echo "Running dynamic linker smoke test (smoke-load)..."
-    cargo run --quiet --locked --features testing --bin plug_long_receipt -- smoke-load --artifact "$STAGE_CLAP"
+    cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- smoke-load --artifact "$STAGE_CLAP"
     mv -f "$STAGE_CLAP" "$CLAP_TARGET"
     printf '%s\n' "$STAGE_SHA" > "$CLAP_SHA_FILE"
     [ "$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)" = "$STAGE_SHA" ] || { echo "published SHA-256 differs from staged artifact"; exit 1; }
@@ -531,6 +613,9 @@ if [ "$DO_PACKAGE" = true ]; then
     PKG_LOG="$LOG_DIR/build-release-packaging.log"
     {
         echo "Creating distribution tarball (.tar.zst)..."
+        SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --pretty=%ct 2>/dev/null || date +%s)}"
+        export SOURCE_DATE_EPOCH
+
         TMP_PKG_DIR=$(mktemp -d -t nam-plug-pkg.XXXXXX)
         mkdir -p "$TMP_PKG_DIR/$ARCHIVE_NAME"
         cp "$CLAP_TARGET" "$TMP_PKG_DIR/$ARCHIVE_NAME/"
@@ -547,10 +632,18 @@ cp nam_plug.clap "$CLAP_DIR/"
 echo "Installed nam_plug.clap to $CLAP_DIR/nam_plug.clap"
 EOF
         chmod +x "$TMP_PKG_DIR/$ARCHIVE_NAME/install.sh"
-        tar -C "$TMP_PKG_DIR" -I "zstd -6 -T0" -cf "$TARBALL" "$ARCHIVE_NAME"
+        tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
+            -C "$TMP_PKG_DIR" -I "zstd -6 -T0" -cf "$TARBALL" "$ARCHIVE_NAME"
         rm -rf "$TMP_PKG_DIR"
         TARBALL_PATH="$TARBALL"
         echo "Generated tarball: $TARBALL"
+
+        echo "Verifying tarball extraction and loading..."
+        TMP_EXTRACT=$(mktemp -d -t nam-plug-extract.XXXXXX)
+        tar -I "zstd -d" -xf "$TARBALL" -C "$TMP_EXTRACT"
+        [ -s "$TMP_EXTRACT/$ARCHIVE_NAME/nam_plug.clap" ] || { echo "ERROR: tarball extraction verification failed: nam_plug.clap missing" >&2; exit 1; }
+        cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- smoke-load --artifact "$TMP_EXTRACT/$ARCHIVE_NAME/nam_plug.clap"
+        rm -rf "$TMP_EXTRACT"
 
         if command -v flatpak >/dev/null 2>&1; then
             echo "Building Flatpak bundle..."
@@ -567,6 +660,21 @@ EOF
             mkdir -p "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug"
             cp "LICENSE.txt" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
             cp "NOTICE" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
+
+            METAINFO_SRC="packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml"
+            if [ -f "$METAINFO_SRC" ]; then
+                mkdir -p "$FLATPAK_BUILD_DIR/files/share/metainfo"
+                cp "$METAINFO_SRC" "$FLATPAK_BUILD_DIR/files/share/metainfo/"
+                if command -v appstreamcli >/dev/null 2>&1; then
+                    if ! appstreamcli validate --no-net --strict "$METAINFO_SRC" >> "$PKG_LOG" 2>&1; then
+                        FAILS+=("packaging")
+                        emit "PHASE: packaging FAIL rc=1 log=$PKG_LOG (AppStream metainfo validation failed)"
+                        finish
+                        exit 1
+                    fi
+                fi
+            fi
+
             flatpak build-finish "$FLATPAK_BUILD_DIR" --extension-priority=100
             flatpak build-export --update-appstream "$FLATPAK_REPO_DIR" "$FLATPAK_BUILD_DIR" 25.08
             flatpak build-bundle --runtime "$FLATPAK_REPO_DIR" "$FLATPAK_BUNDLE" org.freedesktop.LinuxAudio.Plugins.NAMPlug 25.08
@@ -624,8 +732,11 @@ RECEIPT_ARGS=(
 
 [ -n "$BOLT_VERSION" ] && RECEIPT_ARGS+=("--bolt-version" "$BOLT_VERSION")
 [ -f "$BOLT_PROFILE" ] && RECEIPT_ARGS+=("--bolt-profile" "$BOLT_PROFILE")
-[ -f "target/logs/ab-opt-ceremony-receipt.json" ] && RECEIPT_ARGS+=("--ceremony-receipt" "target/logs/ab-opt-ceremony-receipt.json")
+[ -f "$LOG_DIR/ab-opt-ceremony-receipt.json" ] && RECEIPT_ARGS+=("--ceremony-receipt" "$LOG_DIR/ab-opt-ceremony-receipt.json")
 [ -f "$PGO_WORKLOAD_RECEIPT" ] && RECEIPT_ARGS+=("--pgo-workload-receipt" "$PGO_WORKLOAD_RECEIPT")
+[ -f "$PGO_WORKLOAD_LOG" ] && RECEIPT_ARGS+=("--pgo-workload-log" "$PGO_WORKLOAD_LOG")
+[ -n "${CLIPPING_COUNT_PHASE1:-}" ] && RECEIPT_ARGS+=("--clipping-count-phase1" "$CLIPPING_COUNT_PHASE1")
+[ -n "${CLIPPING_COUNT_BOLT:-}" ] && RECEIPT_ARGS+=("--clipping-count-bolt" "$CLIPPING_COUNT_BOLT")
 [ -f "$CODEGEN_PRE_JSON" ] && RECEIPT_ARGS+=("--codegen-csv-pre" "$CODEGEN_PRE_JSON")
 [ -f "$CODEGEN_POST_JSON" ] && RECEIPT_ARGS+=("--codegen-csv-post" "$CODEGEN_POST_JSON")
 [ -n "$TARBALL_PATH" ] && RECEIPT_ARGS+=("--tarball-path" "$TARBALL_PATH")
@@ -640,7 +751,7 @@ if [ "$DO_STRICT" -eq 1 ]; then
     RECEIPT_ARGS+=("--strict")
 fi
 
-cargo run --quiet --locked --features testing --bin plug_long_receipt -- build-receipt "${RECEIPT_ARGS[@]}" 2>&1 | tee "$RECEIPT_LOG"
+cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- build-receipt "${RECEIPT_ARGS[@]}" 2>&1 | tee "$RECEIPT_LOG"
 RC=${PIPESTATUS[0]}
 
 if [ "$RC" -eq 0 ]; then

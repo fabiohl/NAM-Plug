@@ -76,6 +76,8 @@ pub struct ReleaseReceipt {
     pub pgo_workload: Option<PgoWorkloadInfo>,
     pub artifacts: ReleaseArtifacts,
     pub long_audit: ReleaseLongAudit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
 }
 
 /// Release artifact details and provenance status.
@@ -270,20 +272,62 @@ pub fn evaluate_certification(
                                     .to_string(),
                             );
                         }
+                        let is_proven_pgo_only = br.optimizations.pgo_applied
+                            && !br.optimizations.bolt_applied
+                            && br.optimizations.bolt_proof == "fallback_pgo_only";
+                        let is_proven_plain_only = !br.optimizations.pgo_applied
+                            && !br.optimizations.bolt_applied
+                            && br.optimizations.bolt_proof == "fallback_plain";
+
+                        let valid_status = br.status == "PASSED"
+                            || ((is_proven_pgo_only || is_proven_plain_only)
+                                && br.status == "PASS_WITH_GAPS");
+
                         // Check status
-                        if br.status != "PASSED" {
+                        if !valid_status {
                             fails.push("build_status_not_passed".to_string());
                             reasons.push(format!(
                                 "build receipt status is '{}', expected 'PASSED'",
                                 br.status
                             ));
                         }
+                        if br.provenance.git_dirty {
+                            fails.push("build_worktree_dirty".to_string());
+                            reasons.push(
+                                "build receipt provenance records git_dirty=true; a certified release must come from a clean worktree"
+                                    .to_string(),
+                            );
+                        }
                         // Check gaps
-                        if !br.gaps.is_empty() {
-                            for g in &br.gaps {
-                                gaps.push(format!("build:{g}"));
+                        for g in &br.gaps {
+                            if g == "bolt_not_proven"
+                                && (is_proven_pgo_only || is_proven_plain_only)
+                            {
+                                continue;
                             }
-                            reasons.push(format!("build receipt contains gaps: {:?}", br.gaps));
+                            if (g == "pgo_not_applied" || g == "bolt_not_applied")
+                                && is_proven_plain_only
+                            {
+                                continue;
+                            }
+                            gaps.push(format!("build:{g}"));
+                            reasons.push(format!("build receipt declares gap: '{g}'"));
+                        }
+                        if br.optimizations.bolt_applied
+                            && br.optimizations.bolt_proof == "fallback_pgo_only"
+                        {
+                            fails.push("build_verdict_mismatch".to_string());
+                            reasons.push(
+                                "build receipt has bolt_applied=true but bolt_proof=fallback_pgo_only"
+                                    .to_string(),
+                            );
+                        }
+                        if !br.optimizations.pgo_applied && !is_proven_plain_only {
+                            fails.push("unoptimized_verdict".to_string());
+                            reasons.push(
+                                "build receipt optimizations reflect unoptimized verdict (pgo_applied=false)"
+                                    .to_string(),
+                            );
                         }
                         // Check run_id
                         if let Some(exp) = expected_run_id
@@ -591,6 +635,19 @@ pub fn evaluate_certification(
         phases: long_phases_summary,
     };
 
+    let verdict = if optimizations.bolt_applied {
+        Some("PGO+BOLT".to_string())
+    } else if optimizations.pgo_applied && optimizations.bolt_proof == "fallback_pgo_only" {
+        Some("PGO-ONLY".to_string())
+    } else if !optimizations.pgo_applied
+        && !optimizations.bolt_applied
+        && optimizations.bolt_proof == "fallback_plain"
+    {
+        Some("PLAIN-ONLY".to_string())
+    } else {
+        None
+    };
+
     ReleaseReceipt {
         schema_version: "1.0.0".to_string(),
         timestamp_utc: now_iso8601(),
@@ -606,5 +663,10 @@ pub fn evaluate_certification(
         pgo_workload,
         artifacts,
         long_audit,
+        verdict,
     }
 }
+
+#[cfg(test)]
+#[path = "release_test.rs"]
+mod tests;
