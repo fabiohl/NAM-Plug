@@ -27,11 +27,11 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 
 *The hardware-accelerated Slint interface running inside a Linux DAW. Organized into five ergonomic zones:*
 
-1. **Asset Selection (Left Panel):** Load `.nam` / `.namb` neural amp models and `.wav` speaker cabinet impulse responses (IRs).
-2. **Gain Staging & Noise Gate (Center Knobs):** Input/Output trim ($\pm 20\text{ dB}$) and an integrated downward noise gate ($-90\text{ to }-40\text{ dB}$).
-3. **Quality & Mode Toggles:** Anti-aliasing oversampling (`Off`, `2x`, `4x`), SIMD activation math (`Standard` vs `Fast`), and click-free `ACTIVE` bypass.
-4. **Precision Metering:** Adaptive mono/stereo peak level meters with calibrated IEC 60268-10 PPM ballistics.
-5. **Real-Time Telemetry Bar (Footer):** Live status reporting sample rate, added latency, DSP CPU load %, cycles per block, quantum size, RT thread priority, and xrun counts.
+1. **Asset Selection & Identity (Left Panel):** Load `.nam` / `.namb` neural amp models and `.wav` speaker cabinet impulse responses (IRs), accompanied by the SIMD badge (`AVX2+FMA`) and version info.
+2. **Analog Gain, Gate & Quality Stages (Center Panel):** Input trim ($-20\text{ to }+20\text{ dB}$), Output level ($-40\text{ to }+20\text{ dB}$), integrated noise gate ($-90\text{ to }0\text{ dB}$) with dynamic LED indicator, anti-aliasing oversampling (`Off`, `2×`, `4×`), and activation precision (`Std` vs `Fast`).
+3. **Precision Metering:** Adaptive mono/stereo peak level meters with calibrated IEC 60268-10 PPM ballistics, peak-hold markers, and a clickable red digital clip LED.
+4. **Master Bypass:** Hardware toggle switch transitioning cleanly between `DSP ACTIVE` and `BYPASS` via a 64-sample click-free crossfade.
+5. **Real-Time Telemetry Bar (Footer):** Live status reporting sample rate (`SR`), buffer size (`BUF`), latency (`LAT`), channel layout (`CH`), DSP load percentage (`% DSP` with overload/XRUN alert LED and tooltip), contextual alert pill, and window backend.
 
 ---
 
@@ -170,35 +170,34 @@ In guitar production, an authentic recorded amp tone consists of two distinct co
 ```
 
 1. **Insert NAM-Plug:** Add NAM-Plug as an audio effect on your dry guitar or bass track. Set your audio interface gain so your guitar's strongest picking hits around **-18 to -12 dBFS**.
-2. **Load an Amp Model:** Click **`Load Model`** in the left panel and select your `.nam` or `.namb` file.
-3. **Load a Cabinet IR:** Click **`Load IR`** and select your `.wav` speaker impulse response.
+2. **Load an Amp Model:** Click **`LOAD .NAM`** in the AMP MODEL card and select your `.nam` or `.namb` file.
+3. **Load a Cabinet IR:** Click **`LOAD IR`** in the CABINET IR card and select your `.wav` speaker impulse response.
 4. **Dial in Gain Staging:**
-   * Adjust **`INPUT`** ($\pm 20\text{ dB}$) to feed the model the right amount of drive.
-   * Adjust **`OUTPUT`** ($\pm 20\text{ dB}$) to balance levels with your overall mix.
-   * Watch the tricolor peak meters to ensure you stay below $0\text{ dBFS}$ digital clipping.
-5. **Set the Noise Gate:** If your guitar pickups produce single-coil hum or high-gain hiss, turn the **`GATE`** knob up from `-90.0 dB` until silence is reached between notes.
+   * Adjust **`INPUT`** ($-20\text{ to }+20\text{ dB}$, default `0.0 dB`) to feed the model the right amount of drive.
+   * Adjust **`OUTPUT`** ($-40\text{ to }+20\text{ dB}$, default `-3.0 dB`) to balance levels with your overall mix.
+   * Watch the tricolor peak meters and reset the red clip LED if digital clipping occurs.
+5. **Set the Noise Gate:** If your guitar pickups produce single-coil hum or high-gain hiss, turn the **`GATE`** knob up from `-90.0 dB` (off by default) until silence is reached between notes; the indicator switches to `GATE ACTIVE`.
 6. **Choose Oversampling:**
    * **`Off` (Live Mode):** Pure zero added latency, perfect for real-time tracking and monitoring.
-   * **`2x` / `4x` (HQ Mode):** Eliminates non-linear high-frequency aliasing foldover on heavy high-gain amps during mixdown and mastering.
+   * **`2×` / `4×` (HQ Mode):** Eliminates non-linear high-frequency aliasing foldover on heavy high-gain amps during mixdown and mastering.
 7. **Select Activation Math Mode:**
-   * **`Standard` (Default):** Exact precision Taylor minimax math (+89.5 dB SNR).
-   * **`Fast`:** Padé polynomial approximation, reducing CPU consumption on large sessions.
-8. **Bypass / Active:** Click **`ACTIVE`** at any time to audition your raw tone. Transitions use a 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with no clicks or pops.
+   * **`Std` (Standard / Default):** Exact precision Taylor minimax math (+89.5 dB SNR).
+   * **`Fast`:** Padé polynomial approximation, reducing CPU consumption on dense sessions.
+8. **Bypass / Active:** Toggle the **Bypass** switch at any time to audition your raw tone. Transitions use a 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with no clicks or pops.
 
 ### 4. Reading the Real-Time Telemetry Bar (Footer)
 
-The footer displays instantaneous DSP telemetry polled at 60 Hz from the audio engine:
+The footer displays instantaneous DSP telemetry polled at 60 Hz (relaxing to 30 Hz in silence):
 
-| Metric          | What It Means                                  | Ideal Value                                            |
-|:--------------- |:---------------------------------------------- |:------------------------------------------------------ |
-| **`SR`**        | Current host sample rate                       | `44.1 kHz`, `48.0 kHz`, `96.0 kHz`                     |
-| **`Lat`**       | Latency added by the plugin                    | `0 ms` (Live mode), compensated by DAW PDC             |
-| **`DSP`**       | % of audio deadline budget consumed            | Typically `3% – 12%` depending on model & oversampling |
-| **`Cycles`**    | Exact CPU cycles spent on the last audio block | Proportional to model complexity                       |
-| **`Last N`**    | Quantum block size received from DAW           | `64`, `128`, `256` samples                             |
-| **`RT Prio`**   | Linux kernel real-time thread priority         | Typically `80 – 95` under PipeWire/JACK                |
-| **`Overloads`** | Real-time buffer underruns/xruns detected      | Should be **`0`**                                      |
-| **`Flags`**     | Real-time diagnostic status bitmask            | `0x0000` (Normal operation)                            |
+| Readout       | What It Means                        | Ideal Value / Behavior                                   |
+|:------------- |:------------------------------------ |:-------------------------------------------------------- |
+| **`SR`**      | Current host sample rate             | `44100 Hz`, `48000 Hz`, `96000 Hz`                       |
+| **`BUF`**     | Quantum block size received from DAW | `64 spl`, `128 spl`, `256 spl`                           |
+| **`LAT`**     | Latency added by the plugin          | `0 spl (0.0 ms)` in live mode; reported to host PDC      |
+| **`CH`**      | Negotiated audio channel layout      | `Mono` (Config 0) or `Stereo` (Config 1)                 |
+| **`% DSP`**   | % of audio deadline budget consumed  | Typically `3% – 12%`; red LED lights up if XRUN occurs   |
+| **`ALERT`**   | Contextual diagnostic status pill    | Blank in normal operation; displays fault/warning text   |
+| **`BACKEND`** | Active window display backend        | `X11 (Embedded)`, `X11 (Floating)`, `Wayland (Floating)` |
 
 ---
 
@@ -324,8 +323,9 @@ The `./utils/` suite automates formatting, static analysis, parity verification,
 | Script                                                     | Purpose & Scope                                                                                                                                             |
 |:---------------------------------------------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`utils/lints.sh`](utils/lints.sh)                         | **Static Analysis Gate:** Runs `cargo fmt`, `cargo check` matrix, strict `clippy`, validates SPDX headers, policies, and RT allocations (~6s).              |
-| [`utils/tests-quick.sh`](utils/tests-quick.sh)             | **Agile QA Suite:** Multi-phase test run (≤ 5 min budget) covering unit/integration tests, C++ NAMCore parity, oversampling parity, and RT codegen guards.  |
+| [`utils/tests-quick.sh`](utils/tests-quick.sh)             | **Agile QA Suite:** Fast test run (≤ 5 min budget) covering unit/integration tests and real-time allocation heap audit (`heap-audit`).                      |
 | [`utils/tests-long.sh`](utils/tests-long.sh)               | **Pre-Release Audit:** Heavy stress testing (GC model swaps, off-RT drain, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`. |
+| [`utils/ab-opt-ceremony.sh`](utils/ab-opt-ceremony.sh)     | **A/B Optimization Ceremony:** Empirical performance comparison (`plain` vs. `pgo` vs. `pgo+bolt`) on an isolated core prior to canonical build.            |
 | [`utils/build-release.sh`](utils/build-release.sh)         | **Release Pipeline & Certification:** Compiles release artifacts (`target/dist/`), packages bundles, and certifies canonical receipts (`--certify`).        |
 | [`utils/verify_rt_codegen.sh`](utils/verify_rt_codegen.sh) | **Static Codegen Guard:** Disassembles the CLAP `.so` and asserts zero `malloc`/`free`, zero `div`/`idiv`, and bounded TLS access.                          |
 | [`utils/mod-update.sh`](utils/mod-update.sh)               | **Dependency Maintenance:** Manual toolchain and Cargo dependency upgrade utility.                                                                          |

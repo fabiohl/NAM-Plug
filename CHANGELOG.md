@@ -15,64 +15,47 @@ Control begins formally with version 1.0.0.
 
 ## [Unreleased]
 
-### Refactored
-
-- **Processor Lifecycle Decomposition (`src/clap/processor/`):**
-  - Decomposed monolithic processor lifecycle into dedicated submodules (`activate.rs` for off-RT buffer pre-allocation and DSP component assembly; `deactivated.rs` for `DeactivatedDspState` and resource preservation; `ftz.rs` for RAII-scoped `FtzDazGuard` MXCSR management).
-  - Isolated off-RT allocation and lifecycle stages from the per-block audio processing callback in `mod.rs`.
-
-### Documentation
-
-- **Host Compatibility & Wayland Support Matrix:**
-  - Updated `README.md`, `docs/architecture.md`, and `docs/functional-tests.md` to reflect empirical Linux host compatibility and windowing behavior.
-  - Documented that Fender Studio Pro 8.2 (Linux, Wayland) exclusively requests embedded Wayland (`CLAP_WINDOW_API_WAYLAND` with `is_floating = false`), which the core CLAP specification does not define; the host displays its native generic parameter editor rather than negotiating a floating window.
-  - Classified Wayland floating window support as experimental due to the absence of a verified test host that negotiates floating windows under Wayland.
-  - Added a dedicated "Using Without a Graphical Interface" section in `README.md` detailing parameter access via generic host controls, model persistence and recovery via saved session state / `~/.nam/models`, Flatpak sandbox path handling, and current operational boundaries (no cross-DAW state portability, Cabinet IRs requiring GUI, and host-side preset discovery that stops after the provider handshake without indexing declared locations).
-
-### Fixed
-
-- **Performance certification harness (`nam_perf_guard` & `tests-long.sh`):**
-  - `utils/tests-long.sh` now automatically bootstraps the paired baseline series (`target/logs/perf-reference.json`) for the current `nam_plug.clap` SHA-256 when absent or stale after a clean build, eliminating the `perf:reference_missing` deadlock on fresh release ceremonies.
-  - `nam_perf_guard` now applies in-process real-time hardening (`mlockall`, 64 KiB stack prefaulting, and `SCHED_FIFO` priority 80 promotion), pre-allocates and prefaults the measurement latency buffer before timing, checks kernel `effective_affinity_list` (with fallback to `smp_affinity_list`) when detecting shared IRQs on `isolcpus=managed_irq` hosts, and records `cpufreq/boost` as diagnostic provenance without falsely marking calibrated hosts as degraded.
-  - Pre-allocated and prefaulted timing vectors in `processor_command_budget_test` and `processor_drain_latency_test` to avoid page-fault jitter during `rt-heap` micro-latency certification.
-- **Long audit & ceremony script hardening:**
-  - `utils/tests-long.sh` now uses `set -o pipefail` (Class B decoupled audit contract), derives `tests=` counts automatically for `catch-all` in `long-receipt.txt`, and executes `catch-all`, `artifact`, and `perf` consecutively before `gui` (`--features testing,gui-x11`) to eliminate redundant ~3 min release recompilations.
-  - `utils/ab-opt-ceremony.sh` now sources `variables.env` before emitting `ab-opt-provenance.json` and `ab-opt-ceremony-receipt.json` so `engine_commit` records the pinned engine SHA instead of `"unknown"`.
-  - `.github/workflows/long.yml` no longer copies `summary.txt` directly outside `utils/_lib.sh` and `.github/actions/qa-summary`.
-- **Performance certification evidence:** `nam_perf_guard` now applies and verifies CPU affinity in-process, writes the report fail-closed to `target/logs/perf-certification-report.json`, blocks certification on a degraded host or missing paired reference, and records `run_id`.
-- **Activation sample rate:** `activate()` clamps the host rate to `[4_000, 384_000]` Hz so out-of-range hosts such as `clap-validator` at 768 kHz activate safely.
-- **Dual-mono teardown contract:** the GC stress test accounts for all 98 in-flight items of the dual-mono layout (32 SPSC + 16 parking lot + 50 overflow) drained off the audio thread.
-- **Long audit safety:** a partial `--only` run preserves the previous full receipt, dedicated GUI/heap suites are selected by Cargo features instead of a shell `--skip` list, custom `CARGO_TARGET_DIR` is never deleted, and all Cargo calls use `--locked`.
-- **Long audit roster:** `phase6` is registered in `plug_long_receipt` and `utils/tests-long.sh`, with the explicit 7th `ex` argument on phases 5 and 6.
-- **Release packaging:** `LICENSE.txt` and the engine `NOTICE` are included in the tarball and Flatpak, `--install` uses `~/.clap`, Flatpak installation failures are no longer suppressed, and `--package` fails when a requested bundle is absent.
-- **Release certification:** `build-release.sh` persists `target/logs/build-run-id`, the long audit reuses it, and `--certify` removes a stale release receipt before failing.
-- **CI:** hosted long runs exclude the speed gate, phase input is no longer interpolated into shell code, the MSRV job proves the 1.99.0 toolchain and uploads provenance, the `x86_64-linux-lints` job installs the `aarch64-unknown-linux-gnu` target, and `cross_aarch64_check` no longer reports a GAP on non-ARM hosts.
-
-## [1.1.0] - 2026-11-01
+## [1.1.0] - 2026-11-10
 
 ### Added [1.1.0]
 
-- **Release Receipts and Identity Chain:** Rust-based long-phase receipts, golden quick-receipt validation and fail-closed contract tests for the certified artifact identity chain.
-- **Adaptive Worker Polling:** Standardized host log alert transitions and adaptive worker polling in the runtime main-thread housekeeping.
-- **Proportional Reset Stabilization:** Proportional stabilization budget policy for model resets, preserving reset containment and parity.
-- **CI Provenance:** Independent lint and quick jobs with engine provenance logging and always-uploaded gate evidence.
+- **Release Receipts & Certified Artifact Identity Chain:** Rust-based long-phase receipts (`plug_long_receipt`), golden quick-receipt validation, and fail-closed contract tests enforcing cryptographic hash parity across the distribution artifact chain (`F-CER-01`).
+- **Adaptive Worker Polling & Alert Standardization:** Integrated adaptive polling and standardized host log alert transitions in main-thread housekeeping.
+- **Proportional Reset Stabilization:** Proportional zero-budget stabilization policy for model resets, preserving real-time execution deadlines and numerical parity.
+- **CI Provenance Tracking:** Independent lint and quick workflows with deterministic engine provenance logging (`Cargo.lock` and `variables.env`) and always-uploaded gate evidence.
 
 ### Changed [1.1.0]
 
-- **Asynchronous Model Loading:** Integrated the asynchronous model loader and adaptive orchestrator rebuilds into the main-thread pipeline.
-- **Model Data Builders:** Updated model data builders and unknown-instruction-set handling; removed experimental asynchronous state-restore and sync fallback flags.
-- **Gate Scripts:** Streamlined lint and quick disciplines with typed phase evidence carriers.
+- **Processor Lifecycle Decomposition (`src/clap/processor/`):**
+  - Decomposed monolithic processor lifecycle into dedicated submodules (`activate.rs` for off-RT buffer pre-allocation and DSP component assembly; `deactivated.rs` for `DeactivatedDspState` resource preservation and zero-allocation re-activation; `ftz.rs` for RAII-scoped `FtzDazGuard` MXCSR management).
+  - Fully isolated off-RT allocation and lifecycle stages from the per-block audio processing callback in `mod.rs`.
+- **Asynchronous Model Loader Integration:** Integrated asynchronous background model loading (`nam-model-loader`) and offloaded heavy WaveNet slimmable slice and oversampler rebuilds from the audio thread.
+- **Host Compatibility & Windowing Documentation:**
+  - Updated documentation across `README.md`, `docs/architecture.md`, and `docs/functional-tests.md` reflecting empirical Linux host compatibility.
+  - Documented native X11 XEmbed integration (verified in Bitwig Studio and REAPER) and generic host controls behavior under native Wayland hosts requesting unsupported embedded configurations (such as Fender Studio Pro 8.2).
+  - Classified Wayland floating window support as experimental due to absence of verified test hosts negotiating floating windows under Wayland.
+  - Added dedicated operational guidance on running without a graphical interface (parameter access, state persistence via `~/.nam/models`, and Flatpak sandbox boundaries).
+- **Cleaned Main Thread APIs:** Streamlined model data builders, removed obsolete experimental asynchronous state-restore flags, and updated lint and quick disciplines with typed status carriers (`_status.tsv`).
 
 ### Fixed [1.1.0]
 
-- **State Transaction:** Buffer size is now passed through the state transaction, and the performance harness matches the real block contract.
-- **Latency Alignment:** Consumer tests now follow the engine's constant partition-sized cab-sim priming latency (the cab-sim contribution equals the partition; total declared latency adds the oversampling and resampler terms).
+- **Performance Certification Harness (`nam_perf_guard` & `tests-long.sh`):**
+  - `utils/tests-long.sh` automatically bootstraps the paired baseline series (`target/logs/perf-reference.json`) for the current `nam_plug.clap` SHA-256 when absent or stale, resolving certification bottlenecks on clean release builds.
+  - `nam_perf_guard` applies in-process real-time hardening (`mlockall`, 64 KiB stack prefaulting, and `SCHED_FIFO` priority 80 promotion), pre-allocates and prefaults latency buffers before timing, checks kernel `effective_affinity_list` (with fallback to `smp_affinity_list`) when detecting shared IRQs on `isolcpus=managed_irq` hosts, and records `cpufreq/boost` as diagnostic provenance.
+  - Pre-allocated and prefaulted timing vectors in `processor_command_budget_test` and `processor_drain_latency_test` to eliminate page-fault jitter during `rt-heap` micro-latency certification.
+- **Long Audit & Ceremony Script Hardening:**
+  - `utils/tests-long.sh` conforms to the Class B decoupled audit contract (`set -o pipefail`), derives `tests=` counts automatically for `catch-all`, and executes `catch-all`, `artifact`, and `perf` consecutively before `gui` (`--features testing,gui-x11`) to eliminate redundant ~3 min release recompilations.
+  - `utils/ab-opt-ceremony.sh` sources `variables.env` before emitting provenance and ceremony receipts, ensuring `engine_commit` records the pinned engine SHA.
+- **Activation Sample Rate Clamping:** Host sample rate in `activate()` is bounded to `[4_000, 384_000]` Hz so ultra-high-frequency test harnesses (such as `clap-validator` at 768 kHz) activate cleanly without panic.
+- **Dual-Mono Teardown Accounting:** GC stress verification accounts for all 98 in-flight items of the dual-mono layout (32 SPSC + 16 parking lot + 50 overflow) drained off the audio thread.
+- **State Transaction Quantum:** Passed buffer size through state transactions and aligned CabSim tests with the engine's constant partition-sized priming latency.
+- **Release Packaging Integrity:** Included `LICENSE.txt` and engine `NOTICE` in tarball and Flatpak distributions, installed verified artifacts directly to `~/.clap`, and ensured Flatpak installation errors are caught fail-closed.
 
 ---
 
 ## [1.0.0] - 2026-10-22
 
-### Added
+### Added [1.0.0]
 
 #### CLAP 1.2+ Audio Plugin Integration
 
@@ -83,7 +66,7 @@ Control begins formally with version 1.0.0.
 - **Bit-Transparent Bypass**: Latency-compensated bypass mode featuring a 64-sample click-free linear crossfader with phase compensation.
 - **State Persistence & Asset Identity**: Full project state save/load serialization with mandatory cryptographic SHA-256 asset hashing (`model_hash`, `ir_hash`), ensuring reliable cross-machine project restoration and preset portability.
 
-#### Core Neural DSP Engine (`NeuralAmpModeler-rs`)
+#### Core Neural DSP Engine (`NeuralAmpModeler-rs`) [1.0.0]
 
 - **Extensive Topology Support**: Native execution of WaveNet (A1 and A2 standard and slimmable profiles), LSTM (1-layer and 2-layer configurations, multi-I/O), ConvNet, Linear FIR/FFT, and Sequential compositions.
 - **Dual-Oracle Parity Validation**: Formally certified against canonical C++ NAMCore ($f32$) and double-precision ($f64$) oracles across 52 model baselines (WaveNet Standard ESR $< 2.31 \times 10^{-14}$, SNR $> 136.4\text{ dB}$; ConvNet ESR $< 9.33 \times 10^{-16}$, SNR $> 150.3\text{ dB}$).
@@ -95,14 +78,14 @@ Control begins formally with version 1.0.0.
 - **Activation Math Modes**: Selectable `Standard` (exact Taylor minimax, +89.5 dB SNR) and `Fast` (Padé polynomial approximations) modes.
 - **Binary `.namb` v2 Container**: Support for pre-transposed binary model containers (Gate-Major LSTM, Interleaved-4 WaveNet) with IEEE 802.3 CRC32 integrity validation (<1 ms hot-swap time).
 
-#### Strict Real-Time Safety & Threading
+#### Strict Real-Time Safety & Threading [1.0.0]
 
 - **Hard RT Audio Contract**: Guaranteed zero heap allocations, zero heap deallocations, zero mutex locks, and zero blocking syscalls on the audio thread (`process()`), audited dynamically via `CountingAllocator`.
 - **3-Tier Lock-Free GC Cascade**: Dropped models, IRs, and oversamplers traverse lock-free SPSC queues (32 slots) → processor parking lot (16 slots) → atomic overwrite ring for deterministic off-RT disposal.
 - **Fault Containment & Poisoning Recovery**: Real-time exception and panic containment latching `poisoned = true`, immediately zeroing output buffers in O(1) without leaks, and signaling autonomous off-RT host restart.
 - **Denormal & Subnormal Armor**: Per-block hardware MXCSR FTZ/DAZ reassertion combined with symmetric $-220\text{ dBFS}$ deterministic dither injection, preventing CPU microcode stalls on digital silence.
 
-#### Hardware-Accelerated Declarative GUI (Slint 1.18)
+#### Hardware-Accelerated Declarative GUI (Slint 1.18) [1.0.0]
 
 - **Native X11 XEmbed Embedding**: Seamlessly embeds the plugin GUI inside host plugin panels (`CLAP_WINDOW_API_X11`, embedded) in Bitwig Studio and REAPER.
 - **Wayland & X11 Floating Fallbacks**: Top-level floating window fallbacks for hosts requesting floating GUI surfaces (`CLAP_WINDOW_API_WAYLAND` / `CLAP_WINDOW_API_X11`).
@@ -115,9 +98,13 @@ Control begins formally with version 1.0.0.
   - Zone 5: Real-time telemetry footer reporting host sample rate, buffer latency, DSP CPU load %, cycle counts, quantum size, RT thread priority, and diagnostic status flags.
 - **Accessibility & Interaction**: Full keyboard navigation (Tab/Shift-Tab focus, arrow key parameter adjustments), double-click reset to default values, Ctrl-drag fine tuning, and drag-and-drop `.nam` model file loading.
 
-#### Distribution, Packaging & Tooling
+#### Distribution, Packaging & Tooling [1.0.0]
 
 - **Flatpak Plugin Extension**: Standalone Flatpak bundle (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`) targeting `org.freedesktop.LinuxAudio.BaseExtension` 25.08, providing native access to sandboxed Flatpak DAWs (Bitwig, REAPER) without filesystem sandbox holes.
 - **Mega-Optimized Release Pipeline (`utils/build-release.sh`)**: 5-phase optimization workflow combining Profile-Guided Optimization (PGO) on neural workloads, LLVM BOLT machine code layout optimization, and real-time deadline certification (`nam_perf_guard`).
 - **Linker-Level Symbol Isolation**: Scoped version script (`hide-libm-shadow.map`) ensuring libm symbols resolve dynamically to `glibc` without dangerous PLT/GOT self-referential loops in release builds.
 - **Automated QA & Verification Suite**: Multi-tier test scripts (`lints.sh`, `tests-quick.sh`, `tests-long.sh`, `tests-gui.sh`, `verify_rt_codegen.sh`, `tests-performance-regression.sh`) validating static RT safety, machine code codegen, property-based tests, and multi-rate C++ oracle parity.
+
+[Unreleased]: https://github.com/fabiohl/NAM-Plug/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/fabiohl/NAM-Plug/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/fabiohl/NAM-Plug/releases/tag/v1.0.0

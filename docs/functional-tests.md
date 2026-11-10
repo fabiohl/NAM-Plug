@@ -30,16 +30,16 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 
 *Objective: Run these 5 actions immediately after building to verify core plugin stability.*
 
-- [ ] **T1.1 Load Model & CabSim IR:** Click `[📂 Load Model]` → select a valid `.nam` model → Click `[📂 Load IR]` → select a valid `.wav` IR.
-  *Expected:* Both load without host UI freeze or audio dropouts. Amp modeling and IR convolution become audible immediately. Active model name and IR filename update in Zone 1.
+- [ ] **T1.1 Load Model & CabSim IR:** Click `[LOAD .NAM]` in the **AMP MODEL** card → select a valid `.nam` model → Click `[LOAD IR]` in the **CABINET IR** card → select a valid `.wav` IR.
+  *Expected:* Both load asynchronously without host UI freeze or audio dropouts. Amp modeling and IR convolution become audible immediately. Active model name and IR filename update in Zone 1.
 - [ ] **T1.2 Knobs & Double-Click Reset:** Drag **INPUT** knob to +6.0 dB, drag **GATE** to −50.0 dB → Double-click **INPUT**.
-  *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to −90.0 dB (off by default).
-- [ ] **T1.3 Bypass & VU Meter Layout:** Insert plugin in DAW configured as Mono (Config 0, default: 1 centered meter bar), then instantiate on a Stereo track via `audio-ports-config` (Config 1: 2 meter bars L/R) → Toggle **BYPASS**.
-  *Expected:* Meter layout matches the negotiated port configuration (1 centered bar for Mono vs. 2 bars L/R for Stereo; configuration negotiated strictly via CLAP `audio-ports-config`, without magic content-based auto-adaptation). Bypass toggle instantly silences DSP processing via a 64-sample click-free crossfade, yielding a bit-transparent dry signal without audible clicks.
+  *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to default 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to default −90.0 dB (off by default); double-clicking **OUTPUT** resets to default −3.0 dB.
+- [ ] **T1.3 Bypass & VU Meter Layout:** Insert plugin in DAW configured as Mono (Config 0, default: 1 centered meter bar), then instantiate on a Stereo track via `audio-ports-config` (Config 1: 2 meter bars L/R) → Toggle **BYPASS** (toggle switch).
+  *Expected:* Meter layout matches the negotiated port configuration (1 centered bar for Mono vs. 2 bars L/R for Stereo; configuration negotiated strictly via CLAP `audio-ports-config`). The toggle switch transitions cleanly between `DSP ACTIVE` and `BYPASS` via a 64-sample click-free linear crossfade, yielding a bit-transparent dry signal without audible clicks.
 - [ ] **T1.4 Host Parameter Automation (`[Bitwig]`):** Draw a quick automation ramp for `input_gain_db` or `output_gain_db` in DAW → start playback.
-  *Expected:* GUI knob arc pulses/animates smoothly in sync with host automation; audio volume adjusts smoothly without zipper noise.
-- [ ] **T1.5 Telemetry & Diagnostic Export:** Hover over status bar `"ℹ"` icon → click `"ℹ"` → paste (Ctrl+V) into a text editor.
-  *Expected:* Status bar displays real-time telemetry (SR, Latency, DSP Load %, Cycles, Last N, RT Prio, Overloads, Flags). A visual toast confirmation (`"Diagnostic copied · file in ~/.cache/neural-amp-modeler-rs/"`) appears; pasted text contains the complete diagnostic dump.
+  *Expected:* Host automation smoothly drives parameter values and audio volume without zipper noise or audio dropouts.
+- [ ] **T1.5 Real-Time Telemetry Bar Verification:** Observe the status bar (Zone 5) during playback.
+  *Expected:* Status bar displays real-time telemetry readouts: host sample rate (`SR: {sr}`), buffer quantum (`BUF: {buf} spl`), latency (`LAT: {lat} spl ({ms} ms)`), channel configuration (`CH: Mono` or `Stereo`), DSP CPU load percentage (`{pct}% DSP` with overload/xrun alert LED), contextual alert pill (when active), and active window backend (`backend_text`, e.g. `X11 (Embedded)`).
 
 ---
 
@@ -52,9 +52,9 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 - [ ] **2A.1 SPSC Non-Blocking Load:** Load a different `.nam` model while playing an audio track.
   *Expected:* DAW UI remains 100% responsive. Audio engine swaps models seamlessly without stopping playback or causing XRUNs in `pw-top`. Dropped model allocations are safely collected off-RT via SPSC GC.
 - [ ] **2A.2 Invalid File Robustness:** Select a corrupted or 0-byte `.nam` / `.wav` file in the file picker.
-  *Expected:* Red error toast (`"⚠ Load failed"` / `"⚠ IR load failed"`) displays for ~3s. Previous valid model/IR remains active; plugin never crashes or silences audio.
-- [ ] **2A.3 CabSim IR Management:** With an IR loaded, click `[🗑 Clear IR]`.
-  *Expected:* IR display reverts to `"No IR loaded"`, audio transitions cleanly back to post-model output without cab simulation, and the clear button disappears.
+  *Expected:* Red error state (`"Load failed"` / `"IR load failed"`) displays on the respective card in Zone 1. The previous valid model/IR remains active; plugin never crashes or silences audio.
+- [ ] **2A.3 CabSim IR Management:** With an IR loaded, click the `[✕]` clear button on the CABINET IR card.
+  *Expected:* IR display reverts to `"No IR loaded"`, audio transitions cleanly back to post-model output without cab simulation, and the `[✕]` clear button disappears.
 - [ ] **2A.4 Oversampling & Activation Engine Modes:** Switch Oversampling from `"Off"` to `"2×"` to `"4×"`, and Activation Precision from `"Standard"` to `"Fast"`.
   *Expected:* Resampler adjusts seamlessly; reported latency in status bar updates dynamically to reflect filter delay (`0 spl` @ Off, `32 spl` @ 2×, `96 spl` @ 4×); zero audio dropouts.
 - [ ] **2A.5 Slimmable A2 Container & Adaptive Compute:** Load a slimmable container model → change host parameter `"Slim Override"` from `"Auto"` to `"Force Lite"` to `"Force Full"` (or adjust `"Adaptive Compute"` mode).
@@ -66,35 +66,31 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 
 ### Domain 2B: UI Controls & Dynamic Feedback
 
-- [ ] **2B.1 Knob Tooltips & Fine-Tune:** Hover over knobs → hold **Ctrl + Drag** (or Ctrl + Scroll).
-  *Expected:* Tooltips display exact values with 2 decimals (e.g. `"3.50 dB"`). Holding Ctrl adjusts parameters ~10× slower for precision tuning.
-- [ ] **2B.2 Interactive Knob Glow:** Drag any knob.
-  *Expected:* A subtle halo glow appears on the active arc while dragging and fades immediately upon release.
-- [ ] **2B.3 Segmented Controls (Oversampling & Activation):** Click `"Off"`, `"2×"`, `"4×"` under Oversampling, and `"Standard"`, `"Fast"` under Activation.
-  *Expected:* Active option highlights crisply. Changes dispatch discrete CLAP parameter events to host and update DSP state instantly.
-- [ ] **2B.4 VU Peak Hold & Clipping:** Feed a high-gain signal to induce clipping (>0 dBFS) → stop audio → click clipped meter bar.
-  *Expected:* Peak hold bar pauses ~2s before decaying smoothly. Red clip LED at the top persists until manually clicked to reset.
-- [ ] **2B.5 VU Meter L/R Channel Independence (`[Stereo Track]`):** On a stereo track, test 4 signal scenarios:
+- [ ] **2B.1 Knob Tooltips & Fine-Tune:** Drag knobs or hover and scroll with mouse wheel → hold **Shift** while dragging/scrolling.
+  *Expected:* Numerical text in knob center updates smoothly (e.g. `"+3.5 dB"`). Holding **Shift** scales adjustments by 0.1× for precision fine-tuning.
+- [ ] **2B.2 Interactive Knob Glow & Double-Click:** Drag any knob dial, then double-click it.
+  *Expected:* The active value arc tracks the cursor. Double-clicking instantly returns the parameter to its defined default (`0.0 dB` for INPUT, `-3.0 dB` for OUTPUT, `-90.0 dB` for GATE).
+- [ ] **2B.3 Discrete Selectors (Oversampling & Precision):** Click `"Off"`, `"2×"`, `"4×"` under Oversample, and `"Std"`, `"Fast"` under Precision.
+  *Expected:* Active option highlights crisply with distinct background color. Changes dispatch discrete CLAP parameter events to host and update DSP state instantly without audio glitches.
+- [ ] **2B.4 VU Peak Hold & Clipping:** Feed a high-gain signal to induce digital clipping (>0 dBFS) → stop audio → click the red clipped indicator bar.
+  *Expected:* Peak hold indicator pauses ~2.0s before decaying smoothly. Red clip indicator at the top persists until clicked to reset.
+- [ ] **2B.5 VU Meter L/R Channel Independence (`[Stereo Track]`):** On a stereo track (Config 1), test 4 signal scenarios:
   - (a) Signal **only on L** (hard-pan L) → only the L bar moves; R remains at minimum.
   - (b) Signal **only on R** → only the R bar moves; L remains at minimum.
   - (c) **Symmetric signal** (equal L and R) → both bars move to equal levels.
   - (d) **Asymmetric signal** (different levels) → bars move independently.
-    *Expected:* L and R channels operate independently without cross-talk or shared state leakage.
-- [ ] **2B.6 Drag & Drop Model Loading:** Drag a `.nam` model file from the host browser or desktop file manager and drop it onto the plugin GUI.
-  *Expected:* `"Drop NAM Model Here ⬇️"` overlay appears on hover; releasing mouse loads the model cleanly.
-- [ ] **2B.7 Keyboard Navigation & Accessibility:** Press **Tab** / **Shift+Tab** to navigate controls → use **Up/Down** (or Left/Right) arrows on knobs → **Space/Enter** on buttons and segmented controls.
-  *Expected:* Focus ring cycles sequentially (`INPUT → OUTPUT → GATE → Oversampling → Activation → BYPASS → Load Model → Load IR → Clear IR`). Arrow keys increment/decrement values (Ctrl provides 0.1 dB fine steps vs. 1.0 dB standard steps).
+  *Expected:* L and R channels operate independently with zero channel crosstalk.
+- [ ] **2B.6 Noise Gate LED Indicator:** Feed a low-level signal below the set gate threshold → then play above threshold.
+  *Expected:* LED displays `"GATE ACTIVE"` in green when closed (silencing background noise) and transitions to `"GATE OPEN"` when audio passes through.
 
 ---
 
 ### Domain 2C: Host Integration & State Persistence
 
-- [ ] **2C.1 Bitwig Track Color Sync (`[Bitwig]`):** Change DAW track color (e.g., Red, Blue, Green).
-  *Expected:* Knob arcs and active LEDs update to match track color in <100ms (VU meters maintain standard tricolor gradient).
-- [ ] **2C.2 MIDI Learn Mapping Halo (`[Bitwig]`):** Activate MIDI Learn on **INPUT**, **OUTPUT**, **GATE**, **Oversampling**, or **Activation** controls in the host.
-  *Expected:* A ring of 6 small dots appears around the knob arc (or 4 corner dots on segmented controls) using the color provided by the host. Halo disappears when MIDI Learn is deactivated.
-- [ ] **2C.3 Automation Arc Pulse & Override (`[Bitwig]`):** Play back active automation on `output_gain_db` → manually drag the knob while automation is playing.
-  *Expected:* (a) Arc pulses smoothly while automation is active. (b) Manual touch temporarily turns arc amber until released.
+- [ ] **2C.1 Host Track Info & Param Indication Extensions:** Verify plugin instantiation on colored tracks or with host MIDI mapping in Bitwig Studio.
+  *Expected:* Plugin queries host track info (`clap_plugin_track_info`) and parameter indication (`clap_plugin_param_indication`) without errors or crashes. Shared state records track color and mapping metadata safely off the audio thread.
+- [ ] **2C.2 Automation Tracking & Playback:** Play back active automation on `output_gain_db` or `input_gain_db` in DAW while monitoring audio.
+  *Expected:* Audio gain ramps smoothly without zipper noise or audio dropouts, and UI display synchronizes with current parameter values.
 - [ ] **2C.4 Full Project State Reload:** Set custom gain, gate, oversampling, activation, model, and IR → save DAW project → close DAW → reopen project.
   *Expected:* All parameters, model path, and IR path restore perfectly with identical audio output. Missing model files degrade cleanly to `"No model loaded"`.
 - [ ] **2C.5 Preset Discovery Browser:** Open the host's preset browser for NAM-Plug → inspect entries → load one.
@@ -115,12 +111,12 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 
 ### Domain 2D: Telemetry, Diagnostics & Dynamic Latency
 
-- [ ] **2D.1 Status Bar Cadence & Metrics:** Observe status bar for ≥20s during steady playback.
-  *Expected:* Real-time telemetry (`SR: {sr} kHz | Lat: {lat} ms ({spl} spl) | DSP: {load}% | Cycles: {cycles} | Last N: {n} | RT Prio: {prio} | Overloads: {overloads} | Flags: {flags}`) and model metadata update smoothly at ~1 Hz without UI flickering.
-- [ ] **2D.2 Diagnostic Clipboard & File Export:** Click status bar `"ℹ"` icon.
-  *Expected:* Toast displays confirmation. Diagnostic file is created under `~/.cache/neural-amp-modeler-rs/diagnostic-{unix_ts}.txt` with `0o600` permissions and complete diagnostic dump.
-- [ ] **2D.3 Diagnostic Folder Open (`[xdg-open]`):** Click `"Open Folder"` next to toast → test fallback by unsetting `HOME` or removing `xdg-open`.
-  *Expected:* Opens cache directory in system file manager; missing `xdg-open` degrades gracefully without host crash.
+- [ ] **2D.1 Status Bar Cadence & Metrics:** Observe the footer status bar for ≥20s during steady playback.
+  *Expected:* Telemetry readouts (`SR`, `BUF`, `LAT`, `CH`, `{pct}% DSP`, backend) update smoothly. The polling cadence operates at 60 Hz under active interaction and relaxes to 30 Hz when signal is silent and the UI is untouched.
+- [ ] **2D.2 Real-Time DSP Load & Overload Detection:** Monitor the `{pct}% DSP` readout during high processing loads (e.g., 4× oversampling on high sample rates).
+  *Expected:* DSP load percentage tracks audio computation time accurately. If an audio buffer overload occurs, the red indicator lights up with a 2-second hold, and hovering displays an actionable recommendation tooltip (`"Reduza oversampling ou habilite computação adaptativa"`).
+- [ ] **2D.3 Contextual Alert Banner:** Induce a runtime condition (e.g. non-finite audio or file load issue).
+  *Expected:* An alert pill appears in Zone 5 displaying the diagnostic alert text and status indicator for ~3 seconds before fading cleanly.
 - [ ] **2D.4 Dynamic Sample Rate & PDC Recalculation:** With NAM-Plug active and audio playing, change the project sample rate (e.g., 44.1 kHz → 96 kHz).
   *Expected:* Status bar updates to the new sample rate. Reported latency updates immediately. Host recalculates Plugin Delay Compensation (PDC) without audio desync or XRUNs.
 - [ ] **2D.5 Bypass & Resampling PDC Update:** Toggle bypass or switch oversampling (e.g. Off → 4×) while audio is playing.
@@ -179,7 +175,7 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 Before signing off on manual QA, verify that the automated release gates and mathematical parity checks have passed:
 
 - [ ] **3.5.1 Automated Quick Verification:** Run `./utils/tests-quick.sh` (or inspect `target/logs/quick-tests.log` and `target/logs/quick-heap-audit.log`).
-  *Expected:* Output confirms structural tests, C++ NAMCore parity, oversampling parity, CabSim IR validation, and RT codegen pass. Overall result must be `RESULT: PASS`, with the typed carrier `target/logs/tests-quick-status.tsv` (`tests-quick\tPASS|PASS_WITH_GAPS|FAIL\t<gaps|none>\t<fails|none>\t<scope=full|scope=partial>`). Every failure path emits exactly one `RESULT:` line; a missing carrier or RESULT is never success.
+  *Expected:* Output confirms non-ignored unit and integration tests and the real-time allocation heap audit pass. Overall result must be `RESULT: PASS`, with the typed carrier `target/logs/tests-quick-status.tsv` (`tests-quick\tPASS|PASS_WITH_GAPS|FAIL\t<gaps|none>\t<fails|none>\t<scope=full|scope=partial>`). Every failure path emits exactly one `RESULT:` line; a missing carrier or RESULT is never success. Heavy parity matrices and codegen checks run in the long suite.
 - [ ] **3.5.2 Parity Standards:** Confirm that multi-rate C++ NAMCore parity, oversampling (2×/4×), and CabSim IR convolution satisfy `ESR < 1e-8` and `SNR > 80 dB` across certification rates (44.1, 48, and 96 kHz). For detailed oracle methodology and baseline figures, see [`testing.md`](testing.md#321-multi-rate-resampling-reference-oracle).
 - [ ] **3.5.3 Release Receipt:** For production builds (`utils/build-release.sh`), inspect `target/dist/release-receipt.json` to verify `status: "CERTIFIED"` with zero unapproved skipped gates.
 
@@ -205,6 +201,6 @@ Before signing off on manual QA, verify that the automated release gates and mat
 **Active Model & IR:** <e.g. jcm800.nam, vintage30.wav>
 **Expected Behavior:** <Description from testing guide>
 **Observed Behavior:** <What actually happened>
-**Telemetry Dump:** <Paste output from clicking the status bar "ℹ" diagnostic button>
+**Host / Terminal Diagnostic Log:** <Paste relevant messages from DAW log, stderr, or status bar readouts>
 **Attachments:** <Screenshots, pw-top output, audio clips if applicable>
 ```

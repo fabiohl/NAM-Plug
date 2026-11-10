@@ -59,15 +59,22 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
     <keyword>plugin</keyword>
   </keywords>
   <releases>
-    <release version="1.1.0" date="2026-11-01">
+    <release version="1.1.0" date="2026-11-10">
       <description>
         <p>NAM-Plug 1.1.0:</p>
         <ul>
-          <li>Release Receipts: Rust-based long-phase receipts, golden quick-receipt validation, and fail-closed certified-artifact identity checks.</li>
-          <li>Runtime Hardening: Adaptive worker polling, standardized host log alerts, asynchronous model loading, and proportional reset stabilization.</li>
-          <li>Latency Contract: Cab-sim reports the engine's constant partition-sized priming latency, with dry and wet paths aligned to the declared figure.</li>
-          <li>Quality Gates: Independent CI lint and quick jobs with engine provenance and always-uploaded evidence; typed phase-status carriers.</li>
+          <li>Processor Lifecycle Decomposition: Modularized real-time audio processor lifecycle with dedicated activation pre-allocation, deactivated state preservation for instant re-activation, and RAII FTZ/DAZ MXCSR management.</li>
+          <li>Release Receipts and Verification Chain: Rust-based long-phase receipts, golden quick-receipt validation, and fail-closed certified-artifact identity checks.</li>
+          <li>Runtime and Script Hardening: Adaptive worker polling, standardized host log alert transitions, asynchronous model loading, and proportional reset stabilization.</li>
+          <li>Host Integration: Documented Linux windowing behavior across X11 (embedded XEmbed) and Wayland hosts (generic controls and floating fallback).</li>
+          <li>Latency and State Calibration: Cab-sim constant partition-sized priming latency and buffer-size-aware state transactions.</li>
+          <li>Quality Gates: Independent CI lint and quick jobs with deterministic engine provenance and typed phase-status carriers.</li>
         </ul>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-10-22">
+      <description>
+        <p>Initial release of NAM-Plug CLAP audio plugin for Linux.</p>
       </description>
     </release>
   </releases>
