@@ -15,6 +15,12 @@ Control begins formally with version 1.0.0.
 
 ## [Unreleased]
 
+### Refactored
+
+- **Processor Lifecycle Decomposition (`src/clap/processor/`):**
+  - Decomposed monolithic processor lifecycle into dedicated submodules (`activate.rs` for off-RT buffer pre-allocation and DSP component assembly; `deactivated.rs` for `DeactivatedDspState` and resource preservation; `ftz.rs` for RAII-scoped `FtzDazGuard` MXCSR management).
+  - Isolated off-RT allocation and lifecycle stages from the per-block audio processing callback in `mod.rs`.
+
 ### Documentation
 
 - **Host Compatibility & Wayland Support Matrix:**

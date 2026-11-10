@@ -3,7 +3,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 -->
 
-# Functional Testing Guide (Human QA) — NAM-Plug (CLAP Plugin)
+# Functional Testing Guide (Human QA) - NAM-Plug (CLAP Plugin)
 
 **Audience:** Developers, QA Testers, and End Users.
 **Target DAWs:** Bitwig Studio 6+ and Reaper / Fender Studio Pro 8+ (Linux, Flatpak / Native).
@@ -18,11 +18,11 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 To ensure comprehensive testing without unnecessary friction, this guide is organized into **3 progressive tiers**:
 
-| Tier       | Name                         | Target Duration | When to Run                            | Scope / Objective                                                     |
-|:---------- |:---------------------------- |:--------------- |:-------------------------------------- |:--------------------------------------------------------------------- |
-| **Tier 1** | ⚡ **2-Minute Smoke Test**   | ~2 min          | After every code commit or quick build | Catch 80% of critical regressions in 5 fast actions                   |
-| **Tier 2** | 🎯 **Feature & Host Sweep**  | ~10–15 min      | PR review / Feature branch completion  | Full functional verification across Audio, Controls, Host & Telemetry |
-| **Tier 3** | 🛡️ **Stress & Release Gate** | ~20–30 min      | Pre-release / Nightly audit            | Heavy multithreaded stress, HiDPI, GL cleanup, offline determinism    |
+| Tier       | Name                        | Target Duration | When to Run                            | Scope / Objective                                                     |
+|:---------- |:--------------------------- |:--------------- |:-------------------------------------- |:--------------------------------------------------------------------- |
+| **Tier 1** | ⚡ **2-Minute Smoke Test**  | ~2 min          | After every code commit or quick build | Catch 80% of critical regressions in 5 fast actions                   |
+| **Tier 2** | 🎯 **Feature & Host Sweep** | ~10–15 min      | PR review / Feature branch completion  | Full functional verification across Audio, Controls, Host & Telemetry |
+| **Tier 3** | 🛡️ **Stress & Release Gate**| ~20–30 min      | Pre-release / Nightly audit            | Heavy multithreaded stress, HiDPI, GL cleanup, offline determinism    |
 
 ---
 
@@ -79,7 +79,7 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
   - (b) Signal **only on R** → only the R bar moves; L remains at minimum.
   - (c) **Symmetric signal** (equal L and R) → both bars move to equal levels.
   - (d) **Asymmetric signal** (different levels) → bars move independently.
-  *Expected:* L and R channels operate independently without cross-talk or shared state leakage.
+    *Expected:* L and R channels operate independently without cross-talk or shared state leakage.
 - [ ] **2B.6 Drag & Drop Model Loading:** Drag a `.nam` model file from the host browser or desktop file manager and drop it onto the plugin GUI.
   *Expected:* `"Drop NAM Model Here ⬇️"` overlay appears on hover; releasing mouse loads the model cleanly.
 - [ ] **2B.7 Keyboard Navigation & Accessibility:** Press **Tab** / **Shift+Tab** to navigate controls → use **Up/Down** (or Left/Right) arrows on knobs → **Space/Enter** on buttons and segmented controls.

@@ -11,7 +11,7 @@
 #   - test-only modules (`#[cfg(test)]` blocks); sibling `*_test.rs` files are
 #     excluded by the caller (repo convention: test modules included via
 #     `#[cfg(test)] #[path = "..."] mod`).
-#   - the off-RT lifecycle/helper functions in `processor/mod.rs`
+#   - the off-RT lifecycle/helper functions across `processor/{activate,deactivated,mod}.rs`
 #     (`buffer_prealloc_error`, `panic_to_error`, `activate`, `deactivate`,
 #     `build_cab_sim_from_raw_samples`). `activate` is the documented ONLY
 #     allocation site (main thread, CLAP lifecycle); the panic helper only

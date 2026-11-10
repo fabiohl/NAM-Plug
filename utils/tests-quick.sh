@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # tests-quick.sh — Execução da disciplina rápida de testes. Classe A.
 # Uso: utils/tests-quick.sh [-h|--help]
-# Orçamento: 44          # +4: log de fase inicializado antes do trap (S3-T3)
+# Orçamento: 48          # +8: margem preventiva log de fase e thresholds
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -34,7 +34,7 @@ if [ "$rc_heap" -ne 0 ]; then
   grep -C 3 -E '(panicked at|FAILED)' "$CUR_LOG" | head -n 50 || true
   grep -q -E '(panicked at|FAILED)' "$CUR_LOG" || { echo "--- Cargo/build failure (tail of $CUR_LOG) ---" >&2; tail -n 25 "$CUR_LOG" >&2; }
 fi
-# Measured: 1 passed (processor_heap_audit_test); threshold=1
+# Measured: 10 passed (processor_heap_audit_test); threshold=1
 [ "$rc_heap" -eq 0 ] && assert_ran_tests "$CUR_LOG" 1 || { FAILS+=(heap-audit); emit "PHASE: heap-audit FAIL rc=$rc_heap log=$CUR_LOG"; finish || exit 1; exit 1; }
 emit "PHASE: heap-audit PASS log=$CUR_LOG"
 

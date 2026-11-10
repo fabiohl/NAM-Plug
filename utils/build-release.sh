@@ -71,6 +71,18 @@ if [ "$DO_INSTALL" = true ] && [ "$DO_CERTIFY" != true ]; then
     usage_fail "build-release.sh: --install exige --certify"
 fi
 
+# When reconciling via --certify, reuse the existing build run id so the independent
+# build, long-audit, and certify steps match even without an exported NAM_RUN_ID.
+if [ "$DO_CERTIFY" = true ] && [ -z "${NAM_RUN_ID:-}" ]; then
+    if [ -s "$LOG_DIR/build-run-id" ]; then
+        IFS= read -r NAM_RUN_ID < "$LOG_DIR/build-run-id" || true
+        export NAM_RUN_ID
+    elif [ -s "$BUILD_RECEIPT" ]; then
+        NAM_RUN_ID=$(sed -n -E 's/.*"run_id": "([^"]+)".*/\1/p' "$BUILD_RECEIPT" | head -n1)
+        [ -n "$NAM_RUN_ID" ] && export NAM_RUN_ID
+    fi
+fi
+
 lib_init
 
 PARANOID_ORIG=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)
@@ -143,6 +155,9 @@ if [ "$DO_CERTIFY" = true ]; then
     CERT_ARGS=("--artifact" "$CLAP_TARGET" "--build-receipt" "$BUILD_RECEIPT")
     if [ "$DO_STRICT" -eq 1 ]; then
         CERT_ARGS+=("--strict")
+    fi
+    if [ -n "${NAM_RUN_ID:-}" ]; then
+        CERT_ARGS+=("--run-id" "$NAM_RUN_ID")
     fi
 
     CERT_BIN=""
@@ -343,7 +358,6 @@ elif [ -n "$LLVM_PROFDATA" ]; then
         RUSTFLAGS="$PGO_GEN_RUSTFLAGS" cargo build --locked --profile dist --features testing --bin pgo_profiling_workload
         echo "Executing PGO profiling workload..."
         LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw" timeout 60 "$PROJECT_DIR/target/dist/pgo_profiling_workload" --receipt "$PGO_WORKLOAD_RECEIPT" 2>&1 | tee "$PGO_WORKLOAD_LOG"
-        CLIPPING_COUNT_PHASE1=$(grep -c "Output clipping detected" "$PGO_WORKLOAD_LOG" 2>/dev/null || echo 0)
 
         PROFRAW_COUNT=$(find "$PROFRAW_DIR" -name "*.profraw" 2>/dev/null | wc -l)
         if [ "$PROFRAW_COUNT" -gt 0 ]; then
@@ -360,6 +374,7 @@ elif [ -n "$LLVM_PROFDATA" ]; then
     } 2>&1 | tee "$PGO_LOG"
     RC=${PIPESTATUS[0]}
     rm -rf "$PROFRAW_DIR"
+    CLIPPING_COUNT_PHASE1=$(grep -c "Output clipping detected" "$PGO_WORKLOAD_LOG" 2>/dev/null || true)
 
     if [ "$RC" -eq 0 ] && [ -s "$MERGED_PROFILE" ]; then
         PGO_STATUS="applied"
@@ -440,8 +455,8 @@ if [ -n "$CEREMONY_VERDICT" ] && [ "$CEREMONY_VERDICT" != "PGO+BOLT" ]; then
 elif [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
     phase "bolt_optimize"
     BOLT_LOG="$LOG_DIR/build-release-bolt_optimize.log"
+    BOLT_VERSION=$("$LLVM_BOLT" --version 2>&1 | head -n 1 || echo "unknown")
     {
-        BOLT_VERSION=$("$LLVM_BOLT" --version 2>&1 | head -n 1 || echo "unknown")
         echo "BOLT version: $BOLT_VERSION"
 
         echo "[Step 1/3] Instrumenting CLAP plugin..."
@@ -457,7 +472,6 @@ elif [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
 
         NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
             "$PROJECT_DIR/target/dist/pgo_profiling_workload" --clap-only --receipt "$BOLT_WORKLOAD_RECEIPT" 2>&1 | tee "$BOLT_WORKLOAD_LOG"
-        CLIPPING_COUNT_BOLT=$(grep -c "Output clipping detected" "$BOLT_WORKLOAD_LOG" 2>/dev/null || echo 0)
 
         CLAP_FDATA_FILES=()
         while IFS= read -r -d '' f; do
@@ -483,6 +497,7 @@ elif [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
         fi
     } 2>&1 | tee "$BOLT_LOG"
     RC=${PIPESTATUS[0]}
+    CLIPPING_COUNT_BOLT=$(grep -c "Output clipping detected" "$BOLT_WORKLOAD_LOG" 2>/dev/null || true)
 
     if [ "$RC" -eq 0 ] && [ -s "$PGO_CLAP_TARGET_DIR/dist/libnam_plug.bolt.so" ]; then
         BOLT_STATUS="applied"
@@ -758,6 +773,15 @@ if [ "$RC" -eq 0 ]; then
     # The long audit reuses this id so build and long receipts reconcile even
     # when the three commands run as independent processes.
     printf '%s\n' "$NAM_RUN_ID" > "$LOG_DIR/build-run-id"
+    if [ -f "$BUILD_RECEIPT" ]; then
+        receipt_gaps=$(grep -o '"gaps": *\[[^]]*\]' "$BUILD_RECEIPT" 2>/dev/null | sed -e 's/"gaps": *\[//' -e 's/\]//' -e 's/"//g' -e 's/[[:space:]]//g' || true)
+        if [ -n "$receipt_gaps" ]; then
+            IFS=',' read -r -a r_gaps <<< "$receipt_gaps"
+            for g in "${r_gaps[@]}"; do
+                [ -n "$g" ] && [[ ! " ${GAPS[*]:-} " =~ " ${g} " ]] && gap "$g"
+            done
+        fi
+    fi
     emit "PHASE: build_receipt PASS log=$RECEIPT_LOG"
 else
     rm -f "$BUILD_RECEIPT"

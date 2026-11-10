@@ -13,10 +13,13 @@
 //! audio configuration. If the host changed either, the affected resources are
 //! discarded and rebuilt from scratch. Model weights are always reusable.
 
+use crate::clap::plugin::NamClapMainThread;
+use crate::clap::processor::NamClapProcessor;
 use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::StaticModel;
+use std::sync::atomic::Ordering;
 
 /// Heavy DSP resources preserved across deactivate/activate cycles.
 pub(crate) struct DeactivatedDspState {
@@ -61,4 +64,118 @@ pub(crate) struct DeactivatedDspState {
     pub(crate) model_input_mult_adj: f32,
     /// Model output gain calibration multiplier (from loudness metadata).
     pub(crate) model_output_mult_adj: f32,
+}
+
+/// Deactivates the audio processor instance, returning channel resources to shared storage
+/// and preserving reusable DSP states off the audio thread.
+pub(crate) fn deactivate<'a>(
+    mut processor: NamClapProcessor<'a>,
+    main_thread: &NamClapMainThread<'a>,
+) {
+    processor
+        .shared
+        .cold
+        .is_processing
+        .store(false, Ordering::Relaxed);
+    // Isolate panics during cleanup.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // A structural command deferred by the final callback is resolved
+        // before teardown. The parked payload's heap resources drop here on
+        // the main thread (safe — never on the audio thread), and its
+        // rolled-back sequence slot is consumed so the ack stays gapless
+        // across a subsequent deactivate/activate cycle (the ring may still
+        // hold commands for the next activate).
+        let (mut cmd_consumer, parked) = processor.cmd_drain.into_parts();
+        if parked.is_some() {
+            cmd_consumer.advance_pending();
+            cmd_consumer.ack_processed();
+        }
+        drop(parked);
+
+        let mut param_rx_guard = processor
+            .shared
+            .cold
+            .param_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *param_rx_guard = Some(cmd_consumer.into_inner());
+
+        let mut gc_tx_guard = processor
+            .shared
+            .cold
+            .gc_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *gc_tx_guard = Some(processor.gc_tx);
+
+        let (slimmable_rx, parked_slimmable) = processor.slimmable_drain.into_parts();
+        // A slimmable rebuild parked by the final callback drops here on
+        // the main thread (safe — never on the audio thread). The plain
+        // ring carries no ack, so no sequence bookkeeping is needed.
+        drop(parked_slimmable);
+
+        let mut slimmable_rx_guard = processor
+            .shared
+            .cold
+            .slimmable_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *slimmable_rx_guard = Some(slimmable_rx);
+
+        // Preserve heavy DSP resources across deactivate/activate cycles
+        // to avoid I/O, filter-bank recompute, and FFT setup on the next
+        // activate(). Resources are validated on restore against the current
+        // audio configuration.
+        //
+        // Persist the *applied* oversampling factor — the one the preserved
+        // engines were actually built for — NEVER the user/DAW-requested
+        // `params.oversample`, which may still be ahead of the engines while
+        // a host restart is pending. Otherwise the next activate() would
+        // consider the old engines compatible with the new requested factor
+        // and reuse them incorrectly.
+        // If the processor was poisoned by a runtime panic, discard the corrupted
+        // DSP state so that the subsequent activate() rebuilds a fresh pipeline.
+        if !processor.poisoned {
+            let deactivated = DeactivatedDspState {
+                model_l: processor.model_l,
+                model_r: processor.model_r,
+                model_generation: processor.model_generation,
+                cabsim_pair: processor.cabsim_pair,
+                resampler: processor.resampler,
+                stream: processor.stream,
+                os_l: processor.os_l,
+                os_r: processor.os_r,
+                os_factor: processor.applied_os_factor,
+                sample_rate: processor.shared.cold.sample_rate.load(Ordering::Relaxed),
+                buffer_size: processor.shared.cold.buffer_size.load(Ordering::Relaxed),
+                model_input_mult_adj: processor.model_input_mult_adj,
+                model_output_mult_adj: processor.model_output_mult_adj,
+            };
+            *processor
+                .shared
+                .cold
+                .deactivated_dsp
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(deactivated);
+        } else {
+            *processor
+                .shared
+                .cold
+                .deactivated_dsp
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+
+        // Hand off single-owner parking-lot items to the final off-RT GC
+        // drain. The audio thread has already stopped (the host calls
+        // deactivate() after stop_processing) and the processor has not been
+        // dropped yet — a single drain_gc_final call releases the SPSC +
+        // overflow + the 16 parking-lot slots on the main thread.
+        main_thread.drain_gc_final(&mut processor.parking_lot);
+    }));
+    if let Err(err) = result {
+        // Deactivate panicked — resources may leak but crash report
+        // was already written. Drop the payload silently.
+        drop(err);
+    }
 }

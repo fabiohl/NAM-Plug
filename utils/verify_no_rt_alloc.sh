@@ -36,6 +36,7 @@ if ! matches=$(awk -f "$AWK_PROG" $SCAN_FILES 2>&1); then
     exit 1
 fi
 
+echo "RT allocation scan clean: no forbidden allocations found in src/clap/processor/." > "$CUR_LOG"
 emit "PHASE: rt_alloc_scan PASS log=$CUR_LOG"
 ok "RT allocation scan clean: no Box::new / implicit allocations on the audio-thread path (src/clap/processor/)."
 finish

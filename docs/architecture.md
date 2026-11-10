@@ -70,7 +70,7 @@ The underlying DSP engine (`NeuralAmpModeler-rs`) provides an optional `rt-harde
 
 **Local RT Safety Invariants:** While delegating host-level thread policy to the DAW, `NAM-Plug` enforces strict real-time discipline internally:
 
-- **Thread-Local FTZ / DAZ:** Configured on the audio thread upon first execution (`_MM_SET_FLUSH_ZERO_MODE` / `_MM_SET_DENORMALS_ZERO_MODE`) via thread-local SSE control registers without modifying global host state.
+- **Thread-Local FTZ / DAZ:** Configured on the audio thread upon first execution (`apply_rt_thread_setup()` in `start_processing()`) and defended on every callback via RAII guard (`FtzDazGuard` in `src/clap/processor/ftz.rs`). The guard asserts FTZ (bit 15) and DAZ (bit 6) in MXCSR and restores the host's exact MXCSR on scope exit, preventing denormal performance stalls while ensuring zero host state leakage.
 - **Strict Audio Callback Contract:** Zero heap allocations (enforced via `heap-audit`), zero mutex locks, zero blocking I/O, and zero panics.
 - **Passive RT Telemetry:** Thread scheduling, CPU affinity, and processing health are passively reported through lock-free atomic bitmasks (`RtStatusFlags`).
 
@@ -277,9 +277,11 @@ RT Thread (Replaced Asset)
 2. **Tier 2 (Processor Parking Lot):** Fixed array `[Option<GcItem>; 16]` inside `PluginAudioProcessor`. Flushed back to SPSC whenever capacity frees. At plugin teardown, `deactivate()` passes `&mut parking_lot` to `drain_gc_final()` for single-owner disposal on the main thread.
 3. **Tier 3 (`GcOverflowBuffer`):** Atomic ring buffer. Overwrites the oldest slot if completely saturated, setting `RT_STATUS_GC_OVERFLOW` to preserve hard real-time deadlines.
 
-### 5.4 Poison-Resilient Activation Rollback Guard (`ActivateRollbackGuard`)
+### 5.4 Poison-Resilient Activation Rollback Guard (`ActivateRollbackGuard` & `StagedItemsRollbackGuard`)
 
-During plugin `activate()`, channel receivers (`param_rx`, `slimmable_rx`), `gc_tx`, and `deactivated_dsp` are transferred to the audio processor under `ActivateRollbackGuard` (`src/clap/processor/rollback.rs`). If activation panics or fails midway, `Drop` recovers poisoned mutexes and restores all resources back into `ColdShared` without dropping them on the audio thread.
+During plugin `activate()` (`src/clap/processor/activate.rs`), channel receivers (`param_rx`, `slimmable_rx`), `gc_tx`, and `deactivated_dsp` are transferred to the audio processor under `ActivateRollbackGuard` (`src/clap/processor/rollback.rs`). If activation panics or fails midway, `Drop` recovers poisoned mutexes and restores all resources back into `ColdShared` without dropping them on the audio thread.
+
+Furthermore, `StagedItemsRollbackGuard` guarantees that any staged state restore or hot-swap payloads (`StagedRestore`, `StagedSwap`) are disarmed only upon successful processor construction, restoring staged items back to `NamClapMainThread` if activation encounters an error or early returns.
 
 ### 5.5 Cold-Path Latency Caching (`cached_effective_latency`)
 
@@ -307,9 +309,16 @@ When DAW state is restored prior to `activate()`, the host buffer size (`max_fra
 - `commit_prepared_model` publishes identity (`params.model_path/hash`) up-front, but display telemetry (`ui_model_metadata`, `ui_model_name`, `model_load_counter`, and error clearing) lands together in `finish_commit_ui`. The UI advances only after the model is retained.
 - `flush_pending_model` uses an RAII restore guard: any error re-inserts the model into `pending_model` for retry instead of dropping it, setting `RT_STATUS_MODEL_LOAD_FAILED` and populating `ui_load_error_msg`.
 
-### 5.8 Channel Preservation on `deactivate()`
+### 5.8 Channel Preservation and DSP Resource Reuse on `deactivate()`
 
-Calling `deactivate()` returns SPSC channel consumers (`param_rx`, `gc_tx`, `slimmable_rx`) back into `ColdShared`, allowing hosts to stop and restart audio processing without reconstructing channels or reallocating memory.
+Calling `deactivate()` (`src/clap/processor/deactivated.rs`) returns SPSC channel consumers (`param_rx`, `gc_tx`, `slimmable_rx`) back into `ColdShared`, allowing hosts to stop and restart audio processing without reconstructing channels or reallocating memory.
+
+Additionally, `DeactivatedDspState` preserves heavy DSP resources (active neural model weights, CabSim convolution pair, polyphase resamplers, streaming resample buffers, and oversampling engines) across deactivate/activate cycles:
+
+- **Model weights:** Reusable unconditionally across activations, as weights are independent of host sample rate and buffer size.
+- **CabSim convolution pair:** Reusable across buffer size (quantum) renegotiations because the underlying driver partitions blocks internally; only an effective host sample rate change forces a rebuild.
+- **Resampler & Streaming buffers:** Reused if the newly negotiated host sample rate and maximum block size match the preserved configuration.
+- **Poisoning Invariant:** If the processor was poisoned by a runtime panic, `deactivated_dsp` is discarded (`None`) so that the subsequent activation rebuilds a clean DSP pipeline from scratch.
 
 ### 5.9 Transactional State Restore (Stage / Commit / Ack)
 
@@ -375,9 +384,26 @@ graph TD
     PeakStore --> HostOutput[/"Host Output Buffer"/]
 ```
 
+### 6.0 Processor Subsystem Architecture (`src/clap/processor/`)
+
+To ensure strict separation of concerns, the real-time audio processor lifecycle is decomposed into dedicated, cohesive submodules:
+
+| Submodule               | Role & Responsibilities                                                                                                                                      |
+|:----------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`activate.rs`**       | Off-RT buffer pre-allocation (`AlignedVec`), SPSC channel extraction, staged restore/swap adaptation, DSP component assembly, and initial latency reporting. |
+| **`deactivated.rs`**    | `DeactivatedDspState` definition and `deactivate()` lifecycle implementation, preserving reusable heavy DSP assets off the audio thread.                     |
+| **`ftz.rs`**            | RAII `FtzDazGuard` asserting hardware FTZ/DAZ denormal flushing during block rendering and restoring host MXCSR on drop with zero leakage.                   |
+| **`mod.rs`**            | CLAP `PluginAudioProcessor` trait implementation, top-level callback entrypoint (`process()`), reset logic, and panic containment.                           |
+| **`dsp/`**              | Audio signal chain: channel extraction, latency-compensated dry delay, noise gate FSM, neural inference, and peak telemetry.                                 |
+| **`events.rs`**         | SPSC command ring drainage and sample-accurate parameter automation sub-block slicing.                                                                       |
+| **`params.rs`**         | Atomic parameter snapshotting and `ParamSmoother` integration.                                                                                               |
+| **`prewarm_policy.rs`** | Proportional zero-budget stabilization policy and execution step sizing for two-phase model resets.                                                          |
+| **`rollback.rs`**       | Panic-resilient resource recovery guards (`ActivateRollbackGuard`).                                                                                          |
+| **`state.rs`**          | `NamClapProcessor` struct declaration and click-free `BypassCrossfader` state machine.                                                                       |
+
 ### 6.1 Execution Sequence
 
-1. **Subnormal & Denormal Setup:** First block enables Flush-To-Zero (FTZ) and Denormals-Are-Zero (DAZ) via SSE control registers.
+1. **Subnormal & Denormal Setup:** First block applies one-shot thread setup (`apply_rt_thread_setup()`), and every callback asserts Flush-To-Zero (FTZ) and Denormals-Are-Zero (DAZ) via RAII `FtzDazGuard` (`src/clap/processor/ftz.rs`), restoring host MXCSR upon exit.
 2. **Event & Command Draining (`process_events()`):** Drains command and slimmable rings via `RtSwapDrain` schedulers (at most one structural swap per callback), then updates local parameter targets from GUI atomics.
 3. **Channel Extraction (`extract_channels()`):** Maps host input buffers into contiguous working scratch buffers and detects active channel count (`1` or `2`) for adaptive metering.
 4. **Input Gain & Stage:** Applies user input gain (SIMD + `ParamSmoother`), injects anti-subnormal dither (`-220 dBFS`), and evaluates the Noise Gate FSM.
@@ -606,7 +632,7 @@ To protect legacy CPUs from crashing with `SIGILL` upon plugin load:
 Enforces zero heap allocation on the audio thread:
 
 - Global memory interceptor (`CountingAllocator`) active under `--features "testing,heap-audit"`.
-- Static AST scanner (`utils/lib/verify_no_rt_alloc.sh`) asserting zero `Box`, `Vec`, or `format!` calls in `src/clap/processor/`.
+- Static AST scanner (`utils/verify_no_rt_alloc.sh`) asserting zero `Box`, `Vec`, or `format!` calls in `src/clap/processor/`.
 - Codegen verifier (`utils/verify_rt_codegen.sh`) disassembling the `.so` with `objdump` to verify zero `malloc`/`free`, zero `div`/`idiv` in hot loops, and zero `__tls_get_addr` calls.
 
 ### 9.5 Headless GUI Testing (Xvfb)

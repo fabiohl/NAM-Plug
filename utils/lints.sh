@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # lints.sh — Análise estática, formatação e conformidade textual. Classe A.
 # Uso: utils/lints.sh
-# Orçamento: 125         # +10: cross_target bidirecional e scan spdx python/shell
+# Orçamento: 130         # +15: margem preventiva cross_target bidirecional e scan spdx
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
 cd "$(dirname "$0")/.."

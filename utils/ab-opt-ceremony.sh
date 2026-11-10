@@ -175,7 +175,7 @@ if [ "$USE_PGO" = 1 ]; then
     mkdir -p "$PGO_DIR/profraw"
     echo "building variant 'pgo-gen'"
     run_timed "$VARIANT_TIMEOUT_S" env \
-        RUSTFLAGS="$CONFIG_RUSTFLAGS -Cprofile-generate=$PGO_DIR/profraw" \
+        RUSTFLAGS="$CONFIG_RUSTFLAGS -Cprofile-generate=$PGO_DIR/profraw -Cllvm-args=-vp-counters-per-site=8" \
         cargo build --locked --release --features testing --bin ab_opt_bench
     echo "running variant 'pgo-gen' (profile capture)"
     run_timed "$VARIANT_TIMEOUT_S" env \

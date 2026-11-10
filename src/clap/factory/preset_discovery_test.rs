@@ -70,4 +70,16 @@ mod tests {
         assert!(desc.name().is_some());
         assert_eq!(desc.id().unwrap().to_bytes(), NAM_PROVIDER_ID.as_bytes());
     }
+
+    #[test]
+    fn test_preset_discovery_plugin_id_matches_descriptor() {
+        let desc = crate::clap::descriptor::nam_descriptor();
+        assert_eq!(
+            NAM_PLUGIN_ID.to_bytes(),
+            desc.id()
+                .expect("Plugin descriptor must have an id")
+                .to_bytes(),
+            "Preset discovery plugin ID must match the plugin descriptor ID"
+        );
+    }
 }

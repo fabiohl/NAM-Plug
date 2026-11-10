@@ -138,6 +138,12 @@ pub struct HostEnvironment {
     pub affinity_error: Option<String>,
 }
 
+const DEFAULT_NOISE_FLOOR_NS: f64 = 25_000.0;
+
+fn default_noise_floor_ns() -> f64 {
+    DEFAULT_NOISE_FLOOR_NS
+}
+
 /// Relative p99 tail ceiling against a previous certification report.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReferenceCheck {
@@ -146,6 +152,8 @@ pub struct ReferenceCheck {
     pub status: String,
     pub p99_ratio_max: f64,
     pub p50_ratio_max: f64,
+    #[serde(default = "default_noise_floor_ns")]
+    pub p99_noise_floor_ns: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worst_p99_ratio: Option<f64>,
     pub worst_p50_ratio: f64,
@@ -504,6 +512,7 @@ fn evaluate_reference_series(
     reference: &ReferenceReport,
     p99_ratio_max: f64,
     p50_ratio_max: f64,
+    p99_noise_floor_ns: f64,
     reference_path: &str,
     reference_sha256: &str,
 ) -> Result<ReferenceCheck, String> {
@@ -515,6 +524,11 @@ fn evaluate_reference_series(
     if !p50_ratio_max.is_finite() || p50_ratio_max <= 0.0 {
         return Err(format!(
             "invalid --p50-ratio-max '{p50_ratio_max}': must be a positive finite number"
+        ));
+    }
+    if !p99_noise_floor_ns.is_finite() || p99_noise_floor_ns < 0.0 {
+        return Err(format!(
+            "invalid --p99-noise-floor-us '{p99_noise_floor_ns}': must be a non-negative finite number"
         ));
     }
     let reference_scenarios: BTreeMap<&str, &ReferenceScenario> = reference
@@ -555,7 +569,8 @@ fn evaluate_reference_series(
             Some(rp) => {
                 let r = m.p99_ns / rp;
                 worst_p99_ratio = Some(worst_p99_ratio.map_or(r, |w| w.max(r)));
-                let passed = r <= p99_ratio_max;
+                let delta_ns = m.p99_ns - rp;
+                let passed = r <= p99_ratio_max || delta_ns <= p99_noise_floor_ns;
                 if !passed {
                     p99_failures.push((m.name.clone(), r));
                 }
@@ -603,6 +618,7 @@ fn evaluate_reference_series(
         status,
         p99_ratio_max,
         p50_ratio_max,
+        p99_noise_floor_ns,
         worst_p99_ratio,
         worst_p50_ratio,
         passed,
@@ -616,6 +632,7 @@ fn load_reference_check(
     measured: &[ScenarioPerfMetrics],
     p99_ratio_max: f64,
     p50_ratio_max: f64,
+    p99_noise_floor_ns: f64,
     artifact_sha256: &str,
 ) -> Result<ReferenceCheck, String> {
     let bytes = fs::read(reference_path).map_err(|e| {
@@ -642,6 +659,7 @@ fn load_reference_check(
         &reference,
         p99_ratio_max,
         p50_ratio_max,
+        p99_noise_floor_ns,
         &reference_path.to_string_lossy(),
         &reference_sha256,
     )
@@ -884,7 +902,8 @@ fn measure_scenario(
 fn usage() -> ! {
     eprintln!(
         "Usage: nam_perf_guard certify --clap <path-to-.clap> [--out <output.json>] \
-         [--reference <previous-report.json>] [--p99-ratio-max <ratio>] [--p50-ratio-max <ratio>]"
+         [--reference <previous-report.json>] [--p99-ratio-max <ratio>] [--p50-ratio-max <ratio>] \
+         [--p99-noise-floor-us <microseconds>]"
     );
     std::process::exit(1);
 }
@@ -902,6 +921,7 @@ fn main() -> ExitCode {
     let mut reference_path: Option<PathBuf> = None;
     let mut p99_ratio_max = 1.25_f64;
     let mut p50_ratio_max = 1.5_f64;
+    let mut p99_noise_floor_ns = DEFAULT_NOISE_FLOOR_NS;
 
     let mut i = 1;
     while i < args.len() {
@@ -958,6 +978,23 @@ fn main() -> ExitCode {
                         return ExitCode::from(1);
                     }
                 };
+            }
+            "--p99-noise-floor-us" => {
+                i += 1;
+                if i >= args.len() {
+                    usage();
+                }
+                let us = match args[i].parse::<f64>() {
+                    Ok(value) if value.is_finite() && value >= 0.0 => value,
+                    _ => {
+                        eprintln!(
+                            "❌ FATAL: invalid --p99-noise-floor-us '{}': expected a non-negative number",
+                            args[i]
+                        );
+                        return ExitCode::from(1);
+                    }
+                };
+                p99_noise_floor_ns = us * 1000.0;
             }
             _ => usage(),
         }
@@ -1096,7 +1133,14 @@ fn main() -> ExitCode {
     let environment_degraded = !degradation_reasons.is_empty();
     let reference_check = match reference_path.as_deref() {
         Some(path) => {
-            match load_reference_check(path, &results, p99_ratio_max, p50_ratio_max, &clap_sha) {
+            match load_reference_check(
+                path,
+                &results,
+                p99_ratio_max,
+                p50_ratio_max,
+                p99_noise_floor_ns,
+                &clap_sha,
+            ) {
                 Ok(check) => Some(check),
                 Err(err) => {
                     eprintln!("❌ FATAL: {err}");
@@ -1156,12 +1200,13 @@ fn main() -> ExitCode {
     );
     if let Some(check) = &reference_check {
         println!(
-            "Reference Check Status:     {} (worst p99 ratio: {}, max allowed: {:.3}, ref={})",
+            "Reference Check Status:     {} (worst p99 ratio: {}, max allowed: {:.3}, noise floor: {:.1}µs, ref={})",
             check.status,
             check
                 .worst_p99_ratio
                 .map_or_else(|| "n/a".to_string(), |w| format!("{w:.3}")),
             check.p99_ratio_max,
+            check.p99_noise_floor_ns / 1000.0,
             check.reference_path
         );
         if let Some(reason) = &check.inconclusive_reason {
@@ -1332,5 +1377,88 @@ mod tests {
             reasons.iter().any(|r| r == "irq_isolation_shared:8:1"),
             "expected irq_isolation_shared:8:1, got {reasons:?}"
         );
+    }
+
+    #[test]
+    fn reference_series_passes_within_noise_floor_even_if_ratio_exceeds_threshold() {
+        let measured = vec![ScenarioPerfMetrics {
+            name: "LSTM_64_samp".to_string(),
+            topology: "LSTM 1x3".to_string(),
+            sample_rate: 48000.0,
+            block_size: 64,
+            iterations: 300,
+            p50_ns: 8102.0,
+            p95_ns: 8521.0,
+            p99_ns: 13759.0, // 4.19 µs delta over reference
+            max_ns: 13759.0,
+            mean_ns: 8158.4,
+            stddev_ns: 612.0,
+            ns_per_sample: 127.5,
+            deadline_budget_ns: 1333333.3,
+            gate_threshold_ns: 1133333.3,
+            deadline_margin_percent: 98.9,
+            gate_headroom_percent: 98.7,
+            deadline_passed: true,
+        }];
+        let reference = ReferenceReport {
+            clap_artifact_sha256: Some("dummy".to_string()),
+            scenarios: vec![ReferenceScenario {
+                name: "LSTM_64_samp".to_string(),
+                p50_ns: Some(8102.0),
+                p99_ns: Some(9568.0),
+                max_ns: Some(14248.0),
+            }],
+        };
+
+        let check = evaluate_reference_series(
+            &measured, &reference, 1.25, 1.5, 25_000.0, // 25 µs noise floor
+            "ref.json", "sha",
+        )
+        .expect("evaluation should succeed");
+
+        assert_eq!(check.status, "PASS");
+        assert!(check.passed);
+        assert_eq!(check.comparisons[0].p99_passed, Some(true));
+    }
+
+    #[test]
+    fn reference_series_fails_when_both_ratio_and_noise_floor_exceeded() {
+        let measured = vec![ScenarioPerfMetrics {
+            name: "LSTM_64_samp".to_string(),
+            topology: "LSTM 1x3".to_string(),
+            sample_rate: 48000.0,
+            block_size: 64,
+            iterations: 300,
+            p50_ns: 8102.0,
+            p95_ns: 8521.0,
+            p99_ns: 60000.0, // 50.4 µs delta over reference (> 25 µs noise floor)
+            max_ns: 60000.0,
+            mean_ns: 15000.0,
+            stddev_ns: 1000.0,
+            ns_per_sample: 250.0,
+            deadline_budget_ns: 1333333.3,
+            gate_threshold_ns: 1133333.3,
+            deadline_margin_percent: 95.0,
+            gate_headroom_percent: 94.0,
+            deadline_passed: true,
+        }];
+        let reference = ReferenceReport {
+            clap_artifact_sha256: Some("dummy".to_string()),
+            scenarios: vec![ReferenceScenario {
+                name: "LSTM_64_samp".to_string(),
+                p50_ns: Some(8102.0),
+                p99_ns: Some(9568.0),
+                max_ns: Some(14248.0),
+            }],
+        };
+
+        let check = evaluate_reference_series(
+            &measured, &reference, 1.25, 1.5, 25_000.0, "ref.json", "sha",
+        )
+        .expect("evaluation should succeed");
+
+        assert_eq!(check.status, "FAIL");
+        assert!(!check.passed);
+        assert_eq!(check.comparisons[0].p99_passed, Some(false));
     }
 }

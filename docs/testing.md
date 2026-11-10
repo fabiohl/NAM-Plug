@@ -16,13 +16,13 @@ This document outlines the architecture, execution workflows, memory invariants,
 
 `NAM-Plug` testing relies on Cargo feature flags defined in [`Cargo.toml`](../Cargo.toml):
 
-| Feature Flag     | Description                                                                              | Test / Bench Usage Scope                                                                              |
-|:---------------- |:---------------------------------------------------------------------------------------- |:----------------------------------------------------------------------------------------------------- |
-| **`default`**    | Enables `dual-mono` by default (`default = ["dual-mono"]`).                              | Standard production builds and default compilation checks.                                            |
+| Feature Flag     | Description                                                                                                                                                                                   | Test / Bench Usage Scope                                                                              |
+|:---------------- |:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |:----------------------------------------------------------------------------------------------------- |
+| **`default`**    | Enables `dual-mono` by default (`default = ["dual-mono"]`).                                                                                                                                   | Standard production builds and default compilation checks.                                            |
 | **`dual-mono`**  | Enables dual-channel L/R processing via `NeuralAmpModeler-rs/dual-mono` and CLAP Stereo port configuration announcement. Without this feature, only the Mono port configuration is announced. | Default feature enabled across standard builds and test runs.                                         |
-| **`testing`**    | Enables engine test utilities, generators, and fixture resolution (`NeuralAmpModeler-rs/testing`). | Mandatory feature flag when running `NAM-Plug` integration tests, receipts, and Criterion benchmarks.  |
-| **`heap-audit`** | Intercepts memory allocations via `CountingAllocator` (`NeuralAmpModeler-rs/heap-audit`). | Used by RT-safety tests to ensure zero heap allocations occur on the audio thread during `process()`. |
-| **`gui-x11`**    | Display-server lifecycle tests (requires dedicated Xvfb/X11 server).                     | Off by default; exercised in dedicated GUI integration test phases.                                   |
+| **`testing`**    | Enables engine test utilities, generators, and fixture resolution (`NeuralAmpModeler-rs/testing`).                                                                                            | Mandatory feature flag when running `NAM-Plug` integration tests, receipts, and Criterion benchmarks. |
+| **`heap-audit`** | Intercepts memory allocations via `CountingAllocator` (`NeuralAmpModeler-rs/heap-audit`).                                                                                                     | Used by RT-safety tests to ensure zero heap allocations occur on the audio thread during `process()`. |
+| **`gui-x11`**    | Display-server lifecycle tests (requires dedicated Xvfb/X11 server).                                                                                                                          | Off by default; exercised in dedicated GUI integration test phases.                                   |
 
 ### 1.1 Dependency Graph & Feature Unification Behavior
 
@@ -77,15 +77,15 @@ Test targets reside in [`tests/`](../tests/) and test modules within `src/`.
 
 *Directory: [`tests/clap/`](../tests/clap/)*
 
-| Submodule / Test Target                                             | Scope & Invariants Verified                                                                                        |
-|:------------------------------------------------------------------- |:------------------------------------------------------------------------------------------------------------------ |
-| **[`artifact_validator`](../tests/clap/artifact_validator.rs)**     | Dynamic artifact discovery, `dlopen` loading, and SHA-256 fingerprint verification.                                |
-| **[`clap_cross_machine`](../tests/clap/clap_cross_machine.rs)**     | Cross-machine determinism, buffer chunk boundary invariance, and numerical float consistency.                      |
-| **[`clap_lifecycle_test`](../tests/clap/clap_lifecycle_test.rs)**   | Lifecycle transitions (`init`, `activate`, `deactivate`, `reset`), host log quiescence coordinator (`HostLogQuiescence`), and dynamic audio configuration changes.         |
-| **[`clap_multi_instance`](../tests/clap/clap_multi_instance.rs)**   | Multi-instance concurrency, thread safety, and resource isolation across parallel instances.                       |
-| **[`clap_parity_multi_sr`](../tests/clap/clap_parity_multi_sr.rs)** | CLAP × NAMCore C++ oracle parity across topologies and rates (44.1, 48, 96 kHz), oversampling, and CabSim IR path. |
-| **[`clap_state_migration`](../tests/clap/clap_state_migration.rs)** | State serialization, parameter persistence, backward compatibility, and corrupt payload recovery.                  |
-| **[`tail_semantics`](../tests/clap/tail_semantics.rs)**             | CLAP tail extension semantics, CabSim ring-out decay, and zero-allocation tail drain.                              |
+| Submodule / Test Target                                             | Scope & Invariants Verified                                                                                                                                        |
+|:------------------------------------------------------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **[`artifact_validator`](../tests/clap/artifact_validator.rs)**     | Dynamic artifact discovery, `dlopen` loading, and SHA-256 fingerprint verification.                                                                                |
+| **[`clap_cross_machine`](../tests/clap/clap_cross_machine.rs)**     | Cross-machine determinism, buffer chunk boundary invariance, and numerical float consistency.                                                                      |
+| **[`clap_lifecycle_test`](../tests/clap/clap_lifecycle_test.rs)**   | Lifecycle transitions (`init`, `activate`, `deactivate`, `reset`), host log quiescence coordinator (`HostLogQuiescence`), and dynamic audio configuration changes. |
+| **[`clap_multi_instance`](../tests/clap/clap_multi_instance.rs)**   | Multi-instance concurrency, thread safety, and resource isolation across parallel instances.                                                                       |
+| **[`clap_parity_multi_sr`](../tests/clap/clap_parity_multi_sr.rs)** | CLAP × NAMCore C++ oracle parity across topologies and rates (44.1, 48, 96 kHz), oversampling, and CabSim IR path.                                                 |
+| **[`clap_state_migration`](../tests/clap/clap_state_migration.rs)** | State serialization, parameter persistence, backward compatibility, and corrupt payload recovery.                                                                  |
+| **[`tail_semantics`](../tests/clap/tail_semantics.rs)**             | CLAP tail extension semantics, CabSim ring-out decay, and zero-allocation tail drain.                                                                              |
 
 #### 3.2.1 Multi-Rate Resampling Reference Oracle
 
@@ -120,6 +120,7 @@ The matrix evaluates three topologies (`wavenet_a1_standard.nam`, `a2_example.na
 | `lstm`                   | 1.91e-11 / 107.2 dB | 2.05e-11 / 106.9 dB | 2.03e-11 / 106.9 dB | ESR < 1e-8, SNR > 80 |
 
 Additional artifact parity gates verified in `phase3` (`artifact`):
+
 - **Oversampling Parity (`test_clap_parity_oversample`):** `2x` oversampling achieves `ESR = 8.43e-12` (`SNR = 110.7 dB`); `4x` oversampling achieves `ESR = 7.99e-12` (`SNR = 111.0 dB`).
 - **CabSim IR Parity (`test_clap_parity_cabsim`):** `ESR = 9.95e-14` (`SNR = 130.0 dB`).
 - **External `clap-validator` (`clap-validator 0.3.2`):** 21 plugin tests executed (`19 passed`, `0 failed`, `2 skipped` for unimplemented `clap.note-ports`), `1 ms` scan-time.
@@ -197,12 +198,12 @@ Performance is certified against the canonical artifact by `nam_perf_guard certi
 
 The benchmark suite differentiates between core neural math and plugin host integration overhead:
 
-| Architectural Layer     | Core Engine (`NeuralAmpModeler-rs`)                                   | CLAP Plugin (`NAM-Plug`)                                                                                 |
-|:----------------------- |:--------------------------------------------------------------------- |:-------------------------------------------------------------------------------------------------------- |
-| **Measurement Target**  | Raw DSP kernels (GEMM, Conv1D, WaveNet dilations, fast activations).  | Full CLAP plugin boundary, C ABI dispatch, buffer slicing, and audio/event routing.                      |
-| **Memory Topology**     | Pre-allocated, contiguous, SIMD-aligned Rust slices.                  | Raw host pointer arrays (`*const *const f32`), non-contiguous channel buffers, dynamic `AudioPorts`.     |
-| **Automation & Events** | Static parameters passed directly as scalar values to DSP kernels.    | Sample-accurate event demultiplexing, sub-block slicing, parameter smoothing ramps, and MIDI CC mapping. |
-| **State & Lifecycle**   | Pure stateless or stateful mathematical models executed sequentially. | Lifecycle state transitions, dynamic delay compensation (PDC), bypass crossfading, CabSim ring-out.      |
+| Architectural Layer     | Core Engine (`NeuralAmpModeler-rs`)                                   | CLAP Plugin (`NAM-Plug`)                                                                                                  |
+|:----------------------- |:--------------------------------------------------------------------- |:------------------------------------------------------------------------------------------------------------------------- |
+| **Measurement Target**  | Raw DSP kernels (GEMM, Conv1D, WaveNet dilations, fast activations).  | Full CLAP plugin boundary, C ABI dispatch, buffer slicing, and audio/event routing.                                       |
+| **Memory Topology**     | Pre-allocated, contiguous, SIMD-aligned Rust slices.                  | Raw host pointer arrays (`*const *const f32`), non-contiguous channel buffers, dynamic `AudioPorts`.                      |
+| **Automation & Events** | Static parameters passed directly as scalar values to DSP kernels.    | Sample-accurate event demultiplexing, sub-block slicing, parameter smoothing ramps, and MIDI CC mapping.                  |
+| **State & Lifecycle**   | Pure stateless or stateful mathematical models executed sequentially. | Lifecycle state transitions, dynamic delay compensation (PDC), bypass crossfading, CabSim ring-out.                       |
 | **Thread Topology**     | Deterministic single-thread execution in controlled test harnesses.   | Multi-thread host worker dispatch (`RoundTripIPC`), evaluating channel synchronization and thread-pool dispatch overhead. |
 
 ---
@@ -217,14 +218,14 @@ All commands must be executed from inside `./NAM-Plug/`:
 
 ### 5.1 Verification Scripts (`utils/`)
 
-| Script                                      | Scope & Operation                                                                                | Usage Context                              |
-|:------------------------------------------- |:------------------------------------------------------------------------------------------------ |:------------------------------------------ |
-| **`utils/lints.sh`**                        | Static analysis (`fmt`, `check` matrix, `clippy -D warnings`, `cross_aarch64_check`, SPDX headers, static RT allocations; ~6s). | Core continuous verification gate          |
-| **`utils/tests-quick.sh`**                  | Agile QA suite (≤ 5 min budget; `cargo test --features testing` + heap-audit unit gate).                 | First line of defense (local & pre-commit) |
-| **`utils/tests-long.sh`**                   | Pre-release & nightly audit suite (GC, teardown, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`. | Nightly & release audit (operator)         |
-| **`utils/verify_rt_codegen.sh`**            | Disassembly inspection of `.so` (0 `malloc`, 0 `div`/`idiv`, bounded TLS).                       | Invoked by `build-release.sh` (pre/post BOLT) |
-| **`utils/build-release.sh`**                | Canonical release builder and receipt certifier (`--strict`, `--package`, `--certify`, `--install` with `--certify`). | Official release pipeline                  |
-| **`utils/mod-update.sh`**                   | Manual toolchain and Cargo dependency upgrade utility (Class D).                                 | Dependency maintenance                     |
+| Script                           | Scope & Operation                                                                                                                 | Usage Context                                 |
+|:-------------------------------- |:--------------------------------------------------------------------------------------------------------------------------------- |:--------------------------------------------- |
+| **`utils/lints.sh`**             | Static analysis (`fmt`, `check` matrix, `clippy -D warnings`, `cross_aarch64_check`, SPDX headers, static RT allocations; ~6s).   | Core continuous verification gate             |
+| **`utils/tests-quick.sh`**       | Agile QA suite (≤ 5 min budget; `cargo test --features testing` + heap-audit unit gate).                                          | First line of defense (local & pre-commit)    |
+| **`utils/tests-long.sh`**        | Pre-release & nightly audit suite (GC, teardown, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`. | Nightly & release audit (operator)            |
+| **`utils/verify_rt_codegen.sh`** | Disassembly inspection of `.so` (0 `malloc`, 0 `div`/`idiv`, bounded TLS).                                                        | Invoked by `build-release.sh` (pre/post BOLT) |
+| **`utils/build-release.sh`**     | Canonical release builder and receipt certifier (`--strict`, `--package`, `--certify`, `--install` with `--certify`).             | Official release pipeline                     |
+| **`utils/mod-update.sh`**        | Manual toolchain and Cargo dependency upgrade utility (Class D).                                                                  | Dependency maintenance                        |
 
 #### 5.1.1 Quick Suite Lifecycle (`utils/tests-quick.sh`)
 
@@ -237,14 +238,14 @@ All commands must be executed from inside `./NAM-Plug/`:
 
 The long suite uses the canonical phase names below; `utils/tests-long.sh --help` prints the same table. Each phase writes `target/logs/long-<name>.log`, and the typed receipt is staged at `target/logs/long-audit-receipt.<NAM_RUN_ID>.partial.jsonl` then published atomically as `target/logs/long-audit-receipt.jsonl` only after `summary`+`validate` succeed on a full run (with `phase_ids` `phase1`–`phase6` kept as the receipt contract). Timeouts per command are calibrated to $\approx 2\times$ observed $p_{100}$ (overridable via `NAM_PHASE_TIMEOUT_S`):
 
-| Receipt `phase_id` | Canonical phase | Command, Invariant & Timeout | Log |
-| :------------------ | :--------------- | :---------------------------- | :--- |
-| `phase1` | `catch-all` | `cargo test --locked --release --features testing --no-run` first under its own 1200s build guard (outside `NAM_PHASE_TIMEOUT_S`), then `cargo test --locked --release --features testing --no-fail-fast --lib --bins --tests` (execution timeout 300s; 485 tests executed). Only non-ignored tests run; every `#[ignore]` suite has a dedicated phase (`artifact`, `perf`, `gui`, `heap-audit`, `rt-heap`), so nothing is orphaned and the build no longer consumes the test timeout. | `target/logs/long-catch-all.log` |
-| `phase3` | `artifact` | Parity and CabSim tests executed immediately after `catch-all` (sharing the `--features testing` Cargo fingerprint without recompilation) with `--exact` against a neutral release `.so` (or `target/dist/nam_plug.clap` with `--artifact`) via `run_named` (timeout 400s; 14 subcases + `clap-validator`). Oracle-backed parity (`test_clap_parity_multi_rate`, `test_clap_parity_oversample`) runs only when `NAM_CORE_RENDER_BIN` or `build/namcore_render` is executable — then `NAM_REQUIRE_CPP_ORACLE=1` is exported under `--strict`; otherwise the phase records the typed `clap_parity:missing_cpp_oracle` GAP but still runs the oracle-free CabSim tests (`test_clap_parity_cabsim`, `test_cabsim_ir_changes_audio_release_artifact`), so `--strict` fails cleanly on the GAP instead of a contradictory `rc=101` panic. Each invocation writes `target/logs/long-artifact-<nome>.log` validated with `ran_tests`; optional `clap-validator` gate. On failure, `close_phase` prints the last 40 log lines to stderr. | `target/logs/long-artifact.log` |
-| `phase4` | `perf` | `nam_perf_guard certify --clap target/dist/nam_plug.clap --reference <paired-series> --out target/logs/perf-certification-report.json` (timeout 120s; worst command $p_{100} \approx 30$s); reuses `--features testing`; requires `--artifact`. When `target/logs/perf-reference.json` is absent or from an earlier artifact SHA-256, `tests-long.sh` automatically captures a baseline reference series for the current `.clap` artifact before running the paired certification pass. | `target/logs/long-perf.log` |
-| `phase2` | `gui` | Individual named tests executed with `--exact` under `xvfb-run` via `run_named` (timeout 300s; 5 tests; worst command $p_{100} \approx 120$s cold / 1.2s warm) under `--features testing,gui-x11`; each invocation writes `target/logs/long-gui-<nome>.log` validated with `ran_tests`; emits `gui:xvfb_not_found` when `xvfb-run` is absent. | `target/logs/long-gui.log` |
-| `phase5` | `heap-audit` | Deterministic GC swap/destroy, off-RT teardown, RT-priority stress and TLS heap-stability soak tests under `--features testing,heap-audit` (timeout 500s; 505 subcases; worst command $p_{100} \approx 215$s under release heap-audit LTO). Each filter executes via `run_heap_test` writing a sublog `long-heap-<test>.log` verified with `ran_tests` fail-closed (PLUG-D). The receipt declares the real subcase cardinality (including the 500 proptest cases). This phase never measures time thresholds, so it is hosted-safe. | `target/logs/long-heap-audit.log` |
-| `phase6` | `rt-heap` | Operator-only time-threshold certification (`test_structural_burst_p99_within_contract`, `processor_drain_latency_test` [automation burst p50=214ns / p99=279ns < 1.0µs; scalar saturation p50=2,501ns / p99=2,630ns < 13.3µs], `test_reset_wall_clock_time_within_contract` [4 subcases total]) under `--features testing,heap-audit` on a pinned core; never selected by the hosted workflow because hosted runners are not a comparable speed gate. | `target/logs/long-rt-heap.log` |
+| Receipt `phase_id` | Canonical phase | Command, Invariant & Timeout                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Log                               |
+|:------------------ |:--------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |:--------------------------------- |
+| `phase1`           | `catch-all`     | `cargo test --locked --release --features testing --no-run` first under its own 1200s build guard (outside `NAM_PHASE_TIMEOUT_S`), then `cargo test --locked --release --features testing --no-fail-fast --lib --bins --tests` (execution timeout 300s; 485 tests executed). Only non-ignored tests run; every `#[ignore]` suite has a dedicated phase (`artifact`, `perf`, `gui`, `heap-audit`, `rt-heap`), so nothing is orphaned and the build no longer consumes the test timeout.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `target/logs/long-catch-all.log`  |
+| `phase3`           | `artifact`      | Parity and CabSim tests executed immediately after `catch-all` (sharing the `--features testing` Cargo fingerprint without recompilation) with `--exact` against a neutral release `.so` (or `target/dist/nam_plug.clap` with `--artifact`) via `run_named` (timeout 400s; 14 subcases + `clap-validator`). Oracle-backed parity (`test_clap_parity_multi_rate`, `test_clap_parity_oversample`) runs only when `NAM_CORE_RENDER_BIN` or `build/namcore_render` is executable — then `NAM_REQUIRE_CPP_ORACLE=1` is exported under `--strict`; otherwise the phase records the typed `clap_parity:missing_cpp_oracle` GAP but still runs the oracle-free CabSim tests (`test_clap_parity_cabsim`, `test_cabsim_ir_changes_audio_release_artifact`), so `--strict` fails cleanly on the GAP instead of a contradictory `rc=101` panic. Each invocation writes `target/logs/long-artifact-<nome>.log` validated with `ran_tests`; optional `clap-validator` gate. On failure, `close_phase` prints the last 40 log lines to stderr. | `target/logs/long-artifact.log`   |
+| `phase4`           | `perf`          | `nam_perf_guard certify --clap target/dist/nam_plug.clap --reference <paired-series> --out target/logs/perf-certification-report.json` (timeout 120s; worst command $p_{100} \approx 30$s); reuses `--features testing`; requires `--artifact`. When `target/logs/perf-reference.json` is absent or from an earlier artifact SHA-256, `tests-long.sh` automatically captures a baseline reference series for the current `.clap` artifact before running the paired certification pass.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `target/logs/long-perf.log`       |
+| `phase2`           | `gui`           | Individual named tests executed with `--exact` under `xvfb-run` via `run_named` (timeout 300s; 5 tests; worst command $p_{100} \approx 120$s cold / 1.2s warm) under `--features testing,gui-x11`; each invocation writes `target/logs/long-gui-<nome>.log` validated with `ran_tests`; emits `gui:xvfb_not_found` when `xvfb-run` is absent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `target/logs/long-gui.log`        |
+| `phase5`           | `heap-audit`    | Deterministic GC swap/destroy, off-RT teardown, RT-priority stress and TLS heap-stability soak tests under `--features testing,heap-audit` (timeout 500s; 505 subcases; worst command $p_{100} \approx 215$s under release heap-audit LTO). Each filter executes via `run_heap_test` writing a sublog `long-heap-<test>.log` verified with `ran_tests` fail-closed (PLUG-D). The receipt declares the real subcase cardinality (including the 500 proptest cases). This phase never measures time thresholds, so it is hosted-safe.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `target/logs/long-heap-audit.log` |
+| `phase6`           | `rt-heap`       | Operator-only time-threshold certification (`test_structural_burst_p99_within_contract`, `processor_drain_latency_test` [automation burst p50=214ns / p99=279ns < 1.0µs; scalar saturation p50=2,501ns / p99=2,630ns < 13.3µs], `test_reset_wall_clock_time_within_contract` [4 subcases total]) under `--features testing,heap-audit` on a pinned core; never selected by the hosted workflow because hosted runners are not a comparable speed gate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `target/logs/long-rt-heap.log`    |
 
 Dedicated suites are selected by Cargo features instead of a shell skip list: the five `gui_x11_*` tests require `gui-x11`, and the micro-latency/timing tests (`processor_drain_latency_test`, `test_reset_wall_clock_time_within_contract`, `test_structural_burst_p99_within_contract`) require `heap-audit`. The catch-all phase compiles neither feature and never passes `--include-ignored`, so it cannot run them without a display or pinned core; the dedicated phases enable the corresponding feature explicitly and own every `#[ignore]` target. Time-threshold tests belong exclusively to `rt-heap` (operator-only); `heap-audit` contains only deterministic, hosted-safe cases.
 
@@ -328,12 +329,12 @@ The canonical release workflow strictly decouples artifact compilation, long-aud
                       atomic copy to ~/.clap/nam_plug.clap, Flatpak bundle if declared
 ```
 
-| Step / Action | Script & Command | Role & Guarantees |
-| :------------- | :---------------- | :----------------- |
-| **0. A/B Ceremony** | `utils/ab-opt-ceremony.sh --runs 3` | Benchmarks `plain`, `pgo`, and `pgo+bolt` across `wavenet_a1`, `wavenet_a2`, and `lstm` on an isolated core, emitting `target/logs/ab-opt-ceremony-receipt.json`. |
-| **1. Canonical Build** | `utils/build-release.sh --strict [--package]` | Compiles `target/dist/nam_plug.clap` according to the ceremony verdict (`PGO+BOLT`, `PGO-ONLY`, or `UNOPTIMIZED` → `fallback_plain`). Packages distribution tarball and Flatpak extension if requested. Emits `target/dist/build-receipt.json`. Never installs. |
-| **2. Artifact Stress Audit** | `utils/tests-long.sh --strict --artifact` | Executes the full pre-release stress suite (1,014 test subcases across 6 phases) directly against `target/dist/nam_plug.clap` via `dlopen`. Records results in `target/logs/long-audit-receipt.jsonl`. |
-| **3. Final Certification** | `utils/build-release.sh --strict --certify [--install]` | Validates cryptographic identity and release gates across receipts without recompilation. Emits final `target/dist/release-receipt.json`. `--install` (valid only with `--certify`) installs the verified artifact to `~/.clap/` after `certify PASS`, emitting `PHASE: install_artifact PASS`. |
+| Step / Action                | Script & Command                                        | Role & Guarantees                                                                                                                                                                                                                                                                               |
+|:---------------------------- |:------------------------------------------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **0. A/B Ceremony**          | `utils/ab-opt-ceremony.sh --runs 3`                     | Benchmarks `plain`, `pgo`, and `pgo+bolt` across `wavenet_a1`, `wavenet_a2`, and `lstm` on an isolated core, emitting `target/logs/ab-opt-ceremony-receipt.json`.                                                                                                                               |
+| **1. Canonical Build**       | `utils/build-release.sh --strict [--package]`           | Compiles `target/dist/nam_plug.clap` according to the ceremony verdict (`PGO+BOLT`, `PGO-ONLY`, or `UNOPTIMIZED` → `fallback_plain`). Packages distribution tarball and Flatpak extension if requested. Emits `target/dist/build-receipt.json`. Never installs.                                 |
+| **2. Artifact Stress Audit** | `utils/tests-long.sh --strict --artifact`               | Executes the full pre-release stress suite (1,014 test subcases across 6 phases) directly against `target/dist/nam_plug.clap` via `dlopen`. Records results in `target/logs/long-audit-receipt.jsonl`.                                                                                          |
+| **3. Final Certification**   | `utils/build-release.sh --strict --certify [--install]` | Validates cryptographic identity and release gates across receipts without recompilation. Emits final `target/dist/release-receipt.json`. `--install` (valid only with `--certify`) installs the verified artifact to `~/.clap/` after `certify PASS`, emitting `PHASE: install_artifact PASS`. |
 
 #### Five Mandatory Release Gates
 
@@ -391,11 +392,11 @@ Because `wavenet_a1` and `wavenet_a2` are compute-bound inside hand-unrolled AVX
 
 `nam_perf_guard` applies in-process real-time hardening (`mlockall(MCL_CURRENT | MCL_FUTURE)`, 64 KiB stack prefaulting, `SCHED_FIFO` priority 80 promotion, and `sched_setaffinity` to the isolated benchmark core) before sampling, and reports two independent properties of a run:
 
-| Field | Meaning | Effect on the gate |
-| :----- | :------- | :------------------ |
-| `environment_stable` | Coefficient of variation ≤ 1.2 across the sampled series (noise/thermal). | `false` ⇒ `INCONCLUSIVE` (exit `2`). |
-| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy (no `isolcpus`/`nohz_full`, shared effective IRQ affinity, non-RT scheduling, non-`performance` governor, affinity not applied/observed on the selected core). | `true` ⇒ `INCONCLUSIVE` (exit `2`); certification is blocked. |
-| paired reference series | `--reference` report supplied to `nam_perf_guard certify`. | Absent ⇒ `INCONCLUSIVE` (exit `2`); `tests-long.sh` bootstraps `perf-reference.json` automatically on the first pass when absent. |
+| Field                                                   | Meaning                                                                                                                                                                                                                                     | Effect on the gate                                                                                                                |
+|:------------------------------------------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |:--------------------------------------------------------------------------------------------------------------------------------- |
+| `environment_stable`                                    | Coefficient of variation ≤ 1.2 across the sampled series (noise/thermal).                                                                                                                                                                   | `false` ⇒ `INCONCLUSIVE` (exit `2`).                                                                                              |
+| `environment_degraded` + `environment_degraded_reasons` | The host was not the isolated-core policy (no `isolcpus`/`nohz_full`, shared effective IRQ affinity, non-RT scheduling, non-`performance` governor, affinity not applied/observed on the selected core).                                    | `true` ⇒ `INCONCLUSIVE` (exit `2`); certification is blocked.                                                                     |
+| paired reference series                                 | `--reference` report supplied to `nam_perf_guard certify`. Validates p99 latency against `--p99-ratio-max` (default 1.25) or within `--p99-noise-floor-us` (default 25.0 µs) to prevent false positives from microsecond-level host jitter. | Absent ⇒ `INCONCLUSIVE` (exit `2`); `tests-long.sh` bootstraps `perf-reference.json` automatically on the first pass when absent. |
 
 The receipt mirrors both fields under `performance_certification`, and the pipeline prints `[DEGRADED HOST]` with the typed reasons. Reasons are stable tokens such as `bench_core_not_isolated:<N>`, `irq_isolation_shared:<N>:<count>` (evaluated against kernel `effective_affinity_list` so managed multi-queue PCI-MSIX masks that route away from the isolated core do not false-positive), `sched_policy_not_realtime:SCHED_OTHER`, `governor_not_performance:powersave`, `governor_unknown`, `affinity_apply_failed:<detail>`, `affinity_observed_mismatch:<requested>:<observed>`. A degraded host blocks certification instead of promoting the run to `PASS`.
 
@@ -519,14 +520,14 @@ When a host streams dense parameter automation (up to 1 event per sample), split
 
 ## 6. Quality Gates & Baseline Standards
 
-| Metric / Test Gate            | Threshold / Constraint                               | Enforced In                                                             |
-|:----------------------------- |:---------------------------------------------------- |:----------------------------------------------------------------------- |
+| Metric / Test Gate            | Threshold / Constraint                               | Enforced In                                                                     |
+|:----------------------------- |:---------------------------------------------------- |:------------------------------------------------------------------------------- |
 | **CLAP vs. NAMCore Parity**   | ESR < 1e-8, SNR > 80 dB; 3 fixtures × 44.1/48/96 kHz | `clap_parity_multi_sr.rs` (`artifact` phase of `tests-long.sh`, release Gate 3) |
-| **Artifact OS/CabSim Parity** | ESR < 1e-8, SNR > 80 dB @ 2×/4× and CabSim           | `test_clap_parity_oversample`, `test_clap_parity_cabsim` (`artifact` phase)      |
-| **Bypass Transparency**       | Phase cancellation < −120 dBFS                       | `processor_bypass_test.rs`                                              |
-| **RT Allocation Budget**      | Exactly 0 heap allocations during `process()`        | `verify_no_rt_alloc.sh` (static) & `alloc_audit.rs` (dynamic)           |
-| **RT Codegen Invariants**     | 0 heap allocs, 0 core-loop divs, 0 core-loop TLS     | `verify_rt_codegen.sh` (static disassembly analysis)                    |
-| **CLAP Event Handling**       | 0 panics or unhandled boundary conditions            | `clap_e2_proptest.rs`                                                   |
+| **Artifact OS/CabSim Parity** | ESR < 1e-8, SNR > 80 dB @ 2×/4× and CabSim           | `test_clap_parity_oversample`, `test_clap_parity_cabsim` (`artifact` phase)     |
+| **Bypass Transparency**       | Phase cancellation < −120 dBFS                       | `processor_bypass_test.rs`                                                      |
+| **RT Allocation Budget**      | Exactly 0 heap allocations during `process()`        | `verify_no_rt_alloc.sh` (static) & `alloc_audit.rs` (dynamic)                   |
+| **RT Codegen Invariants**     | 0 heap allocs, 0 core-loop divs, 0 core-loop TLS     | `verify_rt_codegen.sh` (static disassembly analysis)                            |
+| **CLAP Event Handling**       | 0 panics or unhandled boundary conditions            | `clap_e2_proptest.rs`                                                           |
 
 ### 6.1 Reference Performance Baseline (Criterion Benchmark Matrix)
 
@@ -570,12 +571,12 @@ All automation scripts in `utils/` adhere to a lean, predictable execution contr
 
 Each script strictly adheres to one of four architectural classes:
 
-| Class | Typical Scripts | Error Handling Policy | Architectural Rationale |
-| :----- | :--------------- | :--------------------- | :----------------------- |
-| **Class A — Interactive** | `lints.sh`, `tests-quick.sh` | `set -euo pipefail`; aborts on first failure; `ERR` trap emits `RESULT: FAIL` | Real-time developer loops. Immediate failure surfaces bugs fast and conserves developer cycles. |
-| **Class B — Decoupled Audit** | `tests-long.sh` | `set -o pipefail` (no `-e`, no `-u`); each phase records status independently; collects all failures; exit `1` at end if any phase failed | Nightly and pre-release audits. Collects all phase evidence without aborting prematurely. |
-| **Class C — Build** | `build-release.sh` | `set -euo pipefail`; aborts on first failure | Build pipelines where intermediate failure invalidates downstream artifacts. |
-| **Class D — Manual Tool** | `mod-update.sh`, `verify_rt_codegen.sh` | `set -euo pipefail` | Targeted utilities executed under direct operator supervision. |
+| Class                         | Typical Scripts                         | Error Handling Policy                                                                                                                     | Architectural Rationale                                                                         |
+|:----------------------------- |:--------------------------------------- |:----------------------------------------------------------------------------------------------------------------------------------------- |:----------------------------------------------------------------------------------------------- |
+| **Class A — Interactive**     | `lints.sh`, `tests-quick.sh`            | `set -euo pipefail`; aborts on first failure; `ERR` trap emits `RESULT: FAIL`                                                             | Real-time developer loops. Immediate failure surfaces bugs fast and conserves developer cycles. |
+| **Class B — Decoupled Audit** | `tests-long.sh`                         | `set -o pipefail` (no `-e`, no `-u`); each phase records status independently; collects all failures; exit `1` at end if any phase failed | Nightly and pre-release audits. Collects all phase evidence without aborting prematurely.       |
+| **Class C — Build**           | `build-release.sh`                      | `set -euo pipefail`; aborts on first failure                                                                                              | Build pipelines where intermediate failure invalidates downstream artifacts.                    |
+| **Class D — Manual Tool**     | `mod-update.sh`, `verify_rt_codegen.sh` | `set -euo pipefail`                                                                                                                       | Targeted utilities executed under direct operator supervision.                                  |
 
 ### 7.2 Output Protocol & Exit Codes
 
@@ -603,6 +604,7 @@ Script output follows a structured stream suitable for automated parsing:
    ```
 
 4. **Exit Codes:**
+
    - `0`: Complete success (`PASS`), or success with documented gaps (`PASS_WITH_GAPS`) when not in strict mode.
    - `1`: Execution failure (`FAIL`), or unfulfilled `GAP` when invoked with `--strict`.
    - `2`: Syntax error, unknown option, or missing precondition.
@@ -629,48 +631,48 @@ Detailed execution logs are written to `target/logs/<script>-<phase>.log` via `t
 
 Only canonical flags are supported across scripts (no legacy aliases):
 
-| Script | Supported Flags | Notes |
-| :------ | :--------------- | :----- |
-| **All scripts** | `-h`, `--help` | Displays concise usage and exits 0. |
-| `lints.sh` | None | Strict zero-flag policy; formatting is applied in-place during local development and verified via `CI=true` on CI. |
-| `tests-quick.sh` | None | Fast first-line discipline; no allow-gaps switch and no simulation mode. |
-| `tests-long.sh` | `--strict`, `--only <name>[,<name>]`, `--artifact` | `--strict` promotes any `GAP` to `FAIL` (exit 1); `--only` runs only the named canonical phases, records the others as `NOT_RUN` (typed GAP), and preserves `target/long`; `--artifact` tests canonical `target/dist/nam_plug.clap`. |
-| `build-release.sh` | `--strict`, `--package`, `--certify`, `--install` | `--package` builds tarball and Flatpak; `--certify` validates receipts without recompiling; `--install` (only with `--certify`) installs the verified artifact to `~/.clap/` and the declared Flatpak bundle. |
+| Script             | Supported Flags                                    | Notes                                                                                                                                                                                                                                |
+|:------------------ |:-------------------------------------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **All scripts**    | `-h`, `--help`                                     | Displays concise usage and exits 0.                                                                                                                                                                                                  |
+| `lints.sh`         | None                                               | Strict zero-flag policy; formatting is applied in-place during local development and verified via `CI=true` on CI.                                                                                                                   |
+| `tests-quick.sh`   | None                                               | Fast first-line discipline; no allow-gaps switch and no simulation mode.                                                                                                                                                             |
+| `tests-long.sh`    | `--strict`, `--only <name>[,<name>]`, `--artifact` | `--strict` promotes any `GAP` to `FAIL` (exit 1); `--only` runs only the named canonical phases, records the others as `NOT_RUN` (typed GAP), and preserves `target/long`; `--artifact` tests canonical `target/dist/nam_plug.clap`. |
+| `build-release.sh` | `--strict`, `--package`, `--certify`, `--install`  | `--package` builds tarball and Flatpak; `--certify` validates receipts without recompiling; `--install` (only with `--certify`) installs the verified artifact to `~/.clap/` and the declared Flatpak bundle.                        |
 
 ### 7.5 Canonical Environment Variables
 
 #### Interface Variables (User & CI Control)
 
-| Variable | Default | Scope | Purpose & Semantics |
-| :-------- | :------- | :----- | :------------------- |
-| `CI` | Unset | CI Runner | When `true`, instructs `lints.sh` to execute `cargo fmt --check` instead of modifying files in-place. |
-| `NAM_BENCH_CORE` | `auto` | Benchmark | Core pinning: explicit CPU ID, isolated core if online, first allowed CPU, or unpinned fallback (`GAP`). |
-| `NAM_PHASE_TIMEOUT_S` | Per-phase default | `tests-long.sh` | Overrides timeout duration across all audit phases for emergency debugging. |
-| `NAM_GUI_TIMEOUT_MS` | `15000` in `tests-long.sh`; `4000` in the harness | GUI Testing | Timeout in milliseconds for headless Xvfb window and lifecycle assertions. |
+| Variable              | Default                                           | Scope           | Purpose & Semantics                                                                                      |
+|:--------------------- |:------------------------------------------------- |:--------------- |:-------------------------------------------------------------------------------------------------------- |
+| `CI`                  | Unset                                             | CI Runner       | When `true`, instructs `lints.sh` to execute `cargo fmt --check` instead of modifying files in-place.    |
+| `NAM_BENCH_CORE`      | `auto`                                            | Benchmark       | Core pinning: explicit CPU ID, isolated core if online, first allowed CPU, or unpinned fallback (`GAP`). |
+| `NAM_PHASE_TIMEOUT_S` | Per-phase default                                 | `tests-long.sh` | Overrides timeout duration across all audit phases for emergency debugging.                              |
+| `NAM_GUI_TIMEOUT_MS`  | `15000` in `tests-long.sh`; `4000` in the harness | GUI Testing     | Timeout in milliseconds for headless Xvfb window and lifecycle assertions.                               |
 
 #### Harness Variables (Internal Script → Rust Communication)
 
-| Variable | Configured By | Read By | Purpose |
-| :-------- | :------------- | :------- | :------- |
-| `NAM_RUN_ID` | `utils/_lib.sh` | Test harnesses | Unique timestamped run identifier for logging and receipt isolation. |
-| `NAM_REQUIRE_CPP_ORACLE` | `tests-long.sh --strict` | Parity suites | Enforces hard failure if the C++ reference render binary is unavailable. |
-| `NAM_RT_STRICT` | `tests-long.sh --strict` | RT deadline tests | Rejects latency outliers and deadline budget misses fail-closed. |
-| `CLAP_PLUGIN_UNDER_TEST` | `tests-long.sh --artifact` | Long audit harnesses | Specifies path to the canonical compiled `.clap` binary under test. |
-| `NAM_GUI_DEDICATED_X11` | `tests-long.sh` (`gui` phase) | GUI lifecycle tests | Requests a dedicated X11 display path for the headless GUI tests. |
-| `NAM_CORE_RENDER_BIN` | `_lib.sh` / preflights | C++ Parity tests | Absolute path to the compiled upstream C++ `render` CLI binary. |
-| `NAM_THERMAL_COOLDOWN_S` | `2` | `utils/ab-opt-ceremony.sh` | Operator | Cooling sleep in seconds between benchmark runs during A/B optimization ceremony. |
-| `NAM_FIXTURES_DIR` | `_lib.sh` / preflights | Model loaders | Explicit path to test model fixtures directory. |
+| Variable                 | Configured By                 | Read By                    | Purpose                                                                  |
+|:------------------------ |:----------------------------- |:-------------------------- |:------------------------------------------------------------------------ |
+| `NAM_RUN_ID`             | `utils/_lib.sh`               | Test harnesses             | Unique timestamped run identifier for logging and receipt isolation.     |
+| `NAM_REQUIRE_CPP_ORACLE` | `tests-long.sh --strict`      | Parity suites              | Enforces hard failure if the C++ reference render binary is unavailable. |
+| `NAM_RT_STRICT`          | `tests-long.sh --strict`      | RT deadline tests          | Rejects latency outliers and deadline budget misses fail-closed.         |
+| `CLAP_PLUGIN_UNDER_TEST` | `tests-long.sh --artifact`    | Long audit harnesses       | Specifies path to the canonical compiled `.clap` binary under test.      |
+| `NAM_GUI_DEDICATED_X11`  | `tests-long.sh` (`gui` phase) | GUI lifecycle tests        | Requests a dedicated X11 display path for the headless GUI tests.        |
+| `NAM_CORE_RENDER_BIN`    | `_lib.sh` / preflights        | C++ Parity tests           | Absolute path to the compiled upstream C++ `render` CLI binary.          |
+| `NAM_THERMAL_COOLDOWN_S` | `2`                           | `utils/ab-opt-ceremony.sh` | Operator                                                                 |
+| `NAM_FIXTURES_DIR`       | `_lib.sh` / preflights        | Model loaders              | Explicit path to test model fixtures directory.                          |
 
 ### 7.6 Measured Durations & Budgets
 
 Execution times measured on standard development hardware (16-core, SSD):
 
-| Discipline / Script | Measured Duration | Budget Ceiling | Notes |
-| :------------------- | :----------------- | :-------------- | :----- |
-| `utils/lints.sh` | ~8s (warm cache, 2026-10-27) to ~45s (clean build) | $\le 2$ min | Covers fmt, check (3 permutations), clippy (`-D warnings`), cross-target `aarch64-unknown-linux-gnu` clippy (native aarch64 hosts reuse the earlier clippy pass; x86_64 hosts set `PKG_CONFIG_ALLOW_CROSS=1`), doc, SPDX, policies, and RT allocation verification. |
-| `utils/tests-quick.sh` | ~36s (warm cache, 2026-10-27) to ~90s | $\le 5$ min | Covers structural unit/integration tests and RT-safety heap audit. C++ NAMCore parity, oversampling, CabSim, and codegen run in Long (`artifact`) and build (D9). |
-| `utils/tests-long.sh` | ~19.7 min (measured runs `42075116266-1` / `42076290250-1`) | $\le 25$ min | Catch-all, headless Xvfb GUI, neutral artifact / C++ NAMCore parity, oversampling, CabSim IR, perf certification, and heap-audit soak. |
-| `utils/build-release.sh` | ~11.8 min (measured run `42075116266-1`) | $\le 15$ min | PGO profiling workload, BOLT optimization, and canonical packaging. |
+| Discipline / Script      | Measured Duration                                           | Budget Ceiling | Notes                                                                                                                                                                                                                                                               |
+|:------------------------ |:----------------------------------------------------------- |:-------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `utils/lints.sh`         | ~8s (warm cache, 2026-10-27) to ~45s (clean build)          | $\le 2$ min    | Covers fmt, check (3 permutations), clippy (`-D warnings`), cross-target `aarch64-unknown-linux-gnu` clippy (native aarch64 hosts reuse the earlier clippy pass; x86_64 hosts set `PKG_CONFIG_ALLOW_CROSS=1`), doc, SPDX, policies, and RT allocation verification. |
+| `utils/tests-quick.sh`   | ~36s (warm cache, 2026-10-27) to ~90s                       | $\le 5$ min    | Covers structural unit/integration tests and RT-safety heap audit. C++ NAMCore parity, oversampling, CabSim, and codegen run in Long (`artifact`) and build (D9).                                                                                                   |
+| `utils/tests-long.sh`    | ~19.7 min (measured runs `42075116266-1` / `42076290250-1`) | $\le 25$ min   | Catch-all, headless Xvfb GUI, neutral artifact / C++ NAMCore parity, oversampling, CabSim IR, perf certification, and heap-audit soak.                                                                                                                              |
+| `utils/build-release.sh` | ~11.8 min (measured run `42075116266-1`)                    | $\le 15$ min   | PGO profiling workload, BOLT optimization, and canonical packaging.                                                                                                                                                                                                 |
 
 #### QA footprint (métrica F-2, 2026-10-27)
 

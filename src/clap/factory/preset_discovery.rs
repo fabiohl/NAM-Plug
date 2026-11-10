@@ -8,6 +8,7 @@
 //! delegated to the engine's host-neutral `loader::peek_metadata`, which streams
 //! past the weight tensors without materializing them.
 
+use clack_common::utils::UniversalPluginId;
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::prelude::PluginError;
 use neural_amp_modeler_rs::loader::nam_json::NamMetadata;
@@ -18,6 +19,9 @@ use std::sync::OnceLock;
 
 /// The unique provider ID for NAM model presets.
 const NAM_PROVIDER_ID: &str = "br.eti.fabiolima.nam-plug.nam-models";
+
+/// The CLAP plugin ID supported by these presets.
+const NAM_PLUGIN_ID: &CStr = c"br.eti.fabiolima.nam-plug";
 
 /// File extensions for NAM models.
 const NAM_FILE_EXT_NAM: &CStr = c"nam";
@@ -82,7 +86,7 @@ impl PresetDiscoveryFactoryImpl for NamPresetDiscoveryFactory {
                         .unwrap_or_default();
                     let location = LocationInfo {
                         name: c"NAM User Models",
-                        flags: Flags::IS_FACTORY_CONTENT,
+                        flags: Flags::IS_USER_CONTENT,
                         location: Location::File { path: &home_cstr },
                     };
                     let _ = indexer.declare_location(location);
@@ -132,6 +136,8 @@ impl ProviderImpl<'_> for NamPresetProvider {
         receiver
             .begin_preset(Some(&name_cstr), Some(load_key_cstr_ref))
             .map_err(|_| PluginError::Message("Failed to begin preset"))?;
+
+        receiver.add_plugin_id(UniversalPluginId::clap(NAM_PLUGIN_ID));
 
         // Try to extract metadata from the model file.
         if let Some(meta) = extract_model_metadata(file_path) {

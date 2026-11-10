@@ -89,7 +89,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 
 ### Dual-Oracle Parity & Perceptual Validation
 
-Accuracy is strictly enforced against two co-equal reference oracles across 52 model baselines (`NeuralAmpModeler-rs/docs/quality-contract.json`):
+Accuracy is strictly enforced against two co-equal reference oracles across 52 model baselines (defined in the core engine's [`quality-contract.json`](https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/quality-contract.json)):
 
 1. **Canonical C++ NAMCore Reference ($f32$):** Verifies bit-exact behavioral parity across WaveNet, LSTM, ConvNet, and Linear models.
 2. **Double-Precision Reference ($f64$):** Quantifies numerical ideality and eliminates floating-point rounding divergence.
