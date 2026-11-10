@@ -80,11 +80,11 @@ The underlying DSP engine (`NeuralAmpModeler-rs`) provides an optional `rt-harde
 
 `NAM-Plug` compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) and auxiliary testing binaries (`pgo_profiling_workload` and `nam_perf_guard` under `src/bin/`, gated behind `testing`). Standalone PipeWire hosting is handled separately by `NAM-Audio-Pipe`.
 
-| Feature Flag | Default | Description                                                                                                                    |
-|:------------ |:------- |:------------------------------------------------------------------------------------------------------------------------------ |
+| Feature Flag | Default | Description                                                                                                                                                                                                                                                   |
+|:------------ |:------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dual-mono`  | Yes     | Enables two independent, identical L/R dual-mono inference and CabSim IR convolution chains with zero channel crosstalk, plus dynamic adaptive stereo VU metering and port announcement. Without this feature, only the Mono port configuration is announced. |
-| `testing`    | No      | Enables internal test harnesses, fixture resolution, `nam_perf_guard`, and `pgo_profiling_workload`.                           |
-| `heap-audit` | No      | Activates the global allocation counting allocator (`CountingAllocator`) for RT-safety verification.                           |
+| `testing`    | No      | Enables internal test harnesses, fixture resolution, `nam_perf_guard`, and `pgo_profiling_workload`.                                                                                                                                                          |
+| `heap-audit` | No      | Activates the global allocation counting allocator (`CountingAllocator`) for RT-safety verification.                                                                                                                                                          |
 
 ```bash
 # Standard release build (produces target/release/libnam_plug.so)
@@ -124,17 +124,17 @@ Core DSP neural inference is mono by definition. Buffer extraction and VU meteri
 
 Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–8):
 
-| Parameter                | ID                         | Type    | Range / Options                                                 | Description                                                |
-|:------------------------ |:-------------------------- |:------- |:--------------------------------------------------------------- |:---------------------------------------------------------- |
-| **Input Gain**           | `input_gain_db` (0)        | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.              |
-| **Output Gain**          | `output_gain_db` (1)       | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.             |
-| **Gate Threshold**       | `gate_threshold_db` (2)    | dB      | `-90.0` to `-40.0` (default `-90.0`, off by default)            | Noise-gate opening threshold.                              |
+| Parameter                | ID                         | Type    | Range / Options                                                 | Description                                                                     |
+|:------------------------ |:-------------------------- |:------- |:--------------------------------------------------------------- |:------------------------------------------------------------------------------- |
+| **Input Gain**           | `input_gain_db` (0)        | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.                                   |
+| **Output Gain**          | `output_gain_db` (1)       | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.                                  |
+| **Gate Threshold**       | `gate_threshold_db` (2)    | dB      | `-90.0` to `-40.0` (default `-90.0`, off by default)            | Noise-gate opening threshold.                                                   |
 | **Bypass**               | `bypass` (3)               | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables neural processing (64-sample click-free linear crossfade passthrough). |
-| **Active Model**         | `active_model` (4)         | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.       |
-| **Adaptive Compute**     | `adaptive_compute` (5)     | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                         |
-| **Slim Override**        | `slim_override` (6)        | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                 |
-| **Oversampling**         | `oversample` (7)           | Stepped | `0` (`Off` / default), `1` (`2x`), `2` (`4x`)                   | Activation oversampling factor.                            |
-| **Activation Precision** | `activation_precision` (8) | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact / `Fast` Padé-minimax).        |
+| **Active Model**         | `active_model` (4)         | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.                            |
+| **Adaptive Compute**     | `adaptive_compute` (5)     | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                                              |
+| **Slim Override**        | `slim_override` (6)        | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                                      |
+| **Oversampling**         | `oversample` (7)           | Stepped | `0` (`Off` / default), `1` (`2x`), `2` (`4x`)                   | Activation oversampling factor.                                                 |
+| **Activation Precision** | `activation_precision` (8) | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact / `Fast` Padé-minimax).                             |
 
 Model file paths (`.nam`/`.namb`) and CabSim IR file paths (`.wav`) are managed as **DAW State Properties** (`clap_plugin_state`), enabling project-level serialization and restoration.
 
@@ -162,24 +162,24 @@ All adoption paths compute the digest up-front and **fail closed** if it cannot 
 
 Extensions are registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) via `clack-extensions`:
 
-| Extension                            | Reference File                                  | Purpose                                                                                     |
-|:------------------------------------ |:----------------------------------------------- |:------------------------------------------------------------------------------------------- |
-| `clap_plugin_audio_ports`            | `src/clap/extensions/audio_ports.rs`            | Single main input/output audio port (Mono 1 ch or Stereo 2 ch per negotiated config).       |
-| `clap_plugin_audio_ports_config`     | `src/clap/extensions/audio_ports.rs`            | Layout negotiation: Config 0 ("Mono", default) and Config 1 ("Stereo"). Selection when off.|
-| `clap_plugin_audio_ports_config_info`| `src/clap/extensions/audio_ports.rs`            | Introspection of active configuration and port characteristics per configuration ID.        |
-| `clap_plugin_audio_ports_activation` | `src/clap/extensions/audio_ports_activation.rs` | Port activation gating; rejects port > 0; strictly rejects Float64 (f32 only, D-13).       |
-| `clap_plugin_params`                 | `src/clap/extensions/params/`                   | Parameter mapping, DAW automation, gesture tracking, and `flush()`.                         |
-| `clap_plugin_state`                  | `src/clap/extensions/state.rs`                  | DAW project state serialization (parameters + model path + IR path).                        |
-| `clap_plugin_state_context`          | `src/clap/extensions/state_context.rs`          | Context-aware state restore (distinguishes portable presets vs. project duplicates).        |
-| `clap_plugin_latency`                | `src/clap/extensions/latency.rs`                | Dynamic latency reporting (resampler + oversample + CabSim total delay).                    |
-| `clap_plugin_track_info`             | `src/clap/extensions/track_info.rs`             | Host track color synchronization to GUI accent theme.                                       |
-| `clap_plugin_remote_controls`        | `src/clap/extensions/remote_controls.rs`        | "Main" and "Gate" control pages for hardware controllers / DAW device panels.               |
-| `clap_plugin_param_indication`       | `src/clap/extensions/param_indication.rs`       | GUI visual cues for mapped/automated/overridden parameter status.                           |
-| `clap_plugin_preset_load`            | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                             |
-| `clap_plugin_render`                 | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision.  |
-| `clap_plugin_tail`                   | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining CabSim IR ring-out frames.                              |
-| `clap_plugin_timer_support`          | `src/clap/extensions/timer.rs`                  | Periodic 250 ms watchdog timer driving autonomous housekeeping and RT recovery.             |
-| `clap_plugin_gui`                    | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint GUI with native X11 XEmbed embedding and floating fallback.      |
+| Extension                             | Reference File                                  | Purpose                                                                                     |
+|:------------------------------------- |:----------------------------------------------- |:------------------------------------------------------------------------------------------- |
+| `clap_plugin_audio_ports`             | `src/clap/extensions/audio_ports.rs`            | Single main input/output audio port (Mono 1 ch or Stereo 2 ch per negotiated config).       |
+| `clap_plugin_audio_ports_config`      | `src/clap/extensions/audio_ports.rs`            | Layout negotiation: Config 0 ("Mono", default) and Config 1 ("Stereo"). Selection when off. |
+| `clap_plugin_audio_ports_config_info` | `src/clap/extensions/audio_ports.rs`            | Introspection of active configuration and port characteristics per configuration ID.        |
+| `clap_plugin_audio_ports_activation`  | `src/clap/extensions/audio_ports_activation.rs` | Port activation gating; rejects port > 0; strictly rejects Float64 (f32 only, D-13).        |
+| `clap_plugin_params`                  | `src/clap/extensions/params/`                   | Parameter mapping, DAW automation, gesture tracking, and `flush()`.                         |
+| `clap_plugin_state`                   | `src/clap/extensions/state.rs`                  | DAW project state serialization (parameters + model path + IR path).                        |
+| `clap_plugin_state_context`           | `src/clap/extensions/state_context.rs`          | Context-aware state restore (distinguishes portable presets vs. project duplicates).        |
+| `clap_plugin_latency`                 | `src/clap/extensions/latency.rs`                | Dynamic latency reporting (resampler + oversample + CabSim total delay).                    |
+| `clap_plugin_track_info`              | `src/clap/extensions/track_info.rs`             | Host track color synchronization to GUI accent theme.                                       |
+| `clap_plugin_remote_controls`         | `src/clap/extensions/remote_controls.rs`        | "Main" and "Gate" control pages for hardware controllers / DAW device panels.               |
+| `clap_plugin_param_indication`        | `src/clap/extensions/param_indication.rs`       | GUI visual cues for mapped/automated/overridden parameter status.                           |
+| `clap_plugin_preset_load`             | `src/clap/extensions/preset_load.rs`            | Direct model loading (`.nam`/`.namb`) from host preset browser.                             |
+| `clap_plugin_render`                  | `src/clap/extensions/render.rs`                 | Offline render detection. Forces `AdaptiveCompute::Off` + `Standard` activation precision.  |
+| `clap_plugin_tail`                    | `src/clap/extensions/tail.rs`                   | Host tail query reporting remaining CabSim IR ring-out frames.                              |
+| `clap_plugin_timer_support`           | `src/clap/extensions/timer.rs`                  | Periodic 250 ms watchdog timer driving autonomous housekeeping and RT recovery.             |
+| `clap_plugin_gui`                     | `src/clap/extensions/gui.rs`                    | Hardware-accelerated Slint GUI with native X11 XEmbed embedding and floating fallback.      |
 
 ### 4.1 Windowing Support Matrix
 
@@ -194,6 +194,16 @@ Extensions are registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) v
 
 - An embedded request is honored **only** when true embedding succeeds (create-time viability gate + strict `set_parent` error path). The plugin never silently delivers a floating window for an embedded request and never creates two windows.
 - Repeated `create`/`destroy` cycles reuse the persistent per-instance GUI worker.
+
+#### 4.1.1 Host Integration Compatibility Matrix
+
+| Host / Session                             | GUI Presentation                      | Operational Behavior                                                                                                                                                                                                                |
+|:------------------------------------------ |:------------------------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bitwig Studio** (X11)                    | Embedded (XEmbed)                     | Native XEmbed child window integration; fully verified.                                                                                                                                                                             |
+| **REAPER** (Native Linux, X11)             | Embedded (XEmbed)                     | Native XEmbed child window integration; fully verified.                                                                                                                                                                             |
+| **X11 Hosts in General**                   | Embedded / Floating                   | Supported as negotiated by host (`is_floating`).                                                                                                                                                                                    |
+| **Fender Studio Pro 8.2** (Linux, Wayland) | Generic Host Controls (No Plugin GUI) | Host requests only embedded Wayland (`CLAP_WINDOW_API_WAYLAND` with `is_floating = false`), which is not defined in the core CLAP specification. Host does not negotiate floating; falls back to native generic parameter controls. |
+| **Wayland Hosts Requesting Floating**      | Floating Window (*Experimental*)      | Plugin code supports `CLAP_WINDOW_API_WAYLAND` with `is_floating = true`; marked **experimental** due to absence of an available test host that negotiates floating windows under Wayland.                                          |
 
 ### 4.2 Audio Port Layout Negotiation Protocol (D-12, D-13, E-10)
 
@@ -542,7 +552,7 @@ NAM-Plug supports native X11 window embedding (XEmbed) under Linux using Slint's
   - *Reparent-after-creation (Rejected):* Reparenting after mapping causes race conditions with Window Managers and requires an external X11 connection.
   - *Custom WindowAdapter (Rejected):* Re-implements complex window management already handled by Slint.
 - **Parent ID Passing:** The host window ID is passed by value (`u32`) through an atomic variable (`EMBED_TARGET`), preventing raw pointers from escaping to the GUI thread.
-- **Viability Gate & Honest Fallback:** The plugin checks display reachability at `create()`. If X11 embedding is unavailable (e.g., pure Wayland without XWayland), `create()` rejects the embedded request cleanly, prompting conforming hosts to negotiate a floating window.
+- **Viability Gate & Honest Fallback:** The plugin checks display reachability at `create()`. If X11 embedding is unavailable (e.g., pure Wayland without XWayland), `create()` rejects the embedded request cleanly (`CLAP_WINDOW_API_WAYLAND` with `is_floating = false` is rejected per CLAP specification). Conforming hosts may negotiate a floating window (`is_floating = true`), or fall back to their native generic parameter editor if floating is not supported or requested by the host (as observed in Fender Studio Pro 8.2).
 
 ---
 
@@ -550,13 +560,13 @@ NAM-Plug supports native X11 window embedding (XEmbed) under Linux using Slint's
 
 NAM-Plug utilizes typed diagnostic codes (`NamErrorCode` in `neural_amp_modeler_rs::common::diagnostics`) for structured logging and UI error toasts:
 
-| Range   | Category            | Representative Examples                                                                                             |
-|:------- |:------------------- |:------------------------------------------------------------------------------------------------------------------- |
-| `E1xxx` | Model Loading & I/O | `E1100` FILE_NOT_FOUND, `E1200` NAM_JSON_PARSE_ERROR, `E1201` NAMB_CRC32_MISMATCH, `E1300` UNSUPPORTED_ARCHITECTURE |
+| Range   | Category            | Representative Examples                                                                                                   |
+|:------- |:------------------- |:------------------------------------------------------------------------------------------------------------------------- |
+| `E1xxx` | Model Loading & I/O | `E1100` FILE_NOT_FOUND, `E1200` NAM_JSON_PARSE_ERROR, `E1201` NAMB_CRC32_MISMATCH, `E1300` UNSUPPORTED_ARCHITECTURE       |
 | `E2xxx` | Audio & Real-Time   | `E2001` DEADLINE_EXCEEDED, `E2130` HOST_LOG_QUIESCENCE_STALLED, `E2200` RESAMPLER_BUILD_FAILED, `E2300` SCHED_FIFO_DENIED |
-| `E3xxx` | SPSC / Lock-Free GC | `E3100` PARAM_CHANNEL_FULL, `E3101` GC_OVERFLOW, `E3102` GC_CORRUPTED                                               |
-| `E4xxx` | Runtime & CLI       | `E4100` INVALID_GAIN_VALUE, `E4103` IR_LOAD_FAILED                                                                  |
-| `E5xxx` | System Resources    | `E5000` OUT_OF_MEMORY                                                                                               |
+| `E3xxx` | SPSC / Lock-Free GC | `E3100` PARAM_CHANNEL_FULL, `E3101` GC_OVERFLOW, `E3102` GC_CORRUPTED                                                     |
+| `E4xxx` | Runtime & CLI       | `E4100` INVALID_GAIN_VALUE, `E4103` IR_LOAD_FAILED                                                                        |
+| `E5xxx` | System Resources    | `E5000` OUT_OF_MEMORY                                                                                                     |
 
 ---
 

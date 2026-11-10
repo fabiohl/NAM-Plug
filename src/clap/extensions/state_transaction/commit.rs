@@ -571,7 +571,8 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
     {
         params_ext.rescan(
             &main_thread.host,
-            clack_extensions::params::ParamRescanFlags::VALUES,
+            clack_extensions::params::ParamRescanFlags::VALUES
+                | clack_extensions::params::ParamRescanFlags::TEXT,
         );
     }
 }
@@ -827,7 +828,8 @@ fn local_commit(
     {
         params_ext.rescan(
             &main_thread.host,
-            clack_extensions::params::ParamRescanFlags::VALUES,
+            clack_extensions::params::ParamRescanFlags::VALUES
+                | clack_extensions::params::ParamRescanFlags::TEXT,
         );
     }
 

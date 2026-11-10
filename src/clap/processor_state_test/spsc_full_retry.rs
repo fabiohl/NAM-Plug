@@ -163,7 +163,7 @@ fn test_spsc_full_retry_publishes_full_ui_commit() {
         state
             .snapshot()
             .iter()
-            .any(|e| matches!(e, HostEvent::ParamsRescan)),
+            .any(|e| matches!(e, HostEvent::ParamsRescan { .. })),
         "F-RB-02: a retained load must rescan params, got: {:?}",
         state.snapshot()
     );

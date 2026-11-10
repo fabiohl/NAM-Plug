@@ -141,7 +141,9 @@ pub enum HostEvent {
         message: String,
     },
     ParamsFlushRequested,
-    ParamsRescan,
+    ParamsRescan {
+        flags: ParamRescanFlags,
+    },
     ParamsClear {
         param_id: u32,
     },
@@ -288,8 +290,8 @@ impl HostPresetLoadImpl for CompleteHostMainThread {
 }
 
 impl HostParamsImplMainThread for CompleteHostMainThread {
-    fn rescan(&self, _flags: ParamRescanFlags) {
-        self.state.record(HostEvent::ParamsRescan);
+    fn rescan(&self, flags: ParamRescanFlags) {
+        self.state.record(HostEvent::ParamsRescan { flags });
     }
     fn clear(&self, param_id: clack_common::utils::ClapId, _flags: ParamClearFlags) {
         self.state.record(HostEvent::ParamsClear {

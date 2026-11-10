@@ -386,7 +386,8 @@ impl<'a> NamClapMainThread<'a> {
         {
             params_ext.rescan(
                 &self.host,
-                clack_extensions::params::ParamRescanFlags::VALUES,
+                clack_extensions::params::ParamRescanFlags::VALUES
+                    | clack_extensions::params::ParamRescanFlags::TEXT,
             );
         }
 

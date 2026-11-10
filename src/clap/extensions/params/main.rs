@@ -94,7 +94,9 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
             PARAM_ADAPTIVE_COMPUTE => {
                 info.set(&ParamInfo {
                     id: ClapId::new(PARAM_ADAPTIVE_COMPUTE),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
+                    flags: ParamInfoFlags::IS_AUTOMATABLE
+                        | ParamInfoFlags::IS_STEPPED
+                        | ParamInfoFlags::IS_ENUM,
                     cookie: clack_plugin::utils::Cookie::empty(),
                     name: b"Adaptive Compute",
                     module: b"",
@@ -106,7 +108,9 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
             PARAM_SLIM_OVERRIDE => {
                 info.set(&ParamInfo {
                     id: ClapId::new(PARAM_SLIM_OVERRIDE),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
+                    flags: ParamInfoFlags::IS_AUTOMATABLE
+                        | ParamInfoFlags::IS_STEPPED
+                        | ParamInfoFlags::IS_ENUM,
                     cookie: clack_plugin::utils::Cookie::empty(),
                     name: b"Slim Override",
                     module: b"",
@@ -118,7 +122,9 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
             PARAM_OVERSAMPLE => {
                 info.set(&ParamInfo {
                     id: ClapId::new(PARAM_OVERSAMPLE),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
+                    flags: ParamInfoFlags::IS_AUTOMATABLE
+                        | ParamInfoFlags::IS_STEPPED
+                        | ParamInfoFlags::IS_ENUM,
                     cookie: clack_plugin::utils::Cookie::empty(),
                     name: b"Oversampling",
                     module: b"",
@@ -130,7 +136,9 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
             PARAM_ACTIVATION => {
                 info.set(&ParamInfo {
                     id: ClapId::new(PARAM_ACTIVATION),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
+                    flags: ParamInfoFlags::IS_AUTOMATABLE
+                        | ParamInfoFlags::IS_STEPPED
+                        | ParamInfoFlags::IS_ENUM,
                     cookie: clack_plugin::utils::Cookie::empty(),
                     name: b"Activation Precision",
                     module: b"",

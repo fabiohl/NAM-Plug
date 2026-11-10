@@ -102,9 +102,9 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 - [ ] **2C.6 Preset Portability (`clap.state-context`):** Move `.nam` model file to a different directory → load saved DAW device preset.
   *Expected:* Plugin locates model via fallback search paths or basename and restores full state.
 - [ ] **2C.7 GUI Window Negotiation (Embedded & Floating):**
-  - **Embedded mode (default):** GUI renders inside the host plugin window as an X11/Wayland child without orphan windows or memory growth.
-  - **Floating mode:** GUI opens as a clean standalone window when requested by the host.
-  - **Honest fallback:** An unsupported embedded request fails gracefully at `create()` rather than silently opening an orphan floating window.
+  - **Embedded mode (default):** GUI renders inside the host plugin window as an X11 child (via XEmbed; Wayland embedded is rejected per CLAP specification) without orphan windows or memory growth.
+  - **Floating mode:** GUI opens as a clean standalone window when requested by the host (`is_floating = true`; verified on X11; experimental on Wayland due to lack of a test host negotiating floating).
+  - **Honest fallback:** An unsupported embedded request (such as Wayland embedded) fails gracefully at `create()` rather than silently opening an orphan floating window; conforming hosts either negotiate a floating window or display their generic parameter editor.
   - **Reopen cycles:** Closing and reopening the GUI window 5+ times on the same instance re-embeds cleanly with zero crashes or platform re-initialization errors.
 - [ ] **2C.8 Bitwig Device Panel Pages (`[Bitwig]`):** Open Bitwig Device Panel → navigate between pages.
   *Expected:* 2 pages present: **"Main"** (INPUT, OUTPUT, BYPASS) and **"Gate"** (GATE). Moving a slider in the Device Panel updates the corresponding knob in the GUI, and vice versa.

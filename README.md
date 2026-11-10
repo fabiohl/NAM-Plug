@@ -5,7 +5,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # NAM-Plug
 
-![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.99%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![Version](https://img.shields.io/badge/Version-1.1.0-informational.svg) ![GUI](https://img.shields.io/badge/GUI-Slint%201.18%20%7C%20FemtoVG%20%7C%20X11%20Embedded%20%7C%20Wayland-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg) ![Parity](https://img.shields.io/badge/Parity-Dual--Oracle%20%3E136dB%20SNR-success.svg)
+![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.99%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![Version](https://img.shields.io/badge/Version-1.1.0-informational.svg) ![GUI](https://img.shields.io/badge/GUI-Slint%201.18%20%7C%20FemtoVG%20%7C%20X11%20Embedded%20%2F%20Floating-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg) ![Parity](https://img.shields.io/badge/Parity-Dual--Oracle%20%3E136dB%20SNR-success.svg)
 
 **NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs (Bitwig Studio, REAPER, Studio One, etc.).
 
@@ -41,7 +41,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 * **SIMD AVX2 Vectorization & Zero-Vtable Dispatch:** Enforces the `x86-64-v3` (AVX2/FMA/BMI2) instruction set baseline. Compute kernels employ tap-major memory layouts and `sum0..sum3` instruction-level parallelism unrolling. Static monomorphization via `dispatch_simd!` eliminates virtual function tables (vtables) and indirect function pointers from the audio path.
 * **Dual-Oracle Numerical Parity:** Formally certified against canonical C++ NAMCore ($f32$) and double-precision ($f64$) mathematical oracles across 52 baseline envelopes (`docs/quality-contract.json`). Typical WaveNet models achieve ESR $< 2.31 \times 10^{-14}$ (SNR $> 136.4\text{ dB}$, MR-STFT $< 6.5 \times 10^{-6}$), while ConvNet achieves ESR $< 9.33 \times 10^{-16}$ (SNR $> 150.3\text{ dB}$).
 * **Native CLAP 1.2+ Standard Integration:** Built directly upon the `clack` framework, exposing a clean, translation-free CLAP implementation. Fully supports sample-accurate parameter automation, project state persistence (JSON serialization with SHA-256 asset verification), host latency reporting with dynamic PDC (`clap_plugin_latency`), and native host extensions (`audio-ports`, `gui`, `params`, `state`, `preset-discovery`, `render`, `tail`, `track-info`).
-* **Hardware-Accelerated Slint GUI with Native X11 Embedding:** Declarative user interface rendered via FemtoVG / OpenGL with **native X11 XEmbed host panel embedding** into Bitwig Studio and REAPER, plus Wayland and X11 floating window fallbacks. A dedicated 60 Hz event-loop thread polls lock-free atomic view models with 0% audio thread overhead.
+* **Hardware-Accelerated Slint GUI with Native X11 Embedding:** Declarative user interface rendered via FemtoVG / OpenGL with **native X11 XEmbed host panel embedding** into Bitwig Studio and REAPER, plus X11 floating and experimental Wayland floating window support. A dedicated 60 Hz event-loop thread polls lock-free atomic view models with 0% audio thread overhead.
 * **Complete Integrated Tone Pipeline:** Includes a native 256-phase minimum-phase Kaiser sinc resampler ($0.7\text{–}1.3\text{ µs}$ execution, $>105\text{ dB}$ stopband, 0 pre-ringing) adapting any model sample rate to host rates (44.1, 48, 96, 192 kHz), Uniform-Partitioned Overlap-Save (UPOLS) FFT cabinet IR convolution ($1.3\text{ µs}$ for 512-sample IRs), polyphase half-band oversampling (2×/4×), and branchless crossfaded bypass (64-sample ramp, about 1.3 ms at 48 kHz).
 * **Binary `.namb` v2 Container Support:** Loads pre-transposed binary models (Gate-Major LSTM, Interleaved-4 WaveNet) with IEEE 802.3 CRC32 integrity validation, slashing model loading and hot-swap times from $\sim 50\text{ ms}$ to $< 1\text{ ms}$.
 * **Sandbox-Ready Flatpak Audio Plugin Extension:** Distributed as an official Flatpak extension (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`) extending `org.freedesktop.LinuxAudio.BaseExtension` 25.08, providing automatic discovery in sandboxed DAWs (Bitwig, REAPER, Studio One) without compromising filesystem security.
@@ -50,24 +50,24 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 
 ## 🥊 Feature Showcase
 
-| Feature / Attribute            | Technical Implementation                                                             | Benefit & Impact                                                                         |
-|:------------------------------ |:------------------------------------------------------------------------------------ |:---------------------------------------------------------------------------------------- |
-| **Inference Topologies**       | WaveNet (A1/A2), LSTM (1- & 2-layer, multi-I/O), ConvNet, Linear FIR/FFT, Sequential | Comprehensive NAM model coverage with native Rust execution speed                        |
-| **Plugin Standard**            | Native CLAP 1.2+ via `clack-plugin` & `clack-extensions`                             | Zero translation layer; sample-accurate automation, dynamic PDC, and full state saving   |
-| **RT Determinism**             | Zero heap alloc/free, zero mutex locks, 3-tier lock-free GC cascade                  | Deterministic, dropout-free audio under sub-millisecond buffer sizes (32–64 samples)     |
-| **SIMD Acceleration**          | Mandatory `x86-64-v3` (AVX2/FMA) baseline; static `dispatch_simd!` dispatch          | WaveNet Standard ≈ 41.8 µs / LSTM 1×16 ≈ 6.8 µs per 64-sample block (Ryzen 7 5700U)      |
-| **Dual-Oracle Parity**         | Validated against C++ NAMCore ($f32$) and double-precision $f64$                     | Bit-exact fidelity ($>136.4\text{ dB}$ SNR WaveNet, $>150.3\text{ dB}$ SNR ConvNet)      |
-| **Native Polyphase Resampler** | 256 phases × 64 taps Kaiser sinc resampler (minimum-phase cepstrum)                  | Pristine multi-rate conversion (>105 dB stopband, < 0.05 dB ripple) in 0.7–1.3 µs        |
-| **Cabinet IR Convolution**     | Uniform-Partitioned Overlap-Save (UPOLS) FFT convolution engine (.wav)               | Ultra-low-overhead speaker cabinet simulation ($1.3\text{ µs}$ for 512-sample IRs)       |
-| **Anti-Aliasing Oversampling** | Half-band polyphase FIR filters (`Off`, `2x`, `4x`, >100 dB stopband)                | Eliminates non-linear high-frequency foldover/aliasing in high-gain models               |
-| **Activation Precision**       | `Standard` (exact Taylor minimax) vs `Fast` (Padé polynomial approximations)         | User-selectable balance between floating-point precision (+89.5 dB SNR) and CPU cycles   |
-| **Graphical User Interface**   | Slint 1.18 declarative UI (FemtoVG/OpenGL via `winit`)                               | Native X11 XEmbed host panel embedding, Wayland/X11 floating fallback, 60 FPS metering   |
-| **Denormal Armor**             | Symmetric −220 dBFS dither injection + hardware MXCSR FTZ/DAZ                        | Eliminates 10–100× CPU microcode penalties during digital silence with zero net DC drift |
-| **Bypass Crossfader**          | 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with branchless FMA loop & phase compensation | Smooth, pop-free transitions with zero phase cancellation                                |
-| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`                | Instant host Plugin Delay Compensation with 0 per-block audio thread overhead            |
-| **Binary `.namb` v2 Format**   | Pre-transposed memory layout (Gate-Major LSTM, Interleaved-4 WaveNet) with CRC32     | Reduces model loading and DAW track hot-swap time from ~50 ms to $< 1\text{ ms}$         |
-| **Flatpak Extension**          | `org.freedesktop.LinuxAudio.Plugins.NAMPlug` on BaseExtension 25.08                  | Seamless 1-click loading in sandboxed Flatpak DAWs without host permissions              |
-| **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly verification                | Maximized CPU instruction throughput and minimized I-Cache misses                        |
+| Feature / Attribute            | Technical Implementation                                                                        | Benefit & Impact                                                                                                       |
+|:------------------------------ |:----------------------------------------------------------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------- |
+| **Inference Topologies**       | WaveNet (A1/A2), LSTM (1- & 2-layer, multi-I/O), ConvNet, Linear FIR/FFT, Sequential            | Comprehensive NAM model coverage with native Rust execution speed                                                      |
+| **Plugin Standard**            | Native CLAP 1.2+ via `clack-plugin` & `clack-extensions`                                        | Zero translation layer; sample-accurate automation, dynamic PDC, and full state saving                                 |
+| **RT Determinism**             | Zero heap alloc/free, zero mutex locks, 3-tier lock-free GC cascade                             | Deterministic, dropout-free audio under sub-millisecond buffer sizes (32–64 samples)                                   |
+| **SIMD Acceleration**          | Mandatory `x86-64-v3` (AVX2/FMA) baseline; static `dispatch_simd!` dispatch                     | WaveNet Standard ≈ 41.8 µs / LSTM 1×16 ≈ 6.8 µs per 64-sample block (Ryzen 7 5700U)                                    |
+| **Dual-Oracle Parity**         | Validated against C++ NAMCore ($f32$) and double-precision $f64$                                | Bit-exact fidelity ($>136.4\text{ dB}$ SNR WaveNet, $>150.3\text{ dB}$ SNR ConvNet)                                    |
+| **Native Polyphase Resampler** | 256 phases × 64 taps Kaiser sinc resampler (minimum-phase cepstrum)                             | Pristine multi-rate conversion (>105 dB stopband, < 0.05 dB ripple) in 0.7–1.3 µs                                      |
+| **Cabinet IR Convolution**     | Uniform-Partitioned Overlap-Save (UPOLS) FFT convolution engine (.wav)                          | Ultra-low-overhead speaker cabinet simulation ($1.3\text{ µs}$ for 512-sample IRs)                                     |
+| **Anti-Aliasing Oversampling** | Half-band polyphase FIR filters (`Off`, `2x`, `4x`, >100 dB stopband)                           | Eliminates non-linear high-frequency foldover/aliasing in high-gain models                                             |
+| **Activation Precision**       | `Standard` (exact Taylor minimax) vs `Fast` (Padé polynomial approximations)                    | User-selectable balance between floating-point precision (+89.5 dB SNR) and CPU cycles                                 |
+| **Graphical User Interface**   | Slint 1.18 declarative UI (FemtoVG/OpenGL via `winit`)                                          | Native X11 XEmbed host panel embedding, X11/Wayland floating fallback (Wayland floating experimental), 60 FPS metering |
+| **Denormal Armor**             | Symmetric −220 dBFS dither injection + hardware MXCSR FTZ/DAZ                                   | Eliminates 10–100× CPU microcode penalties during digital silence with zero net DC drift                               |
+| **Bypass Crossfader**          | 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with branchless FMA loop & phase compensation | Smooth, pop-free transitions with zero phase cancellation                                                              |
+| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`                           | Instant host Plugin Delay Compensation with 0 per-block audio thread overhead                                          |
+| **Binary `.namb` v2 Format**   | Pre-transposed memory layout (Gate-Major LSTM, Interleaved-4 WaveNet) with CRC32                | Reduces model loading and DAW track hot-swap time from ~50 ms to $< 1\text{ ms}$                                       |
+| **Flatpak Extension**          | `org.freedesktop.LinuxAudio.Plugins.NAMPlug` on BaseExtension 25.08                             | Seamless 1-click loading in sandboxed Flatpak DAWs without host permissions                                            |
+| **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly verification                           | Maximized CPU instruction throughput and minimized I-Cache misses                                                      |
 
 ---
 
@@ -128,13 +128,13 @@ Execution times measured per **64-sample block at 48 kHz** ($1.33\text{ ms}$ rea
 
 In addition to core DSP benchmarks, the distributed release artifact (`~/.clap/nam_plug.clap`) undergoes automated real-time certification via `nam_perf_guard --certify` under realistic DAW host conditions (event queues, parameter smoothing, crossfading, buffer routing) after PGO + LLVM-BOLT optimization:
 
-| Host Scenario / Topology        | Block Size  | p50 Latency  | p99 Latency  | Deadline Budget | Budget Used (p50 / p99) | Headroom  | Certification Status  |
-|:------------------------------- |:----------- |:------------ |:------------ |:--------------- |:----------------------- |:--------- |:--------------------- |
-| **WaveNet A1 Standard**         | 64 samples  | **102.2 µs** | **111.8 µs** | 1.33 ms         | 7.7% / 8.4%             | **90.1%** | ✅ PASS (Certified)   |
-| **WaveNet A1 Standard**         | 128 samples | **201.4 µs** | **219.5 µs** | 2.67 ms         | 7.6% / 8.2%             | **90.3%** | ✅ PASS (Certified)   |
-| **WaveNet A2 Slimmable**        | 64 samples  | **49.9 µs**  | **60.1 µs**  | 1.33 ms         | 3.7% / 4.5%             | **94.7%** | ✅ PASS (Certified)   |
-| **LSTM 1×3**                    | 64 samples  | **12.4 µs**  | **19.9 µs**  | 1.33 ms         | 0.9% / 1.5%             | **98.2%** | ✅ PASS (Certified)   |
-| **CLAP Passthrough (No Model)** | 64 samples  | **2.3 µs**   | **2.4 µs**   | 1.33 ms         | 0.17% / 0.18%           | **99.8%** | ✅ PASS (Certified)   |
+| Host Scenario / Topology        | Block Size  | p50 Latency  | p99 Latency  | Deadline Budget | Budget Used (p50 / p99) | Headroom  | Certification Status |
+|:------------------------------- |:----------- |:------------ |:------------ |:--------------- |:----------------------- |:--------- |:-------------------- |
+| **WaveNet A1 Standard**         | 64 samples  | **102.2 µs** | **111.8 µs** | 1.33 ms         | 7.7% / 8.4%             | **90.1%** | ✅ PASS (Certified)  |
+| **WaveNet A1 Standard**         | 128 samples | **201.4 µs** | **219.5 µs** | 2.67 ms         | 7.6% / 8.2%             | **90.3%** | ✅ PASS (Certified)  |
+| **WaveNet A2 Slimmable**        | 64 samples  | **49.9 µs**  | **60.1 µs**  | 1.33 ms         | 3.7% / 4.5%             | **94.7%** | ✅ PASS (Certified)  |
+| **LSTM 1×3**                    | 64 samples  | **12.4 µs**  | **19.9 µs**  | 1.33 ms         | 0.9% / 1.5%             | **98.2%** | ✅ PASS (Certified)  |
+| **CLAP Passthrough (No Model)** | 64 samples  | **2.3 µs**   | **2.4 µs**   | 1.33 ms         | 0.17% / 0.18%           | **99.8%** | ✅ PASS (Certified)  |
 
 > [!TIP]
 > **What This Means In Your DAW:**
@@ -277,23 +277,43 @@ For maximum performance in live and studio environments, compile using the autom
 ./utils/build-release.sh
 ```
 
-| Canonical Option | Purpose                                                                               |
-|:---------------- |:------------------------------------------------------------------------------------- |
-| `--package`      | Generates distribution archive (`.tar.zst`) and Flatpak extension (`.flatpak`)       |
-| `--install`      | Automatically installs the generated CLAP binary to `~/.clap/` (and flatpak bundle)  |
+| Canonical Option | Purpose                                                                                 |
+|:---------------- |:--------------------------------------------------------------------------------------- |
+| `--package`      | Generates distribution archive (`.tar.zst`) and Flatpak extension (`.flatpak`)          |
+| `--install`      | Automatically installs the generated CLAP binary to `~/.clap/` (and flatpak bundle)     |
 | `--strict`       | Enforces fail-closed mode: any optimization or verification gap aborts with exit code 1 |
-| `--certify`      | Does not compile; strictly validates and certifies canonical artifacts via receipts  |
-| `-h, --help`     | Displays command-line help screen and exits                                           |
+| `--certify`      | Does not compile; strictly validates and certifies canonical artifacts via receipts     |
+| `-h, --help`     | Displays command-line help screen and exits                                             |
 
 ---
 
 ## 🎚️ Host Compatibility & DAW Notes
 
-| DAW / Host Environment                                  | Status             | Compatibility Notes                                                                                                                                             |
-|:------------------------------------------------------- |:------------------ |:--------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bitwig Studio** (Linux)                               | ✅ Full Support    | Native X11 embedded GUI panel (default), sample-accurate automation, state save/restore, and offline bouncing.                                                  |
-| **REAPER** (Native Linux)                               | ✅ Full Support    | Native X11 embedded GUI panel (default), parameter automation, dynamic PDC, and ultra-low latency playback.                                                     |
-| **PreSonus Studio One** / **Fender Studio Pro** (Linux) | ⚠️ Floating Window | Host cannot initialize an embedded X11 surface; NAM-Plug automatically serves X11 or Wayland floating windows (`is_floating = true`) with clean teardown joins. |
+The table below summarizes verified GUI presentation and host integration behavior across Linux host environments:
+
+| Host / Session                                | Plugin GUI Support                  | Notes & Operational Behavior                                                                                                                                                                                    |
+|:--------------------------------------------- |:----------------------------------- |:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bitwig Studio** (X11)                       | ✅ Embedded (XEmbed)                | Native X11 embedded GUI panel (default), sample-accurate automation, state save/restore, and offline bouncing.                                                                                                  |
+| **REAPER** (Native Linux, X11)                | ✅ Embedded (XEmbed)                | Native X11 embedded GUI panel (default), parameter automation, dynamic PDC, and ultra-low latency playback.                                                                                                     |
+| **X11 Hosts in General**                      | ✅ Embedded / Floating              | Embedded via XEmbed or floating window, depending on host window negotiation (`is_floating`).                                                                                                                   |
+| **Fender Studio Pro 8.2** (Linux, Wayland)    | ⚠️ Generic Host Controls            | **Plugin GUI not available**: the host exclusively requests embedded Wayland (`is_floating = false`), which the core CLAP specification does not define; the host displays its native generic parameter editor. |
+| **Wayland Hosts Requesting Floating Windows** | 🧪 Floating Window (*Experimental*) | Standalone floating window supported by the plugin code (`is_floating = true`), but classified as **experimental** due to the absence of a verified test host negotiating floating windows under Wayland.       |
+
+### Using Without a Graphical Interface
+
+When running in a host or display server environment where the custom graphical interface is not displayed (such as Fender Studio Pro under native Wayland), NAM-Plug remains fully operational via the host's generic parameter controls:
+
+* **DSP Parameter Control:** All continuous and discrete audio parameters (Input Trim, Output Level, Noise Gate Threshold, Active Bypass, Oversampling Mode, and Activation Precision) are exposed to the host and can be automated, adjusted, or modulated directly from the generic parameter panel.
+* **Model Selection in Generic Hosts:** In Fender Studio Pro 8.2 the host does query the plugin's CLAP preset discovery provider (the provider descriptor is read and one provider instance is created, which declares `~/.nam/models`), but it does not request model metadata or issue a preset load; the module is then recorded as presetless and the preset selector shows an empty list. Consequently the available models are not exposed in the host preset browser, and the plugin does not provide an in-host model picker outside its custom GUI.
+* **Session Persistence & State Restores:**
+  * When a DAW project, track template, or host preset is saved, the host serializes the full plugin state (including the active model file path, basename, and SHA-256 hash).
+  * Upon reloading the session or track, NAM-Plug restores the exact model instance and state: it first checks the recorded absolute path, and if relocated, automatically searches `~/.nam/models` for a matching filename and SHA-256 checksum.
+  * Saving and restoring a model-bearing session is verified in X11 hosts. In Fender Studio Pro 8.2, state serialization itself is confirmed (the host stores the plugin envelope per insert), but the model-bearing round-trip has not been reproduced yet because this host currently offers no way to load a model into an instance.
+* **Important Operational Boundaries:**
+  * **No Cross-DAW State Transfer (GAP-13):** Serialized device presets or saved session chunks should not be expected to transfer seamlessly across different DAW hosts.
+  * **Cabinet IRs Require GUI (GAP-10):** Speaker cabinet impulse responses (`.wav`) are configured through the custom graphical interface and are not exposed via generic parameters or preset discovery; sessions without GUI retain whatever IR state was previously serialized into the project.
+  * **Model Directory Convention (`~/.nam/models`):** The `~/.nam/models` directory is a local user storage and symlink location for model files; the plugin does not crawl arbitrary directories on the host filesystem.
+  * **Flatpak Environments:** When running sandboxed Flatpak DAWs, ensure models and IRs are stored in directories accessible within the DAW's sandbox boundary (such as the user's home directory or `~/.nam/models`).
 
 ---
 
@@ -301,14 +321,14 @@ For maximum performance in live and studio environments, compile using the autom
 
 The `./utils/` suite automates formatting, static analysis, parity verification, and release certification:
 
-| Script                                                                           | Purpose & Scope                                                                                                                                            |
-|:-------------------------------------------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`utils/lints.sh`](utils/lints.sh)                                               | **Static Analysis Gate:** Runs `cargo fmt`, `cargo check` matrix, strict `clippy`, validates SPDX headers, policies, and RT allocations (~6s).            |
-| [`utils/tests-quick.sh`](utils/tests-quick.sh)                                   | **Agile QA Suite:** Multi-phase test run (≤ 5 min budget) covering unit/integration tests, C++ NAMCore parity, oversampling parity, and RT codegen guards. |
-| [`utils/tests-long.sh`](utils/tests-long.sh)                                     | **Pre-Release Audit:** Heavy stress testing (GC model swaps, off-RT drain, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`. |
-| [`utils/build-release.sh`](utils/build-release.sh)                               | **Release Pipeline & Certification:** Compiles release artifacts (`target/dist/`), packages bundles, and certifies canonical receipts (`--certify`).      |
-| [`utils/verify_rt_codegen.sh`](utils/verify_rt_codegen.sh)                       | **Static Codegen Guard:** Disassembles the CLAP `.so` and asserts zero `malloc`/`free`, zero `div`/`idiv`, and bounded TLS access.                         |
-| [`utils/mod-update.sh`](utils/mod-update.sh)                                     | **Dependency Maintenance:** Manual toolchain and Cargo dependency upgrade utility.                                                                         |
+| Script                                                     | Purpose & Scope                                                                                                                                             |
+|:---------------------------------------------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`utils/lints.sh`](utils/lints.sh)                         | **Static Analysis Gate:** Runs `cargo fmt`, `cargo check` matrix, strict `clippy`, validates SPDX headers, policies, and RT allocations (~6s).              |
+| [`utils/tests-quick.sh`](utils/tests-quick.sh)             | **Agile QA Suite:** Multi-phase test run (≤ 5 min budget) covering unit/integration tests, C++ NAMCore parity, oversampling parity, and RT codegen guards.  |
+| [`utils/tests-long.sh`](utils/tests-long.sh)               | **Pre-Release Audit:** Heavy stress testing (GC model swaps, off-RT drain, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`. |
+| [`utils/build-release.sh`](utils/build-release.sh)         | **Release Pipeline & Certification:** Compiles release artifacts (`target/dist/`), packages bundles, and certifies canonical receipts (`--certify`).        |
+| [`utils/verify_rt_codegen.sh`](utils/verify_rt_codegen.sh) | **Static Codegen Guard:** Disassembles the CLAP `.so` and asserts zero `malloc`/`free`, zero `div`/`idiv`, and bounded TLS access.                          |
+| [`utils/mod-update.sh`](utils/mod-update.sh)               | **Dependency Maintenance:** Manual toolchain and Cargo dependency upgrade utility.                                                                          |
 
 ### Script Contract & Release Chain
 

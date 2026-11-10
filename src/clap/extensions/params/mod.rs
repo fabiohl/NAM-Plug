@@ -6,6 +6,10 @@
 pub mod audio;
 pub mod main;
 
+#[cfg(test)]
+#[path = "params_test.rs"]
+mod params_test;
+
 /// Input gain parameter ID.
 pub const PARAM_INPUT_GAIN: u32 = 0;
 /// Output gain parameter ID.
