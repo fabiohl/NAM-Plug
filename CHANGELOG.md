@@ -15,6 +15,10 @@ Control begins formally with version 1.0.0.
 
 ## [Unreleased]
 
+### Changed
+
+- **Dual-Stack Flatpak Runtime Architecture (26.08 and 25.08):** Upgraded `packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml` and configured `utils/build-release.sh` with zero-recompile multi-stack bundling targeting both `26.08` (canonical, next-gen DAWs like Fender Studio Pro 8) and `25.08` (compatibility, Bitwig Studio and REAPER), enabling simultaneous coexistence and universal Flatpak DAW discovery.
+
 ## [1.1.0] - 2026-11-10
 
 ### Added [1.1.0]

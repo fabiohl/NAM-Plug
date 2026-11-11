@@ -44,7 +44,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 * **Hardware-Accelerated Slint GUI with Native X11 Embedding:** Declarative user interface rendered via FemtoVG / OpenGL with **native X11 XEmbed host panel embedding** into Bitwig Studio and REAPER, plus X11 floating and experimental Wayland floating window support. A dedicated 60 Hz event-loop thread polls lock-free atomic view models with 0% audio thread overhead.
 * **Complete Integrated Tone Pipeline:** Includes a native 256-phase minimum-phase Kaiser sinc resampler ($0.7\text{–}1.3\text{ µs}$ execution, $>105\text{ dB}$ stopband, 0 pre-ringing) adapting any model sample rate to host rates (44.1, 48, 96, 192 kHz), Uniform-Partitioned Overlap-Save (UPOLS) FFT cabinet IR convolution ($1.3\text{ µs}$ for 512-sample IRs), polyphase half-band oversampling (2×/4×), and branchless crossfaded bypass (64-sample ramp, about 1.3 ms at 48 kHz).
 * **Binary `.namb` v2 Container Support:** Loads pre-transposed binary models (Gate-Major LSTM, Interleaved-4 WaveNet) with IEEE 802.3 CRC32 integrity validation, slashing model loading and hot-swap times from $\sim 50\text{ ms}$ to $< 1\text{ ms}$.
-* **Sandbox-Ready Flatpak Audio Plugin Extension:** Distributed as an official Flatpak extension (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`) extending `org.freedesktop.LinuxAudio.BaseExtension` 25.08, providing automatic discovery in sandboxed DAWs (Bitwig, REAPER, Studio One) without compromising filesystem security.
+* **Sandbox-Ready Flatpak Audio Plugin Extension:** Distributed as an official Flatpak extension (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`) extending `org.freedesktop.LinuxAudio.BaseExtension` 26.08, providing automatic discovery in sandboxed DAWs (Fender Studio Pro, Bitwig, REAPER, Studio One) without compromising filesystem security.
 
 ---
 
@@ -66,7 +66,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 | **Bypass Crossfader**          | 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with branchless FMA loop & phase compensation | Smooth, pop-free transitions with zero phase cancellation                                                              |
 | **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`                           | Instant host Plugin Delay Compensation with 0 per-block audio thread overhead                                          |
 | **Binary `.namb` v2 Format**   | Pre-transposed memory layout (Gate-Major LSTM, Interleaved-4 WaveNet) with CRC32                | Reduces model loading and DAW track hot-swap time from ~50 ms to $< 1\text{ ms}$                                       |
-| **Flatpak Extension**          | `org.freedesktop.LinuxAudio.Plugins.NAMPlug` on BaseExtension 25.08                             | Seamless 1-click loading in sandboxed Flatpak DAWs without host permissions                                            |
+| **Flatpak Extension**          | `org.freedesktop.LinuxAudio.Plugins.NAMPlug` on BaseExtension 26.08                             | Seamless 1-click loading in sandboxed Flatpak DAWs without host permissions                                            |
 | **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly verification                           | Maximized CPU instruction throughput and minimized I-Cache misses                                                      |
 
 ---
@@ -225,21 +225,32 @@ sudo apt update && sudo apt install -y build-essential pkg-config cmake libgl1-m
 
 ### Method 1: Flatpak Plugin Extension (Recommended for Flatpak DAWs)
 
-If you run a sandboxed Flatpak DAW (Bitwig Studio, REAPER, Studio One), install the pre-built `.flatpak` extension:
+NAM-Plug supports a **dual-stack** packaging architecture targeting both `26.08` and `25.08` runtime branches simultaneously:
 
 ```bash
-flatpak install --user --reinstall target/dist/org.freedesktop.LinuxAudio.Plugins.NAMPlug.flatpak
+# Para DAWs modernas no runtime 26.08 (ex.: Fender Studio Pro 8):
+flatpak install --user --reinstall target/dist/nam-plug-1.1.0-linux-x86_64.flatpak
+
+# Para DAWs estáveis no runtime 25.08 (ex.: Bitwig Studio, REAPER):
+flatpak install --user --reinstall target/dist/nam-plug-1.1.0-linux-x86_64-25.08.flatpak
 ```
 
-Compatible Flatpak DAWs automatically mount and discover the plugin at `/app/extensions/Plugins/clap/nam_plug.clap` on startup—no sandbox permission overrides required.
-
-To inspect installed files:
+Ambos os ramos podem coexistir lado a lado no sistema sem conflitos:
 
 ```bash
+flatpak list --runtime | grep NAMPlug
+```
+
+As DAWs montam automaticamente o ramo correspondente em `/app/extensions/Plugins/clap/nam_plug.clap` na inicialização — sem furos ou permissões manuais de sandbox.
+
+Para inspecionar os arquivos instalados por ramo:
+
+```bash
+ls -la ~/.local/share/flatpak/runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/26.08/active/files/clap/
 ls -la ~/.local/share/flatpak/runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08/active/files/clap/
 ```
 
-To uninstall:
+Para desinstalar:
 
 ```bash
 flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug

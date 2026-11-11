@@ -132,6 +132,12 @@ install_certified() {
             FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=1 log=$log"; finish || true; exit 1
         fi
         echo "flatpak installed: $fpath" >> "$log"
+        local compat_fpath="${fpath%.flatpak}-25.08.flatpak"
+        if [ -f "$compat_fpath" ]; then
+            if flatpak install --user --reinstall -y "$compat_fpath" >> "$log" 2>&1; then
+                echo "flatpak compat installed: $compat_fpath" >> "$log"
+            fi
+        fi
     elif [ "$frc" -ne 3 ]; then
         FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=$frc log=$log"; finish || true; exit 1
     fi
@@ -217,7 +223,7 @@ emit "PHASE: env_verify PASS log=$ENV_LOG"
 VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml 2>/dev/null || echo "1.0.0")
 ARCHIVE_NAME="nam-plug-${VERSION}-linux-x86_64"
 TARBALL="$DIST_DIR/${ARCHIVE_NAME}.tar.zst"
-FLATPAK_BUNDLE="$DIST_DIR/org.freedesktop.LinuxAudio.Plugins.NAMPlug.flatpak"
+FLATPAK_BUNDLE="$DIST_DIR/${ARCHIVE_NAME}.flatpak"
 
 # Git provenance
 GIT_COMMIT="unknown"
@@ -432,6 +438,8 @@ BOLT_STATUS="skipped"
 BOLT_DIR="$PROJECT_DIR/target/bolt"
 BOLT_PROFILE="$BOLT_DIR/libnam_plug.merged.fdata"
 BOLT_VERSION=""
+BOLT_WORKLOAD_RECEIPT="$LOG_DIR/bolt-workload-receipt.json"
+BOLT_WORKLOAD_LOG="$LOG_DIR/build-release-bolt_workload.log"
 mkdir -p "$BOLT_DIR"
 
 CEREMONY_VERDICT=""
@@ -661,41 +669,51 @@ EOF
         rm -rf "$TMP_EXTRACT"
 
         if command -v flatpak >/dev/null 2>&1; then
-            echo "Building Flatpak bundle..."
-            FLATPAK_BUILD_DIR="$(mktemp -d -t nam-plug-flatpak-build.XXXXXX)"
-            FLATPAK_REPO_DIR="$(mktemp -d -t nam-plug-flatpak-repo.XXXXXX)"
-            SDK_NAME="org.freedesktop.Sdk"
-            if ! flatpak info org.freedesktop.Sdk//25.08 >/dev/null 2>&1; then
-                SDK_NAME="org.freedesktop.Platform"
-            fi
-            flatpak build-init --type=extension --extension-tag=25.08 \
-                "$FLATPAK_BUILD_DIR" org.freedesktop.LinuxAudio.Plugins.NAMPlug "$SDK_NAME" org.freedesktop.Platform 25.08
-            mkdir -p "$FLATPAK_BUILD_DIR/files/clap"
-            cp "$CLAP_TARGET" "$FLATPAK_BUILD_DIR/files/clap/nam_plug.clap"
-            mkdir -p "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug"
-            cp "LICENSE.txt" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
-            cp "NOTICE" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
-
+            echo "Building Flatpak extension bundles (multi-stack: 26.08 and 25.08)..."
             METAINFO_SRC="packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml"
-            if [ -f "$METAINFO_SRC" ]; then
-                mkdir -p "$FLATPAK_BUILD_DIR/files/share/metainfo"
-                cp "$METAINFO_SRC" "$FLATPAK_BUILD_DIR/files/share/metainfo/"
-                if command -v appstreamcli >/dev/null 2>&1; then
-                    if ! appstreamcli validate --no-net --strict "$METAINFO_SRC" >> "$PKG_LOG" 2>&1; then
-                        FAILS+=("packaging")
-                        emit "PHASE: packaging FAIL rc=1 log=$PKG_LOG (AppStream metainfo validation failed)"
-                        finish
-                        exit 1
-                    fi
+            if [ -f "$METAINFO_SRC" ] && command -v appstreamcli >/dev/null 2>&1; then
+                if ! appstreamcli validate --no-net --strict "$METAINFO_SRC" >> "$PKG_LOG" 2>&1; then
+                    FAILS+=("packaging")
+                    emit "PHASE: packaging FAIL rc=1 log=$PKG_LOG (AppStream metainfo validation failed)"
+                    finish
+                    exit 1
                 fi
             fi
 
-            flatpak build-finish "$FLATPAK_BUILD_DIR" --extension-priority=100
-            flatpak build-export --update-appstream "$FLATPAK_REPO_DIR" "$FLATPAK_BUILD_DIR" 25.08
-            flatpak build-bundle --runtime "$FLATPAK_REPO_DIR" "$FLATPAK_BUNDLE" org.freedesktop.LinuxAudio.Plugins.NAMPlug 25.08
-            rm -rf "$FLATPAK_BUILD_DIR" "$FLATPAK_REPO_DIR"
-            FLATPAK_PATH="$FLATPAK_BUNDLE"
-            echo "Generated flatpak bundle: $FLATPAK_BUNDLE"
+            for f_branch in 26.08 25.08; do
+                FLATPAK_BUILD_DIR="$(mktemp -d -t nam-plug-flatpak-build.XXXXXX)"
+                FLATPAK_REPO_DIR="$(mktemp -d -t nam-plug-flatpak-repo.XXXXXX)"
+                SDK_NAME="org.freedesktop.Sdk"
+                if ! flatpak info "org.freedesktop.Sdk//${f_branch}" >/dev/null 2>&1; then
+                    SDK_NAME="org.freedesktop.Platform"
+                fi
+                flatpak build-init --type=extension "--extension-tag=${f_branch}" \
+                    "$FLATPAK_BUILD_DIR" org.freedesktop.LinuxAudio.Plugins.NAMPlug "$SDK_NAME" org.freedesktop.Platform "${f_branch}"
+                mkdir -p "$FLATPAK_BUILD_DIR/files/clap"
+                cp "$CLAP_TARGET" "$FLATPAK_BUILD_DIR/files/clap/nam_plug.clap"
+                mkdir -p "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug"
+                cp "LICENSE.txt" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
+                cp "NOTICE" "$FLATPAK_BUILD_DIR/files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/"
+                if [ -f "$METAINFO_SRC" ]; then
+                    mkdir -p "$FLATPAK_BUILD_DIR/files/share/metainfo"
+                    cp "$METAINFO_SRC" "$FLATPAK_BUILD_DIR/files/share/metainfo/"
+                fi
+
+                flatpak build-finish "$FLATPAK_BUILD_DIR" --extension-priority=100
+                flatpak build-export --update-appstream "$FLATPAK_REPO_DIR" "$FLATPAK_BUILD_DIR" "${f_branch}"
+
+                if [ "$f_branch" = "26.08" ]; then
+                    flatpak build-bundle --runtime "$FLATPAK_REPO_DIR" "$FLATPAK_BUNDLE" org.freedesktop.LinuxAudio.Plugins.NAMPlug "${f_branch}"
+                    cp -f "$FLATPAK_BUNDLE" "$DIST_DIR/${ARCHIVE_NAME}-${f_branch}.flatpak"
+                    FLATPAK_PATH="$FLATPAK_BUNDLE"
+                    echo "Generated flatpak bundle (26.08 canonical): $FLATPAK_BUNDLE"
+                else
+                    BRANCH_BUNDLE="$DIST_DIR/${ARCHIVE_NAME}-${f_branch}.flatpak"
+                    flatpak build-bundle --runtime "$FLATPAK_REPO_DIR" "$BRANCH_BUNDLE" org.freedesktop.LinuxAudio.Plugins.NAMPlug "${f_branch}"
+                    echo "Generated flatpak bundle (${f_branch} compat): $BRANCH_BUNDLE"
+                fi
+                rm -rf "$FLATPAK_BUILD_DIR" "$FLATPAK_REPO_DIR"
+            done
         else
             echo "flatpak command not found; packaging gap recorded."
         fi

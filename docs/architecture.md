@@ -700,12 +700,12 @@ Freedesktop Flatpak audio applications utilize a standardized extension point (`
                                │ (Flatpak runtime extension bind mount)
 ┌──────────────────────────────┴──────────────────────────────────────────────┐
 │                    Host User Extension Storage (~/.local/share/flatpak)     │
-│  runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08/active/    │
+│  runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/26.08/active/    │
 │    └── files/clap/nam_plug.clap                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Runtime Extension Ref:** `runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08`
+- **Runtime Extension Ref:** `runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/26.08`
 - **Base Extension:** `org.freedesktop.LinuxAudio.BaseExtension`
 - **Container Mount Path:** `/app/extensions/Plugins/clap/nam_plug.clap`
 - **Extension Priority:** `--extension-priority=100` during `flatpak build-finish`.
@@ -729,14 +729,14 @@ The metadata descriptor (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.N
 
 ### 10.3 Manifest Specification
 
-The Flatpak manifest (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml`) targets the `25.08` runtime branch:
+The Flatpak manifest (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml`) targets the `26.08` runtime branch:
 
 ```yaml
 id: org.freedesktop.LinuxAudio.Plugins.NAMPlug
-branch: "25.08"
+branch: "26.08"
 runtime: org.freedesktop.LinuxAudio.BaseExtension
 runtime-version: stable
-sdk: org.freedesktop.Sdk//25.08
+sdk: org.freedesktop.Sdk//26.08
 build-extension: true
 
 build-options:
@@ -752,14 +752,14 @@ modules:
 
 ### 10.4 Integrated Release Pipeline (`build-release.sh`)
 
-Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh`:
+Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh` with zero-recompile **multi-stack** bundling across `26.08` and `25.08`:
 
-1. **Initialize:** Runs `flatpak build-init --type=extension --extension-tag=25.08`.
-2. **Install:** Installs `nam_plug.clap` into `files/clap/` and AppStream XML into `files/share/metainfo/`.
+1. **Initialize:** Runs `flatpak build-init --type=extension --extension-tag=<branch>` for each branch.
+2. **Install:** Reuses the single optimized host binary `nam_plug.clap` into `files/clap/` and AppStream XML into `files/share/metainfo/`.
 3. **Finish:** Runs `flatpak build-finish --extension-priority=100`.
 4. **Export OSTree:** Executes `flatpak build-export --update-appstream`.
-5. **Create Bundle:** Generates the standalone bundle `target/dist/org.freedesktop.LinuxAudio.Plugins.NAMPlug.flatpak` (and the `nam-plug-<VERSION>-linux-x86_64.tar.zst` archive).
-6. **Deploy:** Optionally installs bundle locally via `flatpak install --user --reinstall -y`.
+5. **Create Bundles:** Generates the canonical bundle `target/dist/nam-plug-<VERSION>-linux-x86_64.flatpak` (branch 26.08) and the compatibility bundle `target/dist/nam-plug-<VERSION>-linux-x86_64-25.08.flatpak`.
+6. **Deploy:** Automatically deploys both branches when `--install` is supplied.
 
 ### 10.5 AppStream Catalog Dynamics & Bundle Semantics
 
@@ -768,7 +768,7 @@ Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh`:
    - Consequently, local bundle installations show generic icons and fallback names in graphical software centers (e.g., Warehouse).
    - In production (Flathub), `flatpak build-update-repo` indexes the metainfo XML into the centralized AppStream branch, displaying full titles, release notes, and icons.
 2. **Semantic Versioning in `flatpak list`:**
-   - The `Versão` (Version) column in `flatpak list` is populated from the cached AppStream catalog. When installed from a standalone bundle without catalog indexing, this column remains blank while the `Ramo` (Branch) column displays `25.08`.
+   - The `Versão` (Version) column in `flatpak list` is populated from the cached AppStream catalog. When installed from a standalone bundle without catalog indexing, this column remains blank while the `Ramo` (Branch) column displays `26.08`.
 3. **Sandbox Permissions:**
    - Plugin extensions are shared libraries mounted into host containers, not standalone sandboxed applications. They declare zero independent sandbox permissions (`--filesystem`, `--device`) and inherit the security boundary of the host DAW. Running `flatpak info --show-permissions` legitimately displays zero lines.
 
