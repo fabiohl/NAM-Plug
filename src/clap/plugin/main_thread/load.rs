@@ -19,9 +19,6 @@ use neural_amp_modeler_rs::models::{NamModel, StaticModel};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
-use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
-
 #[cfg(test)]
 type TestMidLoadHook = Box<dyn Fn(&Path) + Send + 'static>;
 
@@ -780,26 +777,9 @@ impl<'a> NamClapMainThread<'a> {
         let cabsim = crate::clap::extensions::state_transaction::load_cabsim_from_verified_bytes(
             &ir_bytes, host_rate, &self.sys, path,
         )?;
-
-        let build_adapter = || {
-            ConvEngine::new(&cabsim.samples, partition_size)
-                .map_err(|e| {
-                    Box::new(
-                        NamDiagnostic::new(e, &self.sys)
-                            .message("Failed to build convolution engine for cab-sim IR")
-                            .hint("The IR samples require more memory than available."),
-                    )
-                })
-                .and_then(|engine| {
-                    CabSimAdapter::new(Box::new(engine)).map_err(|e| {
-                        Box::new(
-                            NamDiagnostic::new(e, &self.sys)
-                                .message("Failed to build cab-sim convolution adapter")
-                                .hint("The IR samples require more memory than available."),
-                        )
-                    })
-                })
-        };
+        let ir_policy = crate::clap::extensions::ir_level_policy::IrLevelPolicy::from_u8(
+            self.shared.cold.ir_level_policy.load(Ordering::Relaxed),
+        );
 
         // When the plugin is already active, build and deliver the pair
         // with the host partition size. When not yet active (buffer_size == 0),
@@ -830,14 +810,15 @@ impl<'a> NamClapMainThread<'a> {
             // Explicit user IR load supersedes any pending staged restore.
             *self.staged_restore.borrow_mut() = None;
 
-            // Box here on the main thread so the SPSC payload
-            // carries `Box<CabSimPair>` and the audio-thread swap moves the
-            // old `Box` by value to the GC with zero allocations.
-            let pair = Some(Box::new(CabSimPair {
-                l: Box::new(build_adapter()?),
-                r: Box::new(build_adapter()?),
-                sample_rate: cabsim.sample_rate,
-            }));
+            let built_pair = crate::clap::extensions::ir_level_policy::build_cabsim_pair_from_raw(
+                &cabsim.samples,
+                cabsim.original_rate,
+                host_rate,
+                partition_size,
+                ir_policy,
+                &self.sys,
+            )?;
+            let pair = Some(Box::new(built_pair));
 
             let current_cabsim_latency = self
                 .shared
@@ -901,7 +882,7 @@ impl<'a> NamClapMainThread<'a> {
             self.shared
                 .cold
                 .ir_raw_sample_rate
-                .store(cabsim.sample_rate, Ordering::Relaxed);
+                .store(cabsim.original_rate, Ordering::Relaxed);
             {
                 let mut params = self.params.borrow_mut();
                 params.ir_path = Some(path.to_path_buf());

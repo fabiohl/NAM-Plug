@@ -324,6 +324,7 @@ pub(crate) struct SlintViewModelInner {
     last_model_name: String,
     last_model_arch: String,
     last_ir_path: Option<String>,
+    last_ir_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     last_dsp_load_pct: Option<u32>,
     last_seen_xrun_epoch: u32,
     xrun_hold_frames: u32,
@@ -691,6 +692,14 @@ impl SlintViewModelInner {
                 self.window.set_ir_name("No IR loaded".into());
             }
         }
+        let ir_policy = crate::clap::extensions::ir_level_policy::IrLevelPolicy::from_u8(
+            self.shared.cold.ir_level_policy.load(Ordering::Relaxed),
+        );
+        if ir_policy != self.last_ir_policy {
+            self.last_ir_policy = ir_policy;
+            self.window
+                .set_ir_policy_label(ir_policy.display_label().into());
+        }
 
         // ── 5. Status Bar Telemetry (cached — F-UX-08) ────────────────────────
         // Formats and publishes the four status-bar texts only when their
@@ -916,6 +925,10 @@ impl SlintViewModel {
             .unwrap_or_else(|| "No IR loaded".to_string());
         window.set_has_ir(initial_has_ir);
         window.set_ir_name(initial_ir_name.into());
+        let initial_ir_policy = crate::clap::extensions::ir_level_policy::IrLevelPolicy::from_u8(
+            shared.cold.ir_level_policy.load(Ordering::Relaxed),
+        );
+        window.set_ir_policy_label(initial_ir_policy.display_label().into());
 
         // Status bar: published once here and then mirrored by `StatusBarCache`
         // (F-UX-08) — the tick formats/publishes these texts only on change.
@@ -1271,6 +1284,40 @@ impl SlintViewModel {
             });
         }
 
+        // ── Bind Cycle IR Level Policy Callback ───────────────────────────────
+        {
+            let shared = Arc::clone(&shared);
+            let window_weak = window.as_weak();
+            window.on_cycle_ir_policy_clicked(move || {
+                use crate::clap::extensions::ir_level_policy::IrLevelPolicy;
+                shared.note_ui_interaction();
+                let current =
+                    IrLevelPolicy::from_u8(shared.cold.ir_level_policy.load(Ordering::Relaxed));
+                let next = current.next();
+                shared
+                    .cold
+                    .ir_level_policy
+                    .store(next.to_u8(), Ordering::Relaxed);
+                shared
+                    .cold
+                    .ui_ir_policy_rebuild_pending
+                    .store(true, Ordering::Release);
+                if let Some(bridge) = host {
+                    let host_static = bridge.as_static();
+                    shared.cold.host_call_quiescence.host_call(|| {
+                        host_static.request_callback();
+                    });
+                }
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_ir_policy_label(next.display_label().into());
+                }
+                log::info!(
+                    "SlintViewModel: Cycled IR level policy to '{}'",
+                    next.as_str()
+                );
+            });
+        }
+
         let inner = Rc::new(RefCell::new(SlintViewModelInner {
             window,
             shared,
@@ -1284,6 +1331,7 @@ impl SlintViewModel {
             last_model_name: initial_model_name,
             last_model_arch: initial_model_arch,
             last_ir_path: None,
+            last_ir_policy: initial_ir_policy,
             last_dsp_load_pct: None,
             last_seen_xrun_epoch: 0,
             xrun_hold_frames: 0,

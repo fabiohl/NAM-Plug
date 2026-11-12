@@ -36,6 +36,7 @@ fn make_validated(params: ProcessingParams) -> ValidatedRestore {
         ir: None,
         ir_path_on_disk: None,
         ir_hash: None,
+        ir_level_policy: Default::default(),
     }
 }
 
@@ -185,7 +186,7 @@ fn test_validate_ir_hash_mismatch() {
         Some("0000000000000000000000000000000000000000000000000000000000000000".to_string());
 
     let sys = neural_amp_modeler_rs::common::diagnostics::SystemSnapshot::capture();
-    let result = validate_ir(&params, 48000, 256, &sys);
+    let result = validate_ir(&params, Default::default(), 48000, 256, &sys);
     assert!(
         result.is_err(),
         "validate_ir must fail with error when IR hash mismatches expected hash"
@@ -394,7 +395,7 @@ fn test_validate_ir_omitted_hash_rejected() {
     let mut params = ProcessingParams::default();
     params.ir_path = Some(ir_file.clone());
     params.ir_hash = None;
-    let result = validate_ir(&params, 48000, 256, &sys_snapshot());
+    let result = validate_ir(&params, Default::default(), 48000, 256, &sys_snapshot());
     assert!(
         result.is_err(),
         "IR without a saved hash must not load the WAV"
@@ -415,7 +416,7 @@ fn test_validate_ir_malformed_hash_rejected() {
     let mut params = ProcessingParams::default();
     params.ir_path = Some(ir_file.clone());
     params.ir_hash = Some("malformed".to_string());
-    let result = validate_ir(&params, 48000, 256, &sys_snapshot());
+    let result = validate_ir(&params, Default::default(), 48000, 256, &sys_snapshot());
     assert!(result.is_err(), "IR with a malformed hash must be rejected");
 
     let _ = std::fs::remove_file(&ir_file);
@@ -432,7 +433,7 @@ fn test_validate_ir_valid_hash_accepts_real_wav() {
     let mut params = ProcessingParams::default();
     params.ir_path = Some(ir_file.clone());
     params.ir_hash = Some(expected_hash.clone());
-    let result = validate_ir(&params, 48000, 256, &sys_snapshot());
+    let result = validate_ir(&params, Default::default(), 48000, 256, &sys_snapshot());
     assert!(result.is_ok(), "IR with matching hash must load");
     let (resources, path_on_disk, hash) = result.unwrap();
     assert!(resources.is_some(), "IR resources must be built");
@@ -455,7 +456,7 @@ fn test_validate_ir_uses_exact_in_memory_bytes_immune_to_file_replacement() {
     params.ir_hash = Some(valid_hash.clone());
 
     // Single-shot load and hash check validates in-memory bytes
-    let result = validate_ir(&params, 48000, 256, &sys_snapshot());
+    let result = validate_ir(&params, Default::default(), 48000, 256, &sys_snapshot());
     assert!(
         result.is_ok(),
         "validate_ir must succeed with verified in-memory bytes"

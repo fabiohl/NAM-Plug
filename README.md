@@ -171,7 +171,7 @@ In guitar production, an authentic recorded amp tone consists of two distinct co
 
 1. **Insert NAM-Plug:** Add NAM-Plug as an audio effect on your dry guitar or bass track. Set your audio interface gain so your guitar's strongest picking hits around **-18 to -12 dBFS**.
 2. **Load an Amp Model:** Click **`LOAD .NAM`** in the AMP MODEL card and select your `.nam` or `.namb` file.
-3. **Load a Cabinet IR:** Click **`LOAD IR`** in the CABINET IR card and select your `.wav` speaker impulse response.
+3. **Load a Cabinet IR:** Click **`LOAD IR`** in the CABINET IR card and select your `.wav` speaker impulse response. Click the **IR level policy badge** (`Peak` / `Preserved` / `Legacy`) in the card header to choose between peak normalization (`peak-normalized`, default), 1:1 original WAV amplitude (`preserved`), or legacy C++ plugin level scaling (`legacy-nam-plugin`, $10^{-18/20} \times 48000 / f_s$, preserving Rust polyphase resampling and full IR length). Old project states without a policy field default to `Peak`.
 4. **Dial in Gain Staging:**
    * Adjust **`INPUT`** ($-20\text{ to }+20\text{ dB}$, default `0.0 dB`) to feed the model the right amount of drive.
    * Adjust **`OUTPUT`** ($-40\text{ to }+20\text{ dB}$, default `-3.0 dB`) to balance levels with your overall mix.

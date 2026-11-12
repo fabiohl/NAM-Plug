@@ -27,6 +27,7 @@ export component MainWindow inherits Window {
 
     in-out property <string> ir_name: "No IR loaded";
     in-out property <string> ir_status: "—";
+    in-out property <string> ir_policy_label: "Peak";
     in-out property <bool> has_ir: false;
     in-out property <bool> ir_loading: false;
     in-out property <bool> ir_error: false;
@@ -88,6 +89,7 @@ export component MainWindow inherits Window {
     callback clear_model_clicked();
     callback load_ir_clicked();
     callback clear_ir_clicked();
+    callback cycle_ir_policy_clicked();
     callback reset_clip_clicked();
     callback reset_in_clip_clicked();
     callback input_gain_changed(float);
@@ -197,6 +199,7 @@ export component MainWindow inherits Window {
                     IrCard {
                         ir-name: root.ir_name;
                         ir-status: root.ir_status;
+                        ir-policy-label: root.ir_policy_label;
                         has-ir: root.has_ir;
                         is-loading: root.ir_loading;
                         is-error: root.ir_error;
@@ -204,6 +207,7 @@ export component MainWindow inherits Window {
                         accent-color: #3498db;
                         load-clicked => { root.load_ir_clicked(); }
                         clear-clicked => { root.clear_ir_clicked(); }
+                        cycle-policy-clicked => { root.cycle_ir_policy_clicked(); }
                     }
                 }
             }

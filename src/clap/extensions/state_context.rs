@@ -49,7 +49,13 @@ impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
             context_type == StateContextType::ForPreset,
         )?;
 
-        let serialized = super::state::serialize_envelope(&save_params)?;
+        let ir_policy = crate::clap::extensions::ir_level_policy::IrLevelPolicy::from_u8(
+            self.shared
+                .cold
+                .ir_level_policy
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let serialized = super::state::serialize_envelope_with_policy(&save_params, ir_policy)?;
 
         output
             .write_all(&serialized)

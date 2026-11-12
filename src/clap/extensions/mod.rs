@@ -24,6 +24,7 @@
 
 pub mod audio_ports;
 pub mod audio_ports_activation;
+pub(crate) mod ir_level_policy;
 pub mod latency;
 pub mod param_indication;
 pub mod params;

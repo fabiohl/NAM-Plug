@@ -1159,6 +1159,84 @@ impl<'a> NamClapMainThread<'a> {
                 log::error!("Failed to clear model from GUI: {e:?}");
             }
         }
+
+        if self
+            .shared
+            .cold
+            .ui_ir_policy_rebuild_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            let policy = crate::clap::extensions::ir_level_policy::IrLevelPolicy::from_u8(
+                self.shared.cold.ir_level_policy.load(Ordering::Relaxed),
+            );
+            let raw_opt = {
+                let guard = self.shared.cold.ir_raw_samples.lock().unwrap_or_else(|e| {
+                    log::error!("PoisonError in ir_raw_samples lock: {e:?}");
+                    e.into_inner()
+                });
+                guard.clone()
+            };
+            if let Some(raw_samples) = raw_opt {
+                let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
+                let processor_active = self
+                    .shared
+                    .cold
+                    .param_rx
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_none();
+                if processor_active && buffer_size > 0 {
+                    let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
+                    let host_rate = if host_rate == 0 { 48_000 } else { host_rate };
+                    let original_rate = self.shared.cold.ir_raw_sample_rate.load(Ordering::Relaxed);
+                    match crate::clap::extensions::ir_level_policy::build_cabsim_pair_from_raw(
+                        &raw_samples,
+                        original_rate,
+                        host_rate,
+                        buffer_size as usize,
+                        policy,
+                        &self.sys,
+                    ) {
+                        Ok(pair) => {
+                            if self
+                                .cmd_producer
+                                .borrow_mut()
+                                .try_push_command(
+                                    crate::clap::plugin::ClapParamPayload::LoadCabIr {
+                                        pair: Some(Box::new(pair)),
+                                    },
+                                )
+                                .is_err()
+                            {
+                                self.shared
+                                    .cold
+                                    .ui_ir_policy_rebuild_pending
+                                    .store(true, Ordering::Release);
+                                self.host.request_callback();
+                            } else {
+                                log::info!(
+                                    "NAM-Plug: rebuilt cab-sim IR with level policy '{}'",
+                                    policy.as_str()
+                                );
+                                if let Some(state_ext) = self
+                                    .host
+                                    .get_extension::<clack_extensions::state::HostState>()
+                                {
+                                    state_ext.mark_dirty(&self.host);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "NAM-Plug: failed to rebuild cab-sim IR for policy '{}': {:?}",
+                                policy.as_str(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Syncs latency changes with the CLAP host and records slimmable stale telemetry.

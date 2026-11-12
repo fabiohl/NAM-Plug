@@ -8,6 +8,7 @@
 //! - v0 (legacy, CLAP v1.5.x): plain JSON `ProcessingParams`, without a `version` field.
 //! - v1 (current): envelope `StateEnvelope { version: 1, params: {...} }`.
 
+use crate::clap::extensions::ir_level_policy::IrLevelPolicy;
 use crate::clap::extensions::state_transaction::{self, RestoreMode};
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::plugin::debug_assert_main_thread;
@@ -18,6 +19,7 @@ use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use std::sync::atomic::Ordering;
 
 pub(crate) const CURRENT_STATE_VERSION: u32 = 1;
 /// Maximum allowed size for a CLAP state stream (32 MiB).
@@ -48,13 +50,26 @@ pub(crate) enum StateError {
 pub(crate) struct StateEnvelope {
     pub(crate) version: u32,
     pub(crate) params: ProcessingParams,
+    #[serde(default)]
+    pub(crate) ir_level_policy: IrLevelPolicy,
 }
 
-/// Shared helper: serialises `ProcessingParams` wrapped in a v1 `StateEnvelope`.
+/// Shared helper: serialises `ProcessingParams` wrapped in a v1 `StateEnvelope`
+/// using the default [`IrLevelPolicy`].
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn serialize_envelope(params: &ProcessingParams) -> Result<Vec<u8>, PluginError> {
+    serialize_envelope_with_policy(params, IrLevelPolicy::default())
+}
+
+/// Serialises `ProcessingParams` and `ir_level_policy` wrapped in a v1 `StateEnvelope`.
+pub(crate) fn serialize_envelope_with_policy(
+    params: &ProcessingParams,
+    ir_level_policy: IrLevelPolicy,
+) -> Result<Vec<u8>, PluginError> {
     let envelope = StateEnvelope {
         version: CURRENT_STATE_VERSION,
         params: params.clone(),
+        ir_level_policy,
     };
     serde_json::to_vec(&envelope)
         .map_err(|e| PluginError::Error(Box::new(StateError::Serialize(e))))
@@ -142,7 +157,9 @@ impl<'a> PluginStateImpl for NamClapMainThread<'a> {
         self.snapshot_params();
         ensure_asset_hashes(&self.params.borrow(), false)?;
 
-        let serialized = serialize_envelope(&self.params.borrow())?;
+        let ir_policy =
+            IrLevelPolicy::from_u8(self.shared.cold.ir_level_policy.load(Ordering::Relaxed));
+        let serialized = serialize_envelope_with_policy(&self.params.borrow(), ir_policy)?;
         let blob_len = serialized.len();
 
         output
@@ -178,9 +195,20 @@ impl<'a> PluginStateImpl for NamClapMainThread<'a> {
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn load_state(buffer: &[u8]) -> Result<ProcessingParams, PluginError> {
+    let (params, _policy) = load_state_with_policy(buffer)?;
+    Ok(params)
+}
+
+pub(crate) fn load_state_with_policy(
+    buffer: &[u8],
+) -> Result<(ProcessingParams, IrLevelPolicy), PluginError> {
     if let Ok(envelope) = serde_json::from_slice::<StateEnvelope>(buffer) {
-        return Ok(migrate(envelope.version, envelope.params));
+        return Ok((
+            migrate(envelope.version, envelope.params),
+            envelope.ir_level_policy,
+        ));
     }
 
     // If the buffer is a v1+ envelope (contains a "version" key) that failed to parse,
@@ -195,7 +223,7 @@ pub(crate) fn load_state(buffer: &[u8]) -> Result<ProcessingParams, PluginError>
     let params: ProcessingParams = serde_json::from_slice(buffer)
         .map_err(|e| PluginError::Error(Box::new(StateError::Deserialize(e))))?;
 
-    Ok(migrate(0, params))
+    Ok((migrate(0, params), IrLevelPolicy::PeakNormalized))
 }
 
 #[cfg(test)]

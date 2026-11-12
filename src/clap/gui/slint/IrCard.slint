@@ -6,6 +6,7 @@ import { SelectorButton } from "SelectorButton.slint";
 export component IrCard inherits Rectangle {
     in property <string> ir-name: "No IR loaded";
     in property <string> ir-status: "Bypassed";
+    in property <string> ir-policy-label: "Peak";
     in property <bool> has-ir: false;
     in property <bool> is-loading: false;
     in property <bool> is-error: false;
@@ -14,6 +15,7 @@ export component IrCard inherits Rectangle {
 
     callback load-clicked();
     callback clear-clicked();
+    callback cycle-policy-clicked();
 
     background: transparent;
 
@@ -32,21 +34,48 @@ export component IrCard inherits Rectangle {
                 color: #8fa1b3;
                 vertical-alignment: center;
             }
-            if root.has-ir : Rectangle {
-                background: #1c3628;
-                border-radius: 2px;
-                border-width: 0.5px;
-                border-color: #43E97B;
-                height: 12px;
-                HorizontalLayout {
-                    padding-left: 3px;
-                    padding-right: 3px;
-                    Text {
-                        text: "IR ON";
-                        font-size: 7.5px;
-                        font-weight: 800;
-                        color: #43E97B;
-                        vertical-alignment: center;
+            HorizontalLayout {
+                spacing: 3px;
+                touch_policy := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.cycle-policy-clicked();
+                    }
+                    Rectangle {
+                        background: touch_policy.has-hover ? #252b36 : #1a1e26;
+                        border-radius: 2px;
+                        border-width: 0.5px;
+                        border-color: touch_policy.has-hover ? root.accent-color : #3b4252;
+                        height: 12px;
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            padding-right: 4px;
+                            Text {
+                                text: root.ir-policy-label;
+                                font-size: 7.5px;
+                                font-weight: 700;
+                                color: #d8dee9;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                if root.has-ir : Rectangle {
+                    background: #1c3628;
+                    border-radius: 2px;
+                    border-width: 0.5px;
+                    border-color: #43E97B;
+                    height: 12px;
+                    HorizontalLayout {
+                        padding-left: 3px;
+                        padding-right: 3px;
+                        Text {
+                            text: "IR ON";
+                            font-size: 7.5px;
+                            font-weight: 800;
+                            color: #43E97B;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }

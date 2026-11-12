@@ -9,8 +9,7 @@ use crate::clap::plugin::errors::{self, static_plugin_error};
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::{ModelInfo, NamDiagnostic, NamErrorCode};
 use neural_amp_modeler_rs::common::params::ProcessingParams;
-use neural_amp_modeler_rs::dsp::cabsim::adapter::{CabSimAdapter, CabSimPair};
-use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
+use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
@@ -86,6 +85,8 @@ pub(crate) struct ValidatedRestore {
     pub(crate) ir_path_on_disk: Option<String>,
     /// Cryptographic SHA-256 digest of the impulse response file.
     pub(crate) ir_hash: Option<String>,
+    /// Restored IR level policy.
+    pub(crate) ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
 }
 
 /// Tuple result of off-RT model validation:
@@ -114,6 +115,7 @@ pub(crate) type IrValidationResult = (Option<IrResources>, Option<String>, Optio
 /// [`PluginError`] if any asset is missing, corrupted, or incompatible.
 pub(crate) fn validate_and_build(
     loaded_params: &ProcessingParams,
+    ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     host_rate: u32,
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
@@ -129,7 +131,7 @@ pub(crate) fn validate_and_build(
     let params = loaded_params.clone();
 
     let (maybe_ir, ir_path_on_disk, ir_hash) =
-        validate_ir(loaded_params, host_rate, buffer_size, sys)?;
+        validate_ir(loaded_params, ir_level_policy, host_rate, buffer_size, sys)?;
 
     Ok(ValidatedRestore {
         params,
@@ -141,6 +143,7 @@ pub(crate) fn validate_and_build(
         ir: maybe_ir,
         ir_path_on_disk,
         ir_hash,
+        ir_level_policy,
     })
 }
 
@@ -741,7 +744,7 @@ pub(crate) fn read_ir_file_bytes(path: &Path) -> Result<Vec<u8>, PluginError> {
 /// with external filesystem replacement.
 pub(crate) fn load_cabsim_from_verified_bytes(
     data: &[u8],
-    host_rate: u32,
+    _host_rate: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
     path_for_log: &Path,
 ) -> Result<Box<CabSimIr>, Box<NamDiagnostic>> {
@@ -802,7 +805,7 @@ pub(crate) fn load_cabsim_from_verified_bytes(
     })?;
     drop(file);
 
-    CabSimIr::load(&tmp_path, host_rate, true).map_err(|e| {
+    CabSimIr::load(&tmp_path, 0, false).map_err(|e| {
         Box::new(
             NamDiagnostic::new(NamErrorCode::IrLoadFailed, sys)
                 .message(format!("Failed to load cab-sim IR: {:?}", path_for_log))
@@ -815,6 +818,7 @@ pub(crate) fn load_cabsim_from_verified_bytes(
 pub(crate) fn build_ir_resources_from_bytes(
     data: &[u8],
     path_for_diagnostic: &Path,
+    ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     host_rate: u32,
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
@@ -826,38 +830,19 @@ pub(crate) fn build_ir_resources_from_bytes(
     };
 
     let cabsim = load_cabsim_from_verified_bytes(data, host_rate, sys, path_for_diagnostic)?;
-
-    let build_adapter = || {
-        ConvEngine::new(&cabsim.samples, partition_size)
-            .map_err(|e| {
-                Box::new(
-                    NamDiagnostic::new(e, sys)
-                        .message("Failed to build convolution engine for cab-sim IR")
-                        .hint("The IR samples require more memory than available."),
-                )
-            })
-            .and_then(|engine| {
-                CabSimAdapter::new(Box::new(engine)).map_err(|e| {
-                    Box::new(
-                        NamDiagnostic::new(e, sys)
-                            .message("Failed to build cab-sim convolution adapter")
-                            .hint("The IR samples require more memory than available."),
-                    )
-                })
-            })
-    };
-
-    let l = build_adapter()?;
-    let r = build_adapter()?;
+    let pair = crate::clap::extensions::ir_level_policy::build_cabsim_pair_from_raw(
+        &cabsim.samples,
+        cabsim.original_rate,
+        host_rate,
+        partition_size,
+        ir_level_policy,
+        sys,
+    )?;
 
     Ok(IrResources {
-        pair: Some(Box::new(CabSimPair {
-            l: Box::new(l),
-            r: Box::new(r),
-            sample_rate: cabsim.sample_rate,
-        })),
+        pair: Some(Box::new(pair)),
         samples: cabsim.samples,
-        sample_rate: cabsim.sample_rate,
+        sample_rate: cabsim.original_rate,
     })
 }
 
@@ -876,11 +861,19 @@ pub(crate) fn build_ir_resources(
                 .param("error", e.to_string()),
         )
     })?;
-    build_ir_resources_from_bytes(&bytes, path, host_rate, buffer_size, sys)
+    build_ir_resources_from_bytes(
+        &bytes,
+        path,
+        crate::clap::extensions::ir_level_policy::IrLevelPolicy::default(),
+        host_rate,
+        buffer_size,
+        sys,
+    )
 }
 
 pub(crate) fn validate_ir(
     loaded_params: &ProcessingParams,
+    ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     host_rate: u32,
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
@@ -930,8 +923,15 @@ pub(crate) fn validate_ir(
         return Err(PluginError::Message(errors::state_txn::IR_HASH_MISMATCH));
     }
 
-    let resources = build_ir_resources_from_bytes(&ir_bytes, ir_path, host_rate, buffer_size, sys)
-        .map_err(|e| PluginError::Error(e))?;
+    let resources = build_ir_resources_from_bytes(
+        &ir_bytes,
+        ir_path,
+        ir_level_policy,
+        host_rate,
+        buffer_size,
+        sys,
+    )
+    .map_err(|e| PluginError::Error(e))?;
     Ok((
         Some(resources),
         Some(ir_path.to_string_lossy().to_string()),

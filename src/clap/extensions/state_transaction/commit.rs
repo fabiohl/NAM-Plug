@@ -168,6 +168,7 @@ pub(crate) fn build_restore_package(
         ir,
         ir_path_on_disk,
         ir_hash,
+        ir_level_policy,
     } = validated;
 
     // Effective params: Full replaces everything; ForPreset only the
@@ -316,6 +317,7 @@ pub(crate) fn build_restore_package(
         ir_raw_samples: ir_publish.as_ref().map(|(s, _)| s.clone()),
         ir_raw_sample_rate: ir_publish.as_ref().map(|(_, r)| *r).unwrap_or(0),
         ir_hash,
+        ir_level_policy,
     };
 
     let txn = RestoreTxn {
@@ -392,6 +394,7 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         ir_raw_samples,
         ir_raw_sample_rate,
         ir_hash,
+        ir_level_policy,
     } = publish;
     let mode = if mode_full {
         RestoreMode::Full
@@ -459,6 +462,11 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
     }
 
     // ── IR publication (only after the audio thread applied the package) ──
+    main_thread
+        .shared
+        .cold
+        .ir_level_policy
+        .store(ir_level_policy.to_u8(), Ordering::Relaxed);
     if let Some(ref ir_path_str) = ir_path_on_disk {
         *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = Some(ir_path_str.clone());
         *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = ir_hash.clone();
@@ -595,6 +603,7 @@ fn local_commit(
         ir,
         ir_path_on_disk,
         ir_hash,
+        ir_level_policy,
     } = validated;
 
     // ── Commit model (local) ──
@@ -703,6 +712,11 @@ fn local_commit(
     }
 
     // ── Commit IR (local) ──
+    main_thread
+        .shared
+        .cold
+        .ir_level_policy
+        .store(ir_level_policy.to_u8(), Ordering::Relaxed);
     if let Some(resources) = ir {
         let IrResources {
             pair,

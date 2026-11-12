@@ -378,6 +378,8 @@ pub struct RestorePublish {
     pub ir_raw_samples: Option<Vec<f32>>,
     /// Sample rate of `ir_raw_samples`.
     pub ir_raw_sample_rate: u32,
+    /// IR level policy restored with this transaction.
+    pub ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
 }
 
 /// A staged restore awaiting atomic delivery and ack-gated publication.
@@ -751,12 +753,16 @@ pub struct ColdShared {
     pub ui_ir_load_error_msg: Mutex<String>,
     /// Flag signaling that the IR should be cleared (bypass cabsim).
     pub ui_clear_ir: AtomicBool,
-    /// Raw IR samples stored for adaptive partition rebuild without WAV reload.
+    /// Raw IR samples stored for adaptive partition rebuild without WAV reload
+    /// (unnormalized, at native `ir_raw_sample_rate`).
     pub ir_raw_samples: Mutex<Option<Vec<f32>>>,
-    /// Sample rate of the stored `ir_raw_samples` — tracks the host rate
-    /// at which the IR was last loaded. When the host rate changes during
-    /// re-activation, the samples are resampled to the new rate.
+    /// Native sample rate of the stored `ir_raw_samples`.
     pub ir_raw_sample_rate: AtomicU32,
+    /// Active cabinet IR level policy (`IrLevelPolicy::to_u8()`).
+    pub ir_level_policy: std::sync::atomic::AtomicU8,
+    /// Flag signaling that the IR level policy changed in the UI and the
+    /// active `CabSimPair` should be rebuilt from `ir_raw_samples`.
+    pub ui_ir_policy_rebuild_pending: AtomicBool,
     /// SPSC channel: Main Thread -> Audio Thread (Slimmable model producer).
     /// Boxed end-to-end (main thread → SPSC → RT swap → GC) so the engine
     /// `SwapRing` surface (`Consumer<Box<P>>`) applies with zero allocation
@@ -1052,6 +1058,10 @@ impl ColdShared {
             ui_clear_ir: AtomicBool::new(false),
             ir_raw_samples: Mutex::new(None),
             ir_raw_sample_rate: AtomicU32::new(0),
+            ir_level_policy: std::sync::atomic::AtomicU8::new(
+                crate::clap::extensions::ir_level_policy::IrLevelPolicy::PeakNormalized.to_u8(),
+            ),
+            ui_ir_policy_rebuild_pending: AtomicBool::new(false),
             slimmable_tx: Mutex::new(Some(slimmable_tx)),
             slimmable_rx: Mutex::new(Some(slimmable_rx)),
             requested_slimmable_generation: AtomicU64::new(0),

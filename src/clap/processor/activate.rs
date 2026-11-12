@@ -71,6 +71,7 @@ fn build_cab_sim_from_raw_samples(
     partition_size: usize,
     host_rate: u32,
 ) -> Result<Option<Box<CabSimPair>>, PluginError> {
+    use crate::clap::extensions::ir_level_policy::{IrLevelPolicy, apply_ir_level_policy};
     use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimAdapter;
     use neural_amp_modeler_rs::dsp::cabsim::conv::ConvEngine;
     use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
@@ -104,19 +105,20 @@ fn build_cab_sim_from_raw_samples(
     }
 
     // Step 2: High-fidelity sample rate conversion if stored IR sample rate differs from the host DAW rate.
-    let resolved_samples: std::borrow::Cow<'_, [f32]> = if stored_rate > 0
-        && stored_rate != host_rate
-    {
-        let resampled = CabSimIr::resample(&samples_cow, stored_rate, host_rate).map_err(|e| {
+    let mut resolved_samples: Vec<f32> = if stored_rate > 0 && stored_rate != host_rate {
+        CabSimIr::resample(&samples_cow, stored_rate, host_rate).map_err(|e| {
             static_plugin_error(
                 errors::dsp_resources::CABSIM_IR_RESAMPLE_FAILED,
                 format_args!("{stored_rate} Hz → {host_rate} Hz: {e}"),
             )
-        })?;
-        std::borrow::Cow::Owned(resampled)
+        })?
     } else {
-        samples_cow
+        samples_cow.into_owned()
     };
+
+    // Step 2b: Apply active IR level policy non-destructively to the convolution kernel.
+    let policy = IrLevelPolicy::from_u8(shared.cold.ir_level_policy.load(Ordering::Relaxed));
+    let _ = apply_ir_level_policy(&mut resolved_samples, policy, host_rate);
 
     // Step 3: Instantiate Uniform-Partitioned Overlap-Save (UPOLS) frequency-domain convolution engines for L/R channels.
     let build_adapter = || -> Result<CabSimAdapter, PluginError> {
