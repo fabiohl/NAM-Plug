@@ -329,6 +329,13 @@ pub(crate) struct SlintViewModelInner {
     xrun_hold_frames: u32,
 
     // Ballistics state
+    current_in_peak_l: f32,
+    current_in_peak_r: f32,
+    hold_in_peak_l: f32,
+    hold_in_peak_r: f32,
+    hold_in_timer_l: u32,
+    hold_in_timer_r: u32,
+
     current_peak_l: f32,
     current_peak_r: f32,
     hold_peak_l: f32,
@@ -355,7 +362,64 @@ impl SlintViewModelInner {
     /// changed and the timer must be re-armed; `None` to keep it running.
     /// The ballistics above run identically on every call regardless of cadence.
     pub fn tick_telemetry(&mut self) -> Option<std::time::Duration> {
-        // ── 1. Peak Telemetry & IEC 60268-10 Type I Ballistics ────────────────
+        // ── 1. Peak & RMS Telemetry & IEC 60268-10 Type I Ballistics ─────────
+        let raw_in_l = f32::from_bits(
+            self.shared
+                .rt_to_ui
+                .ui_in_peak_l
+                .swap(0.0f32.to_bits(), Ordering::Relaxed),
+        );
+        let raw_in_r = f32::from_bits(
+            self.shared
+                .rt_to_ui
+                .ui_in_peak_r
+                .swap(0.0f32.to_bits(), Ordering::Relaxed),
+        );
+
+        if raw_in_l > self.current_in_peak_l {
+            self.current_in_peak_l = raw_in_l;
+        } else {
+            self.current_in_peak_l = (self.current_in_peak_l * BALLISTICS_DECAY_RATE).max(raw_in_l);
+        }
+        if raw_in_l >= self.hold_in_peak_l {
+            self.hold_in_peak_l = raw_in_l;
+            self.hold_in_timer_l = PEAK_HOLD_FRAMES;
+        } else if self.hold_in_timer_l > 0 {
+            self.hold_in_timer_l -= 1;
+        } else {
+            self.hold_in_peak_l = (self.hold_in_peak_l * BALLISTICS_DECAY_RATE).max(raw_in_l);
+        }
+
+        if raw_in_r > self.current_in_peak_r {
+            self.current_in_peak_r = raw_in_r;
+        } else {
+            self.current_in_peak_r = (self.current_in_peak_r * BALLISTICS_DECAY_RATE).max(raw_in_r);
+        }
+        if raw_in_r >= self.hold_in_peak_r {
+            self.hold_in_peak_r = raw_in_r;
+            self.hold_in_timer_r = PEAK_HOLD_FRAMES;
+        } else if self.hold_in_timer_r > 0 {
+            self.hold_in_timer_r -= 1;
+        } else {
+            self.hold_in_peak_r = (self.hold_in_peak_r * BALLISTICS_DECAY_RATE).max(raw_in_r);
+        }
+
+        let in_rms_l = f32::from_bits(self.shared.rt_to_ui.ui_in_rms_l.load(Ordering::Relaxed));
+        let in_rms_r = f32::from_bits(self.shared.rt_to_ui.ui_in_rms_r.load(Ordering::Relaxed));
+        let out_rms_l = f32::from_bits(self.shared.rt_to_ui.ui_out_rms_l.load(Ordering::Relaxed));
+        let out_rms_r = f32::from_bits(self.shared.rt_to_ui.ui_out_rms_r.load(Ordering::Relaxed));
+
+        self.window
+            .set_in_peak_l(amp_to_meter_frac(self.current_in_peak_l));
+        self.window
+            .set_in_peak_r(amp_to_meter_frac(self.current_in_peak_r));
+        self.window
+            .set_in_peak_hold_l(amp_to_meter_frac(self.hold_in_peak_l));
+        self.window
+            .set_in_peak_hold_r(amp_to_meter_frac(self.hold_in_peak_r));
+        self.window.set_in_rms_l(amp_to_meter_frac(in_rms_l));
+        self.window.set_in_rms_r(amp_to_meter_frac(in_rms_r));
+
         let raw_l = f32::from_bits(
             self.shared
                 .rt_to_ui
@@ -407,8 +471,20 @@ impl SlintViewModelInner {
             .set_peak_hold_l(amp_to_meter_frac(self.hold_peak_l));
         self.window
             .set_peak_hold_r(amp_to_meter_frac(self.hold_peak_r));
+        self.window.set_rms_l(amp_to_meter_frac(out_rms_l));
+        self.window.set_rms_r(amp_to_meter_frac(out_rms_r));
 
         // ── 2. Clipping & Gate Indicators ─────────────────────────────────────
+        let in_clip = self
+            .shared
+            .rt_to_ui
+            .ui_in_clip_indicator
+            .load(Ordering::Relaxed)
+            || self.shared.rt_to_ui.ui_in_clipped.load(Ordering::Relaxed);
+        if in_clip != self.window.get_in_clip_active() {
+            self.window.set_in_clip_active(in_clip);
+        }
+
         let clip = self
             .shared
             .rt_to_ui
@@ -1070,6 +1146,26 @@ impl SlintViewModel {
             });
         }
 
+        // ── Bind In Clip Reset Callback ───────────────────────────────────────
+        {
+            let shared = Arc::clone(&shared);
+            let window_weak = window.as_weak();
+            window.on_reset_in_clip_clicked(move || {
+                shared.note_ui_interaction();
+                shared
+                    .rt_to_ui
+                    .ui_in_clip_indicator
+                    .store(false, Ordering::Relaxed);
+                shared
+                    .rt_to_ui
+                    .ui_in_clipped
+                    .store(false, Ordering::Relaxed);
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_in_clip_active(false);
+                }
+            });
+        }
+
         // ── Bind Model File Dialog (XDG Portal via rfd) ───────────────────────
         {
             let shared = Arc::clone(&shared);
@@ -1191,6 +1287,12 @@ impl SlintViewModel {
             last_dsp_load_pct: None,
             last_seen_xrun_epoch: 0,
             xrun_hold_frames: 0,
+            current_in_peak_l: 0.0,
+            current_in_peak_r: 0.0,
+            hold_in_peak_l: 0.0,
+            hold_in_peak_r: 0.0,
+            hold_in_timer_l: 0,
+            hold_in_timer_r: 0,
             current_peak_l: 0.0,
             current_peak_r: 0.0,
             hold_peak_l: 0.0,

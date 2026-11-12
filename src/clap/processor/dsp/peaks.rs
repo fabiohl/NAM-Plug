@@ -44,6 +44,90 @@ pub(super) fn store_peaks(shared: &NamClapShared, peak_l: f32, peak_r: f32) {
     }
 }
 
+/// Stores input audio peak and clipping telemetry into the shared RT-to-UI struct.
+///
+/// Follows the same monotonic atomic `fetch_max` ordering semantics as [`store_peaks`].
+#[inline(always)]
+pub(super) fn store_input_peaks(shared: &NamClapShared, in_peak_l: f32, in_peak_r: f32) {
+    let safe_l = if in_peak_l <= 0.0 || in_peak_l.is_nan() {
+        0.0
+    } else {
+        in_peak_l
+    };
+    shared
+        .rt_to_ui
+        .ui_in_peak_l
+        .fetch_max(safe_l.to_bits(), Ordering::Relaxed);
+
+    let safe_r = if in_peak_r <= 0.0 || in_peak_r.is_nan() {
+        0.0
+    } else {
+        in_peak_r
+    };
+    shared
+        .rt_to_ui
+        .ui_in_peak_r
+        .fetch_max(safe_r.to_bits(), Ordering::Relaxed);
+
+    if in_peak_l > 1.0 || in_peak_r > 1.0 {
+        shared.rt_to_ui.ui_in_clipped.store(true, Ordering::Relaxed);
+        shared
+            .rt_to_ui
+            .ui_in_clip_indicator
+            .store(true, Ordering::Relaxed);
+    }
+}
+
+/// Stores input and output smoothed RMS / energy levels into the shared RT-to-UI struct.
+#[inline(always)]
+pub(super) fn store_rms(
+    shared: &NamClapShared,
+    in_rms_l: f32,
+    in_rms_r: f32,
+    out_rms_l: f32,
+    out_rms_r: f32,
+) {
+    let safe_in_l = if in_rms_l > 0.0 && in_rms_l.is_finite() {
+        in_rms_l
+    } else {
+        0.0
+    };
+    shared
+        .rt_to_ui
+        .ui_in_rms_l
+        .store(safe_in_l.to_bits(), Ordering::Relaxed);
+
+    let safe_in_r = if in_rms_r > 0.0 && in_rms_r.is_finite() {
+        in_rms_r
+    } else {
+        0.0
+    };
+    shared
+        .rt_to_ui
+        .ui_in_rms_r
+        .store(safe_in_r.to_bits(), Ordering::Relaxed);
+
+    let safe_out_l = if out_rms_l > 0.0 && out_rms_l.is_finite() {
+        out_rms_l
+    } else {
+        0.0
+    };
+    shared
+        .rt_to_ui
+        .ui_out_rms_l
+        .store(safe_out_l.to_bits(), Ordering::Relaxed);
+
+    let safe_out_r = if out_rms_r > 0.0 && out_rms_r.is_finite() {
+        out_rms_r
+    } else {
+        0.0
+    };
+    shared
+        .rt_to_ui
+        .ui_out_rms_r
+        .store(safe_out_r.to_bits(), Ordering::Relaxed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +389,92 @@ mod tests {
             spikes_observed > 0,
             "Concurrent UI thread must observe spikes without systematic loss (got {})",
             spikes_observed
+        );
+    }
+
+    #[test]
+    fn test_store_input_peaks_and_rms() {
+        let shared = make_test_shared();
+
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_peak_l.load(Ordering::Relaxed)),
+            0.0
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_peak_r.load(Ordering::Relaxed)),
+            0.0
+        );
+        assert!(!shared.rt_to_ui.ui_in_clipped.load(Ordering::Relaxed));
+        assert!(!shared.rt_to_ui.ui_in_clip_indicator.load(Ordering::Relaxed));
+
+        // Sub-1.0 peak
+        store_input_peaks(&shared, 0.6, 0.4);
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_peak_l.load(Ordering::Relaxed)),
+            0.6
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_peak_r.load(Ordering::Relaxed)),
+            0.4
+        );
+        assert!(!shared.rt_to_ui.ui_in_clipped.load(Ordering::Relaxed));
+
+        // Clipping peak > 1.0
+        store_input_peaks(&shared, 1.25, 0.8);
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_peak_l.load(Ordering::Relaxed)),
+            1.25
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_peak_r.load(Ordering::Relaxed)),
+            0.8
+        );
+        assert!(shared.rt_to_ui.ui_in_clipped.load(Ordering::Relaxed));
+        assert!(shared.rt_to_ui.ui_in_clip_indicator.load(Ordering::Relaxed));
+
+        // Negative and non-finite sanitization
+        store_input_peaks(&shared, -1.0, f32::NAN);
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_peak_l.load(Ordering::Relaxed)),
+            1.25
+        );
+
+        // Test store_rms
+        store_rms(&shared, 0.5, 0.45, 0.707, 0.707);
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_rms_l.load(Ordering::Relaxed)),
+            0.5
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_rms_r.load(Ordering::Relaxed)),
+            0.45
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_out_rms_l.load(Ordering::Relaxed)),
+            0.707
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_out_rms_r.load(Ordering::Relaxed)),
+            0.707
+        );
+
+        // Non-finite and negative RMS sanitization
+        store_rms(&shared, -0.5, f32::NAN, f32::INFINITY, 0.0);
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_rms_l.load(Ordering::Relaxed)),
+            0.0
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_in_rms_r.load(Ordering::Relaxed)),
+            0.0
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_out_rms_l.load(Ordering::Relaxed)),
+            0.0
+        );
+        assert_eq!(
+            f32::from_bits(shared.rt_to_ui.ui_out_rms_r.load(Ordering::Relaxed)),
+            0.0
         );
     }
 }

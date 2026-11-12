@@ -29,7 +29,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 
 1. **Asset Selection & Identity (Left Panel):** Load `.nam` / `.namb` neural amp models and `.wav` speaker cabinet impulse responses (IRs), accompanied by the SIMD badge (`AVX2+FMA`) and version info.
 2. **Analog Gain, Gate & Quality Stages (Center Panel):** Input trim ($-20\text{ to }+20\text{ dB}$), Output level ($-40\text{ to }+20\text{ dB}$), integrated noise gate ($-90\text{ to }0\text{ dB}$) with dynamic LED indicator, anti-aliasing oversampling (`Off`, `2×`, `4×`), and activation precision (`Std` vs `Fast`).
-3. **Precision Metering:** Adaptive mono/stereo peak level meters with calibrated IEC 60268-10 PPM ballistics, peak-hold markers, and a clickable red digital clip LED.
+3. **Dual-Stage Precision Metering:** Dual stereo/mono input (post-trim, pre-model) and output (post-gain) level meters with simultaneous IEC 60268-10 Type I quasi-peak ballistics, solid inner EWMA RMS cores ($\tau = 300\text{ ms}$), 2-second peak-hold bars, and independent latching IN CLIP / OUT CLIP indicators with click-to-reset.
 4. **Master Bypass:** Hardware toggle switch transitioning cleanly between `DSP ACTIVE` and `BYPASS` via a 64-sample click-free crossfade.
 5. **Real-Time Telemetry Bar (Footer):** Live status reporting sample rate (`SR`), buffer size (`BUF`), latency (`LAT`), channel layout (`CH`), DSP load percentage (`% DSP` with overload/XRUN alert LED and tooltip), contextual alert pill, and window backend.
 
@@ -198,6 +198,29 @@ The footer displays instantaneous DSP telemetry polled at 60 Hz (relaxing to 30 
 | **`% DSP`**   | % of audio deadline budget consumed  | Typically `3% – 12%`; red LED lights up if XRUN occurs   |
 | **`ALERT`**   | Contextual diagnostic status pill    | Blank in normal operation; displays fault/warning text   |
 | **`BACKEND`** | Active window display backend        | `X11 (Embedded)`, `X11 (Floating)`, `Wayland (Floating)` |
+
+### 5. Metering Architecture & Ballistics
+
+NAM-Plug features a dual-stage input and output metering system designed for precise gain-staging:
+
+* **Input Metering (IN):** Tapped **post-trim / pre-model** (immediately after the input gain knob and smoother, before entering the noise gate and neural model). This allows the performer to gauge the actual drive level fed into the neural network, matching the canonical C++ reference input pointer (`mInputPointers`).
+* **Output Metering (OUT):** Tapped **post-gain / post-cabsim** at the final stage before passing audio to the DAW host.
+* **Ballistics & Visual Representation:**
+  * **Peak Bar:** Quasi-peak level with calibrated IEC 60268-10 Type I ballistics (20 dB decay in 1.7 s, ~12 dB/s), rendered as a responsive semi-transparent outer bar.
+  * **RMS Core:** Continuous energy level smoothed via a single-pole leaky EWMA integrator with $\tau = 300\text{ ms}$ (matching `IPeakAvgSender` ballistics), rendered as a solid high-contrast inner bar.
+  * **Peak Hold:** 2-second (120 frames at 60 Hz) floating marker with instant attack and smooth linear drop.
+  * **Digital Clip Indicators:** Separate, latching `IN CLIP` and `OUT CLIP` warning buttons lighting up at $\ge 0.0\text{ dBFS}$ with touch/click reset.
+
+---
+
+## 🎛️ DSP Design Boundaries & Deliberate Architectural Decisions (P06)
+
+To maintain uncompromising real-time determinism, pristine modularity, and zero-allocation execution, certain features from legacy guitar plugins are omitted by deliberate engineering design:
+
+1. **Omission of Integrated Tone Stack (EQ):**
+   Unlike all-in-one plugin suites, NAM-Plug deliberately omits an internal 3-band post-model tone stack (Bass/Mid/Treble). In professional digital audio workstation (DAW) workflows, tone shaping, parametric equalization, and dynamic notch filtering are best handled by dedicated, high-resolution EQ plugins (e.g., FabFilter Pro-Q, ReaEQ, or Bitwig EQ+) placed before or after NAM-Plug. Neural models captured from physical amplifiers already embody the exact tone stack settings dialed in during the capture session.
+2. **Omission of Post-Cabinet DC Blocker / Filter:**
+   NAM-Plug deliberately omits a built-in post-cab DC blocking high-pass filter. While symmetrical dither and floating-point denormal armoring prevent hardware microcode slowdowns, **there is no claim of absolute immunity to DC offset** (which may be produced by asymmetrical non-linear neural networks or exotic IRs). Musicians or engineers requiring brickwall sub-bass removal should place a standard high-pass filter plugin (e.g., 20–30 Hz 24 dB/oct) down-chain. This decision remains open and may be reevaluated in future revisions based on user feedback and latency considerations.
 
 ---
 

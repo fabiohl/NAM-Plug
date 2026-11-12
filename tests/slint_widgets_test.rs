@@ -67,6 +67,17 @@ fn test_slint_widgets_and_five_zones_lifecycle() {
     window.set_clip_active(true);
     assert!(window.get_clip_active());
 
+    window.set_in_peak_l(0.85);
+    assert_eq!(window.get_in_peak_l(), 0.85);
+    window.set_in_peak_r(0.80);
+    assert_eq!(window.get_in_peak_r(), 0.80);
+    window.set_in_rms_l(0.60);
+    assert_eq!(window.get_in_rms_l(), 0.60);
+    window.set_in_rms_r(0.55);
+    assert_eq!(window.get_in_rms_r(), 0.55);
+    window.set_in_clip_active(true);
+    assert!(window.get_in_clip_active());
+
     window.set_bypass_active(true);
     assert!(window.get_bypass_active());
     window.set_bypass_active(false);

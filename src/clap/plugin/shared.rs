@@ -461,6 +461,22 @@ pub struct RtToUi {
     pub ui_clipped: AtomicBool,
     /// Flag indicating whether output/input clipping is active for UI indicator display.
     pub ui_clip_indicator: AtomicBool,
+    /// Input Sample Peak L level accumulated by the audio thread (`fetch_max`) and read/reset by UI (`swap(0.0)`).
+    pub ui_in_peak_l: AtomicU32,
+    /// Input Sample Peak R level accumulated by the audio thread (`fetch_max`) and read/reset by UI (`swap(0.0)`).
+    pub ui_in_peak_r: AtomicU32,
+    /// Flag indicating whether input clipping has occurred since the last UI frame. Set by audio thread; read/reset by UI.
+    pub ui_in_clipped: AtomicBool,
+    /// Flag indicating whether input clipping is active for UI indicator display.
+    pub ui_in_clip_indicator: AtomicBool,
+    /// Input RMS / energy level (L) computed by audio thread EWMA (tau ≈ 300 ms), stored as f32 bits.
+    pub ui_in_rms_l: AtomicU32,
+    /// Input RMS / energy level (R) computed by audio thread EWMA (tau ≈ 300 ms), stored as f32 bits.
+    pub ui_in_rms_r: AtomicU32,
+    /// Output RMS / energy level (L) computed by audio thread EWMA (tau ≈ 300 ms), stored as f32 bits.
+    pub ui_out_rms_l: AtomicU32,
+    /// Output RMS / energy level (R) computed by audio thread EWMA (tau ≈ 300 ms), stored as f32 bits.
+    pub ui_out_rms_r: AtomicU32,
     /// Flag indicating whether the noise gate is currently active (attenuating).
     pub ui_gate_active: AtomicBool,
     /// Current latency reported to the host (in samples).
@@ -518,6 +534,14 @@ impl Default for RtToUi {
             ui_peak_r: AtomicU32::new(0.0f32.to_bits()),
             ui_clipped: AtomicBool::new(false),
             ui_clip_indicator: AtomicBool::new(false),
+            ui_in_peak_l: AtomicU32::new(0.0f32.to_bits()),
+            ui_in_peak_r: AtomicU32::new(0.0f32.to_bits()),
+            ui_in_clipped: AtomicBool::new(false),
+            ui_in_clip_indicator: AtomicBool::new(false),
+            ui_in_rms_l: AtomicU32::new(0.0f32.to_bits()),
+            ui_in_rms_r: AtomicU32::new(0.0f32.to_bits()),
+            ui_out_rms_l: AtomicU32::new(0.0f32.to_bits()),
+            ui_out_rms_r: AtomicU32::new(0.0f32.to_bits()),
             ui_gate_active: AtomicBool::new(false),
             current_latency: AtomicU32::new(0),
             cabsim_tail_samples: AtomicU32::new(0),

@@ -117,11 +117,34 @@ fn test_telemetry_timer_cadence_and_ballistics() {
         .rt_to_ui
         .ui_peak_r
         .store(1.0f32.to_bits(), Ordering::Relaxed);
+    shared
+        .rt_to_ui
+        .ui_in_peak_l
+        .store(1.0f32.to_bits(), Ordering::Relaxed);
+    shared
+        .rt_to_ui
+        .ui_in_peak_r
+        .store(1.0f32.to_bits(), Ordering::Relaxed);
+    shared
+        .rt_to_ui
+        .ui_in_rms_l
+        .store(0.707f32.to_bits(), Ordering::Relaxed);
+    shared
+        .rt_to_ui
+        .ui_in_rms_r
+        .store(0.707f32.to_bits(), Ordering::Relaxed);
     vm.tick_telemetry();
     assert!((window.get_peak_l() - peak_0db).abs() < 1e-4);
     assert!((window.get_peak_r() - peak_0db).abs() < 1e-4);
     assert!((window.get_peak_hold_l() - peak_0db).abs() < 1e-4);
     assert!((window.get_peak_hold_r() - peak_0db).abs() < 1e-4);
+    assert!((window.get_in_peak_l() - peak_0db).abs() < 1e-4);
+    assert!((window.get_in_peak_r() - peak_0db).abs() < 1e-4);
+    assert!((window.get_in_peak_hold_l() - peak_0db).abs() < 1e-4);
+    assert!((window.get_in_peak_hold_r() - peak_0db).abs() < 1e-4);
+    let rms_expected = amp_to_meter_frac(0.707);
+    assert!((window.get_in_rms_l() - rms_expected).abs() < 1e-4);
+    assert!((window.get_in_rms_r() - rms_expected).abs() < 1e-4);
 
     // 10 silent frames: current decays by one factor per frame, the hold
     // stays pinned at the peak.
@@ -135,7 +158,9 @@ fn test_telemetry_timer_cadence_and_ballistics() {
         window.get_peak_l(),
         decayed_10
     );
+    assert!((window.get_in_peak_l() - decayed_10).abs() < 1e-4);
     assert!((window.get_peak_hold_l() - peak_0db).abs() < 1e-4);
+    assert!((window.get_in_peak_hold_l() - peak_0db).abs() < 1e-4);
 
     // Hold expiry: PEAK_HOLD_FRAMES silent frames after the attack leave the
     // hold untouched; the next frame releases it by one decay factor.
@@ -146,6 +171,7 @@ fn test_telemetry_timer_cadence_and_ballistics() {
         (window.get_peak_hold_l() - peak_0db).abs() < 1e-4,
         "hold must stay pinned for exactly {PEAK_HOLD_FRAMES} frames"
     );
+    assert!((window.get_in_peak_hold_l() - peak_0db).abs() < 1e-4);
     vm.tick_telemetry();
     let hold_released = amp_to_meter_frac(BALLISTICS_DECAY_RATE);
     assert!(
@@ -154,6 +180,7 @@ fn test_telemetry_timer_cadence_and_ballistics() {
         window.get_peak_hold_l(),
         hold_released
     );
+    assert!((window.get_in_peak_hold_l() - hold_released).abs() < 1e-4);
 
     // The synthetic sequence keeps the cadence at the calibrated 60 Hz rate.
     assert_eq!(vm.telemetry_period(), TELEMETRY_PERIOD_FULL);

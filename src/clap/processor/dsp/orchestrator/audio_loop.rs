@@ -56,6 +56,55 @@ pub(crate) struct SubBlockScratch<'a> {
     pub buf_xfd_scratch_r: &'a mut [f32],
 }
 
+/// Telemetry and processing metrics returned by [`process_sub_block`].
+pub(crate) struct SubBlockMetrics {
+    /// Number of output samples rendered into host buffer.
+    pub n_out: usize,
+    /// Noise gate state at the end of this sub-block.
+    pub gate_state: GateState,
+    /// Post-gain input absolute peak on Left channel.
+    pub in_peak_l: f32,
+    /// Post-gain input absolute peak on Right channel.
+    pub in_peak_r: f32,
+    /// Sum of squared post-gain input samples on Left channel (for block RMS).
+    pub in_sum_sq_l: f32,
+    /// Sum of squared post-gain input samples on Right channel (for block RMS).
+    pub in_sum_sq_r: f32,
+    /// Output absolute peak on Left channel.
+    pub out_peak_l: f32,
+    /// Output absolute peak on Right channel.
+    pub out_peak_r: f32,
+    /// Sum of squared output samples on Left channel (for block RMS).
+    pub out_sum_sq_l: f32,
+    /// Sum of squared output samples on Right channel (for block RMS).
+    pub out_sum_sq_r: f32,
+}
+
+/// Computes the sum of squared samples over a slice for energy/RMS calculation.
+#[inline(always)]
+fn compute_sum_sq(samples: &[f32]) -> f32 {
+    let mut sum = 0.0f32;
+    for &s in samples {
+        sum += s * s;
+    }
+    sum
+}
+
+/// Computes absolute peak and sum of squared samples over an input slice.
+#[inline(always)]
+pub(crate) fn compute_peak_and_sum_sq(samples: &[f32]) -> (f32, f32) {
+    let mut peak = 0.0f32;
+    let mut sum_sq = 0.0f32;
+    for &s in samples {
+        let abs = s.abs();
+        if abs.is_finite() {
+            peak = peak.max(abs);
+            sum_sq += abs * abs;
+        }
+    }
+    (peak, sum_sq)
+}
+
 /// Processes an audio sub-block (chunked up to MAX_RESAMP_BUF) through input staging,
 /// streaming neural inference, gate hysteresis, output gain, and latency-compensated dry delay blending.
 ///
@@ -86,7 +135,7 @@ pub(crate) fn process_sub_block(
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
     gain_steps: &[GainStep],
-) -> (usize, GateState, f32, f32) {
+) -> SubBlockMetrics {
     if n_samples > neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF {
         core::hint::cold_path();
         return process_sub_block_chunked(
@@ -161,7 +210,14 @@ pub(crate) fn process_sub_block(
     }
 
     if bypass {
-        let (peak_l, peak_r) = copy_delayed_dry_to_output(
+        let (in_peak_l, in_sum_sq_l) =
+            compute_peak_and_sum_sq(&buf_host_l[offset..offset + n_samples]);
+        let (in_peak_r, in_sum_sq_r) = if process_mono {
+            (in_peak_l, in_sum_sq_l)
+        } else {
+            compute_peak_and_sum_sq(&buf_host_r[offset..offset + n_samples])
+        };
+        let (out_peak_l, out_peak_r, out_sum_sq_l, out_sum_sq_r) = copy_delayed_dry_to_output(
             out_l,
             out_r,
             &mut buf_xfade_dry_l[..n_samples],
@@ -169,7 +225,18 @@ pub(crate) fn process_sub_block(
             output_offset,
             process_mono,
         );
-        return (n_samples, GateState::Open, peak_l, peak_r);
+        return SubBlockMetrics {
+            n_out: n_samples,
+            gate_state: GateState::Open,
+            in_peak_l,
+            in_peak_r,
+            in_sum_sq_l,
+            in_sum_sq_r,
+            out_peak_l,
+            out_peak_r,
+            out_sum_sq_l,
+            out_sum_sq_r,
+        };
     }
 
     apply_gain_ramp_with_steps(
@@ -185,6 +252,13 @@ pub(crate) fn process_sub_block(
         process_mono,
     );
 
+    let (in_peak_l, in_sum_sq_l) = compute_peak_and_sum_sq(&buf_host_l[offset..offset + n_samples]);
+    let (in_peak_r, in_sum_sq_r) = if process_mono {
+        (in_peak_l, in_sum_sq_l)
+    } else {
+        compute_peak_and_sum_sq(&buf_host_r[offset..offset + n_samples])
+    };
+
     let gate_state = if process_mono {
         apply_input_stage_mono(&mut buf_host_l[offset..offset + n_samples], n_samples, ctx)
     } else {
@@ -198,7 +272,7 @@ pub(crate) fn process_sub_block(
 
     if gate_state == GateState::Closed {
         core::hint::cold_path();
-        return process_tail_drain(
+        let (out_peak_l, out_peak_r, out_sum_sq_l, out_sum_sq_r) = process_tail_drain(
             n_samples,
             out_l,
             out_r,
@@ -211,6 +285,18 @@ pub(crate) fn process_sub_block(
             shared_sample_rate,
             gain_steps,
         );
+        return SubBlockMetrics {
+            n_out: n_samples,
+            gate_state: GateState::Closed,
+            in_peak_l,
+            in_peak_r,
+            in_sum_sq_l,
+            in_sum_sq_r,
+            out_peak_l,
+            out_peak_r,
+            out_sum_sq_l,
+            out_sum_sq_r,
+        };
     }
 
     let SubBlockScratch {
@@ -307,7 +393,7 @@ pub(crate) fn process_sub_block(
         *ctx.process_mono,
     );
 
-    let (peak_l, peak_r) = copy_output_from_sub_block(
+    let (out_peak_l, out_peak_r, out_sum_sq_l, out_sum_sq_r) = copy_output_from_sub_block(
         out_l,
         out_r,
         buf_out_l,
@@ -317,7 +403,18 @@ pub(crate) fn process_sub_block(
         process_mono,
     );
 
-    (n_out, gate_state, peak_l, peak_r)
+    SubBlockMetrics {
+        n_out,
+        gate_state,
+        in_peak_l,
+        in_peak_r,
+        in_sum_sq_l,
+        in_sum_sq_r,
+        out_peak_l,
+        out_peak_r,
+        out_sum_sq_l,
+        out_sum_sq_r,
+    }
 }
 
 /// Cold overflow chunker for host blocks larger than `MAX_RESAMP_BUF`.
@@ -352,18 +449,24 @@ fn process_sub_block_chunked(
     smoother_out: &mut ParamSmoother,
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
-) -> (usize, GateState, f32, f32) {
+) -> SubBlockMetrics {
     let mut total_out = 0;
     let mut last_gate = GateState::Open;
     let mut curr_offset = offset;
     let mut curr_out_offset = output_offset;
     let mut remaining = n_samples;
-    let mut peak_l = 0.0f32;
-    let mut peak_r = 0.0f32;
+    let mut in_peak_l = 0.0f32;
+    let mut in_peak_r = 0.0f32;
+    let mut in_sum_sq_l = 0.0f32;
+    let mut in_sum_sq_r = 0.0f32;
+    let mut out_peak_l = 0.0f32;
+    let mut out_peak_r = 0.0f32;
+    let mut out_sum_sq_l = 0.0f32;
+    let mut out_sum_sq_r = 0.0f32;
 
     while remaining > 0 {
         let chunk = remaining.min(neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF);
-        let (c_out, c_gate, c_pl, c_pr) = process_sub_block(
+        let m = process_sub_block(
             curr_offset,
             chunk,
             out_l,
@@ -383,15 +486,32 @@ fn process_sub_block_chunked(
             shared_sample_rate,
             &[],
         );
-        total_out += c_out;
-        last_gate = c_gate;
-        peak_l = peak_l.max(c_pl);
-        peak_r = peak_r.max(c_pr);
+        total_out += m.n_out;
+        last_gate = m.gate_state;
+        in_peak_l = in_peak_l.max(m.in_peak_l);
+        in_peak_r = in_peak_r.max(m.in_peak_r);
+        in_sum_sq_l += m.in_sum_sq_l;
+        in_sum_sq_r += m.in_sum_sq_r;
+        out_peak_l = out_peak_l.max(m.out_peak_l);
+        out_peak_r = out_peak_r.max(m.out_peak_r);
+        out_sum_sq_l += m.out_sum_sq_l;
+        out_sum_sq_r += m.out_sum_sq_r;
         curr_offset += chunk;
-        curr_out_offset += c_out;
+        curr_out_offset += m.n_out;
         remaining -= chunk;
     }
-    (total_out, last_gate, peak_l, peak_r)
+    SubBlockMetrics {
+        n_out: total_out,
+        gate_state: last_gate,
+        in_peak_l,
+        in_peak_r,
+        in_sum_sq_l,
+        in_sum_sq_r,
+        out_peak_l,
+        out_peak_r,
+        out_sum_sq_l,
+        out_sum_sq_r,
+    }
 }
 
 /// Shared kernel of both gate-closed paths: drains up to `n_samples` tail
@@ -565,7 +685,7 @@ fn process_tail_drain(
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
     gain_steps: &[GainStep],
-) -> (usize, GateState, f32, f32) {
+) -> (f32, f32, f32, f32) {
     let drained = drain_tail_into(
         n_samples,
         ctx,
@@ -578,9 +698,7 @@ fn process_tail_drain(
     );
 
     if drained == 0 {
-        let (peak_l, peak_r) =
-            copy_silence_to_output(out_l, out_r, output_offset, n_samples, process_mono);
-        return (n_samples, GateState::Closed, peak_l, peak_r);
+        return copy_silence_to_output(out_l, out_r, output_offset, n_samples, process_mono);
     }
 
     let SubBlockScratch {
@@ -597,7 +715,7 @@ fn process_tail_drain(
         buf_xfd_scratch_l: _,
         buf_xfd_scratch_r: _,
     } = scratch;
-    let (peak_l, peak_r) = copy_output_from_sub_block(
+    copy_output_from_sub_block(
         out_l,
         out_r,
         buf_out_l,
@@ -605,9 +723,7 @@ fn process_tail_drain(
         n_samples,
         output_offset,
         process_mono,
-    );
-
-    (n_samples, GateState::Closed, peak_l, peak_r)
+    )
 }
 
 /// Wet pipeline for sub-blocks under an active bypass crossfade.
@@ -639,7 +755,7 @@ fn process_crossfade_sub_block(
     smoother_out: &mut ParamSmoother,
     model_output_mult_adj: f32,
     shared_sample_rate: u32,
-) -> (usize, GateState, f32, f32) {
+) -> SubBlockMetrics {
     // The scratch borrows are re-taken per phase (rather than destructured once
     // at the top) because the gate-closed phase passes `scratch` whole to the
     // shared `drain_tail_into` kernel: holding the field borrows across that
@@ -662,6 +778,14 @@ fn process_crossfade_sub_block(
         input_clipped,
         process_mono,
     );
+
+    let (in_peak_l, in_sum_sq_l) =
+        compute_peak_and_sum_sq(&scratch.buf_host_l[offset..offset + n_samples]);
+    let (in_peak_r, in_sum_sq_r) = if process_mono {
+        (in_peak_l, in_sum_sq_l)
+    } else {
+        compute_peak_and_sum_sq(&scratch.buf_host_r[offset..offset + n_samples])
+    };
 
     let gate_state = if process_mono {
         apply_input_stage_mono(
@@ -844,7 +968,7 @@ fn process_crossfade_sub_block(
     }
 
     // 4. Copy blended result to output
-    let (peak_l, peak_r) = copy_output_from_sub_block(
+    let (out_peak_l, out_peak_r, out_sum_sq_l, out_sum_sq_r) = copy_output_from_sub_block(
         out_l,
         out_r,
         scratch.buf_out_l,
@@ -854,7 +978,18 @@ fn process_crossfade_sub_block(
         process_mono,
     );
 
-    (n_out, gate_state, peak_l, peak_r)
+    SubBlockMetrics {
+        n_out,
+        gate_state,
+        in_peak_l,
+        in_peak_r,
+        in_sum_sq_l,
+        in_sum_sq_r,
+        out_peak_l,
+        out_peak_r,
+        out_sum_sq_l,
+        out_sum_sq_r,
+    }
 }
 
 #[inline(always)]
@@ -1085,7 +1220,7 @@ pub(crate) fn copy_silence_to_output(
     output_offset: usize,
     n_samples: usize,
     _process_mono: bool,
-) -> (f32, f32) {
+) -> (f32, f32, f32, f32) {
     if let Some(o_l) = out_l {
         let end = (output_offset + n_samples).min(o_l.len());
         o_l[output_offset..end].fill(0.0);
@@ -1094,11 +1229,11 @@ pub(crate) fn copy_silence_to_output(
         let end = (output_offset + n_samples).min(o_r.len());
         o_r[output_offset..end].fill(0.0);
     }
-    (0.0, 0.0)
+    (0.0, 0.0, 0.0, 0.0)
 }
 
 /// Copies the wet model output to the host buffers while sanitizing non-finites
-/// and computing absolute peak in a single fused pass (SP-P2.4 / F-PERF-16).
+/// and computing absolute peak and sum of squares in a fused pass (SP-P2.4 / F-PERF-16).
 ///
 /// Containment and peak detection happen directly during the transfer to host:
 /// `sanitize_copy_peak` reads the scratch buffer, sanitizes non-finites to 0.0,
@@ -1116,24 +1251,28 @@ pub(crate) fn copy_output_from_sub_block(
     n_out: usize,
     output_offset: usize,
     process_mono: bool,
-) -> (f32, f32) {
+) -> (f32, f32, f32, f32) {
     let mut peak_l = 0.0f32;
+    let mut sum_sq_l = 0.0f32;
     if let Some(o_l) = out_l {
         let n = n_out.min(o_l.len().saturating_sub(output_offset));
         peak_l = sanitize_copy_peak(&buf_out_l[..n], &mut o_l[output_offset..output_offset + n]);
+        sum_sq_l = compute_sum_sq(&o_l[output_offset..output_offset + n]);
     }
     let mut peak_r = 0.0f32;
+    let mut sum_sq_r = 0.0f32;
     if let Some(o_r) = out_r {
         let src: &[f32] = if process_mono { buf_out_l } else { buf_out_r };
         let n = n_out.min(o_r.len().saturating_sub(output_offset));
         peak_r = sanitize_copy_peak(&src[..n], &mut o_r[output_offset..output_offset + n]);
+        sum_sq_r = compute_sum_sq(&o_r[output_offset..output_offset + n]);
     }
-    (peak_l, peak_r)
+    (peak_l, peak_r, sum_sq_l, sum_sq_r)
 }
 
 /// Copies the latency-compensated dry signal to the output in the
 /// fully-bypassed state while sanitizing non-finites and computing peak
-/// in a single fused pass (SP-P2.4).
+/// and sum of squares in a fused pass (SP-P2.4).
 #[inline(always)]
 pub(crate) fn copy_delayed_dry_to_output(
     out_l: &mut Option<&mut [f32]>,
@@ -1142,19 +1281,23 @@ pub(crate) fn copy_delayed_dry_to_output(
     dry_r: &mut [f32],
     output_offset: usize,
     process_mono: bool,
-) -> (f32, f32) {
+) -> (f32, f32, f32, f32) {
     let mut peak_l = 0.0f32;
+    let mut sum_sq_l = 0.0f32;
     if let Some(o_l) = out_l {
         let n = dry_l.len().min(o_l.len().saturating_sub(output_offset));
         peak_l = sanitize_copy_peak(&dry_l[..n], &mut o_l[output_offset..output_offset + n]);
+        sum_sq_l = compute_sum_sq(&o_l[output_offset..output_offset + n]);
     }
     let mut peak_r = 0.0f32;
+    let mut sum_sq_r = 0.0f32;
     if let Some(o_r) = out_r {
         let src: &[f32] = if process_mono { dry_l } else { dry_r };
         let n = src.len().min(o_r.len().saturating_sub(output_offset));
         peak_r = sanitize_copy_peak(&src[..n], &mut o_r[output_offset..output_offset + n]);
+        sum_sq_r = compute_sum_sq(&o_r[output_offset..output_offset + n]);
     }
-    (peak_l, peak_r)
+    (peak_l, peak_r, sum_sq_l, sum_sq_r)
 }
 
 #[cfg(test)]

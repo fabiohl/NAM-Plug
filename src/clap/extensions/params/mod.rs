@@ -102,7 +102,7 @@ pub fn sanitize_param_value(id: u32, val: f32) -> f32 {
                 // most permissive setting.
                 -90.0
             } else {
-                val.clamp(-90.0, -40.0)
+                val.clamp(-90.0, 0.0)
             }
         }
         PARAM_BYPASS => {

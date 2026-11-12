@@ -56,6 +56,20 @@ const MIN_SPLIT_SAMPLES: usize = 16;
 /// smaller optimization). Bounded so the on-stack step buffer stays tiny.
 const MAX_GAIN_STEPS: usize = 64;
 
+/// Metrics accumulated across sub-blocks within an audio processing cycle.
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct BlockMetricsAccumulator {
+    pub in_peak_l: f32,
+    pub in_peak_r: f32,
+    pub in_sum_sq_l: f32,
+    pub in_sum_sq_r: f32,
+    pub out_peak_l: f32,
+    pub out_peak_r: f32,
+    pub out_sum_sq_l: f32,
+    pub out_sum_sq_r: f32,
+    pub total_samples: usize,
+}
+
 /// Whether an event is allowed to end the current inference sub-block.
 /// Only the smoothed gain parameters are boundary-free; everything else
 /// (gate threshold, bypass, oversample, slim override, adaptive compute,
@@ -256,8 +270,7 @@ impl<'a> NamClapProcessor<'a> {
                     }
                 }
 
-                let mut peak_l = 0.0f32;
-                let mut peak_r = 0.0f32;
+                let mut metrics = BlockMetricsAccumulator::default();
                 let mut last_gate_state = GateState::Open;
                 let mut any_active = false;
                 let mut input_clipped = false;
@@ -307,8 +320,7 @@ impl<'a> NamClapProcessor<'a> {
                         out_l,
                         out_r,
                         &mut event_idx,
-                        &mut peak_l,
-                        &mut peak_r,
+                        &mut metrics,
                         &mut last_gate_state,
                         &mut any_active,
                         &mut input_clipped,
@@ -330,7 +342,10 @@ impl<'a> NamClapProcessor<'a> {
                     gate_flags::report_gate_flags(&self.rt_status, GateState::Closed);
                 }
 
-                peaks::store_peaks(self.shared, peak_l, peak_r);
+                self.update_rms_and_telemetry(
+                    &metrics,
+                    self.shared.cold.sample_rate.load(Ordering::Relaxed),
+                );
                 continue;
             }
             let n_samples = n_samples_raw.min(self.max_frames_count);
@@ -414,8 +429,7 @@ impl<'a> NamClapProcessor<'a> {
                 }
             }
 
-            let mut peak_l = 0.0f32;
-            let mut peak_r = 0.0f32;
+            let mut metrics = BlockMetricsAccumulator::default();
             let mut last_gate_state = GateState::Open;
             let mut any_active = false;
             let mut input_clipped = false;
@@ -431,8 +445,7 @@ impl<'a> NamClapProcessor<'a> {
                 out_l,
                 out_r,
                 &mut event_idx,
-                &mut peak_l,
-                &mut peak_r,
+                &mut metrics,
                 &mut last_gate_state,
                 &mut any_active,
                 &mut input_clipped,
@@ -451,7 +464,10 @@ impl<'a> NamClapProcessor<'a> {
                 gate_flags::report_gate_flags(&self.rt_status, GateState::Closed);
             }
 
-            peaks::store_peaks(self.shared, peak_l, peak_r);
+            self.update_rms_and_telemetry(
+                &metrics,
+                self.shared.cold.sample_rate.load(Ordering::Relaxed),
+            );
         }
 
         // Defensive: if audio port pairs was empty or any remaining events were not processed
@@ -527,6 +543,39 @@ impl<'a> NamClapProcessor<'a> {
         Ok(ProcessStatus::Continue)
     }
 
+    #[inline(always)]
+    fn update_rms_and_telemetry(&mut self, metrics: &BlockMetricsAccumulator, sample_rate: u32) {
+        let sr = if sample_rate > 0 {
+            sample_rate as f32
+        } else {
+            48000.0
+        };
+        let n = metrics.total_samples;
+        if n > 0 {
+            let n_f = n as f32;
+            let block_in_rms_l = (metrics.in_sum_sq_l / n_f).sqrt();
+            let block_in_rms_r = (metrics.in_sum_sq_r / n_f).sqrt();
+            let block_out_rms_l = (metrics.out_sum_sq_l / n_f).sqrt();
+            let block_out_rms_r = (metrics.out_sum_sq_r / n_f).sqrt();
+
+            let alpha = (1.0 - (-n_f / (sr * 0.300)).exp()).clamp(0.0, 1.0);
+            self.in_rms_ewma_l += alpha * (block_in_rms_l - self.in_rms_ewma_l);
+            self.in_rms_ewma_r += alpha * (block_in_rms_r - self.in_rms_ewma_r);
+            self.out_rms_ewma_l += alpha * (block_out_rms_l - self.out_rms_ewma_l);
+            self.out_rms_ewma_r += alpha * (block_out_rms_r - self.out_rms_ewma_r);
+        }
+
+        peaks::store_peaks(self.shared, metrics.out_peak_l, metrics.out_peak_r);
+        peaks::store_input_peaks(self.shared, metrics.in_peak_l, metrics.in_peak_r);
+        peaks::store_rms(
+            self.shared,
+            self.in_rms_ewma_l,
+            self.in_rms_ewma_r,
+            self.out_rms_ewma_l,
+            self.out_rms_ewma_r,
+        );
+    }
+
     #[expect(clippy::too_many_arguments)]
     fn process_wet_sub_blocks(
         &mut self,
@@ -535,8 +584,7 @@ impl<'a> NamClapProcessor<'a> {
         mut out_l: Option<&mut [f32]>,
         mut out_r: Option<&mut [f32]>,
         event_idx: &mut usize,
-        peak_l: &mut f32,
-        peak_r: &mut f32,
+        metrics: &mut BlockMetricsAccumulator,
         last_gate_state: &mut GateState,
         any_active: &mut bool,
         input_clipped: &mut bool,
@@ -717,7 +765,7 @@ impl<'a> NamClapProcessor<'a> {
                         &mut dummy_none_model
                     };
 
-                let (n_out, gate_state, sub_peak_l, sub_peak_r) = {
+                let sub_m = {
                     let mut ctx = DspPipelineContext {
                         resampler: &mut self.resampler,
                         os_l: &mut self.os_l,
@@ -779,6 +827,14 @@ impl<'a> NamClapProcessor<'a> {
                 if *input_clipped {
                     self.shared
                         .rt_to_ui
+                        .ui_in_clipped
+                        .store(true, Ordering::Relaxed);
+                    self.shared
+                        .rt_to_ui
+                        .ui_in_clip_indicator
+                        .store(true, Ordering::Relaxed);
+                    self.shared
+                        .rt_to_ui
                         .ui_clipped
                         .store(true, Ordering::Relaxed);
                     self.shared
@@ -787,15 +843,20 @@ impl<'a> NamClapProcessor<'a> {
                         .store(true, Ordering::Relaxed);
                 }
 
-                output_offset += n_out;
+                output_offset += sub_m.n_out;
 
-                // SP-P2.4 / F-PERF-16: peak detection is fused into the host buffer copy
-                // pass inside process_sub_block, eliminating redundant passes over memory.
-                *peak_l = (*peak_l).max(sub_peak_l);
-                *peak_r = (*peak_r).max(sub_peak_r);
+                metrics.in_peak_l = metrics.in_peak_l.max(sub_m.in_peak_l);
+                metrics.in_peak_r = metrics.in_peak_r.max(sub_m.in_peak_r);
+                metrics.in_sum_sq_l += sub_m.in_sum_sq_l;
+                metrics.in_sum_sq_r += sub_m.in_sum_sq_r;
+                metrics.out_peak_l = metrics.out_peak_l.max(sub_m.out_peak_l);
+                metrics.out_peak_r = metrics.out_peak_r.max(sub_m.out_peak_r);
+                metrics.out_sum_sq_l += sub_m.out_sum_sq_l;
+                metrics.out_sum_sq_r += sub_m.out_sum_sq_r;
+                metrics.total_samples += sub_m.n_out;
 
-                if gate_state != GateState::Closed {
-                    *last_gate_state = gate_state;
+                if sub_m.gate_state != GateState::Closed {
+                    *last_gate_state = sub_m.gate_state;
                     *any_active = true;
                 }
             }
@@ -1045,8 +1106,7 @@ impl<'a> NamClapProcessor<'a> {
             self.gate_dirty = false;
         }
 
-        let mut peak_l = 0.0f32;
-        let mut peak_r = 0.0f32;
+        let mut metrics = BlockMetricsAccumulator::default();
         for mut port_pair in audio {
             let n_samples_raw = port_pair.frames_count() as usize;
             if n_samples_raw > self.max_frames_count {
@@ -1138,16 +1198,31 @@ impl<'a> NamClapProcessor<'a> {
                         slice_len,
                         self.process_mono,
                     );
-                    let (sub_peak_l, sub_peak_r) = audio_loop::copy_delayed_dry_to_output(
-                        &mut out_l,
-                        &mut out_r,
-                        &mut self.buf_xfade_dry_l[..slice_len],
-                        &mut self.buf_xfade_dry_r[..slice_len],
-                        0,
-                        self.process_mono,
-                    );
-                    peak_l = peak_l.max(sub_peak_l);
-                    peak_r = peak_r.max(sub_peak_r);
+                    let (in_peak_l, in_sum_sq_l) =
+                        audio_loop::compute_peak_and_sum_sq(&self.buf_host_l[..slice_len]);
+                    let (in_peak_r, in_sum_sq_r) = if self.process_mono {
+                        (in_peak_l, in_sum_sq_l)
+                    } else {
+                        audio_loop::compute_peak_and_sum_sq(&self.buf_host_r[..slice_len])
+                    };
+                    let (sub_peak_l, sub_peak_r, sub_sum_sq_l, sub_sum_sq_r) =
+                        audio_loop::copy_delayed_dry_to_output(
+                            &mut out_l,
+                            &mut out_r,
+                            &mut self.buf_xfade_dry_l[..slice_len],
+                            &mut self.buf_xfade_dry_r[..slice_len],
+                            0,
+                            self.process_mono,
+                        );
+                    metrics.in_peak_l = metrics.in_peak_l.max(in_peak_l);
+                    metrics.in_peak_r = metrics.in_peak_r.max(in_peak_r);
+                    metrics.in_sum_sq_l += in_sum_sq_l;
+                    metrics.in_sum_sq_r += in_sum_sq_r;
+                    metrics.out_peak_l = metrics.out_peak_l.max(sub_peak_l);
+                    metrics.out_peak_r = metrics.out_peak_r.max(sub_peak_r);
+                    metrics.out_sum_sq_l += sub_sum_sq_l;
+                    metrics.out_sum_sq_r += sub_sum_sq_r;
+                    metrics.total_samples += slice_len;
 
                     slice_start += slice_len;
                 }
@@ -1198,16 +1273,31 @@ impl<'a> NamClapProcessor<'a> {
                 n_samples,
                 self.process_mono,
             );
-            let (sub_peak_l, sub_peak_r) = audio_loop::copy_delayed_dry_to_output(
-                &mut out_l,
-                &mut out_r,
-                &mut self.buf_xfade_dry_l[..n_samples],
-                &mut self.buf_xfade_dry_r[..n_samples],
-                0,
-                self.process_mono,
-            );
-            peak_l = peak_l.max(sub_peak_l);
-            peak_r = peak_r.max(sub_peak_r);
+            let (in_peak_l, in_sum_sq_l) =
+                audio_loop::compute_peak_and_sum_sq(&self.buf_host_l[..n_samples]);
+            let (in_peak_r, in_sum_sq_r) = if self.process_mono {
+                (in_peak_l, in_sum_sq_l)
+            } else {
+                audio_loop::compute_peak_and_sum_sq(&self.buf_host_r[..n_samples])
+            };
+            let (sub_peak_l, sub_peak_r, sub_sum_sq_l, sub_sum_sq_r) =
+                audio_loop::copy_delayed_dry_to_output(
+                    &mut out_l,
+                    &mut out_r,
+                    &mut self.buf_xfade_dry_l[..n_samples],
+                    &mut self.buf_xfade_dry_r[..n_samples],
+                    0,
+                    self.process_mono,
+                );
+            metrics.in_peak_l = metrics.in_peak_l.max(in_peak_l);
+            metrics.in_peak_r = metrics.in_peak_r.max(in_peak_r);
+            metrics.in_sum_sq_l += in_sum_sq_l;
+            metrics.in_sum_sq_r += in_sum_sq_r;
+            metrics.out_peak_l = metrics.out_peak_l.max(sub_peak_l);
+            metrics.out_peak_r = metrics.out_peak_r.max(sub_peak_r);
+            metrics.out_sum_sq_l += sub_sum_sq_l;
+            metrics.out_sum_sq_r += sub_sum_sq_r;
+            metrics.total_samples += n_samples;
         }
 
         // Bypass-leg telemetry projection: gate reported open, no FSM
@@ -1217,7 +1307,10 @@ impl<'a> NamClapProcessor<'a> {
             .ui_gate_active
             .store(false, Ordering::Relaxed);
         gate_flags::report_gate_flags(&self.rt_status, GateState::Open);
-        peaks::store_peaks(self.shared, peak_l, peak_r);
+        self.update_rms_and_telemetry(
+            &metrics,
+            self.shared.cold.sample_rate.load(Ordering::Relaxed),
+        );
 
         let pending_after = PendingRestartOs::load(
             &self.shared.cold.pending_restart_os_factor,

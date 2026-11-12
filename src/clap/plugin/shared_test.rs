@@ -39,6 +39,38 @@ fn test_production_vs_test_defaults() {
         test.rt_to_ui.ui_clip_indicator.load(Ordering::Relaxed)
     );
     assert_eq!(
+        prod.rt_to_ui.ui_in_peak_l.load(Ordering::Relaxed),
+        test.rt_to_ui.ui_in_peak_l.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.rt_to_ui.ui_in_peak_r.load(Ordering::Relaxed),
+        test.rt_to_ui.ui_in_peak_r.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.rt_to_ui.ui_in_clipped.load(Ordering::Relaxed),
+        test.rt_to_ui.ui_in_clipped.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.rt_to_ui.ui_in_clip_indicator.load(Ordering::Relaxed),
+        test.rt_to_ui.ui_in_clip_indicator.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.rt_to_ui.ui_in_rms_l.load(Ordering::Relaxed),
+        test.rt_to_ui.ui_in_rms_l.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.rt_to_ui.ui_in_rms_r.load(Ordering::Relaxed),
+        test.rt_to_ui.ui_in_rms_r.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.rt_to_ui.ui_out_rms_l.load(Ordering::Relaxed),
+        test.rt_to_ui.ui_out_rms_l.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.rt_to_ui.ui_out_rms_r.load(Ordering::Relaxed),
+        test.rt_to_ui.ui_out_rms_r.load(Ordering::Relaxed)
+    );
+    assert_eq!(
         prod.rt_to_ui.ui_gate_active.load(Ordering::Relaxed),
         test.rt_to_ui.ui_gate_active.load(Ordering::Relaxed)
     );

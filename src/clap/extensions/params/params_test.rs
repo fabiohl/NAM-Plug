@@ -236,7 +236,7 @@ fn test_parameters_non_regression_snapshot() {
             id: PARAM_GATE_THRESH,
             name: b"Gate Threshold",
             min: -90.0,
-            max: -40.0,
+            max: 0.0,
             default: -90.0,
             initial_value: -90.0,
             required_flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_MODULATABLE,
@@ -358,4 +358,41 @@ fn test_parameters_non_regression_snapshot() {
             exp.id
         );
     }
+}
+
+#[test]
+fn test_gate_threshold_contract_alignment() {
+    // S02 / T02.1: Contract alignment for PARAM_GATE_THRESH to [-90.0, 0.0] dB.
+    // 1. Min/Max boundaries
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -90.0), -90.0);
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, 0.0), 0.0);
+
+    // 2. Out-of-bounds values clamp strictly to range
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -90.1), -90.0);
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -150.0), -90.0);
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, 0.1), 0.0);
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, 50.0), 0.0);
+
+    // 3. Previously clamped range [-40.0, 0.0] is now preserved without truncation
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -40.0), -40.0);
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -30.0), -30.0);
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -15.5), -15.5);
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -6.0), -6.0);
+
+    // 4. Non-finites fall back to the safe default (-90.0 dB, gate parked/off)
+    assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, f32::NAN), -90.0);
+    assert_eq!(
+        sanitize_param_value(PARAM_GATE_THRESH, f32::INFINITY),
+        -90.0
+    );
+    assert_eq!(
+        sanitize_param_value(PARAM_GATE_THRESH, f32::NEG_INFINITY),
+        -90.0
+    );
+
+    // 5. Double precision f64 variant parity
+    assert_eq!(sanitize_param_value_f64(PARAM_GATE_THRESH, -90.0), -90.0);
+    assert_eq!(sanitize_param_value_f64(PARAM_GATE_THRESH, 0.0), 0.0);
+    assert_eq!(sanitize_param_value_f64(PARAM_GATE_THRESH, 10.0), 0.0);
+    assert_eq!(sanitize_param_value_f64(PARAM_GATE_THRESH, f64::NAN), -90.0);
 }

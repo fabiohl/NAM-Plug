@@ -44,10 +44,20 @@ export component MainWindow inherits Window {
     in-out property <int> activation_mode: 1; // 1: Standard, 0: Fast
 
     // ── Zone 3 Properties: Telemetry & VU Meters ──────────────
+    in-out property <float> in_peak_l: 0.0;
+    in-out property <float> in_peak_r: 0.0;
+    in-out property <float> in_peak_hold_l: 0.0;
+    in-out property <float> in_peak_hold_r: 0.0;
+    in-out property <float> in_rms_l: 0.0;
+    in-out property <float> in_rms_r: 0.0;
+    in-out property <bool> in_clip_active: false;
+
     in-out property <float> peak_l: 0.72;
     in-out property <float> peak_r: 0.68;
     in-out property <float> peak_hold_l: 0.78;
     in-out property <float> peak_hold_r: 0.74;
+    in-out property <float> rms_l: 0.0;
+    in-out property <float> rms_r: 0.0;
     in-out property <bool> clip_active: false;
     in-out property <bool> is_stereo: true;
 
@@ -79,6 +89,7 @@ export component MainWindow inherits Window {
     callback load_ir_clicked();
     callback clear_ir_clicked();
     callback reset_clip_clicked();
+    callback reset_in_clip_clicked();
     callback input_gain_changed(float);
     callback input_gain_gesture_begin();
     callback input_gain_gesture_end();
@@ -469,10 +480,21 @@ export component MainWindow inherits Window {
 
                     VuMeter {
                         stereo: root.is_stereo;
+                        in-level-l: root.in_peak_l;
+                        in-level-r: root.in_peak_r;
+                        in-peak-hold-l: root.in_peak_hold_l;
+                        in-peak-hold-r: root.in_peak_hold_r;
+                        in-rms-l: root.in_rms_l;
+                        in-rms-r: root.in_rms_r;
+                        in-clipped <=> root.in_clip_active;
+                        reset-in-clip => { root.reset_in_clip_clicked(); }
+
                         level-l: root.peak_l;
                         level-r: root.peak_r;
                         peak-hold-l: root.peak_hold_l;
                         peak-hold-r: root.peak_hold_r;
+                        rms-l: root.rms_l;
+                        rms-r: root.rms_r;
                         clipped <=> root.clip_active;
                         reset-clip => { root.reset_clip_clicked(); }
                     }

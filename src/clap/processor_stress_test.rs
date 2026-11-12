@@ -946,7 +946,7 @@ mod tests {
         // Finite out-of-bounds sanitization clamps to valid range
         assert_eq!(sanitize_param_value(PARAM_INPUT_GAIN, 1000.0), 30.0);
         assert_eq!(sanitize_param_value(PARAM_INPUT_GAIN, -1000.0), -96.0);
-        assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, 10.0), -40.0);
+        assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, 10.0), 0.0);
         assert_eq!(sanitize_param_value(PARAM_GATE_THRESH, -150.0), -90.0);
         assert_eq!(sanitize_param_value(PARAM_BYPASS, 10.0), 1.0);
         assert_eq!(sanitize_param_value(PARAM_BYPASS, -10.0), 0.0);

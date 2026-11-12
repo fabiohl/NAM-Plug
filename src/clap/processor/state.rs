@@ -266,6 +266,12 @@ pub struct NamClapProcessor<'a> {
     /// Applied as `output_gain_mult` in the DSP pipeline context, separate from
     /// user-configured output gain applied via `smoother_out`.
     pub(crate) model_output_mult_adj: f32,
+    /// Input RMS level exponential moving average (tau ≈ 300 ms).
+    pub(crate) in_rms_ewma_l: f32,
+    pub(crate) in_rms_ewma_r: f32,
+    /// Output RMS level exponential moving average (tau ≈ 300 ms).
+    pub(crate) out_rms_ewma_l: f32,
+    pub(crate) out_rms_ewma_r: f32,
     /// Parking lot for model/resampler disposal if the GC channel is full.
     /// `parking_lot_dirty` mirrors the NAM-Audio-Pipe dirty latch: stored with
     /// `Release` before each GC cascade so the audio-thread drain can skip the
