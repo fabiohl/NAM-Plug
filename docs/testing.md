@@ -347,9 +347,8 @@ The canonical release workflow strictly decouples artifact compilation, long-aud
 4. **CabSim IR Artifact Test:** Confirms impulse responses alter output audio as expected.
 5. **Performance Certification:** Invokes `nam_perf_guard certify` with affinity applied and verified in-process, a paired reference series, and no `environment_degraded` reason; p99 execution must stay below **85% of the audio block budget**.
 
-#### 5.4.1 Certified Artifact Identity (F-CER-01)
-
-The certification process (`build-release.sh --certify`) never recompiles after the long audit. The typed Rust certifier (`plug_long_receipt certify`) strictly enforces cryptographic parity across the artifact chain:
+- **`build-receipt.json` Schema & Gap Reconciliation:** `build-release.sh` uses `plug_long_receipt build-status --receipt target/dist/build-receipt.json --run-id $NAM_RUN_ID` to strictly validate schema conformance (`serde(deny_unknown_fields)`), verify `run_id` matching, and reconcile any multiline gaps into the build carrier fail-closed.
+- **Certified Artifact Identity (F-CER-01):** The certification process (`build-release.sh --certify`) never recompiles after the long audit. The typed Rust certifier (`plug_long_receipt certify`) strictly enforces cryptographic parity across the artifact chain:
 
 ```text
 sha256(long-audit receipt) == sha256(build receipt) == sha256(target/dist/nam_plug.clap)

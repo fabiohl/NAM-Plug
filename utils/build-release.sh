@@ -792,13 +792,21 @@ if [ "$RC" -eq 0 ]; then
     # when the three commands run as independent processes.
     printf '%s\n' "$NAM_RUN_ID" > "$LOG_DIR/build-run-id"
     if [ -f "$BUILD_RECEIPT" ]; then
-        receipt_gaps=$(grep -o '"gaps": *\[[^]]*\]' "$BUILD_RECEIPT" 2>/dev/null | sed -e 's/"gaps": *\[//' -e 's/\]//' -e 's/"//g' -e 's/[[:space:]]//g' || true)
-        if [ -n "$receipt_gaps" ]; then
-            IFS=',' read -r -a r_gaps <<< "$receipt_gaps"
-            for g in "${r_gaps[@]}"; do
-                [ -n "$g" ] && [[ ! " ${GAPS[*]:-} " =~ " ${g} " ]] && gap "$g"
-            done
+        if ! status_output=$(cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- build-status --receipt "$BUILD_RECEIPT" --run-id "$NAM_RUN_ID" 2>>"$RECEIPT_LOG"); then
+            rm -f "$BUILD_RECEIPT"
+            FAILS+=("build_receipt")
+            emit "PHASE: build_receipt FAIL rc=1 log=$RECEIPT_LOG"
+            finish
+            exit 1
         fi
+        while IFS= read -r line; do
+            case "$line" in
+                GAP:\ *)
+                    g="${line#GAP: }"
+                    [ -n "$g" ] && [[ ! " ${GAPS[*]:-} " =~ " ${g} " ]] && gap "$g"
+                    ;;
+            esac
+        done <<< "$status_output"
     fi
     emit "PHASE: build_receipt PASS log=$RECEIPT_LOG"
 else

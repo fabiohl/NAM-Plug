@@ -72,7 +72,7 @@ clap-sys = "0.5"
 slint-build = "1.18"
 
 [dev-dependencies]
-NeuralAmpModeler-rs = { version = "2.0.0", features = ["testing"] }
+NeuralAmpModeler-rs = { version = "2.1.0", features = ["testing"] }
 nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.2", features = ["clack-plugin"] }
 clap-sys = "0.5"
@@ -168,3 +168,6 @@ allow_attributes = "warn"
 [package.metadata.docs.rs]
 features = ["testing"]
 rustdoc-args = ["--cfg", "docsrs"]
+
+[patch.crates-io]
+NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs" }

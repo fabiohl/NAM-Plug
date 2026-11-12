@@ -63,6 +63,7 @@ done
 
 PHASES=(catch-all gui artifact perf heap-audit rt-heap)
 if [ -n "$ONLY_PHASES" ]; then
+    SCOPE=partial
     IFS=',' read -ra requested <<< "$ONLY_PHASES"
     for p in "${requested[@]}"; do
         [ -n "$p" ] || continue
