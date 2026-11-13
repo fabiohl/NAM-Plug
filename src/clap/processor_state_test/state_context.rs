@@ -57,8 +57,12 @@ fn test_state_context_roundtrip() {
     let preset_json: serde_json::Value =
         serde_json::from_slice(&preset_buffer).expect("preset buffer should be valid JSON");
     assert_eq!(
-        preset_json["version"], 1,
-        "ForPreset save should produce v1 envelope"
+        preset_json["version"], 2,
+        "ForPreset save should produce v2 envelope"
+    );
+    assert!(
+        preset_json["calibration"].is_object(),
+        "ForPreset v2 envelope should contain calibration object"
     );
     assert!(
         preset_json["params"].is_object(),
@@ -87,8 +91,12 @@ fn test_state_context_roundtrip() {
     let project_json: serde_json::Value =
         serde_json::from_slice(&project_buffer).expect("project buffer should be valid JSON");
     assert_eq!(
-        project_json["version"], 1,
-        "ForProject save should produce v1 envelope"
+        project_json["version"], 2,
+        "ForProject save should produce v2 envelope"
+    );
+    assert!(
+        project_json["calibration"].is_object(),
+        "ForProject v2 envelope should contain calibration object"
     );
     assert!(
         project_json["params"]["model_path"].is_string(),

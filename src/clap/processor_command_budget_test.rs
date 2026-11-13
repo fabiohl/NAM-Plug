@@ -177,6 +177,7 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
                     model: None,
                     ir: None,
                     params: RtProcessingParams::default(),
+                    calibration: Default::default(),
                 },
             ))
             .expect("restore push after reactivation must succeed");
@@ -225,6 +226,7 @@ fn test_structural_budget_one_per_callback() {
                     model: None,
                     ir: None,
                     params: RtProcessingParams::default(),
+                    calibration: Default::default(),
                 },
             ))
             .expect("restore burst must fit the ring");
@@ -363,6 +365,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
                     model: None,
                     ir: None,
                     params: RtProcessingParams::default(),
+                    calibration: Default::default(),
                 },
             ))
             .expect("restore push must succeed");
@@ -456,6 +459,7 @@ fn test_structural_burst_deferral_counts_deterministic() {
                         model: None,
                         ir: None,
                         params: RtProcessingParams::default(),
+                        calibration: Default::default(),
                     },
                 ))
                 .expect("restore burst must fit the ring");
@@ -527,6 +531,7 @@ fn test_structural_burst_p99_within_contract() {
                         model: None,
                         ir: None,
                         params: RtProcessingParams::default(),
+                        calibration: Default::default(),
                     },
                 ))
                 .expect("restore burst must fit the ring");

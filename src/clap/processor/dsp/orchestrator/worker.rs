@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
+use crate::clap::extensions::calibration::{
+    CalibrationConfig, ModelCalibrationMeta, OutputMode, compute_calibration_multipliers,
+};
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH, PARAM_INPUT_GAIN,
-    PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
+    PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
+    PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
 };
 use crate::clap::plugin::{PendingRestartOs, UiToRt};
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
@@ -63,8 +67,14 @@ pub(crate) fn apply_scheduled_event(
     value: f32,
     is_mod: bool,
     params: &mut RtProcessingParams,
+    cal_config: &mut CalibrationConfig,
+    model_cal_meta: &ModelCalibrationMeta,
+    model_input_mult_adj: &mut f32,
+    model_output_mult_adj: &mut f32,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
+    smoother_cal_in: &mut ParamSmoother,
+    smoother_cal_out: &mut ParamSmoother,
     gate_dirty: &mut bool,
     mod_input_gain: &mut f32,
     mod_output_gain: &mut f32,
@@ -212,8 +222,80 @@ pub(crate) fn apply_scheduled_event(
                     neural_amp_modeler_rs::math::activations::set_activation_tls(mode);
                 }
             }
+            PARAM_CALIBRATE_INPUT => {
+                let enabled = val >= 0.5;
+                if enabled != cal_config.calibrate_input {
+                    cal_config.calibrate_input = enabled;
+                    ui_to_rt
+                        .param_calibrate_input
+                        .store(enabled as u32, Ordering::Relaxed);
+                    update_calibration_multipliers(
+                        model_cal_meta,
+                        *cal_config,
+                        model_input_mult_adj,
+                        model_output_mult_adj,
+                        smoother_cal_in,
+                        smoother_cal_out,
+                        apply_smoother,
+                    );
+                }
+            }
+            PARAM_INPUT_CALIBRATION_LEVEL => {
+                if (val - cal_config.input_calibration_level_dbu).abs() > f32::EPSILON {
+                    cal_config.input_calibration_level_dbu = val;
+                    ui_to_rt
+                        .param_input_calibration_level
+                        .store(val.to_bits(), Ordering::Relaxed);
+                    update_calibration_multipliers(
+                        model_cal_meta,
+                        *cal_config,
+                        model_input_mult_adj,
+                        model_output_mult_adj,
+                        smoother_cal_in,
+                        smoother_cal_out,
+                        apply_smoother,
+                    );
+                }
+            }
+            PARAM_OUTPUT_MODE => {
+                let mode = OutputMode::from_f32(val);
+                if mode != cal_config.output_mode {
+                    cal_config.output_mode = mode;
+                    ui_to_rt
+                        .param_output_mode
+                        .store(mode.to_u32(), Ordering::Relaxed);
+                    update_calibration_multipliers(
+                        model_cal_meta,
+                        *cal_config,
+                        model_input_mult_adj,
+                        model_output_mult_adj,
+                        smoother_cal_in,
+                        smoother_cal_out,
+                        apply_smoother,
+                    );
+                }
+            }
             _ => {}
         }
     }
     None
+}
+
+#[inline]
+fn update_calibration_multipliers(
+    model_cal_meta: &ModelCalibrationMeta,
+    cal_config: CalibrationConfig,
+    model_input_mult_adj: &mut f32,
+    model_output_mult_adj: &mut f32,
+    smoother_cal_in: &mut ParamSmoother,
+    smoother_cal_out: &mut ParamSmoother,
+    apply_smoother: bool,
+) {
+    let (in_mult, out_mult) = compute_calibration_multipliers(*model_cal_meta, cal_config);
+    *model_input_mult_adj = in_mult;
+    *model_output_mult_adj = out_mult;
+    if apply_smoother {
+        smoother_cal_in.set_target(in_mult);
+        smoother_cal_out.set_target(out_mult);
+    }
 }

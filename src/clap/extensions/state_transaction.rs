@@ -52,7 +52,8 @@ pub(crate) fn restore_state_transactional(
     }
 
     // ══════ Phase 1: PREPARE — deserialise ══════
-    let (loaded_params, ir_level_policy) = super::state::load_state_with_policy(buffer)?;
+    let (loaded_params, ir_level_policy, calibration) =
+        super::state::load_state_with_policy_and_calibration(buffer)?;
 
     let host_rate = {
         let rate = main_thread.shared.cold.sample_rate.load(Ordering::Relaxed);
@@ -64,6 +65,7 @@ pub(crate) fn restore_state_transactional(
     let validated = validate::validate_and_build(
         &loaded_params,
         ir_level_policy,
+        calibration,
         host_rate,
         buffer_size,
         &main_thread.sys,

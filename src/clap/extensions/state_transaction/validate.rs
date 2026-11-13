@@ -37,6 +37,8 @@ pub(crate) struct ModelResources {
     pub(crate) input_mult_adj: f32,
     /// Pre-computed output level multiplier adjustment (calibration).
     pub(crate) output_mult_adj: f32,
+    /// Model calibration metadata extracted for runtime parameter recomputation.
+    pub(crate) cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta,
     /// Negotiated host block size (frames) at validation time. Carried so the
     /// restore path can size the off-RT prewarm-cost calibration block without
     /// exceeding the model's `max_buffer_size`.
@@ -87,6 +89,8 @@ pub(crate) struct ValidatedRestore {
     pub(crate) ir_hash: Option<String>,
     /// Restored IR level policy.
     pub(crate) ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
+    /// Restored input calibration and output mode configuration.
+    pub(crate) calibration: crate::clap::extensions::calibration::CalibrationConfig,
 }
 
 /// Tuple result of off-RT model validation:
@@ -116,17 +120,28 @@ pub(crate) type IrValidationResult = (Option<IrResources>, Option<String>, Optio
 pub(crate) fn validate_and_build(
     loaded_params: &ProcessingParams,
     ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
+    calibration: crate::clap::extensions::calibration::CalibrationConfig,
     host_rate: u32,
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
     mode: &RestoreMode,
 ) -> Result<ValidatedRestore, PluginError> {
-    let maybe_model = match mode {
+    let mut maybe_model = match mode {
         RestoreMode::Full => validate_model_full(loaded_params, host_rate, buffer_size, sys)?,
         RestoreMode::ForPreset => {
             validate_model_preset(loaded_params, host_rate, buffer_size, sys)?
         }
     };
+
+    if let Some(ref mut resources) = maybe_model.0 {
+        let (in_mult, out_mult) =
+            crate::clap::extensions::calibration::compute_calibration_multipliers(
+                resources.cal_meta,
+                calibration,
+            );
+        resources.input_mult_adj = in_mult;
+        resources.output_mult_adj = out_mult;
+    }
 
     let params = loaded_params.clone();
 
@@ -144,6 +159,7 @@ pub(crate) fn validate_and_build(
         ir_path_on_disk,
         ir_hash,
         ir_level_policy,
+        calibration,
     })
 }
 
@@ -335,6 +351,11 @@ pub(crate) fn build_model_resources(
     }
 
     let model_info = model_pair.model_info(path);
+    let cal_meta =
+        crate::clap::extensions::calibration::ModelCalibrationMeta::from_loaded_model(&model_pair);
+    let metadata = model_pair.metadata.clone();
+    let architecture = model_pair.architecture.clone();
+    let topology = model_pair.topology.clone();
 
     let mut model_l = model_pair.model_l;
     let mut model_r = model_pair.model_r;
@@ -392,10 +413,6 @@ pub(crate) fn build_model_resources(
         )
     })?;
 
-    let metadata = model_pair.metadata.clone();
-    let architecture = model_pair.architecture.clone();
-    let topology = model_pair.topology.clone();
-
     let model_metadata = NamModelMetadata {
         architecture,
         topology,
@@ -415,6 +432,9 @@ pub(crate) fn build_model_resources(
                 _ => String::new(),
             })
             .filter(|s| !s.is_empty()),
+        input_level_dbu: cal_meta.input_level_dbu,
+        output_level_dbu: cal_meta.output_level_dbu,
+        loudness: cal_meta.loudness,
     };
     Ok(ModelResources {
         model_l,
@@ -423,6 +443,7 @@ pub(crate) fn build_model_resources(
         new_stream,
         input_mult_adj,
         output_mult_adj,
+        cal_meta,
         buffer_size,
         model_rate,
         model_metadata,

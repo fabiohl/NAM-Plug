@@ -43,7 +43,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// while keeping memory footprint minimal (~8 KiB for pointers).
 pub const CMD_QUEUE_CAPACITY: usize = 256;
 
-const PARAM_COUNT: usize = 9;
+use crate::clap::extensions::calibration::CalibrationConfig;
+use crate::clap::extensions::params::PARAM_COUNT;
 
 /// Error returned when the SPSC ring buffer is full and the
 /// command cannot be enqueued. The caller should retry or fall
@@ -58,6 +59,7 @@ pub enum PushError {
 struct CoalesceBuffer {
     slots: [Option<f64>; PARAM_COUNT],
     dirty_mask: u16,
+    pending_calibration: Option<CalibrationConfig>,
 }
 
 impl Default for CoalesceBuffer {
@@ -65,6 +67,7 @@ impl Default for CoalesceBuffer {
         Self {
             slots: [None; PARAM_COUNT],
             dirty_mask: 0,
+            pending_calibration: None,
         }
     }
 }
@@ -301,6 +304,13 @@ impl<'a> CommandProducer<'a> {
         !had_pending
     }
 
+    /// Queues a coalesced amp calibration configuration for delivery to RT.
+    pub fn push_calibration(&mut self, cfg: CalibrationConfig) -> bool {
+        let had_pending = self.coalescing.pending_calibration.is_some();
+        self.coalescing.pending_calibration = Some(cfg.sanitized());
+        !had_pending
+    }
+
     /// Queues a non-coalescable command (model load, IR swap,
     /// oversampling engine hot-swap).
     ///
@@ -312,7 +322,7 @@ impl<'a> CommandProducer<'a> {
     /// [`try_push_command`](Self::try_push_command) for the fail-closed
     /// variant that returns the command back to the caller).
     pub fn push_command(&mut self, cmd: ClapParamPayload) -> Result<u64, PushError> {
-        self.try_push_command(cmd).map_err(|(e, _)| e)
+        self.try_push_command(cmd).map_err(|err| err.0)
     }
 
     /// Queues a non-coalescable command, returning the command back to the
@@ -322,15 +332,14 @@ impl<'a> CommandProducer<'a> {
     /// ordering. Sequence numbers are only consumed **after** a successful
     /// push, guaranteeing the FIFO item↔sequence mapping has no gaps.
     ///
-    /// The payload is deliberately small (heap resources travel `Box`ed
-    /// end-to-end — models, resamplers, streams and cab-sim adapters), so
-    /// returning it by value on `Full` costs no large struct copy.
+    /// The error pair is boxed so the happy-path `Result` fits in 16 bytes
+    /// without bloating stack frames or triggering `result_large_err`.
     pub fn try_push_command(
         &mut self,
         cmd: ClapParamPayload,
-    ) -> Result<u64, (PushError, ClapParamPayload)> {
+    ) -> Result<u64, Box<(PushError, ClapParamPayload)>> {
         if let Err(e) = self.force_flush() {
-            return Err((e, cmd));
+            return Err(Box::new((e, cmd)));
         }
         // The box is created here on the main thread (allocation is legal
         // off-RT); the audio thread pops it already boxed — zero allocation
@@ -340,7 +349,7 @@ impl<'a> CommandProducer<'a> {
                 let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
                 Ok(seq)
             }
-            Err(rtrb::PushError::Full(value)) => Err((PushError::Full, *value)),
+            Err(rtrb::PushError::Full(value)) => Err(Box::new((PushError::Full, *value))),
         }
     }
 
@@ -357,22 +366,32 @@ impl<'a> CommandProducer<'a> {
     /// the caller must surface the `Err` and schedule a retry (e.g. via
     /// `host.request_callback()`), never discard it with `let _ =`.
     pub fn force_flush(&mut self) -> Result<u64, PushError> {
+        let mut last_seq = 0u64;
         if let Some(snapshot) = self.coalescing.take_snapshot() {
             match self.tx.push(Box::new(ClapParamPayload::Params(snapshot))) {
                 Ok(()) => {
-                    let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
-                    Ok(seq)
+                    last_seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
                 }
                 Err(rtrb::PushError::Full(_)) => {
                     // Retain the snapshot so the retry does not lose the
                     // latest parameter values.
                     self.coalescing.restore_snapshot(snapshot);
-                    Err(PushError::Full)
+                    return Err(PushError::Full);
                 }
             }
-        } else {
-            Ok(0)
         }
+        if let Some(cal) = self.coalescing.pending_calibration.take() {
+            match self.tx.push(Box::new(ClapParamPayload::Calibration(cal))) {
+                Ok(()) => {
+                    last_seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                }
+                Err(rtrb::PushError::Full(_)) => {
+                    self.coalescing.pending_calibration = Some(cal);
+                    return Err(PushError::Full);
+                }
+            }
+        }
+        Ok(last_seq)
     }
 
     /// Returns the last sequence number acknowledged by the audio

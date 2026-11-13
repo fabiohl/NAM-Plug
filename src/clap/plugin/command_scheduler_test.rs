@@ -36,10 +36,12 @@ fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
             model_rate: 48000,
             input_mult_adj: mult_adj,
             output_mult_adj: mult_adj,
+            cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
             prewarm_cost_ns: None,
         }),
         ir: Some(None),
         params: rt_gain(gain),
+        calibration: Default::default(),
     }
 }
 
@@ -426,7 +428,7 @@ fn try_push_command_returns_payload_on_full() {
         .try_push_command(ClapParamPayload::LoadCabIr { pair: None })
         .expect_err("5th push must saturate the ring");
     assert!(
-        matches!(err, (PushError::Full, ClapParamPayload::LoadCabIr { .. })),
+        matches!(*err, (PushError::Full, ClapParamPayload::LoadCabIr { .. })),
         "try_push_command must return (Full, payload) so the caller can retain it"
     );
 
@@ -502,9 +504,11 @@ fn restore_txn_atomic_delivery_capacity_1() {
         Err(_) => panic!("A must fill the empty ring"),
     };
     let retained_b = match producer.try_push_command(ClapParamPayload::RestoreTxn(txn_b)) {
-        Err((PushError::Full, ClapParamPayload::RestoreTxn(t))) => t,
+        Err(err) => match *err {
+            (PushError::Full, ClapParamPayload::RestoreTxn(t)) => t,
+            _ => panic!("unexpected error pushing B"),
+        },
         Ok(_) => panic!("expected Full but B fit the ring"),
-        Err(_) => panic!("unexpected error pushing B"),
     };
 
     // Block 1: the audio thread applies exactly ONE complete package (A).
@@ -574,9 +578,11 @@ fn restore_txn_atomic_delivery_capacity_2() {
     assert!(seq_b > seq_a);
 
     let retained_c = match producer.try_push_command(ClapParamPayload::RestoreTxn(txn_c)) {
-        Err((PushError::Full, ClapParamPayload::RestoreTxn(t))) => t,
+        Err(err) => match *err {
+            (PushError::Full, ClapParamPayload::RestoreTxn(t)) => t,
+            _ => panic!("unexpected error pushing C"),
+        },
         Ok(_) => panic!("expected Full but C fit the ring"),
-        Err(_) => panic!("unexpected error pushing C"),
     };
 
     // Each block applies exactly one complete package, in FIFO order.
@@ -640,6 +646,7 @@ fn structural_classification_light_vs_heavy() {
             model_rate: 48000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
             prewarm_cost_ns: None,
         },
         ClapParamPayload::LoadCabIr { pair: None },
@@ -664,6 +671,7 @@ fn structural_classification_light_vs_heavy() {
             model: None,
             ir: None,
             params: RtProcessingParams::default(),
+            calibration: Default::default(),
         }),
     ];
     for payload in &heavy {

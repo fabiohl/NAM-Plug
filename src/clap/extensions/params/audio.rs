@@ -4,8 +4,9 @@
 //! `PluginAudioProcessorParams` implementation for the Audio Thread.
 
 use super::{
-    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH, PARAM_INPUT_GAIN,
-    PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
+    PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
+    PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
 };
 use crate::clap::processor::NamClapProcessor;
 use clack_extensions::params::PluginAudioProcessorParams;
@@ -65,6 +66,9 @@ impl NamClapProcessor<'_> {
                     PARAM_SLIM_OVERRIDE => self.set_slim_override(val),
                     PARAM_OVERSAMPLE => self.set_oversample(val),
                     PARAM_ACTIVATION => self.set_activation(val),
+                    PARAM_CALIBRATE_INPUT => self.set_calibrate_input(val),
+                    PARAM_INPUT_CALIBRATION_LEVEL => self.set_input_calibration_level(val),
+                    PARAM_OUTPUT_MODE => self.set_output_mode(val),
                     _ => continue,
                 }
                 param_changed = true;

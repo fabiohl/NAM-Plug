@@ -132,7 +132,8 @@ pub(crate) fn process_sub_block(
     input_clipped: &mut bool,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
-    model_output_mult_adj: f32,
+    smoother_cal_in: &mut ParamSmoother,
+    smoother_cal_out: &mut ParamSmoother,
     shared_sample_rate: u32,
     gain_steps: &[GainStep],
 ) -> SubBlockMetrics {
@@ -154,7 +155,8 @@ pub(crate) fn process_sub_block(
             input_clipped,
             smoother_in,
             smoother_out,
-            model_output_mult_adj,
+            smoother_cal_in,
+            smoother_cal_out,
             shared_sample_rate,
         );
     }
@@ -204,12 +206,15 @@ pub(crate) fn process_sub_block(
             input_clipped,
             smoother_in,
             smoother_out,
-            model_output_mult_adj,
+            smoother_cal_in,
+            smoother_cal_out,
             shared_sample_rate,
         );
     }
 
     if bypass {
+        advance_smoother_if_active(smoother_cal_in, n_samples);
+        advance_smoother_if_active(smoother_cal_out, n_samples);
         let (in_peak_l, in_sum_sq_l) =
             compute_peak_and_sum_sq(&buf_host_l[offset..offset + n_samples]);
         let (in_peak_r, in_sum_sq_r) = if process_mono {
@@ -272,6 +277,7 @@ pub(crate) fn process_sub_block(
 
     if gate_state == GateState::Closed {
         core::hint::cold_path();
+        advance_smoother_if_active(smoother_cal_in, n_samples);
         let (out_peak_l, out_peak_r, out_sum_sq_l, out_sum_sq_r) = process_tail_drain(
             n_samples,
             out_l,
@@ -280,8 +286,8 @@ pub(crate) fn process_sub_block(
             ctx,
             process_mono,
             smoother_out,
+            smoother_cal_out,
             scratch,
-            model_output_mult_adj,
             shared_sample_rate,
             gain_steps,
         );
@@ -313,6 +319,14 @@ pub(crate) fn process_sub_block(
         buf_xfd_scratch_l,
         buf_xfd_scratch_r,
     } = scratch;
+    ctx.input_gain_mult = resolve_input_cal_mult(
+        smoother_cal_in,
+        buf_host_l,
+        buf_host_r,
+        offset,
+        n_samples,
+        process_mono,
+    );
     let n_out = run_inference_streaming(
         &buf_host_l[offset..offset + n_samples],
         &buf_host_r[offset..offset + n_samples],
@@ -368,11 +382,11 @@ pub(crate) fn process_sub_block(
         }
     }
 
-    apply_output_stage(
+    apply_output_stage_calibrated(
         &mut buf_out_l[..n_out],
         &mut buf_out_r[..n_out],
         n_out,
-        model_output_mult_adj,
+        smoother_cal_out,
         ctx.silence_hysteresis,
         ctx.rt_status,
         process_mono,
@@ -447,7 +461,8 @@ fn process_sub_block_chunked(
     input_clipped: &mut bool,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
-    model_output_mult_adj: f32,
+    smoother_cal_in: &mut ParamSmoother,
+    smoother_cal_out: &mut ParamSmoother,
     shared_sample_rate: u32,
 ) -> SubBlockMetrics {
     let mut total_out = 0;
@@ -482,7 +497,8 @@ fn process_sub_block_chunked(
             input_clipped,
             smoother_in,
             smoother_out,
-            model_output_mult_adj,
+            smoother_cal_in,
+            smoother_cal_out,
             shared_sample_rate,
             &[],
         );
@@ -546,8 +562,8 @@ fn drain_tail_into(
     ctx: &mut DspPipelineContext<'_>,
     process_mono: bool,
     smoother_out: &mut ParamSmoother,
+    smoother_cal_out: &mut ParamSmoother,
     scratch: &mut SubBlockScratch<'_>,
-    model_output_mult_adj: f32,
     shared_sample_rate: u32,
     gain_steps: &[GainStep],
 ) -> usize {
@@ -601,17 +617,20 @@ fn drain_tail_into(
                 buf_out_r[..drain].copy_from_slice(&buf_out_l[..drain]);
             }
         }
-        apply_output_stage(
+        apply_output_stage_calibrated(
             &mut buf_out_l[..drain],
             &mut buf_out_r[..drain],
             drain,
-            model_output_mult_adj,
+            smoother_cal_out,
             &mut DynamicHysteresis::new(),
             ctx.rt_status,
             *ctx.process_mono,
             ctx.adaptive,
             shared_sample_rate,
         );
+        if drain < n_samples {
+            advance_smoother_if_active(smoother_cal_out, n_samples - drain);
+        }
         apply_gain_ramp_with_steps(
             smoother_out,
             buf_out_l,
@@ -625,6 +644,7 @@ fn drain_tail_into(
             process_mono,
         );
     } else {
+        advance_smoother_if_active(smoother_cal_out, n_samples);
         // No tail samples to render, but fused output-gain targets staged
         // earlier (`apply_smoother = false`) must still be committed to the
         // smoother so a later gate reopen uses the correct gain. With n = 0
@@ -681,8 +701,8 @@ fn process_tail_drain(
     ctx: &mut DspPipelineContext<'_>,
     process_mono: bool,
     smoother_out: &mut ParamSmoother,
+    smoother_cal_out: &mut ParamSmoother,
     scratch: &mut SubBlockScratch<'_>,
-    model_output_mult_adj: f32,
     shared_sample_rate: u32,
     gain_steps: &[GainStep],
 ) -> (f32, f32, f32, f32) {
@@ -691,8 +711,8 @@ fn process_tail_drain(
         ctx,
         process_mono,
         smoother_out,
+        smoother_cal_out,
         scratch,
-        model_output_mult_adj,
         shared_sample_rate,
         gain_steps,
     );
@@ -753,7 +773,8 @@ fn process_crossfade_sub_block(
     input_clipped: &mut bool,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
-    model_output_mult_adj: f32,
+    smoother_cal_in: &mut ParamSmoother,
+    smoother_cal_out: &mut ParamSmoother,
     shared_sample_rate: u32,
 ) -> SubBlockMetrics {
     // The scratch borrows are re-taken per phase (rather than destructured once
@@ -803,6 +824,7 @@ fn process_crossfade_sub_block(
     };
 
     let n_out = if gate_state == GateState::Closed {
+        advance_smoother_if_active(smoother_cal_in, n_samples);
         // Shared gate-closed kernel (unity-gate ring-out + strict-cardinality
         // zero-fill). The crossfade blends the drained/zeroed wet scratch
         // against the dry capture below, so the full wet head must be defined
@@ -812,13 +834,21 @@ fn process_crossfade_sub_block(
             ctx,
             process_mono,
             smoother_out,
+            smoother_cal_out,
             scratch,
-            model_output_mult_adj,
             shared_sample_rate,
             &[],
         );
         n_samples
     } else {
+        ctx.input_gain_mult = resolve_input_cal_mult(
+            smoother_cal_in,
+            scratch.buf_host_l,
+            scratch.buf_host_r,
+            offset,
+            n_samples,
+            process_mono,
+        );
         let n_o = run_inference_streaming(
             &scratch.buf_host_l[offset..offset + n_samples],
             &scratch.buf_host_r[offset..offset + n_samples],
@@ -866,11 +896,11 @@ fn process_crossfade_sub_block(
             }
         }
 
-        apply_output_stage(
+        apply_output_stage_calibrated(
             &mut scratch.buf_out_l[..n_o],
             &mut scratch.buf_out_r[..n_o],
             n_o,
-            model_output_mult_adj,
+            smoother_cal_out,
             ctx.silence_hysteresis,
             ctx.rt_status,
             *ctx.process_mono,
@@ -989,6 +1019,91 @@ fn process_crossfade_sub_block(
         out_peak_r,
         out_sum_sq_l,
         out_sum_sq_r,
+    }
+}
+
+#[inline(always)]
+fn advance_smoother_if_active(smoother: &mut ParamSmoother, n_samples: usize) {
+    if (smoother.peek() - smoother.target_value()).abs() >= 1e-9 {
+        for _ in 0..n_samples {
+            smoother.tick();
+        }
+    }
+}
+
+#[inline(always)]
+fn resolve_input_cal_mult(
+    smoother_cal_in: &mut ParamSmoother,
+    buf_l: &mut [f32],
+    buf_r: &mut [f32],
+    offset: usize,
+    n_samples: usize,
+    process_mono: bool,
+) -> f32 {
+    if (smoother_cal_in.peek() - smoother_cal_in.target_value()).abs() >= 1e-9 {
+        let mut dummy = false;
+        apply_iir_gain_ramp_sub_block(
+            smoother_cal_in,
+            buf_l,
+            buf_r,
+            offset,
+            n_samples,
+            false,
+            &mut dummy,
+            process_mono,
+        );
+        1.0
+    } else {
+        smoother_cal_in.target_value()
+    }
+}
+
+#[inline(always)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "wrapper around apply_output_stage plus optional calibration smoother ramp"
+)]
+fn apply_output_stage_calibrated(
+    buf_out_l: &mut [f32],
+    buf_out_r: &mut [f32],
+    n_out: usize,
+    smoother_cal_out: &mut ParamSmoother,
+    silence_hysteresis: &mut DynamicHysteresis,
+    rt_status: &neural_amp_modeler_rs::common::spsc::RtStatusFlags,
+    process_mono: bool,
+    adaptive: &mut neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute,
+    shared_sample_rate: u32,
+) {
+    let cal_out_smoothing =
+        (smoother_cal_out.peek() - smoother_cal_out.target_value()).abs() >= 1e-9;
+    let scalar_cal_out = if cal_out_smoothing {
+        1.0
+    } else {
+        smoother_cal_out.target_value()
+    };
+    apply_output_stage(
+        buf_out_l,
+        buf_out_r,
+        n_out,
+        scalar_cal_out,
+        silence_hysteresis,
+        rt_status,
+        process_mono,
+        adaptive,
+        shared_sample_rate,
+    );
+    if cal_out_smoothing && n_out > 0 {
+        let mut dummy = false;
+        apply_iir_gain_ramp_sub_block(
+            smoother_cal_out,
+            buf_out_l,
+            buf_out_r,
+            0,
+            n_out,
+            false,
+            &mut dummy,
+            process_mono,
+        );
     }
 }
 

@@ -3,6 +3,10 @@
 
 //! Lock-free shared state between the audio thread and the main thread.
 
+use crate::clap::extensions::calibration::{
+    CalibrationConfig, INPUT_CALIBRATION_LEVEL_DEFAULT_DBU, ModelCalibrationMeta, OutputMode,
+};
+use crate::clap::extensions::params::PARAM_COUNT;
 use crate::clap::gui::dialog_state::{DialogSharedState, IrDialogSharedState};
 use crate::clap::plugin::command_scheduler::CMD_QUEUE_CAPACITY;
 use crate::clap::plugin::lock::lock_cold;
@@ -142,6 +146,8 @@ impl PendingRestartOs {
 pub enum ClapParamPayload {
     /// Parameter update (gain, gate, bypass).
     Params(RtProcessingParams),
+    /// Amp model input calibration & output mode update (`Calibrate Input`, dBu level, `Output Mode`).
+    Calibration(CalibrationConfig),
     /// Loading of a new model pair (transferred/constructed outside RT) and its resampler.
     LoadModel {
         /// Monotonic model generation this load belongs to.
@@ -163,6 +169,8 @@ pub enum ClapParamPayload {
         input_mult_adj: f32,
         /// Model output gain calibration multiplier (from loudness metadata).
         output_mult_adj: f32,
+        /// Amp model calibration metadata (`input_level_dbu`, `output_level_dbu`, `loudness`).
+        cal_meta: ModelCalibrationMeta,
         /// Off-RT measured per-sample inference cost (ns) of `model_l`, seeded
         /// by the loader from the engine's cost calibration (U-02). `None`
         /// selects the conservative per-family prewarm table.
@@ -231,7 +239,7 @@ impl ClapParamPayload {
     /// Command Budgeting.
     pub const fn structural_kind(&self) -> Option<StructuralKind> {
         match self {
-            ClapParamPayload::Params(_) => None,
+            ClapParamPayload::Params(_) | ClapParamPayload::Calibration(_) => None,
             ClapParamPayload::LoadModel { .. } => Some(StructuralKind::Model),
             ClapParamPayload::LoadCabIr { .. } => Some(StructuralKind::CabIr),
             ClapParamPayload::SetOversample { .. } => Some(StructuralKind::Oversample),
@@ -243,7 +251,10 @@ impl ClapParamPayload {
     /// a light parameter update. Structural commands are budgeted to at most
     /// one per audio callback; light updates drain freely.
     pub const fn is_structural(&self) -> bool {
-        !matches!(self, ClapParamPayload::Params(_))
+        !matches!(
+            self,
+            ClapParamPayload::Params(_) | ClapParamPayload::Calibration(_)
+        )
     }
 }
 
@@ -269,6 +280,8 @@ pub struct LoadModelPayload {
     pub input_mult_adj: f32,
     /// Model output gain calibration multiplier.
     pub output_mult_adj: f32,
+    /// Amp model calibration metadata (`input_level_dbu`, `output_level_dbu`, `loudness`).
+    pub cal_meta: ModelCalibrationMeta,
     /// Off-RT measured per-sample inference cost (ns) of `model_l`, produced by
     /// the engine's [`measure_cost_ns_per_sample`](neural_amp_modeler_rs::models::NamModel::measure_cost_ns_per_sample)
     /// (U-02 / F-PR-10). `None` selects the conservative per-family prewarm table.
@@ -337,6 +350,8 @@ pub struct RestoreTxn {
     pub ir: Option<Option<Box<CabSimPair>>>,
     /// Full RT parameter snapshot applied atomically with the model/IR.
     pub params: RtProcessingParams,
+    /// Calibration configuration restored atomically with the preset/project state.
+    pub calibration: CalibrationConfig,
 }
 
 /// Model publication data retained until the restore transaction is acked.
@@ -380,6 +395,8 @@ pub struct RestorePublish {
     pub ir_raw_sample_rate: u32,
     /// IR level policy restored with this transaction.
     pub ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
+    /// Input calibration and output mode configuration restored with this transaction.
+    pub calibration: crate::clap::extensions::calibration::CalibrationConfig,
 }
 
 /// A staged restore awaiting atomic delivery and ack-gated publication.
@@ -431,6 +448,12 @@ pub struct NamModelMetadata {
     pub tone_type: Option<String>,
     /// Date formatted as YYYY-MM-DD.
     pub date: Option<String>,
+    /// Capture input calibration reference level (dBu), when present in metadata.
+    pub input_level_dbu: Option<f32>,
+    /// Capture output reference level (dBu), when present in metadata.
+    pub output_level_dbu: Option<f32>,
+    /// Measured loudness (dB), when present in metadata.
+    pub loudness: Option<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -520,8 +543,14 @@ pub struct UiToRt {
     pub param_oversample: AtomicU32,
     /// Latest Activation Precision parameter value (0=Fast, 1=Standard).
     pub param_activation: AtomicU32,
+    /// Opt-in input calibration toggle (0=Off, 1=On; new project default 0).
+    pub param_calibrate_input: AtomicU32,
+    /// Input calibration reference level (f32 bits in `[-60.0, 60.0]` dBu, default 12.0).
+    pub param_input_calibration_level: AtomicU32,
+    /// Model output mode (0=Raw, 1=Normalized, 2=Calibrated; default 1).
+    pub param_output_mode: AtomicU32,
     /// Gesture and modification flag bitmap per parameter (GUI -> Host/Processor).
-    pub gesture_flags: AtomicU32,
+    pub gesture_flags: AtomicU64,
     /// Monotonic generation counter bumped (Release) by GUI on any param write.
     pub gui_param_generation: AtomicU32,
     /// True if the host has deactivated the R channel via audio-ports-activation.
@@ -571,7 +600,12 @@ impl Default for UiToRt {
             param_slim_override: AtomicU32::new(0),    // Auto by default
             param_oversample: AtomicU32::new(0),       // Off by default
             param_activation: AtomicU32::new(1),       // Standard (exact-grade) by default
-            gesture_flags: AtomicU32::new(0),
+            param_calibrate_input: AtomicU32::new(0),  // Opt-in Off for new instances
+            param_input_calibration_level: AtomicU32::new(
+                INPUT_CALIBRATION_LEVEL_DEFAULT_DBU.to_bits(),
+            ),
+            param_output_mode: AtomicU32::new(OutputMode::Normalized.to_u32()),
+            gesture_flags: AtomicU64::new(0),
             gui_param_generation: AtomicU32::new(0),
             host_r_deactivated: AtomicBool::new(false),
         }
@@ -670,11 +704,11 @@ pub struct ColdShared {
     pub current_cabsim_latency: AtomicU32,
     /// Dynamic accent color based on DAW track color (packed ARGB).
     pub track_accent_color: AtomicU32,
-    /// Parameter indication (mapping, automation, and override) for the 9 parameters.
+    /// Parameter indication (mapping, automation, and override) for all parameters.
     /// Bit 0: Mapped, Bit 1: Automating, Bit 2: Override.
-    pub param_indication: [AtomicU8; 9],
+    pub param_indication: [AtomicU8; PARAM_COUNT],
     /// Indicated/mapped parameter colors (packed ARGB).
-    pub param_indication_color: [AtomicU32; 9],
+    pub param_indication_color: [AtomicU32; PARAM_COUNT],
     /// Model load counter (incremented on each successful model load).
     pub model_load_counter: AtomicU32,
     /// Monotonic model-generation allocator.
@@ -815,6 +849,8 @@ pub struct ColdShared {
     /// (channel full), the snapshot is stored here for retry via
     /// `host.request_callback()` → `housekeeping()`.
     pub in_flight_params: Mutex<Option<neural_amp_modeler_rs::common::params::RtProcessingParams>>,
+    /// In-flight calibration snapshot retained when SPSC push saturates.
+    pub in_flight_calibration: Mutex<Option<CalibrationConfig>>,
     /// Model loaded before `activate()` (state restore while `buffer_size == 0`),
     /// deferred to avoid heap allocation on the audio thread.
     /// See `flush_pending_model()` in load.rs and housekeeping.rs.
@@ -890,6 +926,8 @@ pub struct PendingModel {
     pub input_mult_adj: f32,
     /// Model output gain calibration multiplier.
     pub output_mult_adj: f32,
+    /// Amp model calibration metadata (`input_level_dbu`, `output_level_dbu`, `loudness`).
+    pub cal_meta: ModelCalibrationMeta,
 }
 
 /// A slimmable-rebuilt model delivered from the main thread to the audio
@@ -1010,28 +1048,8 @@ impl ColdShared {
             current_stream_latency: AtomicU32::new(0),
             current_cabsim_latency: AtomicU32::new(0),
             track_accent_color: AtomicU32::new(0),
-            param_indication: [
-                AtomicU8::new(0),
-                AtomicU8::new(0),
-                AtomicU8::new(0),
-                AtomicU8::new(0),
-                AtomicU8::new(0),
-                AtomicU8::new(0),
-                AtomicU8::new(0),
-                AtomicU8::new(0),
-                AtomicU8::new(0),
-            ],
-            param_indication_color: [
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-            ],
+            param_indication: std::array::from_fn(|_| AtomicU8::new(0)),
+            param_indication_color: std::array::from_fn(|_| AtomicU32::new(0)),
             model_load_counter: AtomicU32::new(0),
             model_generation: AtomicU64::new(0),
             ui_last_interaction_ms: AtomicU64::new(UI_NO_INTERACTION),
@@ -1074,6 +1092,7 @@ impl ColdShared {
             pending_restart_os_factor: AtomicU32::new(0),
             last_reported_tail_samples: AtomicU32::new(0),
             in_flight_params: Mutex::new(None),
+            in_flight_calibration: Mutex::new(None),
             pending_model: Mutex::new(None),
             deactivated_dsp: Mutex::new(None),
             dialog_state: Some(Arc::new(DialogSharedState::new())),
@@ -1181,19 +1200,51 @@ impl GuiSharedState {
 
     /// Sets a gesture flag for the parameter (store = true).
     pub fn set_gesture(&self, param_index: usize, flag_shift: u32) {
-        let bit = 1u32 << (param_index as u32 * Self::GESTURE_BITS_PER_PARAM + flag_shift);
+        let bit = 1u64 << (param_index as u32 * Self::GESTURE_BITS_PER_PARAM + flag_shift);
         self.ui_to_rt.gesture_flags.fetch_or(bit, Ordering::Relaxed);
     }
 
     /// Reads and clears a gesture flag (swap to false), returns the previous value.
     pub fn take_gesture(&self, param_index: usize, flag_shift: u32) -> bool {
-        let bit = 1u32 << (param_index as u32 * Self::GESTURE_BITS_PER_PARAM + flag_shift);
+        let bit = 1u64 << (param_index as u32 * Self::GESTURE_BITS_PER_PARAM + flag_shift);
         (self
             .ui_to_rt
             .gesture_flags
             .fetch_and(!bit, Ordering::Relaxed)
             & bit)
             != 0
+    }
+
+    /// Reads the current [`CalibrationConfig`] snapshot from `ui_to_rt` atomics.
+    pub fn calibration_config(&self) -> CalibrationConfig {
+        let calibrate_input = self.ui_to_rt.param_calibrate_input.load(Ordering::Relaxed) != 0;
+        let input_calibration_level_dbu = f32::from_bits(
+            self.ui_to_rt
+                .param_input_calibration_level
+                .load(Ordering::Relaxed),
+        );
+        let output_mode =
+            OutputMode::from_u32(self.ui_to_rt.param_output_mode.load(Ordering::Relaxed));
+        CalibrationConfig {
+            calibrate_input,
+            input_calibration_level_dbu,
+            output_mode,
+        }
+        .sanitized()
+    }
+
+    /// Stores `cfg` into `ui_to_rt` atomics.
+    pub fn store_calibration_config(&self, cfg: CalibrationConfig) {
+        let cfg = cfg.sanitized();
+        self.ui_to_rt
+            .param_calibrate_input
+            .store(u32::from(cfg.calibrate_input), Ordering::Relaxed);
+        self.ui_to_rt
+            .param_input_calibration_level
+            .store(cfg.input_calibration_level_dbu.to_bits(), Ordering::Relaxed);
+        self.ui_to_rt
+            .param_output_mode
+            .store(cfg.output_mode.to_u32(), Ordering::Relaxed);
     }
 
     /// Zeros out all gesture flags.
@@ -1259,8 +1310,9 @@ impl GuiSharedState {
     /// off-RT (housekeeping logs it) — never an invisible loss.
     pub fn write_gui_events(&self, output: &mut OutputEvents) {
         use crate::clap::extensions::params::{
-            PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH,
-            PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
+            PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
+            PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
+            PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
         };
         use clack_plugin::events::event_types::{
             ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent,
@@ -1274,50 +1326,76 @@ impl GuiSharedState {
             return;
         }
 
-        let params: [(u32, u32, &AtomicU32); 8] = [
+        let params: [(u32, u32, &AtomicU32, bool); 11] = [
             (
                 PARAM_INPUT_GAIN,
                 Self::param_index(PARAM_INPUT_GAIN) as u32,
                 &self.ui_to_rt.param_input_gain,
+                true,
             ),
             (
                 PARAM_OUTPUT_GAIN,
                 Self::param_index(PARAM_OUTPUT_GAIN) as u32,
                 &self.ui_to_rt.param_output_gain,
+                true,
             ),
             (
                 PARAM_GATE_THRESH,
                 Self::param_index(PARAM_GATE_THRESH) as u32,
                 &self.ui_to_rt.param_gate_thresh,
+                true,
             ),
             (
                 PARAM_BYPASS,
                 Self::param_index(PARAM_BYPASS) as u32,
                 &self.ui_to_rt.param_bypass,
+                false,
             ),
             (
                 PARAM_ADAPTIVE_COMPUTE,
                 Self::param_index(PARAM_ADAPTIVE_COMPUTE) as u32,
                 &self.ui_to_rt.param_adaptive_compute,
+                false,
             ),
             (
                 PARAM_SLIM_OVERRIDE,
                 Self::param_index(PARAM_SLIM_OVERRIDE) as u32,
                 &self.ui_to_rt.param_slim_override,
+                false,
             ),
             (
                 PARAM_OVERSAMPLE,
                 Self::param_index(PARAM_OVERSAMPLE) as u32,
                 &self.ui_to_rt.param_oversample,
+                false,
             ),
             (
                 PARAM_ACTIVATION,
                 Self::param_index(PARAM_ACTIVATION) as u32,
                 &self.ui_to_rt.param_activation,
+                false,
+            ),
+            (
+                PARAM_CALIBRATE_INPUT,
+                Self::param_index(PARAM_CALIBRATE_INPUT) as u32,
+                &self.ui_to_rt.param_calibrate_input,
+                false,
+            ),
+            (
+                PARAM_INPUT_CALIBRATION_LEVEL,
+                Self::param_index(PARAM_INPUT_CALIBRATION_LEVEL) as u32,
+                &self.ui_to_rt.param_input_calibration_level,
+                true,
+            ),
+            (
+                PARAM_OUTPUT_MODE,
+                Self::param_index(PARAM_OUTPUT_MODE) as u32,
+                &self.ui_to_rt.param_output_mode,
+                false,
             ),
         ];
 
-        for (param_id, param_idx, value_atomic) in &params {
+        for (param_id, param_idx, value_atomic, is_f32_bits) in &params {
             let pi = *param_idx as usize;
 
             if self.take_gesture(pi, Self::GESTURE_BEGIN_SHIFT) {
@@ -1331,7 +1409,12 @@ impl GuiSharedState {
             if self.take_gesture(pi, Self::GESTURE_CHANGED_SHIFT) {
                 // Value is re-read from the atomic on retry, so the latest GUI
                 // value wins while the queue is full (coalescing).
-                let val = f32::from_bits(value_atomic.load(Ordering::Relaxed)) as f64;
+                let raw = value_atomic.load(Ordering::Relaxed);
+                let val = if *is_f32_bits {
+                    f32::from_bits(raw) as f64
+                } else {
+                    raw as f64
+                };
                 let ev = ParamValueEvent::new(
                     0,
                     ClapId::new(*param_id),

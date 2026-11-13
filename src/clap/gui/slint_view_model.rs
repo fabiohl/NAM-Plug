@@ -19,8 +19,10 @@ use clack_extensions::params::HostParams;
 use neural_amp_modeler_rs::math::common::{InstructionSet, SIMD_MATH};
 use slint::ComponentHandle;
 
+use crate::clap::extensions::calibration::{OutputMode, sanitize_calibration_level_dbu};
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_BYPASS, PARAM_GATE_THRESH, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
+    PARAM_ACTIVATION, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_THRESH,
+    PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE,
     PARAM_OVERSAMPLE,
 };
 use crate::clap::gui::GuiHostBridge;
@@ -83,6 +85,40 @@ fn format_model_arch(meta: &crate::clap::plugin::NamModelMetadata) -> String {
     } else {
         format!("{} ({})", meta.architecture, meta.topology)
     }
+}
+
+#[inline]
+fn format_cal_dbu_text(val: f32) -> String {
+    let clean = sanitize_calibration_level_dbu(val);
+    let rounded = (clean * 10.0).round() / 10.0;
+    let normalized = if rounded == 0.0 { 0.0 } else { rounded };
+    if normalized > 0.0 {
+        format!("+{normalized:.1} dBu")
+    } else {
+        format!("{normalized:.1} dBu")
+    }
+}
+
+#[inline]
+fn extract_cal_flags(meta: Option<&crate::clap::plugin::NamModelMetadata>) -> (bool, bool, bool) {
+    match meta {
+        Some(m) => (
+            m.input_level_dbu.is_some(),
+            m.output_level_dbu.is_some(),
+            m.loudness.is_some(),
+        ),
+        None => (false, false, false),
+    }
+}
+
+#[inline]
+fn commit_gui_param(host: Option<&GuiHostBridge>, shared: &GuiSharedState, param_id: u32) {
+    shared.note_ui_interaction();
+    shared.begin_gesture(param_id);
+    shared.mark_param_changed(param_id);
+    shared.end_gesture(param_id);
+    shared.bump_generation();
+    flush_params(host, shared);
 }
 
 /// Full-rate telemetry period (60 Hz) — the rate at which the IEC 60268-10
@@ -321,6 +357,10 @@ pub(crate) struct SlintViewModelInner {
     last_bypass: bool,
     last_oversampling: u32,
     last_activation: u32,
+    last_calibrate_input: bool,
+    last_input_cal_level: f32,
+    last_output_mode: u32,
+    last_cal_flags: (bool, bool, bool),
     last_model_name: String,
     last_model_arch: String,
     last_ir_path: Option<String>,
@@ -608,6 +648,44 @@ impl SlintViewModelInner {
             self.window.set_activation_mode(act as i32);
         }
 
+        let cal_in = self
+            .shared
+            .ui_to_rt
+            .param_calibrate_input
+            .load(Ordering::Relaxed)
+            != 0;
+        if cal_in != self.last_calibrate_input || cal_in != self.window.get_calibrate_input() {
+            self.last_calibrate_input = cal_in;
+            self.window.set_calibrate_input(cal_in);
+        }
+
+        let cal_level = sanitize_calibration_level_dbu(f32::from_bits(
+            self.shared
+                .ui_to_rt
+                .param_input_calibration_level
+                .load(Ordering::Relaxed),
+        ));
+        if (cal_level - self.last_input_cal_level).abs() > f32::EPSILON
+            || (cal_level - self.window.get_input_calibration_level_dbu()).abs() > f32::EPSILON
+        {
+            self.last_input_cal_level = cal_level;
+            self.window.set_input_calibration_level_dbu(cal_level);
+            self.window
+                .set_input_calibration_text(format_cal_dbu_text(cal_level).into());
+        }
+
+        let out_mode = OutputMode::from_u32(
+            self.shared
+                .ui_to_rt
+                .param_output_mode
+                .load(Ordering::Relaxed),
+        )
+        .to_u32();
+        if out_mode != self.last_output_mode || out_mode as i32 != self.window.get_output_mode() {
+            self.last_output_mode = out_mode;
+            self.window.set_output_mode(out_mode as i32);
+        }
+
         // ── 4. Model Card & IR Card Status ────────────────────────────────────
         let model_loading = self.shared.cold.ui_loading.load(Ordering::Relaxed);
         if model_loading != self.window.get_model_loading() {
@@ -653,6 +731,13 @@ impl SlintViewModelInner {
             if self.last_model_arch != current_arch {
                 self.last_model_arch = current_arch.clone();
                 self.window.set_model_arch(current_arch.into());
+            }
+            let cal_flags = extract_cal_flags(meta_guard.as_ref());
+            if self.last_cal_flags != cal_flags {
+                self.last_cal_flags = cal_flags;
+                self.window.set_has_input_cal_meta(cal_flags.0);
+                self.window.set_has_output_cal_meta(cal_flags.1);
+                self.window.set_has_loudness_meta(cal_flags.2);
             }
         }
 
@@ -892,14 +977,24 @@ impl SlintViewModel {
         window.set_has_model(initial_has_model);
         window.set_model_name(initial_model_name.as_str().into());
 
-        let initial_model_arch = shared
+        let (initial_model_arch, initial_cal_flags) = shared
             .cold
             .ui_model_metadata
             .try_lock()
             .ok()
-            .and_then(|guard| guard.as_ref().map(format_model_arch))
-            .unwrap_or_else(|| "No model loaded".to_string());
+            .map(|guard| {
+                let arch = guard
+                    .as_ref()
+                    .map(format_model_arch)
+                    .unwrap_or_else(|| "No model loaded".to_string());
+                let flags = extract_cal_flags(guard.as_ref());
+                (arch, flags)
+            })
+            .unwrap_or_else(|| ("No model loaded".to_string(), (false, false, false)));
         window.set_model_arch(initial_model_arch.clone().into());
+        window.set_has_input_cal_meta(initial_cal_flags.0);
+        window.set_has_output_cal_meta(initial_cal_flags.1);
+        window.set_has_loudness_meta(initial_cal_flags.2);
 
         let initial_has_ir = shared
             .cold
@@ -976,6 +1071,25 @@ impl SlintViewModel {
             _ => "1x (Off)".into(),
         });
         window.set_activation_mode(initial_act as i32);
+
+        let initial_cal_in = shared
+            .ui_to_rt
+            .param_calibrate_input
+            .load(Ordering::Relaxed)
+            != 0;
+        let initial_cal_level = sanitize_calibration_level_dbu(f32::from_bits(
+            shared
+                .ui_to_rt
+                .param_input_calibration_level
+                .load(Ordering::Relaxed),
+        ));
+        let initial_out_mode =
+            OutputMode::from_u32(shared.ui_to_rt.param_output_mode.load(Ordering::Relaxed))
+                .to_u32();
+        window.set_calibrate_input(initial_cal_in);
+        window.set_input_calibration_level_dbu(initial_cal_level);
+        window.set_input_calibration_text(format_cal_dbu_text(initial_cal_level).into());
+        window.set_output_mode(initial_out_mode as i32);
 
         // ── Bind Input Gain Callbacks ─────────────────────────────────────────
         {
@@ -1228,6 +1342,9 @@ impl SlintViewModel {
                     w.set_has_model(false);
                     w.set_model_name("No model loaded".into());
                     w.set_model_arch("No model loaded".into());
+                    w.set_has_input_cal_meta(false);
+                    w.set_has_output_cal_meta(false);
+                    w.set_has_loudness_meta(false);
                 }
             });
         }
@@ -1318,6 +1435,59 @@ impl SlintViewModel {
             });
         }
 
+        // ── Bind Calibration & Output Mode Controls ───────────────────────────
+        {
+            let shared = Arc::clone(&shared);
+            let window_weak = window.as_weak();
+            window.on_calibrate_input_toggled(move || {
+                let prev = shared
+                    .ui_to_rt
+                    .param_calibrate_input
+                    .load(Ordering::Relaxed)
+                    != 0;
+                let active = !prev;
+                shared
+                    .ui_to_rt
+                    .param_calibrate_input
+                    .store(u32::from(active), Ordering::Relaxed);
+                commit_gui_param(host.as_ref(), &shared, PARAM_CALIBRATE_INPUT);
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_calibrate_input(active);
+                }
+            });
+        }
+        {
+            let shared = Arc::clone(&shared);
+            let window_weak = window.as_weak();
+            window.on_input_calibration_level_changed(move |val| {
+                let sanitized = sanitize_calibration_level_dbu(val);
+                shared
+                    .ui_to_rt
+                    .param_input_calibration_level
+                    .store(sanitized.to_bits(), Ordering::Relaxed);
+                commit_gui_param(host.as_ref(), &shared, PARAM_INPUT_CALIBRATION_LEVEL);
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_input_calibration_level_dbu(sanitized);
+                    w.set_input_calibration_text(format_cal_dbu_text(sanitized).into());
+                }
+            });
+        }
+        {
+            let shared = Arc::clone(&shared);
+            let window_weak = window.as_weak();
+            window.on_output_mode_changed(move |val| {
+                let mode = OutputMode::from_u32(val.max(0) as u32);
+                shared
+                    .ui_to_rt
+                    .param_output_mode
+                    .store(mode.to_u32(), Ordering::Relaxed);
+                commit_gui_param(host.as_ref(), &shared, PARAM_OUTPUT_MODE);
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_output_mode(mode.to_u32() as i32);
+                }
+            });
+        }
+
         let inner = Rc::new(RefCell::new(SlintViewModelInner {
             window,
             shared,
@@ -1328,6 +1498,10 @@ impl SlintViewModel {
             last_bypass: initial_bypass,
             last_oversampling: initial_os,
             last_activation: initial_act,
+            last_calibrate_input: initial_cal_in,
+            last_input_cal_level: initial_cal_level,
+            last_output_mode: initial_out_mode,
+            last_cal_flags: initial_cal_flags,
             last_model_name: initial_model_name,
             last_model_arch: initial_model_arch,
             last_ir_path: None,

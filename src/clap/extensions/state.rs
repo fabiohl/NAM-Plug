@@ -5,9 +5,14 @@
 //! Allows the plugin to save and load its current configuration (parameters and model).
 //!
 //! Payload versioning:
-//! - v0 (legacy, CLAP v1.5.x): plain JSON `ProcessingParams`, without a `version` field.
-//! - v1 (current): envelope `StateEnvelope { version: 1, params: {...} }`.
+//! - v0 (legacy, CLAP v1.5.x): plain JSON `ProcessingParams`, without a `version` field
+//!   (restored with `calibrate_input = true`, `12.0 dBu`, `OutputMode::Normalized`).
+//! - v1: envelope `StateEnvelope { version: 1, params, ir_level_policy }` without calibration
+//!   fields (restored with `calibrate_input = true`, `12.0 dBu`, `OutputMode::Normalized`).
+//! - v2 (current): envelope `StateEnvelope { version: 2, params, ir_level_policy, calibration }`
+//!   with explicit opt-in calibration fields (new-project default `calibrate_input = false`).
 
+use crate::clap::extensions::calibration::CalibrationConfig;
 use crate::clap::extensions::ir_level_policy::IrLevelPolicy;
 use crate::clap::extensions::state_transaction::{self, RestoreMode};
 use crate::clap::plugin::NamClapMainThread;
@@ -21,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::sync::atomic::Ordering;
 
-pub(crate) const CURRENT_STATE_VERSION: u32 = 1;
+pub(crate) const CURRENT_STATE_VERSION: u32 = 2;
 /// Maximum allowed size for a CLAP state stream (32 MiB).
 pub(crate) const MAX_STATE_STREAM_SIZE: usize = 32 * 1024 * 1024;
 
@@ -52,24 +57,33 @@ pub(crate) struct StateEnvelope {
     pub(crate) params: ProcessingParams,
     #[serde(default)]
     pub(crate) ir_level_policy: IrLevelPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) calibration: Option<CalibrationConfig>,
 }
 
-/// Shared helper: serialises `ProcessingParams` wrapped in a v1 `StateEnvelope`
-/// using the default [`IrLevelPolicy`].
+/// Shared helper: serialises `ProcessingParams` wrapped in a v2 `StateEnvelope`
+/// using the default [`IrLevelPolicy`] and [`CalibrationConfig`].
 #[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn serialize_envelope(params: &ProcessingParams) -> Result<Vec<u8>, PluginError> {
-    serialize_envelope_with_policy(params, IrLevelPolicy::default())
+    serialize_envelope_v2(
+        params,
+        IrLevelPolicy::default(),
+        CalibrationConfig::default(),
+    )
 }
 
-/// Serialises `ProcessingParams` and `ir_level_policy` wrapped in a v1 `StateEnvelope`.
-pub(crate) fn serialize_envelope_with_policy(
+/// Serialises `ProcessingParams`, `ir_level_policy`, and `calibration` wrapped in
+/// a v2 `StateEnvelope`.
+pub(crate) fn serialize_envelope_v2(
     params: &ProcessingParams,
     ir_level_policy: IrLevelPolicy,
+    calibration: CalibrationConfig,
 ) -> Result<Vec<u8>, PluginError> {
     let envelope = StateEnvelope {
         version: CURRENT_STATE_VERSION,
         params: params.clone(),
         ir_level_policy,
+        calibration: Some(calibration.sanitized()),
     };
     serde_json::to_vec(&envelope)
         .map_err(|e| PluginError::Error(Box::new(StateError::Serialize(e))))
@@ -159,7 +173,8 @@ impl<'a> PluginStateImpl for NamClapMainThread<'a> {
 
         let ir_policy =
             IrLevelPolicy::from_u8(self.shared.cold.ir_level_policy.load(Ordering::Relaxed));
-        let serialized = serialize_envelope_with_policy(&self.params.borrow(), ir_policy)?;
+        let calibration = self.shared.calibration_config();
+        let serialized = serialize_envelope_v2(&self.params.borrow(), ir_policy, calibration)?;
         let blob_len = serialized.len();
 
         output
@@ -197,17 +212,27 @@ impl<'a> PluginStateImpl for NamClapMainThread<'a> {
 
 #[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn load_state(buffer: &[u8]) -> Result<ProcessingParams, PluginError> {
-    let (params, _policy) = load_state_with_policy(buffer)?;
+    let (params, _policy, _calibration) = load_state_with_policy_and_calibration(buffer)?;
     Ok(params)
 }
 
-pub(crate) fn load_state_with_policy(
+pub(crate) fn load_state_with_policy_and_calibration(
     buffer: &[u8],
-) -> Result<(ProcessingParams, IrLevelPolicy), PluginError> {
+) -> Result<(ProcessingParams, IrLevelPolicy, CalibrationConfig), PluginError> {
     if let Ok(envelope) = serde_json::from_slice::<StateEnvelope>(buffer) {
+        let calibration = match envelope.calibration {
+            Some(cal) => {
+                cal.validate()
+                    .map_err(|_| PluginError::Error(Box::new(StateError::CorruptedEnvelope)))?;
+                cal
+            }
+            None if envelope.version <= 1 => CalibrationConfig::legacy_restored_default(),
+            None => CalibrationConfig::new_project_default(),
+        };
         return Ok((
             migrate(envelope.version, envelope.params),
             envelope.ir_level_policy,
+            calibration,
         ));
     }
 
@@ -223,7 +248,11 @@ pub(crate) fn load_state_with_policy(
     let params: ProcessingParams = serde_json::from_slice(buffer)
         .map_err(|e| PluginError::Error(Box::new(StateError::Deserialize(e))))?;
 
-    Ok((migrate(0, params), IrLevelPolicy::PeakNormalized))
+    Ok((
+        migrate(0, params),
+        IrLevelPolicy::PeakNormalized,
+        CalibrationConfig::legacy_restored_default(),
+    ))
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ import { IrCard } from "IrCard.slint";
 export component MainWindow inherits Window {
     title: "NAM-Plug";
     width: 600px;
-    height: 275px;
+    height: 312px;
     background: #1A1D23;
     default-font-family: "sans-serif";
 
@@ -43,6 +43,13 @@ export component MainWindow inherits Window {
     in-out property <bool> gate_active: false;
     in-out property <int> oversample_mode: 0; // 0: Off, 1: 2x, 2: 4x
     in-out property <int> activation_mode: 1; // 1: Standard, 0: Fast
+    in-out property <bool> calibrate_input: false;
+    in-out property <float> input_calibration_level_dbu: 12.0;
+    in-out property <string> input_calibration_text: "12.0 dBu";
+    in-out property <int> output_mode: 1; // 0: Raw, 1: Normalized, 2: Calibrated
+    in-out property <bool> has_input_cal_meta: false;
+    in-out property <bool> has_output_cal_meta: false;
+    in-out property <bool> has_loudness_meta: false;
 
     // ── Zone 3 Properties: Telemetry & VU Meters ──────────────
     in-out property <float> in_peak_l: 0.0;
@@ -104,6 +111,9 @@ export component MainWindow inherits Window {
     callback oversample_changed(int);
     callback activation_changed(int);
     callback cycle_oversample();
+    callback calibrate_input_toggled();
+    callback input_calibration_level_changed(float);
+    callback output_mode_changed(int);
     // Lifecycle bridge: invoked by the CLAP gui show()/hide() paths so the
     // 60 Hz telemetry timer can be suspended with the window (F-UX-08).
     callback set_telemetry_active(bool);
@@ -113,10 +123,10 @@ export component MainWindow inherits Window {
         spacing: 5px;
 
         // ═════════════════════════════════════════════════════════════════════
-        // Upper Area: Zones 1, 2, 3, 4 (232 px exact height)
+        // Upper Area: Zones 1, 2, 3, 4 (269 px exact height)
         // ═════════════════════════════════════════════════════════════════════
         HorizontalLayout {
-            height: 232px;
+            height: 269px;
             spacing: 6px;
 
             // ── Zone 1: Identity, Model & IR Cards (145 px width) ───────────
@@ -458,6 +468,195 @@ export component MainWindow inherits Window {
                                         font-size: 8px;
                                         font-weight: 700;
                                         color: root.activation_mode == 0 ? #ffffff : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Calibration Separator
+                    Rectangle {
+                        height: 1px;
+                        background: #2E3440;
+                    }
+
+                    // Input Calibration & Output Mode Row
+                    HorizontalLayout {
+                        alignment: space-between;
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        height: 22px;
+
+                        // Input Calibration Toggle + Stepper (dBu)
+                        HorizontalLayout {
+                            spacing: 3px;
+                            alignment: start;
+                            in property <bool> cal_in_available: !root.has_model || root.has_input_cal_meta;
+
+                            TouchArea {
+                                width: 42px;
+                                enabled: parent.cal_in_available;
+                                mouse-cursor: self.enabled ? pointer : default;
+                                clicked => {
+                                    root.calibrate_input_toggled();
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    opacity: (!root.has_model || root.has_input_cal_meta) ? 1.0 : 0.45;
+                                    background: root.calibrate_input ? #00D4AA : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.calibrate_input ? #00D4AA : #2E3440;
+                                    Text {
+                                        text: "CAL IN";
+                                        font-size: 7.5px;
+                                        font-weight: 700;
+                                        color: root.calibrate_input ? #121315 : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            TouchArea {
+                                width: 14px;
+                                enabled: (!root.has_model || root.has_input_cal_meta) && root.calibrate_input;
+                                mouse-cursor: self.enabled ? pointer : default;
+                                clicked => {
+                                    root.input_calibration_level_changed(Math.max(-60.0, root.input_calibration_level_dbu - 1.0));
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    opacity: ((!root.has_model || root.has_input_cal_meta) && root.calibrate_input) ? 1.0 : 0.4;
+                                    background: parent.has-hover ? #2e3440 : #1a1d23;
+                                    border-width: 0.5px;
+                                    border-color: #2E3440;
+                                    Text {
+                                        text: "-";
+                                        font-size: 9px;
+                                        font-weight: 700;
+                                        color: #cdd6f4;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 50px;
+                                opacity: (!root.has_model || root.has_input_cal_meta) ? 1.0 : 0.45;
+                                Text {
+                                    text: (root.has_model && !root.has_input_cal_meta) ? "No meta" : root.input_calibration_text;
+                                    font-size: 8px;
+                                    font-weight: 700;
+                                    color: (root.calibrate_input && (!root.has_model || root.has_input_cal_meta)) ? #e0e6ed : #8fa1b3;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                width: 14px;
+                                enabled: (!root.has_model || root.has_input_cal_meta) && root.calibrate_input;
+                                mouse-cursor: self.enabled ? pointer : default;
+                                clicked => {
+                                    root.input_calibration_level_changed(Math.min(60.0, root.input_calibration_level_dbu + 1.0));
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    opacity: ((!root.has_model || root.has_input_cal_meta) && root.calibrate_input) ? 1.0 : 0.4;
+                                    background: parent.has-hover ? #2e3440 : #1a1d23;
+                                    border-width: 0.5px;
+                                    border-color: #2E3440;
+                                    Text {
+                                        text: "+";
+                                        font-size: 9px;
+                                        font-weight: 700;
+                                        color: #cdd6f4;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Output Mode Segmented Switch (Raw, Norm, Cal)
+                        HorizontalLayout {
+                            spacing: 2px;
+                            alignment: end;
+                            Text {
+                                text: "Out:";
+                                font-size: 8px;
+                                font-weight: 700;
+                                color: #8fa1b3;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                width: 25px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.output_mode = 0;
+                                    root.output_mode_changed(0);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.output_mode == 0 ? #3498db : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.output_mode == 0 ? #3498db : #2E3440;
+                                    Text {
+                                        text: "Raw";
+                                        font-size: 7.5px;
+                                        font-weight: 700;
+                                        color: root.output_mode == 0 ? #ffffff : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 29px;
+                                enabled: !root.has_model || root.has_loudness_meta;
+                                mouse-cursor: self.enabled ? pointer : default;
+                                clicked => {
+                                    root.output_mode = 1;
+                                    root.output_mode_changed(1);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    opacity: (!root.has_model || root.has_loudness_meta) ? 1.0 : 0.4;
+                                    background: root.output_mode == 1 ? #3498db : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.output_mode == 1 ? #3498db : #2E3440;
+                                    Text {
+                                        text: "Norm";
+                                        font-size: 7.5px;
+                                        font-weight: 700;
+                                        color: root.output_mode == 1 ? #ffffff : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 22px;
+                                enabled: !root.has_model || root.has_output_cal_meta;
+                                mouse-cursor: self.enabled ? pointer : default;
+                                clicked => {
+                                    root.output_mode = 2;
+                                    root.output_mode_changed(2);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    opacity: (!root.has_model || root.has_output_cal_meta) ? 1.0 : 0.4;
+                                    background: root.output_mode == 2 ? #3498db : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.output_mode == 2 ? #3498db : #2E3440;
+                                    Text {
+                                        text: "Cal";
+                                        font-size: 7.5px;
+                                        font-weight: 700;
+                                        color: root.output_mode == 2 ? #ffffff : #8fa1b3;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }

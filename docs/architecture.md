@@ -132,19 +132,22 @@ Core DSP neural inference is mono by definition. Buffer extraction and VU meteri
 
 ### 3.2 Parameter Surface Catalog
 
-Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–8):
+Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–11):
 
-| Parameter                | ID                         | Type    | Range / Options                                                 | Description                                                                     |
-|:------------------------ |:-------------------------- |:------- |:--------------------------------------------------------------- |:------------------------------------------------------------------------------- |
-| **Input Gain**           | `input_gain_db` (0)        | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.                                   |
-| **Output Gain**          | `output_gain_db` (1)       | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.                                  |
-| **Gate Threshold**       | `gate_threshold_db` (2)    | dB      | `-90.0` to `-40.0` (default `-90.0`, off by default)            | Noise-gate opening threshold.                                                   |
-| **Bypass**               | `bypass` (3)               | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables neural processing (64-sample click-free linear crossfade passthrough). |
-| **Active Model**         | `active_model` (4)         | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.                            |
-| **Adaptive Compute**     | `adaptive_compute` (5)     | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                                              |
-| **Slim Override**        | `slim_override` (6)        | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                                      |
-| **Oversampling**         | `oversample` (7)           | Stepped | `0` (`Off` / default), `1` (`2x`), `2` (`4x`)                   | Activation oversampling factor.                                                 |
-| **Activation Precision** | `activation_precision` (8) | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact / `Fast` Padé-minimax).                             |
+| Parameter                    | ID                            | Type    | Range / Options                                                 | Description                                                                     |
+|:---------------------------- |:----------------------------- |:------- |:--------------------------------------------------------------- |:------------------------------------------------------------------------------- |
+| **Input Gain**               | `input_gain_db` (0)           | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.                                   |
+| **Output Gain**              | `output_gain_db` (1)          | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.                                  |
+| **Gate Threshold**           | `gate_threshold_db` (2)       | dB      | `-90.0` to `-40.0` (default `-90.0`, off by default)            | Noise-gate opening threshold.                                                   |
+| **Bypass**                   | `bypass` (3)                  | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables neural processing (64-sample click-free linear crossfade passthrough). |
+| **Active Model**             | `active_model` (4)            | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.                            |
+| **Adaptive Compute**         | `adaptive_compute` (5)        | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                                              |
+| **Slim Override**            | `slim_override` (6)           | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                                      |
+| **Oversampling**             | `oversample` (7)              | Stepped | `0` (`Off` / default), `1` (`2x`), `2` (`4x`)                   | Activation oversampling factor.                                                 |
+| **Activation Precision**     | `activation_precision` (8)    | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact / `Fast` Padé-minimax).                             |
+| **Calibrate Input**          | `calibrate_input` (9)         | Binary  | `0` (`Off` / default) / `1` (`On`)                              | Enables pre-nonlinearity input calibration from model `input_level` dBu.         |
+| **Input Calibration Level**  | `input_calibration_level` (10)| dBu     | `-60.0` to `+60.0` dBu (default `12.0`)                         | Reference 0 dBFS input level in dBu used for calibrated gain equations.         |
+| **Output Mode**              | `output_mode` (11)            | Stepped | `0` (`Raw`), `1` (`Normalized` / default), `2` (`Calibrated`)   | Output level normalization mode (`loudness`, `output_level`, or unity).         |
 
 The table lists the host-facing (authoritative) ranges. The GUI knobs expose a narrower, ergonomic subset (`INPUT` −20 to +20 dB, `OUTPUT` −40 to +20 dB); values written by the GUI are clamped to the host range by the parameter layer (`src/clap/extensions/params/mod.rs`).
 
@@ -451,7 +454,11 @@ The wet DSP chain introduces algorithmic latency (`cached_effective_latency` = r
 
 ### 6.3 Model Gain Calibration Isolation
 
-NAM models supply embedded metadata (`input_level_dbu`, `loudness`). Calibration adjustments (`input_mult_adj`, `output_mult_adj`) are passed separately via `DspPipelineContext` rather than multiplying user gain smoothers, ensuring DAW parameter automation never alters intrinsic model calibration.
+NAM models may supply embedded metadata (`input_level_dbu`, `output_level_dbu`, `loudness`). Linear calibration multipliers are computed in `f64::powf` (avoiding `GainLUT` ±30 dB saturation across the full `[-60, +60]` dBu calibration range) and driven through dedicated per-processor `smoother_cal_in` and `smoother_cal_out` exponential smoothers into `DspPipelineContext` rather than multiplying user gain smoothers:
+
+- `input_mult_adj`: when `calibrate_input` is enabled and `input_level_dbu` exists, `10^((input_calibration_level_dbu - input_level_dbu) / 20)` applied post-gate / pre-nonlinearity; otherwise `1.0` (the noise gate continues evaluating raw pre-calibration input).
+- `output_mult_adj`: `Raw` -> `1.0`; `Normalized` -> `10^((-18.0 - loudness) / 20)` if `loudness` exists else `1.0`; `Calibrated` -> `10^((output_level_dbu - input_calibration_level_dbu) / 20)` if `output_level_dbu` exists else `1.0`.
+- **State Migration (`StateEnvelope` v2):** Sessions persist `CalibrationState` (`calibrate_input`, `input_calibration_level_dbu`, `output_mode`). Restoring `v0`/`v1` envelopes lacking `"calibration"` preserves upstream legacy playback semantics (`calibrate_input = true`, `12.0` dBu, `Normalized`), while new instances default to `calibrate_input = false`, `12.0` dBu, `Normalized`.
 
 ### 6.4 Host Event Scheduling, In-Block Slicing & Anomaly Containment
 

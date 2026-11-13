@@ -659,6 +659,12 @@ mod tests {
                             model_rate: 48000,
                             input_mult_adj,
                             output_mult_adj,
+                            cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta {
+                                has_model: true,
+                                loudness: None,
+                                input_level_dbu: None,
+                                output_level_dbu: None,
+                            },
                             prewarm_cost_ns: None,
                         })
                         .expect("model burst push must succeed");
@@ -710,10 +716,17 @@ mod tests {
                             model_rate: 48000,
                             input_mult_adj,
                             output_mult_adj,
+                            cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta {
+                                has_model: true,
+                                loudness: None,
+                                input_level_dbu: None,
+                                output_level_dbu: None,
+                            },
                             prewarm_cost_ns: None,
                         }),
                         ir: Some(Some(build_ir(4096))),
                         params: RtProcessingParams::default().with_oversample(OversampleFactor::X2),
+                        calibration: crate::clap::extensions::calibration::CalibrationConfig::new_project_default(),
                     }))
                     .expect("mixed RestoreTxn push must succeed");
             }
@@ -745,6 +758,7 @@ mod tests {
                             ir: Some(None),
                             params: RtProcessingParams::default()
                                 .with_oversample(OversampleFactor::X2),
+                            calibration: crate::clap::extensions::calibration::CalibrationConfig::new_project_default(),
                         }))
                         .expect("restore burst push must succeed");
                 }

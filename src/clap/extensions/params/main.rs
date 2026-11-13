@@ -4,9 +4,14 @@
 //! `PluginMainThreadParams` implementation for the Main Thread.
 
 use super::{
-    PARAM_ACTIVATION, PARAM_ACTIVE_MODEL, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH,
-    PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32,
-    bypass_f32_to_bool, sanitize_param_value, sanitize_param_value_f64,
+    PARAM_ACTIVATION, PARAM_ACTIVE_MODEL, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS,
+    PARAM_CALIBRATE_INPUT, PARAM_COUNT, PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL,
+    PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
+    bypass_bool_to_u32, bypass_f32_to_bool, sanitize_param_value, sanitize_param_value_f64,
+};
+use crate::clap::extensions::calibration::{
+    CalibrationConfig, INPUT_CALIBRATION_LEVEL_DEFAULT_DBU, INPUT_CALIBRATION_LEVEL_MAX_DBU,
+    INPUT_CALIBRATION_LEVEL_MIN_DBU, OutputMode,
 };
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::plugin::lock::lock_cold;
@@ -21,7 +26,7 @@ use std::ffi::CStr;
 
 impl PluginMainThreadParams for NamClapMainThread<'_> {
     fn count(&self) -> u32 {
-        9
+        PARAM_COUNT as u32
     }
 
     fn get_info(&self, param_index: u32, info: &mut ParamInfoWriter) {
@@ -149,6 +154,44 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     default_value: 1.0,
                 });
             }
+            PARAM_CALIBRATE_INPUT => {
+                info.set(&ParamInfo {
+                    id: ClapId::new(PARAM_CALIBRATE_INPUT),
+                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
+                    cookie: clack_plugin::utils::Cookie::empty(),
+                    name: b"Calibrate Input",
+                    module: b"Calibration",
+                    min_value: 0.0,
+                    max_value: 1.0,
+                    default_value: 0.0,
+                });
+            }
+            PARAM_INPUT_CALIBRATION_LEVEL => {
+                info.set(&ParamInfo {
+                    id: ClapId::new(PARAM_INPUT_CALIBRATION_LEVEL),
+                    flags: ParamInfoFlags::IS_AUTOMATABLE,
+                    cookie: clack_plugin::utils::Cookie::empty(),
+                    name: b"Input Cal Level",
+                    module: b"Calibration",
+                    min_value: INPUT_CALIBRATION_LEVEL_MIN_DBU as f64,
+                    max_value: INPUT_CALIBRATION_LEVEL_MAX_DBU as f64,
+                    default_value: INPUT_CALIBRATION_LEVEL_DEFAULT_DBU as f64,
+                });
+            }
+            PARAM_OUTPUT_MODE => {
+                info.set(&ParamInfo {
+                    id: ClapId::new(PARAM_OUTPUT_MODE),
+                    flags: ParamInfoFlags::IS_AUTOMATABLE
+                        | ParamInfoFlags::IS_STEPPED
+                        | ParamInfoFlags::IS_ENUM,
+                    cookie: clack_plugin::utils::Cookie::empty(),
+                    name: b"Output Mode",
+                    module: b"Calibration",
+                    min_value: 0.0,
+                    max_value: 2.0,
+                    default_value: OutputMode::Normalized.to_f32() as f64,
+                });
+            }
             _ => {}
         }
     }
@@ -217,6 +260,24 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     .param_activation
                     .load(std::sync::atomic::Ordering::Relaxed) as f64,
             ),
+            PARAM_CALIBRATE_INPUT => Some(
+                self.shared
+                    .ui_to_rt
+                    .param_calibrate_input
+                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
+            ),
+            PARAM_INPUT_CALIBRATION_LEVEL => Some(f32::from_bits(
+                self.shared
+                    .ui_to_rt
+                    .param_input_calibration_level
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ) as f64),
+            PARAM_OUTPUT_MODE => Some(
+                self.shared
+                    .ui_to_rt
+                    .param_output_mode
+                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
+            ),
             _ => None,
         }
     }
@@ -268,6 +329,15 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 0 => writer.write_str("Fast"),
                 _ => writer.write_str("Standard"),
             },
+            PARAM_CALIBRATE_INPUT => {
+                if bypass_f32_to_bool(value as f32) {
+                    writer.write_str("On")
+                } else {
+                    writer.write_str("Off")
+                }
+            }
+            PARAM_INPUT_CALIBRATION_LEVEL => writer.write_fmt(format_args!("{:.1} dBu", value)),
+            PARAM_OUTPUT_MODE => writer.write_str(OutputMode::from_f32(value as f32).as_str()),
             _ => Ok(()),
         }
     }
@@ -354,6 +424,27 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     if val.is_finite() { Some(val) } else { None }
                 }
             },
+            PARAM_CALIBRATE_INPUT => match text_str.trim().to_ascii_lowercase().as_str() {
+                "off" | "0" | "false" => Some(0.0),
+                "on" | "1" | "true" => Some(1.0),
+                _ => None,
+            },
+            PARAM_INPUT_CALIBRATION_LEVEL => {
+                let clean = text_str
+                    .trim()
+                    .trim_end_matches("dBu")
+                    .trim_end_matches("dbu")
+                    .trim_end_matches("dB")
+                    .trim_end_matches("db")
+                    .trim();
+                let lower = clean.to_ascii_lowercase();
+                if lower.contains("nan") || lower.contains("inf") {
+                    return None;
+                }
+                let val = clean.parse::<f64>().ok()?;
+                if val.is_finite() { Some(val) } else { None }
+            }
+            PARAM_OUTPUT_MODE => OutputMode::from_text(text_str).map(|m| m.to_f32() as f64),
             _ => None,
         };
 
@@ -364,6 +455,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
         self.shared.write_gui_events(output);
 
         let mut param_changed = false;
+        let mut cal_changed = false;
 
         for event in input {
             let Some(param_event) = event.as_event::<ParamValueEvent>() else {
@@ -441,23 +533,65 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                         .param_activation
                         .store(mode as u32, std::sync::atomic::Ordering::Relaxed);
                 }
+                PARAM_CALIBRATE_INPUT => {
+                    let on = bypass_f32_to_bool(val);
+                    self.shared
+                        .ui_to_rt
+                        .param_calibrate_input
+                        .store(u32::from(on), std::sync::atomic::Ordering::Relaxed);
+                    cal_changed = true;
+                    continue;
+                }
+                PARAM_INPUT_CALIBRATION_LEVEL => {
+                    self.shared
+                        .ui_to_rt
+                        .param_input_calibration_level
+                        .store(val.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                    cal_changed = true;
+                    continue;
+                }
+                PARAM_OUTPUT_MODE => {
+                    let mode = OutputMode::from_f32(val);
+                    self.shared
+                        .ui_to_rt
+                        .param_output_mode
+                        .store(mode.to_u32(), std::sync::atomic::Ordering::Relaxed);
+                    cal_changed = true;
+                    continue;
+                }
                 _ => continue,
             }
             param_changed = true;
         }
 
-        if param_changed {
+        if param_changed || cal_changed {
             // Scoped params borrow: released before the SPSC producer borrow
             // below, and both are released before the host
             // `request_callback()` in the error path.
-            let snapshot = RtProcessingParams::from_processing_params(&self.params.borrow());
+            let snapshot = param_changed
+                .then(|| RtProcessingParams::from_processing_params(&self.params.borrow()));
+            let cal_cfg: Option<CalibrationConfig> =
+                cal_changed.then(|| self.shared.calibration_config());
             let flush_result = {
                 let mut producer = self.cmd_producer.borrow_mut();
-                producer.push_params(snapshot);
+                if let Some(s) = snapshot {
+                    producer.push_params(s);
+                }
+                if let Some(c) = cal_cfg {
+                    producer.push_calibration(c);
+                }
                 producer.force_flush()
             };
             if flush_result.is_err() {
-                *lock_cold(&self.shared.cold.in_flight_params, "in_flight_params") = Some(snapshot);
+                if let Some(s) = snapshot {
+                    *lock_cold(&self.shared.cold.in_flight_params, "in_flight_params") = Some(s);
+                }
+                if let Some(c) = cal_cfg {
+                    *lock_cold(
+                        &self.shared.cold.in_flight_calibration,
+                        "in_flight_calibration",
+                    ) = Some(c);
+                }
                 self.shared.bump_generation();
                 self.host.request_callback();
             }

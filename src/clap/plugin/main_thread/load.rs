@@ -87,10 +87,8 @@ pub(crate) struct PreparedModel {
     model_r: Option<Box<StaticModel>>,
     /// Model native sample rate (Hz).
     model_rate: u32,
-    /// Input gain calibration multiplier.
-    input_mult_adj: f32,
-    /// Output gain calibration multiplier.
-    output_mult_adj: f32,
+    /// Model calibration metadata extracted at load time.
+    cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta,
     /// Content SHA-256 hex digest adopted as the portable asset identity.
     model_hash: String,
     /// Metadata for GUI display.
@@ -214,6 +212,10 @@ impl<'a> NamClapMainThread<'a> {
         }
 
         let metadata = model_pair.metadata.clone();
+        let cal_meta =
+            crate::clap::extensions::calibration::ModelCalibrationMeta::from_loaded_model(
+                &model_pair,
+            );
         let ui_metadata = NamModelMetadata {
             architecture: model_pair.architecture.clone(),
             topology: model_pair.topology.clone(),
@@ -233,6 +235,9 @@ impl<'a> NamClapMainThread<'a> {
                     _ => String::new(),
                 })
                 .filter(|s| !s.is_empty()),
+            input_level_dbu: cal_meta.input_level_dbu,
+            output_level_dbu: cal_meta.output_level_dbu,
+            loudness: cal_meta.loudness,
         };
 
         let model_info = model_pair.model_info(path);
@@ -240,8 +245,6 @@ impl<'a> NamClapMainThread<'a> {
 
         let mut model_l = model_pair.model_l;
         let mut model_r = model_pair.model_r;
-        let input_mult_adj = model_pair.input_mult_adj;
-        let output_mult_adj = model_pair.output_mult_adj;
 
         // Derive full WaveNet weights for main-thread slimmable rebuild. This is
         // the same helper used in state_transaction.rs.
@@ -324,8 +327,7 @@ impl<'a> NamClapMainThread<'a> {
             model_l,
             model_r,
             model_rate,
-            input_mult_adj,
-            output_mult_adj,
+            cal_meta,
             model_hash,
             metadata: ui_metadata,
             model_info,
@@ -421,8 +423,7 @@ impl<'a> NamClapMainThread<'a> {
             mut model_l,
             mut model_r,
             model_rate,
-            input_mult_adj,
-            output_mult_adj,
+            cal_meta,
             model_hash,
             metadata,
             model_info,
@@ -433,6 +434,11 @@ impl<'a> NamClapMainThread<'a> {
             mut prewarm_cost_ns,
             audio_epoch,
         } = prepared;
+        let (input_mult_adj, output_mult_adj) =
+            crate::clap::extensions::calibration::compute_calibration_multipliers(
+                cal_meta,
+                self.shared.calibration_config(),
+            );
 
         // Identity (path/hash/search-path), DSP epoch and display metadata are
         // published only after the resources have been committed (or
@@ -450,6 +456,7 @@ impl<'a> NamClapMainThread<'a> {
                 model_rate,
                 input_mult_adj,
                 output_mult_adj,
+                cal_meta,
             });
             self.publish_model_identity(&path, model_hash, model_rate, model_bytes, full_wavenet);
             self.finish_commit_ui(&path, metadata, model_info);
@@ -577,6 +584,7 @@ impl<'a> NamClapMainThread<'a> {
                             model_rate,
                             input_mult_adj,
                             output_mult_adj,
+                            cal_meta,
                             prewarm_cost_ns,
                         });
                 match push_result {
@@ -590,7 +598,8 @@ impl<'a> NamClapMainThread<'a> {
                         );
                         self.finish_commit_ui(&path, metadata, model_info);
                     }
-                    Err((PushError::Full, payload)) => {
+                    Err(err) => {
+                        let (PushError::Full, payload) = *err;
                         // Fail-closed — retain the model for retry instead of
                         // dropping it. The model is retained, so the UI
                         // commit advances together with it (F-RB-02);
@@ -604,6 +613,7 @@ impl<'a> NamClapMainThread<'a> {
                             model_rate: _,
                             input_mult_adj,
                             output_mult_adj,
+                            cal_meta,
                             prewarm_cost_ns: _,
                         } = payload
                         {
@@ -617,6 +627,7 @@ impl<'a> NamClapMainThread<'a> {
                                     model_rate,
                                     input_mult_adj,
                                     output_mult_adj,
+                                    cal_meta,
                                 });
                         }
                         self.host.request_callback();
@@ -648,6 +659,7 @@ impl<'a> NamClapMainThread<'a> {
                         model_rate,
                         input_mult_adj,
                         output_mult_adj,
+                        cal_meta,
                         prewarm_cost_ns,
                     });
                 }
@@ -978,17 +990,21 @@ impl<'a> NamClapMainThread<'a> {
                             model_rate: host_rate,
                             input_mult_adj: 1.0,
                             output_mult_adj: 1.0,
+                            cal_meta:
+                                crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
                             prewarm_cost_ns: None,
                         });
                 match push_result {
                     Ok(_seq) => {}
-                    Err((PushError::Full, payload)) => {
+                    Err(err) => {
+                        let (PushError::Full, payload) = *err;
                         if let ClapParamPayload::LoadModel {
                             generation,
                             model_l,
                             model_r,
                             input_mult_adj,
                             output_mult_adj,
+                            cal_meta,
                             ..
                         } = payload
                         {
@@ -1000,6 +1016,7 @@ impl<'a> NamClapMainThread<'a> {
                                     model_rate: host_rate,
                                     input_mult_adj,
                                     output_mult_adj,
+                                    cal_meta,
                                 });
                         }
                     }
@@ -1017,6 +1034,8 @@ impl<'a> NamClapMainThread<'a> {
                         model_rate: host_rate,
                         input_mult_adj: 1.0,
                         output_mult_adj: 1.0,
+                        cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta::empty(
+                        ),
                         prewarm_cost_ns: None,
                     });
                 }
@@ -1030,6 +1049,7 @@ impl<'a> NamClapMainThread<'a> {
                 model_rate: host_rate,
                 input_mult_adj: 1.0,
                 output_mult_adj: 1.0,
+                cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
             });
         }
 

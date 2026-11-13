@@ -250,9 +250,9 @@ fn gui_x11_lifecycle_embedded_set_parent_honest() {
             gui_ext.get_size(&handle),
             Some(GuiSize {
                 width: 600,
-                height: 275
+                height: 312
             }),
-            "embedded GUI keeps the fixed 600x275 logical size"
+            "embedded GUI keeps the fixed 600x312 logical size"
         );
         assert!(
             !gui_ext.can_resize(&handle),
@@ -264,11 +264,11 @@ fn gui_x11_lifecycle_embedded_set_parent_honest() {
                     &handle,
                     GuiSize {
                         width: 600,
-                        height: 275
+                        height: 312
                     }
                 )
                 .is_ok(),
-            "set_size(600x275) must be accepted"
+            "set_size(600x312) must be accepted"
         );
         assert!(
             gui_ext.set_scale(&handle, 1.5).is_ok(),
@@ -660,9 +660,9 @@ fn gui_x11_embedded_open_close_cycles_no_leak() {
                 gui_ext.get_size(&handle),
                 Some(GuiSize {
                     width: 600,
-                    height: 275
+                    height: 312
                 }),
-                "embedded GUI keeps the fixed 600x275 logical size"
+                "embedded GUI keeps the fixed 600x312 logical size"
             );
             assert!(
                 !gui_ext.can_resize(&handle),
@@ -674,7 +674,7 @@ fn gui_x11_embedded_open_close_cycles_no_leak() {
                         &handle,
                         GuiSize {
                             width: 600,
-                            height: 275
+                            height: 312
                         }
                     )
                     .is_ok()

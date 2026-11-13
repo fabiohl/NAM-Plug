@@ -516,7 +516,9 @@ impl<'a> NamClapMainThread<'a> {
                         .cold
                         .rt_status
                         .clear_flag_release(spsc::RT_STATUS_NEEDS_OS_REBUILD),
-                    Err((crate::clap::plugin::command_scheduler::PushError::Full, payload)) => {
+                    Err(err) => {
+                        let (crate::clap::plugin::command_scheduler::PushError::Full, payload) =
+                            *err;
                         if let crate::clap::plugin::ClapParamPayload::SetOversample { os_l, os_r } =
                             payload
                         {
@@ -591,7 +593,8 @@ impl<'a> NamClapMainThread<'a> {
                         .rt_status
                         .clear_flag_release(spsc::RT_STATUS_NEEDS_OS_REBUILD);
                 }
-                Err((crate::clap::plugin::command_scheduler::PushError::Full, _payload)) => {
+                Err(err) => {
+                    let (crate::clap::plugin::command_scheduler::PushError::Full, _payload) = *err;
                     log::warn!(
                         "NAM-Plug: Command ring full during SetOversample; retaining flag for retry"
                     );
@@ -1304,30 +1307,60 @@ impl<'a> NamClapMainThread<'a> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        if let Some(params) = snapshot {
+        let cal_snapshot = self
+            .shared
+            .cold
+            .in_flight_calibration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if snapshot.is_some() || cal_snapshot.is_some() {
             // Scoped producer borrow: released before the poisoned-lock
             // recovery below (no host call happens here, but keeping the
             // borrow window minimal is the house rule).
             let flush_result = {
                 let mut producer = self.cmd_producer.borrow_mut();
-                producer.push_params(params);
+                if let Some(params) = snapshot {
+                    producer.push_params(params);
+                }
+                if let Some(cal) = cal_snapshot {
+                    producer.push_calibration(cal);
+                }
                 producer.force_flush()
             };
             match flush_result {
                 Ok(_) => {
-                    log::trace!("In-flight params delivered on retry");
+                    log::trace!("In-flight params/calibration delivered on retry");
                 }
                 Err(crate::clap::plugin::command_scheduler::PushError::Full) => {
-                    let mut guard = self
-                        .shared
-                        .cold
-                        .in_flight_params
-                        .lock()
-                        .unwrap_or_else(|e| {
-                            log::error!("in_flight_params mutex poisoned during flush, recovering");
-                            e.into_inner()
-                        });
-                    *guard = Some(params);
+                    if let Some(params) = snapshot {
+                        let mut guard =
+                            self.shared
+                                .cold
+                                .in_flight_params
+                                .lock()
+                                .unwrap_or_else(|e| {
+                                    log::error!(
+                                        "in_flight_params mutex poisoned during flush, recovering"
+                                    );
+                                    e.into_inner()
+                                });
+                        *guard = Some(params);
+                    }
+                    if let Some(cal) = cal_snapshot {
+                        let mut guard = self
+                            .shared
+                            .cold
+                            .in_flight_calibration
+                            .lock()
+                            .unwrap_or_else(|e| {
+                                log::error!(
+                                    "in_flight_calibration mutex poisoned during flush, recovering"
+                                );
+                                e.into_inner()
+                            });
+                        *guard = Some(cal);
+                    }
                     self.shared.bump_generation();
                 }
             }

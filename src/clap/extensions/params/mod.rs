@@ -28,6 +28,14 @@ pub const PARAM_SLIM_OVERRIDE: u32 = 6;
 pub const PARAM_OVERSAMPLE: u32 = 7;
 /// Activation precision parameter ID (stepped: Fast/Standard).
 pub const PARAM_ACTIVATION: u32 = 8;
+/// Opt-in input calibration toggle parameter ID (`0.0 = Off`, `1.0 = On`).
+pub const PARAM_CALIBRATE_INPUT: u32 = 9;
+/// Input calibration reference level parameter ID (`[-60.0, 60.0]` dBu).
+pub const PARAM_INPUT_CALIBRATION_LEVEL: u32 = 10;
+/// Model output gain mode parameter ID (`0 = Raw`, `1 = Normalized`, `2 = Calibrated`).
+pub const PARAM_OUTPUT_MODE: u32 = 11;
+/// Total number of exposed CLAP parameters.
+pub const PARAM_COUNT: usize = 12;
 
 /// Bypass atomic value: off.
 pub const BYPASS_OFF: u32 = 0;
@@ -147,6 +155,25 @@ pub fn sanitize_param_value(id: u32, val: f32) -> f32 {
                 1.0
             } else {
                 val.round().clamp(0.0, 1.0)
+            }
+        }
+        PARAM_CALIBRATE_INPUT => {
+            if !val.is_finite() {
+                0.0
+            } else if val >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        PARAM_INPUT_CALIBRATION_LEVEL => {
+            crate::clap::extensions::calibration::sanitize_calibration_level_dbu(val)
+        }
+        PARAM_OUTPUT_MODE => {
+            if !val.is_finite() {
+                1.0
+            } else {
+                val.round().clamp(0.0, 2.0)
             }
         }
         _ => {

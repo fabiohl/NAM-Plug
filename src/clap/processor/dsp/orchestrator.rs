@@ -144,6 +144,8 @@ impl<'a> NamClapProcessor<'a> {
             self.dry_delay.reset();
             self.smoother_in.snap_to_target();
             self.smoother_out.snap_to_target();
+            self.smoother_cal_in.snap_to_target();
+            self.smoother_cal_out.snap_to_target();
             // Scratch hygiene identical to `reset()`: no pre-fault sample
             // survives in a slot the wet path could read before rewriting after
             // reconvergence.
@@ -485,8 +487,14 @@ impl<'a> NamClapProcessor<'a> {
                     evt.value,
                     evt.is_mod,
                     &mut self.params,
+                    &mut self.cal_config,
+                    &self.model_cal_meta,
+                    &mut self.model_input_mult_adj,
+                    &mut self.model_output_mult_adj,
                     &mut self.smoother_in,
                     &mut self.smoother_out,
+                    &mut self.smoother_cal_in,
+                    &mut self.smoother_cal_out,
                     &mut self.gate_dirty,
                     &mut self.mod_input_gain,
                     &mut self.mod_output_gain,
@@ -598,7 +606,6 @@ impl<'a> NamClapProcessor<'a> {
 
         let mut block_offset = 0usize;
         let mut output_offset = 0usize;
-        let model_output_mult_adj = self.model_output_mult_adj;
         let shared_sample_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
         let event_count = self.scheduled_events.len();
 
@@ -618,8 +625,14 @@ impl<'a> NamClapProcessor<'a> {
                     evt.value,
                     evt.is_mod,
                     &mut self.params,
+                    &mut self.cal_config,
+                    &self.model_cal_meta,
+                    &mut self.model_input_mult_adj,
+                    &mut self.model_output_mult_adj,
                     &mut self.smoother_in,
                     &mut self.smoother_out,
+                    &mut self.smoother_cal_in,
+                    &mut self.smoother_cal_out,
                     &mut self.gate_dirty,
                     &mut self.mod_input_gain,
                     &mut self.mod_output_gain,
@@ -711,8 +724,14 @@ impl<'a> NamClapProcessor<'a> {
                         value,
                         is_mod,
                         &mut self.params,
+                        &mut self.cal_config,
+                        &self.model_cal_meta,
+                        &mut self.model_input_mult_adj,
+                        &mut self.model_output_mult_adj,
                         &mut self.smoother_in,
                         &mut self.smoother_out,
+                        &mut self.smoother_cal_in,
+                        &mut self.smoother_cal_out,
                         &mut self.gate_dirty,
                         &mut self.mod_input_gain,
                         &mut self.mod_output_gain,
@@ -773,7 +792,7 @@ impl<'a> NamClapProcessor<'a> {
                         active_model_l: &mut self.model_l,
                         active_model_r,
                         input_gain_mult: self.model_input_mult_adj,
-                        output_gain_mult: model_output_mult_adj,
+                        output_gain_mult: self.model_output_mult_adj,
                         gate_params: &self.cached_gate_params,
                         silence_hysteresis: &mut self.silence_hyst,
                         mono_hysteresis: &mut self.mono_hyst,
@@ -818,7 +837,8 @@ impl<'a> NamClapProcessor<'a> {
                         input_clipped,
                         &mut self.smoother_in,
                         &mut self.smoother_out,
-                        model_output_mult_adj,
+                        &mut self.smoother_cal_in,
+                        &mut self.smoother_cal_out,
                         shared_sample_rate,
                         &gain_steps[..n_steps],
                     )
@@ -871,8 +891,14 @@ impl<'a> NamClapProcessor<'a> {
                     evt.value,
                     evt.is_mod,
                     &mut self.params,
+                    &mut self.cal_config,
+                    &self.model_cal_meta,
+                    &mut self.model_input_mult_adj,
+                    &mut self.model_output_mult_adj,
                     &mut self.smoother_in,
                     &mut self.smoother_out,
+                    &mut self.smoother_cal_in,
+                    &mut self.smoother_cal_out,
                     &mut self.gate_dirty,
                     &mut self.mod_input_gain,
                     &mut self.mod_output_gain,
@@ -923,8 +949,14 @@ impl<'a> NamClapProcessor<'a> {
                     evt.value,
                     evt.is_mod,
                     &mut self.params,
+                    &mut self.cal_config,
+                    &self.model_cal_meta,
+                    &mut self.model_input_mult_adj,
+                    &mut self.model_output_mult_adj,
                     &mut self.smoother_in,
                     &mut self.smoother_out,
+                    &mut self.smoother_cal_in,
+                    &mut self.smoother_cal_out,
                     &mut self.gate_dirty,
                     &mut self.mod_input_gain,
                     &mut self.mod_output_gain,
@@ -1075,8 +1107,14 @@ impl<'a> NamClapProcessor<'a> {
                 evt.value,
                 evt.is_mod,
                 &mut self.params,
+                &mut self.cal_config,
+                &self.model_cal_meta,
+                &mut self.model_input_mult_adj,
+                &mut self.model_output_mult_adj,
                 &mut self.smoother_in,
                 &mut self.smoother_out,
+                &mut self.smoother_cal_in,
+                &mut self.smoother_cal_out,
                 &mut self.gate_dirty,
                 &mut self.mod_input_gain,
                 &mut self.mod_output_gain,

@@ -615,6 +615,7 @@ impl<'a> NamClapProcessor<'a> {
                 cabsim_pair,
                 model_input_mult_adj,
                 model_output_mult_adj,
+                model_cal_meta,
             ) = if staged_restore_valid {
                 // `staged_restore_valid` is `staged_restore.as_ref().is_some_and(..)`,
                 // so the flag implies a staged value; a `None` here is an internal
@@ -640,6 +641,7 @@ impl<'a> NamClapProcessor<'a> {
                         stream,
                         model_input_mult_adj,
                         model_output_mult_adj,
+                        model_cal_meta,
                     ) = if let Some(m) = txn.model {
                         (
                             m.model_l,
@@ -649,6 +651,7 @@ impl<'a> NamClapProcessor<'a> {
                             m.new_stream,
                             m.input_mult_adj,
                             m.output_mult_adj,
+                            m.cal_meta,
                         )
                     } else {
                         (
@@ -659,6 +662,7 @@ impl<'a> NamClapProcessor<'a> {
                             new_stream.unwrap_or(deact.stream),
                             deact.model_input_mult_adj,
                             deact.model_output_mult_adj,
+                            deact.model_cal_meta,
                         )
                     };
 
@@ -687,6 +691,7 @@ impl<'a> NamClapProcessor<'a> {
                         cabsim_pair,
                         model_input_mult_adj,
                         model_output_mult_adj,
+                        model_cal_meta,
                     )
                 } else {
                     let (
@@ -697,6 +702,7 @@ impl<'a> NamClapProcessor<'a> {
                         stream,
                         model_input_mult_adj,
                         model_output_mult_adj,
+                        model_cal_meta,
                     ) = if let Some(m) = txn.model {
                         (
                             m.model_l,
@@ -706,6 +712,7 @@ impl<'a> NamClapProcessor<'a> {
                             m.new_stream,
                             m.input_mult_adj,
                             m.output_mult_adj,
+                            m.cal_meta,
                         )
                     } else {
                         (
@@ -722,6 +729,7 @@ impl<'a> NamClapProcessor<'a> {
                             })?,
                             1.0,
                             1.0,
+                            crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
                         )
                     };
 
@@ -748,6 +756,7 @@ impl<'a> NamClapProcessor<'a> {
                         cabsim_pair,
                         model_input_mult_adj,
                         model_output_mult_adj,
+                        model_cal_meta,
                     )
                 }
             } else if let Some(deact) = rollback.deactivated.take() {
@@ -759,6 +768,7 @@ impl<'a> NamClapProcessor<'a> {
                     stream,
                     model_input_mult_adj,
                     model_output_mult_adj,
+                    model_cal_meta,
                 ) = if staged_model_ok {
                     // `staged_model_ok` is derived from
                     // `staged_swap.model.as_ref().is_some_and(..)`, so the flag
@@ -778,6 +788,7 @@ impl<'a> NamClapProcessor<'a> {
                         m.new_stream,
                         m.input_mult_adj,
                         m.output_mult_adj,
+                        m.cal_meta,
                     )
                 } else {
                     (
@@ -788,6 +799,7 @@ impl<'a> NamClapProcessor<'a> {
                         new_stream.unwrap_or(deact.stream),
                         deact.model_input_mult_adj,
                         deact.model_output_mult_adj,
+                        deact.model_cal_meta,
                     )
                 };
                 let cabsim_pair = if let Some(ir) = staged_ir {
@@ -813,6 +825,7 @@ impl<'a> NamClapProcessor<'a> {
                     cabsim_pair,
                     model_input_mult_adj,
                     model_output_mult_adj,
+                    model_cal_meta,
                 )
             } else {
                 let (
@@ -823,6 +836,7 @@ impl<'a> NamClapProcessor<'a> {
                     stream,
                     model_input_mult_adj,
                     model_output_mult_adj,
+                    model_cal_meta,
                 ) = if staged_model_ok {
                     // `staged_model_ok` is derived from
                     // `staged_swap.model.as_ref().is_some_and(..)`, so the flag
@@ -842,6 +856,7 @@ impl<'a> NamClapProcessor<'a> {
                         m.new_stream,
                         m.input_mult_adj,
                         m.output_mult_adj,
+                        m.cal_meta,
                     )
                 } else {
                     (
@@ -856,6 +871,7 @@ impl<'a> NamClapProcessor<'a> {
                         })?,
                         1.0,
                         1.0,
+                        crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
                     )
                 };
                 let cabsim_pair = if let Some(ir) = staged_ir {
@@ -879,6 +895,7 @@ impl<'a> NamClapProcessor<'a> {
                     cabsim_pair,
                     model_input_mult_adj,
                     model_output_mult_adj,
+                    model_cal_meta,
                 )
             };
 
@@ -995,6 +1012,22 @@ impl<'a> NamClapProcessor<'a> {
                 audio_config.sample_rate as f32,
                 20.0,
             );
+            let cal_config = shared.calibration_config();
+            let has_cal_meta = model_cal_meta.input_level_dbu.is_some()
+                || model_cal_meta.output_level_dbu.is_some()
+                || model_cal_meta.loudness.is_some();
+            let (model_input_mult_adj, model_output_mult_adj) = if has_cal_meta {
+                crate::clap::extensions::calibration::compute_calibration_multipliers(
+                    model_cal_meta,
+                    cal_config,
+                )
+            } else {
+                (model_input_mult_adj, model_output_mult_adj)
+            };
+            let smoother_cal_in =
+                ParamSmoother::new(model_input_mult_adj, audio_config.sample_rate as f32, 20.0);
+            let smoother_cal_out =
+                ParamSmoother::new(model_output_mult_adj, audio_config.sample_rate as f32, 20.0);
 
             // Build an atomic snapshot for params that drive smoothers
             // from UiToRt atomics BEFORE constructing the RT processor. This
@@ -1145,6 +1178,10 @@ impl<'a> NamClapProcessor<'a> {
                 shared,
                 smoother_in,
                 smoother_out,
+                smoother_cal_in,
+                smoother_cal_out,
+                cal_config,
+                model_cal_meta,
                 model_input_mult_adj,
                 model_output_mult_adj,
                 in_rms_ewma_l: 0.0,

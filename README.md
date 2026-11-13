@@ -336,7 +336,7 @@ The table below summarizes verified GUI presentation and host integration behavi
 
 When running in a host or display server environment where the custom graphical interface is not displayed (such as Fender Studio Pro under native Wayland), NAM-Plug remains fully operational via the host's generic parameter controls:
 
-* **DSP Parameter Control:** All continuous and discrete audio parameters (Input Trim, Output Level, Noise Gate Threshold, Active Bypass, Oversampling Mode, and Activation Precision) are exposed to the host and can be automated, adjusted, or modulated directly from the generic parameter panel.
+* **DSP Parameter Control:** All continuous and discrete audio parameters (Input Trim, Output Level, Noise Gate Threshold, Active Bypass, Oversampling Mode, Activation Precision, Calibrate Input, Input Calibration Level, and Output Mode) are exposed to the host and can be automated, adjusted, or modulated directly from the generic parameter panel.
 * **Model Selection in Generic Hosts:** In Fender Studio Pro 8.2 the host does query the plugin's CLAP preset discovery provider (the provider descriptor is read and one provider instance is created, which declares `~/.nam/models`), but it does not request model metadata or issue a preset load; the module is then recorded as presetless and the preset selector shows an empty list. Consequently the available models are not exposed in the host preset browser, and the plugin does not provide an in-host model picker outside its custom GUI.
 * **Session Persistence & State Restores:**
   * When a DAW project, track template, or host preset is saved, the host serializes the full plugin state (including the active model file path, basename, and SHA-256 hash).

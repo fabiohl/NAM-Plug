@@ -192,8 +192,8 @@ fn test_parameters_non_regression_snapshot() {
 
     assert_eq!(
         params_ext.count(&handle),
-        9,
-        "Total parameter count must remain 9"
+        12,
+        "Total parameter count must be 12 (including calibration parameters)"
     );
 
     struct ParamExpectation {
@@ -317,6 +317,42 @@ fn test_parameters_non_regression_snapshot() {
                 | ParamInfoFlags::IS_ENUM,
             forbidden_flags: ParamInfoFlags::IS_READONLY | ParamInfoFlags::IS_BYPASS,
         },
+        ParamExpectation {
+            id: PARAM_CALIBRATE_INPUT,
+            name: b"Calibrate Input",
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            initial_value: 0.0,
+            required_flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
+            forbidden_flags: ParamInfoFlags::IS_READONLY
+                | ParamInfoFlags::IS_BYPASS
+                | ParamInfoFlags::IS_ENUM,
+        },
+        ParamExpectation {
+            id: PARAM_INPUT_CALIBRATION_LEVEL,
+            name: b"Input Cal Level",
+            min: -60.0,
+            max: 60.0,
+            default: 12.0,
+            initial_value: 12.0,
+            required_flags: ParamInfoFlags::IS_AUTOMATABLE,
+            forbidden_flags: ParamInfoFlags::IS_STEPPED
+                | ParamInfoFlags::IS_READONLY
+                | ParamInfoFlags::IS_ENUM,
+        },
+        ParamExpectation {
+            id: PARAM_OUTPUT_MODE,
+            name: b"Output Mode",
+            min: 0.0,
+            max: 2.0,
+            default: 1.0,
+            initial_value: 1.0,
+            required_flags: ParamInfoFlags::IS_AUTOMATABLE
+                | ParamInfoFlags::IS_STEPPED
+                | ParamInfoFlags::IS_ENUM,
+            forbidden_flags: ParamInfoFlags::IS_READONLY | ParamInfoFlags::IS_BYPASS,
+        },
     ];
 
     let mut info_buf = ParamInfoBuffer::new();
@@ -395,4 +431,110 @@ fn test_gate_threshold_contract_alignment() {
     assert_eq!(sanitize_param_value_f64(PARAM_GATE_THRESH, 0.0), 0.0);
     assert_eq!(sanitize_param_value_f64(PARAM_GATE_THRESH, 10.0), 0.0);
     assert_eq!(sanitize_param_value_f64(PARAM_GATE_THRESH, f64::NAN), -90.0);
+}
+
+#[test]
+fn test_calibration_parameters_formatting_parsing_and_sanitization() {
+    assert_eq!(sanitize_param_value(PARAM_CALIBRATE_INPUT, 0.0), 0.0);
+    assert_eq!(sanitize_param_value(PARAM_CALIBRATE_INPUT, 1.0), 1.0);
+    assert_eq!(sanitize_param_value(PARAM_CALIBRATE_INPUT, f32::NAN), 0.0);
+
+    assert_eq!(
+        sanitize_param_value(PARAM_INPUT_CALIBRATION_LEVEL, -60.0),
+        -60.0
+    );
+    assert_eq!(
+        sanitize_param_value(PARAM_INPUT_CALIBRATION_LEVEL, 60.0),
+        60.0
+    );
+    assert_eq!(
+        sanitize_param_value(PARAM_INPUT_CALIBRATION_LEVEL, -100.0),
+        -60.0
+    );
+    assert_eq!(
+        sanitize_param_value(PARAM_INPUT_CALIBRATION_LEVEL, 100.0),
+        60.0
+    );
+    assert_eq!(
+        sanitize_param_value(PARAM_INPUT_CALIBRATION_LEVEL, f32::NAN),
+        12.0
+    );
+    assert_eq!(
+        sanitize_param_value_f64(PARAM_INPUT_CALIBRATION_LEVEL, f64::INFINITY),
+        12.0
+    );
+
+    assert_eq!(sanitize_param_value(PARAM_OUTPUT_MODE, 0.0), 0.0);
+    assert_eq!(sanitize_param_value(PARAM_OUTPUT_MODE, 1.0), 1.0);
+    assert_eq!(sanitize_param_value(PARAM_OUTPUT_MODE, 2.0), 2.0);
+    assert_eq!(sanitize_param_value(PARAM_OUTPUT_MODE, 99.0), 2.0);
+    assert_eq!(sanitize_param_value(PARAM_OUTPUT_MODE, -5.0), 0.0);
+    assert_eq!(sanitize_param_value(PARAM_OUTPUT_MODE, f32::NAN), 1.0);
+
+    let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
+    let params_ext = instance
+        .plugin_handle()
+        .get_extension::<PluginParams>()
+        .expect("PluginParams extension not found");
+    let handle = instance.plugin_handle();
+    let mut buf = [0u8; 64];
+
+    for (id, val, expected_substr) in [
+        (PARAM_CALIBRATE_INPUT, 0.0, "Off"),
+        (PARAM_CALIBRATE_INPUT, 1.0, "On"),
+        (PARAM_INPUT_CALIBRATION_LEVEL, -12.5, "-12.5 dBu"),
+        (PARAM_INPUT_CALIBRATION_LEVEL, 12.0, "12.0 dBu"),
+        (PARAM_OUTPUT_MODE, 0.0, "Raw"),
+        (PARAM_OUTPUT_MODE, 1.0, "Normalized"),
+        (PARAM_OUTPUT_MODE, 2.0, "Calibrated"),
+    ] {
+        let res = params_ext
+            .value_to_text(&handle, ClapId::new(id), val, &mut buf)
+            .expect("value_to_text");
+        let text = std::str::from_utf8(res)
+            .expect("utf8")
+            .trim_end_matches('\0');
+        assert_eq!(text, expected_substr);
+    }
+
+    assert_eq!(
+        params_ext.text_to_value(&handle, ClapId::new(PARAM_CALIBRATE_INPUT), c"on"),
+        Some(1.0)
+    );
+    assert_eq!(
+        params_ext.text_to_value(&handle, ClapId::new(PARAM_CALIBRATE_INPUT), c"off"),
+        Some(0.0)
+    );
+    assert_eq!(
+        params_ext.text_to_value(
+            &handle,
+            ClapId::new(PARAM_INPUT_CALIBRATION_LEVEL),
+            c"18.5 dBu"
+        ),
+        Some(18.5)
+    );
+    assert_eq!(
+        params_ext.text_to_value(
+            &handle,
+            ClapId::new(PARAM_INPUT_CALIBRATION_LEVEL),
+            c"-99 dBu"
+        ),
+        Some(-60.0)
+    );
+    assert_eq!(
+        params_ext.text_to_value(&handle, ClapId::new(PARAM_INPUT_CALIBRATION_LEVEL), c"NaN"),
+        None
+    );
+    assert_eq!(
+        params_ext.text_to_value(&handle, ClapId::new(PARAM_OUTPUT_MODE), c"raw"),
+        Some(0.0)
+    );
+    assert_eq!(
+        params_ext.text_to_value(&handle, ClapId::new(PARAM_OUTPUT_MODE), c"normalized"),
+        Some(1.0)
+    );
+    assert_eq!(
+        params_ext.text_to_value(&handle, ClapId::new(PARAM_OUTPUT_MODE), c"calibrated"),
+        Some(2.0)
+    );
 }

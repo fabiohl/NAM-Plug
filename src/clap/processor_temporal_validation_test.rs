@@ -265,6 +265,12 @@ mod tests {
         mt.load_model(&model_file).expect("load LSTM model");
         let ir = write_unit_ir("t44_xfade_ir");
         mt.load_cabsim(&ir).expect("load unit IR");
+        let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+        shared
+            .ui_to_rt
+            .param_calibrate_input
+            .store(1, Ordering::Relaxed);
+        shared.bump_generation();
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
 
         // Generate a 440 Hz sine wave over 20 blocks (5120 samples)

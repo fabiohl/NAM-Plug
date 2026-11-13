@@ -267,6 +267,7 @@ impl<'a> NamClapMainThread<'a> {
             model_rate,
             input_mult_adj,
             output_mult_adj,
+            cal_meta,
         }) = restore.pending.take()
         else {
             return Ok(());
@@ -286,6 +287,7 @@ impl<'a> NamClapMainThread<'a> {
                     model_rate,
                     input_mult_adj,
                     output_mult_adj,
+                    cal_meta,
                 });
                 self.note_flush_failure(&format!(
                     "Failed to create deferred resampler (host {sample_rate} Hz, model {model_rate} Hz): {e:?}. Check the host sample rate."
@@ -310,6 +312,7 @@ impl<'a> NamClapMainThread<'a> {
                         model_rate,
                         input_mult_adj,
                         output_mult_adj,
+                        cal_meta,
                     });
                     self.note_flush_failure(&format!(
                     "Failed to create deferred streaming buffer (buffer size {buffer_size}): {e:?}."
@@ -331,6 +334,7 @@ impl<'a> NamClapMainThread<'a> {
                 model_rate,
                 input_mult_adj,
                 output_mult_adj,
+                cal_meta,
             });
             self.note_flush_failure(&format!(
                 "Failed to resize deferred model buffers for host buffer size ({buffer_size}): {e}. Try a smaller host buffer size."
@@ -353,6 +357,7 @@ impl<'a> NamClapMainThread<'a> {
                 model_rate,
                 input_mult_adj,
                 output_mult_adj,
+                cal_meta,
             });
             self.note_flush_failure(&format!(
                 "Failed to resize deferred model buffers for host buffer size ({buffer_size}) (R): {e}. Try a smaller host buffer size."
@@ -391,6 +396,7 @@ impl<'a> NamClapMainThread<'a> {
                     model_rate,
                     input_mult_adj,
                     output_mult_adj,
+                    cal_meta,
                     prewarm_cost_ns,
                 });
         match push_result {
@@ -401,7 +407,8 @@ impl<'a> NamClapMainThread<'a> {
                 log::trace!("Deferred model sent to audio thread (seq={seq})");
                 Ok(())
             }
-            Err((PushError::Full, payload)) => {
+            Err(err) => {
+                let (PushError::Full, payload) = *err;
                 // Fail-closed — retain the model for retry instead of
                 // dropping it. The resampler and streaming buffer are rebuilt on the next flush.
                 if let ClapParamPayload::LoadModel {
@@ -413,6 +420,7 @@ impl<'a> NamClapMainThread<'a> {
                     model_rate: _,
                     input_mult_adj,
                     output_mult_adj,
+                    cal_meta,
                     prewarm_cost_ns: _,
                 } = payload
                 {
@@ -426,6 +434,7 @@ impl<'a> NamClapMainThread<'a> {
                             model_rate,
                             input_mult_adj,
                             output_mult_adj,
+                            cal_meta,
                         });
                 }
                 self.host.request_callback();

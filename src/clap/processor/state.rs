@@ -258,11 +258,19 @@ pub struct NamClapProcessor<'a> {
     pub(crate) smoother_in: ParamSmoother,
     /// Smoothers for input and output gains.
     pub(crate) smoother_out: ParamSmoother,
-    /// Model input calibration multiplier (from input_level_dbu metadata).
+    /// Smoother for model input calibration multiplier (ramped on live changes).
+    pub(crate) smoother_cal_in: ParamSmoother,
+    /// Smoother for model output calibration multiplier (ramped on live changes).
+    pub(crate) smoother_cal_out: ParamSmoother,
+    /// Active input calibration and output mode configuration.
+    pub(crate) cal_config: crate::clap::extensions::calibration::CalibrationConfig,
+    /// Calibration metadata of the currently active model.
+    pub(crate) model_cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta,
+    /// Model input calibration multiplier target (from input_level_dbu metadata).
     /// Applied as `input_gain_mult` in the DSP pipeline context, separate from
     /// user-configured input gain applied via `smoother_in`.
     pub(crate) model_input_mult_adj: f32,
-    /// Model output calibration multiplier (from loudness metadata).
+    /// Model output calibration multiplier target (from loudness metadata).
     /// Applied as `output_gain_mult` in the DSP pipeline context, separate from
     /// user-configured output gain applied via `smoother_out`.
     pub(crate) model_output_mult_adj: f32,

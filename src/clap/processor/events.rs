@@ -271,6 +271,8 @@ macro_rules! command_swap_parts {
                 cabsim_pair: &mut $s.cabsim_pair,
                 params: &mut $s.params,
                 applied_os_factor: &mut $s.applied_os_factor,
+                cal_config: &mut $s.cal_config,
+                model_cal_meta: &mut $s.model_cal_meta,
                 model_input_mult_adj: &mut $s.model_input_mult_adj,
                 model_output_mult_adj: &mut $s.model_output_mult_adj,
                 adaptive_compute: &mut $s.adaptive_compute,
@@ -278,6 +280,8 @@ macro_rules! command_swap_parts {
                 dry_delay: &mut $s.dry_delay,
                 smoother_in: &mut $s.smoother_in,
                 smoother_out: &mut $s.smoother_out,
+                smoother_cal_in: &mut $s.smoother_cal_in,
+                smoother_cal_out: &mut $s.smoother_cal_out,
                 mod_input_gain: &mut $s.mod_input_gain,
                 mod_output_gain: &mut $s.mod_output_gain,
                 gate_dirty: &mut $s.gate_dirty,
@@ -473,6 +477,10 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     pub(super) params: &'p mut RtProcessingParams,
     /// Oversampling factor of the installed engines.
     pub(super) applied_os_factor: &'p mut OversampleFactor,
+    /// Active input calibration and output mode configuration.
+    pub(super) cal_config: &'p mut crate::clap::extensions::calibration::CalibrationConfig,
+    /// Calibration metadata of the currently active model.
+    pub(super) model_cal_meta: &'p mut crate::clap::extensions::calibration::ModelCalibrationMeta,
     /// Model input/output calibration multipliers (level/loudness metadata).
     pub(super) model_input_mult_adj: &'p mut f32,
     pub(super) model_output_mult_adj: &'p mut f32,
@@ -485,6 +493,8 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     /// Sample-accurate gain smoothers (targets updated per snapshot).
     pub(super) smoother_in: &'p mut ParamSmoother,
     pub(super) smoother_out: &'p mut ParamSmoother,
+    pub(super) smoother_cal_in: &'p mut ParamSmoother,
+    pub(super) smoother_cal_out: &'p mut ParamSmoother,
     /// Last modulation values applied onto the gain targets.
     pub(super) mod_input_gain: &'p mut f32,
     pub(super) mod_output_gain: &'p mut f32,
@@ -583,6 +593,21 @@ impl ClapCommandSwapHandler<'_, '_> {
             ClapParamPayload::Params(new_params) => {
                 self.apply_params_from_spsc(new_params);
             }
+            ClapParamPayload::Calibration(cfg) => {
+                let sanitized = cfg.sanitized();
+                if sanitized != *self.cal_config {
+                    *self.cal_config = sanitized;
+                    let (in_mult, out_mult) =
+                        crate::clap::extensions::calibration::compute_calibration_multipliers(
+                            *self.model_cal_meta,
+                            *self.cal_config,
+                        );
+                    *self.model_input_mult_adj = in_mult;
+                    *self.model_output_mult_adj = out_mult;
+                    self.smoother_cal_in.set_target(in_mult);
+                    self.smoother_cal_out.set_target(out_mult);
+                }
+            }
             ClapParamPayload::LoadModel {
                 generation,
                 model_l,
@@ -592,6 +617,7 @@ impl ClapCommandSwapHandler<'_, '_> {
                 model_rate,
                 input_mult_adj,
                 output_mult_adj,
+                cal_meta,
                 prewarm_cost_ns,
             } => self.cold_load_model(
                 crate::clap::plugin::shared::LoadModelPayload {
@@ -603,6 +629,7 @@ impl ClapCommandSwapHandler<'_, '_> {
                     model_rate,
                     input_mult_adj,
                     output_mult_adj,
+                    cal_meta,
                     prewarm_cost_ns,
                 },
                 gc,
@@ -688,6 +715,7 @@ impl ClapCommandSwapHandler<'_, '_> {
             model_rate: _,
             input_mult_adj,
             output_mult_adj,
+            cal_meta,
             prewarm_cost_ns,
         } = payload;
         // Bind the processor's active model generation to the generation
@@ -743,8 +771,24 @@ impl ClapCommandSwapHandler<'_, '_> {
             .current_stream_latency
             .store(self.stream.latency_samples(), Ordering::Relaxed);
 
-        *self.model_input_mult_adj = input_mult_adj;
-        *self.model_output_mult_adj = output_mult_adj;
+        *self.model_cal_meta = cal_meta;
+        let has_meta = cal_meta.input_level_dbu.is_some()
+            || cal_meta.output_level_dbu.is_some()
+            || cal_meta.loudness.is_some();
+        let (effective_in_adj, effective_out_adj) = if has_meta {
+            crate::clap::extensions::calibration::compute_calibration_multipliers(
+                *self.model_cal_meta,
+                *self.cal_config,
+            )
+        } else {
+            (input_mult_adj, output_mult_adj)
+        };
+        *self.model_input_mult_adj = effective_in_adj;
+        *self.model_output_mult_adj = effective_out_adj;
+        self.smoother_cal_in.set_target(effective_in_adj);
+        self.smoother_cal_in.snap_to_target();
+        self.smoother_cal_out.set_target(effective_out_adj);
+        self.smoother_cal_out.snap_to_target();
 
         if let Some(model) = self.model_l.as_ref()
             && let StaticModel::WavenetDyn(w) = model.as_ref()
@@ -881,9 +925,24 @@ impl ClapCommandSwapHandler<'_, '_> {
         txn: crate::clap::plugin::shared::RestoreTxn,
         gc: &mut GcSink<'_>,
     ) {
+        *self.cal_config = txn.calibration.sanitized();
+        let had_model_swap = txn.model.is_some();
         if let Some(model) = txn.model {
             self.cold_load_model(model, gc);
+        } else {
+            let (in_mult, out_mult) =
+                crate::clap::extensions::calibration::compute_calibration_multipliers(
+                    *self.model_cal_meta,
+                    *self.cal_config,
+                );
+            *self.model_input_mult_adj = in_mult;
+            *self.model_output_mult_adj = out_mult;
+            self.smoother_cal_in.set_target(in_mult);
+            self.smoother_cal_in.snap_to_target();
+            self.smoother_cal_out.set_target(out_mult);
+            self.smoother_cal_out.snap_to_target();
         }
+        let _ = had_model_swap;
         if let Some(ir) = txn.ir {
             self.cold_load_cabsim(ir, gc);
         }

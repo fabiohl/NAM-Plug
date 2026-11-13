@@ -25,7 +25,11 @@ fn test_serialized_format_is_v1_envelope() {
     let buf = crate::clap::extensions::state::serialize_envelope(&params).unwrap();
 
     let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("should be valid JSON");
-    assert_eq!(parsed["version"], 1, "envelope should have version: 1");
+    assert_eq!(parsed["version"], 2, "envelope should have version: 2");
+    assert!(
+        parsed["calibration"].is_object(),
+        "v2 envelope should contain calibration object"
+    );
     assert!(
         parsed["params"].is_object(),
         "envelope should contain params object"

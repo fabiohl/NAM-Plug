@@ -506,7 +506,8 @@ When a host streams dense parameter automation (up to 1 event per sample), split
 
 #### Solution: Piecewise Gain Fusion
 
-- Smoothed gain parameters (`PARAM_INPUT_GAIN`, `PARAM_OUTPUT_GAIN`) no longer fragment inference sub-blocks. Only state-discontinuous events (noise gate threshold, bypass, oversampling, model swaps) create sub-block splits.
+- Smoothed gain parameters (`PARAM_INPUT_GAIN`, `PARAM_OUTPUT_GAIN`, and live calibration smoothers `smoother_cal_in` / `smoother_cal_out` driven by `PARAM_CALIBRATE_INPUT`, `PARAM_INPUT_CALIBRATION_LEVEL`, `PARAM_OUTPUT_MODE`) no longer fragment inference sub-blocks. Only state-discontinuous events (noise gate threshold, bypass, oversampling, model swaps) create sub-block splits.
+- End-to-end calibration parity across `Raw` / `Normalized` / `Calibrated`, extreme dBu ranges, pre-nonlinearity saturation, gate/CabSim isolation, multi-instance independence, and `v0`/`v1`/`v2` state migration is verified in `tests/calibration_modes_test.rs`.
 - Gain targets are replayed at their exact sample offsets through an analytic IIR ramp (`apply_gain_ramp_with_steps`). The gain stage is bit-identical to legacy splitting (ESR = 0), while keeping neural model inference fully vectorized.
 
 #### Empirical Benchmark Comparison

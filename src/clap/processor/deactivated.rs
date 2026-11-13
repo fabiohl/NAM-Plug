@@ -64,6 +64,8 @@ pub(crate) struct DeactivatedDspState {
     pub(crate) model_input_mult_adj: f32,
     /// Model output gain calibration multiplier (from loudness metadata).
     pub(crate) model_output_mult_adj: f32,
+    /// Model calibration metadata preserved across deactivate/activate.
+    pub(crate) model_cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta,
 }
 
 /// Deactivates the audio processor instance, returning channel resources to shared storage
@@ -150,6 +152,7 @@ pub(crate) fn deactivate<'a>(
                 buffer_size: processor.shared.cold.buffer_size.load(Ordering::Relaxed),
                 model_input_mult_adj: processor.model_input_mult_adj,
                 model_output_mult_adj: processor.model_output_mult_adj,
+                model_cal_meta: processor.model_cal_meta,
             };
             *processor
                 .shared

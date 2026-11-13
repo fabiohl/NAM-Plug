@@ -55,7 +55,8 @@ impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
                 .ir_level_policy
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
-        let serialized = super::state::serialize_envelope_with_policy(&save_params, ir_policy)?;
+        let calibration = self.shared.calibration_config();
+        let serialized = super::state::serialize_envelope_v2(&save_params, ir_policy, calibration)?;
 
         output
             .write_all(&serialized)

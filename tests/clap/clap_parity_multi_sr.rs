@@ -62,6 +62,14 @@
 //! boundaries. The IR-free output is itself certified against NAMCore by the
 //! matrix above, so the CabSim check isolates the convolution path of the final
 //! binary without duplicating an oracle render.
+//!
+//! **Calibration note (S05):** Every parity test here restores a legacy `v0`
+//! raw `ProcessingParams` state via `state_ext.load`, which applies legacy
+//! compensated calibration defaults (`CalibrateInput = true`,
+//! `InputCalibrationLevel = 12.0 dBu`, `OutputMode = Normalized`) matching
+//! `NeuralAmpModeler-rs`'s compensated `NAMCore` render contract. New-project
+//! defaults (`CalibrateInput = false`, `OutputMode = Normalized`) and all
+//! output modes are tested separately in `tests/calibration_modes_test.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -142,6 +142,7 @@ impl Drop for ActivateRollbackGuard<'_> {
                     model_rate,
                     input_mult_adj,
                     output_mult_adj,
+                    cal_meta,
                     prewarm_cost_ns: _,
                 } = *boxed_payload
                 {
@@ -152,6 +153,7 @@ impl Drop for ActivateRollbackGuard<'_> {
                         model_rate,
                         input_mult_adj,
                         output_mult_adj,
+                        cal_meta,
                     };
                     // Concurrent generations: keep the newest; a superseded
                     // model payload drops here on the main thread.
@@ -283,6 +285,7 @@ mod tests {
             model_rate: 48000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            cal_meta: Default::default(),
         });
 
         let model = |generation: u64, rate: u32| ClapParamPayload::LoadModel {
@@ -294,6 +297,7 @@ mod tests {
             model_rate: rate,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            cal_meta: Default::default(),
             prewarm_cost_ns: None,
         };
         param_tx
@@ -350,6 +354,7 @@ mod tests {
             model_rate: 48000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            cal_meta: Default::default(),
         });
         param_tx
             .push(Box::new(ClapParamPayload::LoadModel {
@@ -362,6 +367,7 @@ mod tests {
                 model_rate: 48000,
                 input_mult_adj: 1.0,
                 output_mult_adj: 1.0,
+                cal_meta: Default::default(),
                 prewarm_cost_ns: None,
             }))
             .unwrap();
@@ -408,6 +414,7 @@ mod tests {
             model_rate: 48000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            cal_meta: Default::default(),
             prewarm_cost_ns: None,
         };
         let _ = param_tx.push(Box::new(payload));

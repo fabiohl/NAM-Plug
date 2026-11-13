@@ -169,6 +169,7 @@ pub(crate) fn build_restore_package(
         ir_path_on_disk,
         ir_hash,
         ir_level_policy,
+        calibration,
     } = validated;
 
     // Effective params: Full replaces everything; ForPreset only the
@@ -218,6 +219,7 @@ pub(crate) fn build_restore_package(
                 new_stream,
                 input_mult_adj,
                 output_mult_adj,
+                cal_meta,
                 buffer_size,
                 model_rate,
                 model_metadata: _,
@@ -245,6 +247,7 @@ pub(crate) fn build_restore_package(
                 model_rate,
                 input_mult_adj,
                 output_mult_adj,
+                cal_meta,
                 prewarm_cost_ns,
             })
         }
@@ -279,6 +282,7 @@ pub(crate) fn build_restore_package(
                     model_rate: 48000,
                     input_mult_adj: 1.0,
                     output_mult_adj: 1.0,
+                    cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
                     prewarm_cost_ns: None,
                 })
             }
@@ -318,6 +322,7 @@ pub(crate) fn build_restore_package(
         ir_raw_sample_rate: ir_publish.as_ref().map(|(_, r)| *r).unwrap_or(0),
         ir_hash,
         ir_level_policy,
+        calibration,
     };
 
     let txn = RestoreTxn {
@@ -325,6 +330,7 @@ pub(crate) fn build_restore_package(
         model: model_component,
         ir: ir_component,
         params: RtProcessingParams::from_processing_params(&effective_params),
+        calibration,
     };
 
     Ok((publish, txn))
@@ -347,7 +353,8 @@ fn deliver_pending_restore(main_thread: &NamClapMainThread, mut pending: Pending
                 pending.seq = seq;
                 note_model_delivered(main_thread, &pending.publish);
             }
-            Err((PushError::Full, payload)) => {
+            Err(err) => {
+                let (PushError::Full, payload) = *err;
                 if let ClapParamPayload::RestoreTxn(txn) = payload {
                     pending.txn = Some(txn);
                 }
@@ -395,6 +402,7 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         ir_raw_sample_rate,
         ir_hash,
         ir_level_policy,
+        calibration,
     } = publish;
     let mode = if mode_full {
         RestoreMode::Full
@@ -571,6 +579,11 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
             .param_activation
             .store(mt_params.activation_precision as u32, Ordering::Relaxed);
     }
+    main_thread.shared.store_calibration_config(calibration);
+    *lock_cold(
+        &main_thread.shared.cold.in_flight_calibration,
+        "in_flight_calibration",
+    ) = None;
     main_thread.shared.bump_generation();
 
     if let Some(params_ext) = main_thread
@@ -604,6 +617,7 @@ fn local_commit(
         ir_path_on_disk,
         ir_hash,
         ir_level_policy,
+        calibration,
     } = validated;
 
     // ── Commit model (local) ──
@@ -615,6 +629,7 @@ fn local_commit(
             new_stream: _,
             input_mult_adj,
             output_mult_adj,
+            cal_meta,
             buffer_size: _,
             model_rate,
             model_metadata,
@@ -653,6 +668,7 @@ fn local_commit(
             model_rate,
             input_mult_adj,
             output_mult_adj,
+            cal_meta,
         });
         main_thread
             .shared
@@ -696,6 +712,7 @@ fn local_commit(
             model_rate: 48000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
         });
         main_thread
             .shared
@@ -834,6 +851,11 @@ fn local_commit(
             .param_activation
             .store(params.activation_precision as u32, Ordering::Relaxed);
     }
+    main_thread.shared.store_calibration_config(calibration);
+    *lock_cold(
+        &main_thread.shared.cold.in_flight_calibration,
+        "in_flight_calibration",
+    ) = None;
     main_thread.shared.bump_generation();
 
     if let Some(params_ext) = main_thread
@@ -877,7 +899,8 @@ impl<'a> NamClapMainThread<'a> {
                     pending.seq = seq;
                     note_model_delivered(self, &pending.publish);
                 }
-                Err((PushError::Full, payload)) => {
+                Err(err) => {
+                    let (PushError::Full, payload) = *err;
                     if let ClapParamPayload::RestoreTxn(txn) = payload {
                         pending.txn = Some(txn);
                     }

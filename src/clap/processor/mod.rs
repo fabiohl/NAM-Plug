@@ -638,6 +638,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             //    in pre-reset state.
             self.smoother_in.snap_to_target();
             self.smoother_out.snap_to_target();
+            self.smoother_cal_in.snap_to_target();
+            self.smoother_cal_out.snap_to_target();
 
             // 9. Bypass crossfader snaps to the current bypass state (no
             //    mid-ramp blend left over from the pre-reset timeline).

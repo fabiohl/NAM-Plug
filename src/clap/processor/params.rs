@@ -15,8 +15,9 @@
 
 use super::NamClapProcessor;
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_GATE_THRESH, PARAM_INPUT_GAIN,
-    PARAM_OUTPUT_GAIN, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32,
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
+    PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
+    PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32,
     bypass_f32_to_bool, bypass_u32_to_bool, sanitize_param_value,
 };
 use crate::clap::plugin::PendingRestartOs;
@@ -162,6 +163,47 @@ impl<'a> NamClapProcessor<'a> {
                 .param_activation
                 .store(mode as u32, Ordering::Relaxed);
             neural_amp_modeler_rs::math::activations::set_activation_tls(mode);
+        }
+    }
+
+    /// Enables or disables input level calibration prior to the neural model.
+    pub(crate) fn set_calibrate_input(&mut self, val: f32) {
+        let sanitized = sanitize_param_value(PARAM_CALIBRATE_INPUT, val);
+        let enabled = sanitized >= 0.5;
+        if enabled != self.cal_config.calibrate_input {
+            self.cal_config.calibrate_input = enabled;
+            self.shared
+                .ui_to_rt
+                .param_calibrate_input
+                .store(u32::from(enabled), Ordering::Relaxed);
+            self.retarget_calibration_smoothers();
+        }
+    }
+
+    /// Sets the converter 0 dBFS input calibration reference level in dBu (`[-60, 60]`).
+    pub(crate) fn set_input_calibration_level(&mut self, val: f32) {
+        let sanitized = sanitize_param_value(PARAM_INPUT_CALIBRATION_LEVEL, val);
+        if (sanitized - self.cal_config.input_calibration_level_dbu).abs() > f32::EPSILON {
+            self.cal_config.input_calibration_level_dbu = sanitized;
+            self.shared
+                .ui_to_rt
+                .param_input_calibration_level
+                .store(sanitized.to_bits(), Ordering::Relaxed);
+            self.retarget_calibration_smoothers();
+        }
+    }
+
+    /// Sets the neural amp model output compensation mode (`Raw`, `Normalized`, `Calibrated`).
+    pub(crate) fn set_output_mode(&mut self, val: f32) {
+        let sanitized = sanitize_param_value(PARAM_OUTPUT_MODE, val);
+        let mode = crate::clap::extensions::calibration::OutputMode::from_f32(sanitized);
+        if mode != self.cal_config.output_mode {
+            self.cal_config.output_mode = mode;
+            self.shared
+                .ui_to_rt
+                .param_output_mode
+                .store(mode.to_u32(), Ordering::Relaxed);
+            self.retarget_calibration_smoothers();
         }
     }
 
@@ -338,6 +380,29 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Recomputes and retargets the calibration smoothers from the active model
+    /// calibration metadata and `self.cal_config`.
+    pub(crate) fn retarget_calibration_smoothers(&mut self) {
+        let (in_mult, out_mult) =
+            crate::clap::extensions::calibration::compute_calibration_multipliers(
+                self.model_cal_meta,
+                self.cal_config,
+            );
+        self.model_input_mult_adj = in_mult;
+        self.model_output_mult_adj = out_mult;
+        self.smoother_cal_in.set_target(in_mult);
+        self.smoother_cal_out.set_target(out_mult);
+    }
+
+    /// Synchronizes input calibration and output mode configuration from `UiToRt`.
+    pub(super) fn sync_calibration_from_gui(&mut self) {
+        let shared_cal = self.shared.calibration_config();
+        if shared_cal != self.cal_config {
+            self.cal_config = shared_cal;
+            self.retarget_calibration_smoothers();
+        }
+    }
+
     /// Synchronizes all parameters changed via GUI from shared UI-to-RT atomics,
     /// retargeting smoothers, flagging gate recalculation, and updating controllers.
     ///
@@ -351,6 +416,7 @@ impl<'a> NamClapProcessor<'a> {
         self.sync_slim_override_from_gui();
         self.sync_oversample_from_gui();
         self.sync_activation_from_gui();
+        self.sync_calibration_from_gui();
     }
 }
 

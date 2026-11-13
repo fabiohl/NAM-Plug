@@ -39,23 +39,31 @@ fn test_v1_round_trip() {
     original.bypass = true;
 
     let envelope = StateEnvelope {
-        version: CURRENT_STATE_VERSION,
+        version: 1,
         params: original.clone(),
         ir_level_policy: Default::default(),
+        calibration: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
 
-    let restored = load_state(&json).expect("v1 payload should load");
+    let (restored, _policy, calibration) =
+        load_state_with_policy_and_calibration(&json).expect("v1 payload should load");
     assert_eq!(restored, original, "v1 round-trip should be idempotent");
+    assert_eq!(
+        calibration,
+        crate::clap::extensions::calibration::CalibrationConfig::legacy_restored_default(),
+        "v1 payload without calibration must restore legacy compensated default"
+    );
 }
 
 #[test]
 fn test_v1_save_format() {
     let params = ProcessingParams::default();
     let envelope = StateEnvelope {
-        version: CURRENT_STATE_VERSION,
+        version: 1,
         params,
         ir_level_policy: Default::default(),
+        calibration: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -95,6 +103,7 @@ fn test_v1_round_trip_with_search_fields() {
         version: CURRENT_STATE_VERSION,
         params: original.clone(),
         ir_level_policy: Default::default(),
+        calibration: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
 
@@ -114,6 +123,7 @@ fn test_v1_search_fields_serialization_format() {
         version: CURRENT_STATE_VERSION,
         params,
         ir_level_policy: Default::default(),
+        calibration: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -131,6 +141,7 @@ fn test_v1_round_trip_with_ir_path() {
         version: CURRENT_STATE_VERSION,
         params: original.clone(),
         ir_level_policy: Default::default(),
+        calibration: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
 
@@ -149,6 +160,7 @@ fn test_v1_ir_path_serialization_format() {
         version: CURRENT_STATE_VERSION,
         params,
         ir_level_policy: Default::default(),
+        calibration: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -175,4 +187,60 @@ fn test_file_hash_size_limit_and_incremental_computation() {
     assert!(!hash.is_empty());
 
     let _ = std::fs::remove_file(&test_file);
+}
+
+#[test]
+fn test_v2_calibration_round_trip_and_missing_field_defaults() {
+    let params = ProcessingParams::default();
+    let cal = crate::clap::extensions::calibration::CalibrationConfig {
+        calibrate_input: true,
+        input_calibration_level_dbu: -18.5,
+        output_mode: crate::clap::extensions::calibration::OutputMode::Calibrated,
+    };
+    let bytes = serialize_envelope_v2(&params, IrLevelPolicy::default(), cal)
+        .expect("v2 envelope should serialize");
+    let (_, _, restored_cal) =
+        load_state_with_policy_and_calibration(&bytes).expect("v2 envelope should deserialize");
+    assert_eq!(restored_cal, cal);
+
+    // v2 payload lacking `"calibration"` uses new_project_default() (opt-in OFF).
+    let v2_no_cal = serde_json::json!({
+        "version": 2,
+        "params": params,
+    });
+    let no_cal_bytes = serde_json::to_vec(&v2_no_cal).unwrap();
+    let (_, _, fallback_cal) = load_state_with_policy_and_calibration(&no_cal_bytes)
+        .expect("v2 without calibration should use new-project defaults");
+    assert_eq!(
+        fallback_cal,
+        crate::clap::extensions::calibration::CalibrationConfig::new_project_default()
+    );
+}
+
+#[test]
+fn test_v2_calibration_rejects_out_of_range_level() {
+    let params = ProcessingParams::default();
+    let bad_env = serde_json::json!({
+        "version": 2,
+        "params": params,
+        "calibration": {
+            "calibrate_input": true,
+            "input_calibration_level_dbu": 120.0,
+            "output_mode": "Calibrated"
+        }
+    });
+    let bytes = serde_json::to_vec(&bad_env).unwrap();
+    let err = load_state_with_policy_and_calibration(&bytes).unwrap_err();
+    match err {
+        PluginError::Error(boxed) => {
+            let state_err = boxed
+                .downcast_ref::<StateError>()
+                .expect("expected StateError");
+            assert!(
+                matches!(state_err, StateError::CorruptedEnvelope),
+                "expected CorruptedEnvelope, got {state_err:?}"
+            );
+        }
+        other => panic!("expected PluginError::Error, got {other:?}"),
+    }
 }

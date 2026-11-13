@@ -22,7 +22,7 @@ pub use slint_view_model::{MainWindow, SlintViewModel};
 /// Default width of the plugin window.
 pub const GUI_WIDTH: u32 = 600;
 /// Default height of the plugin window.
-pub const GUI_HEIGHT: u32 = 275;
+pub const GUI_HEIGHT: u32 = 312;
 
 /// Safe bridge for passing the CLAP host handle to the GUI thread.
 ///

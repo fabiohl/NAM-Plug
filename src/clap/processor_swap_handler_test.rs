@@ -164,6 +164,7 @@ mod tests {
             model_rate: 48_000,
             input_mult_adj: 1.0,
             output_mult_adj: 1.0,
+            cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta::empty(),
             prewarm_cost_ns: None,
         }
     }
@@ -181,6 +182,7 @@ mod tests {
             model: None,
             ir: None,
             params: RtProcessingParams::default(),
+            calibration: Default::default(),
         })
     }
 

@@ -185,7 +185,7 @@ mod tests {
         // 1. get_size
         let size = gui_ext.get_size(&handle).expect("Failed to get size");
         assert_eq!(size.width, 600);
-        assert_eq!(size.height, 275);
+        assert_eq!(size.height, crate::clap::gui::GUI_HEIGHT);
 
         // 2. can_resize
         assert!(!gui_ext.can_resize(&handle));
@@ -197,7 +197,7 @@ mod tests {
                     &handle,
                     GuiSize {
                         width: 600,
-                        height: 275
+                        height: crate::clap::gui::GUI_HEIGHT
                     }
                 )
                 .is_ok()

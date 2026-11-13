@@ -121,6 +121,22 @@ fn test_production_vs_test_defaults() {
         test.ui_to_rt.param_activation.load(Ordering::Relaxed)
     );
     assert_eq!(
+        prod.ui_to_rt.param_calibrate_input.load(Ordering::Relaxed),
+        test.ui_to_rt.param_calibrate_input.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.ui_to_rt
+            .param_input_calibration_level
+            .load(Ordering::Relaxed),
+        test.ui_to_rt
+            .param_input_calibration_level
+            .load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        prod.ui_to_rt.param_output_mode.load(Ordering::Relaxed),
+        test.ui_to_rt.param_output_mode.load(Ordering::Relaxed)
+    );
+    assert_eq!(
         prod.ui_to_rt.gesture_flags.load(Ordering::Relaxed),
         test.ui_to_rt.gesture_flags.load(Ordering::Relaxed)
     );
@@ -211,9 +227,9 @@ const CHANGED_SHIFT: u32 = 0;
 const BEGIN_SHIFT: u32 = 1;
 const END_SHIFT: u32 = 2;
 
-/// CLAP ids of the 8 writable parameters (PARAM_ACTIVE_MODEL = 4 is read-only
+/// CLAP ids of the 11 writable parameters (PARAM_ACTIVE_MODEL = 4 is read-only
 /// and is not part of the GUI gesture set).
-const WRITABLE_PARAM_IDS: [u32; 8] = [0, 1, 2, 3, 5, 6, 7, 8];
+const WRITABLE_PARAM_IDS: [u32; 11] = [0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11];
 
 /// Host-side output queue with a hard capacity limit, simulating a real host
 /// whose output event buffer is full. `capacity == 0` rejects every push.
@@ -291,11 +307,11 @@ fn record_events(buf: &EventBuffer) -> Vec<EvRec> {
 /// delivered sequence: `begin → value* → end`, no orphan `end`, no `begin`
 /// while a gesture is already active, and no unterminated gesture.
 fn assert_legal_gesture_order(records: &[EvRec]) {
-    // Indices 0..=8 = the 9 CLAP params; index 4 (ACTIVE_MODEL) is never used.
-    let mut state = [0u8; 9];
+    // Indices 0..=11 = the 12 CLAP params; index 4 (ACTIVE_MODEL) is never used.
+    let mut state = [0u8; 12];
     for rec in records {
         let p = rec.param as usize;
-        assert!(p <= 8, "unexpected param_id {}", rec.param);
+        assert!(p <= 11, "unexpected param_id {}", rec.param);
         match rec.kind {
             EvKind::Begin => {
                 assert_eq!(
@@ -328,21 +344,30 @@ fn assert_legal_gesture_order(records: &[EvRec]) {
 }
 
 fn arms_gesture(shared: &NamClapShared, param_id: u32, value: f32) {
-    shared.set_gesture(param_id as usize, BEGIN_SHIFT);
-    shared.set_gesture(param_id as usize, CHANGED_SHIFT);
-    shared.set_gesture(param_id as usize, END_SHIFT);
-    let atomic = match param_id {
-        0 => &shared.ui_to_rt.param_input_gain,
-        1 => &shared.ui_to_rt.param_output_gain,
-        2 => &shared.ui_to_rt.param_gate_thresh,
-        3 => &shared.ui_to_rt.param_bypass,
-        5 => &shared.ui_to_rt.param_adaptive_compute,
-        6 => &shared.ui_to_rt.param_slim_override,
-        7 => &shared.ui_to_rt.param_oversample,
-        8 => &shared.ui_to_rt.param_activation,
+    let idx = GuiSharedState::param_index(param_id);
+    shared.set_gesture(idx, BEGIN_SHIFT);
+    shared.set_gesture(idx, CHANGED_SHIFT);
+    shared.set_gesture(idx, END_SHIFT);
+    let (atomic, is_f32_bits) = match param_id {
+        0 => (&shared.ui_to_rt.param_input_gain, true),
+        1 => (&shared.ui_to_rt.param_output_gain, true),
+        2 => (&shared.ui_to_rt.param_gate_thresh, true),
+        3 => (&shared.ui_to_rt.param_bypass, false),
+        5 => (&shared.ui_to_rt.param_adaptive_compute, false),
+        6 => (&shared.ui_to_rt.param_slim_override, false),
+        7 => (&shared.ui_to_rt.param_oversample, false),
+        8 => (&shared.ui_to_rt.param_activation, false),
+        9 => (&shared.ui_to_rt.param_calibrate_input, false),
+        10 => (&shared.ui_to_rt.param_input_calibration_level, true),
+        11 => (&shared.ui_to_rt.param_output_mode, false),
         _ => unreachable!("unexpected param id {param_id}"),
     };
-    atomic.store(value.to_bits(), Ordering::Relaxed);
+    let encoded = if is_f32_bits {
+        value.to_bits()
+    } else {
+        value as u32
+    };
+    atomic.store(encoded, Ordering::Relaxed);
 }
 
 fn gesture_flags_clear(shared: &NamClapShared) -> bool {
@@ -409,8 +434,8 @@ fn test_gui_events_capacity_0_retains_every_bit_and_recovers() {
     let records = flush_until_drained(&shared, &mut roomy, 10);
     assert_eq!(
         records.len(),
-        24,
-        "8 params x (begin, value, end) = 24 events"
+        33,
+        "11 params x (begin, value, end) = 33 events"
     );
     assert_legal_gesture_order(&records);
     for rec in &records {
@@ -442,7 +467,7 @@ fn test_gui_events_capacity_1_delivers_all_in_legal_order() {
         all_records.extend(recs);
     }
 
-    assert_eq!(all_records.len(), 72, "8 params x 3 gestures x 3 events");
+    assert_eq!(all_records.len(), 99, "11 params x 3 gestures x 3 events");
     assert_legal_gesture_order(&all_records);
 
     // Each cycle must deliver exactly one value per param, equal to the
@@ -452,11 +477,15 @@ fn test_gui_events_capacity_1_delivers_all_in_legal_order() {
         .filter(|r| r.kind == EvKind::Value)
         .map(|r| r.value.unwrap())
         .collect();
-    assert_eq!(values.len(), 24);
+    assert_eq!(values.len(), 33);
     for cycle in 0..3 {
         for (i, &pid) in WRITABLE_PARAM_IDS.iter().enumerate() {
             let expected = (10.0 * cycle as f32 + pid as f32) as f64;
-            assert_eq!(values[cycle * 8 + i], expected, "cycle {cycle} param {pid}");
+            assert_eq!(
+                values[cycle * 11 + i],
+                expected,
+                "cycle {cycle} param {pid}"
+            );
         }
     }
 }
