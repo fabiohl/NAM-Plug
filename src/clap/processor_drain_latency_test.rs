@@ -211,6 +211,7 @@ fn test_drain_p99_automation_burst_under_1us() {
                         params: RtProcessingParams::default(),
                         calibration: crate::clap::extensions::calibration::CalibrationConfig::new_project_default(),
                         gate_mode: Default::default(),
+                        cab_bypass: false,
                     },
                 ))
                 .expect("restore burst must fit the ring");

@@ -4,7 +4,7 @@
 //! `PluginMainThreadParams` implementation for the Main Thread.
 
 use super::{
-    PARAM_ACTIVATION, PARAM_ACTIVE_MODEL, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS,
+    PARAM_ACTIVATION, PARAM_ACTIVE_MODEL, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CAB_BYPASS,
     PARAM_CALIBRATE_INPUT, PARAM_COUNT, PARAM_GATE_MODE, PARAM_GATE_THRESH,
     PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE,
     PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32, bypass_f32_to_bool,
@@ -208,6 +208,18 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     default_value: GateMode::Silence.to_f32() as f64,
                 });
             }
+            PARAM_CAB_BYPASS => {
+                info.set(&ParamInfo {
+                    id: ClapId::new(PARAM_CAB_BYPASS),
+                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
+                    cookie: clack_plugin::utils::Cookie::empty(),
+                    name: b"Cabinet Bypass",
+                    module: b"Cabinet",
+                    min_value: 0.0,
+                    max_value: 1.0,
+                    default_value: 0.0,
+                });
+            }
             _ => {}
         }
     }
@@ -300,6 +312,12 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     .param_gate_mode
                     .load(std::sync::atomic::Ordering::Relaxed) as f64,
             ),
+            PARAM_CAB_BYPASS => Some(
+                self.shared
+                    .ui_to_rt
+                    .param_cab_bypass
+                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
+            ),
             _ => None,
         }
     }
@@ -361,6 +379,13 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
             PARAM_INPUT_CALIBRATION_LEVEL => writer.write_fmt(format_args!("{:.1} dBu", value)),
             PARAM_OUTPUT_MODE => writer.write_str(OutputMode::from_f32(value as f32).as_str()),
             PARAM_GATE_MODE => writer.write_str(GateMode::from_f32(value as f32).as_str()),
+            PARAM_CAB_BYPASS => {
+                if bypass_f32_to_bool(value as f32) {
+                    writer.write_str("Bypassed")
+                } else {
+                    writer.write_str("Active")
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -469,6 +494,11 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
             }
             PARAM_OUTPUT_MODE => OutputMode::from_text(text_str).map(|m| m.to_f32() as f64),
             PARAM_GATE_MODE => GateMode::from_text(text_str).map(|m| m.to_f32() as f64),
+            PARAM_CAB_BYPASS => match text_str.trim().to_ascii_lowercase().as_str() {
+                "active" | "0" | "false" | "off" => Some(0.0),
+                "bypassed" | "1" | "true" | "on" => Some(1.0),
+                _ => None,
+            },
             _ => None,
         };
 
@@ -481,6 +511,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
         let mut param_changed = false;
         let mut cal_changed = false;
         let mut gate_mode_changed = false;
+        let mut cab_bypass_changed = false;
 
         for event in input {
             let Some(param_event) = event.as_event::<ParamValueEvent>() else {
@@ -593,12 +624,21 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     gate_mode_changed = true;
                     continue;
                 }
+                PARAM_CAB_BYPASS => {
+                    let bypass = bypass_f32_to_bool(val);
+                    self.shared.ui_to_rt.param_cab_bypass.store(
+                        bypass_bool_to_u32(bypass),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    cab_bypass_changed = true;
+                    continue;
+                }
                 _ => continue,
             }
             param_changed = true;
         }
 
-        if param_changed || cal_changed || gate_mode_changed {
+        if param_changed || cal_changed || gate_mode_changed || cab_bypass_changed {
             // Scoped params borrow: released before the SPSC producer borrow
             // below, and both are released before the host
             // `request_callback()` in the error path.
@@ -607,6 +647,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
             let cal_cfg: Option<CalibrationConfig> =
                 cal_changed.then(|| self.shared.calibration_config());
             let gm: Option<GateMode> = gate_mode_changed.then(|| self.shared.gate_mode());
+            let cb: Option<bool> = cab_bypass_changed.then(|| self.shared.cab_bypass());
             let flush_result = {
                 let mut producer = self.cmd_producer.borrow_mut();
                 if let Some(s) = snapshot {
@@ -617,6 +658,9 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 }
                 if let Some(m) = gm {
                     producer.push_gate_mode(m);
+                }
+                if let Some(b) = cb {
+                    producer.push_cab_bypass(b);
                 }
                 producer.force_flush()
             };
@@ -633,6 +677,12 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 if let Some(m) = gm {
                     *lock_cold(&self.shared.cold.in_flight_gate_mode, "in_flight_gate_mode") =
                         Some(m);
+                }
+                if let Some(b) = cb {
+                    *lock_cold(
+                        &self.shared.cold.in_flight_cab_bypass,
+                        "in_flight_cab_bypass",
+                    ) = Some(b);
                 }
                 self.shared.bump_generation();
                 self.host.request_callback();

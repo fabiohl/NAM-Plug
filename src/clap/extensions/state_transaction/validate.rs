@@ -4,12 +4,14 @@
 //! State restoration validation phase: off-RT asset checks, model loading, and IR construction.
 
 use super::RestoreMode;
+use crate::clap::extensions::cabinet::{
+    CabAssetKind, CabSlotDsp, CabUiMeta, build_cab_nam_from_bytes,
+};
 use crate::clap::plugin::NamModelMetadata;
 use crate::clap::plugin::errors::{self, static_plugin_error};
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::{ModelInfo, NamDiagnostic, NamErrorCode};
 use neural_amp_modeler_rs::common::params::ProcessingParams;
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
@@ -53,14 +55,20 @@ pub(crate) struct ModelResources {
     pub(crate) model_hash: String,
 }
 
-/// Validated impulse response (IR) resources ready for convolution engine integration.
+/// Validated single-slot cabinet resources (WAV IR or 1-in/1-out NAM/NAMB).
 pub(crate) struct IrResources {
-    /// Pre-configured convolution pair ready for atomic swap into the audio pipeline.
-    pub(crate) pair: Option<Box<CabSimPair>>,
-    /// Raw floating-point IR samples preserved for UI visualization or state archiving.
+    /// Pre-configured cabinet DSP resource ready for atomic swap into the audio pipeline.
+    pub(crate) slot: Option<CabSlotDsp>,
+    /// Format kind of the cabinet asset.
+    pub(crate) kind: CabAssetKind,
+    /// Raw floating-point IR samples (WAV only) for rate renegotiation or policy rebuilds.
     pub(crate) samples: Vec<f32>,
-    /// Sampling rate corresponding to the loaded IR waveform.
+    /// Sampling rate corresponding to the loaded WAV IR or neural cabinet.
     pub(crate) sample_rate: u32,
+    /// Verified raw bytes of a neural cabinet model (`.nam`/`.namb`) for rebuilds on restart.
+    pub(crate) nam_raw: Option<(CabAssetKind, Vec<u8>)>,
+    /// Disambiguated UI display metadata.
+    pub(crate) ui_meta: CabUiMeta,
 }
 
 /// Holds all resources that passed validation, ready for atomic commit.
@@ -93,6 +101,8 @@ pub(crate) struct ValidatedRestore {
     pub(crate) calibration: crate::clap::extensions::calibration::CalibrationConfig,
     /// Restored noise gate operating mode.
     pub(crate) gate_mode: crate::clap::extensions::gate_mode::GateMode,
+    /// Restored independent cabinet bypass state.
+    pub(crate) cab_bypass: bool,
 }
 
 /// Tuple result of off-RT model validation:
@@ -121,13 +131,14 @@ pub(crate) type IrValidationResult = (Option<IrResources>, Option<String>, Optio
 /// [`PluginError`] if any asset is missing, corrupted, or incompatible.
 #[expect(
     clippy::too_many_arguments,
-    reason = "Atomic state restore transaction carries loaded policy, calibration, gate mode, host config, and mode"
+    reason = "Atomic state restore transaction carries loaded policy, calibration, gate mode, cab bypass, host config, and mode"
 )]
-pub(crate) fn validate_and_build(
+pub(crate) fn validate_and_build_with_cab(
     loaded_params: &ProcessingParams,
     ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     calibration: crate::clap::extensions::calibration::CalibrationConfig,
     gate_mode: crate::clap::extensions::gate_mode::GateMode,
+    cab_bypass: bool,
     host_rate: u32,
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
@@ -168,6 +179,7 @@ pub(crate) fn validate_and_build(
         ir_level_policy,
         calibration,
         gate_mode,
+        cab_bypass,
     })
 }
 
@@ -843,9 +855,30 @@ pub(crate) fn load_cabsim_from_verified_bytes(
     })
 }
 
-/// Builds IR resources directly from an in-memory byte slice without re-reading the target file.
+/// Builds WAV IR cabinet resources directly from an in-memory byte slice.
 pub(crate) fn build_ir_resources_from_bytes(
     data: &[u8],
+    path_for_diagnostic: &Path,
+    ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
+    host_rate: u32,
+    buffer_size: u32,
+    sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
+) -> Result<IrResources, Box<NamDiagnostic>> {
+    build_cab_resources_from_bytes(
+        data,
+        CabAssetKind::WavIr,
+        path_for_diagnostic,
+        ir_level_policy,
+        host_rate,
+        buffer_size,
+        sys,
+    )
+}
+
+/// Builds single-slot cabinet resources (`.wav` IR or 1-in/1-out `.nam`/`.namb` model) from memory.
+pub(crate) fn build_cab_resources_from_bytes(
+    data: &[u8],
+    kind: CabAssetKind,
     path_for_diagnostic: &Path,
     ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     host_rate: u32,
@@ -858,21 +891,53 @@ pub(crate) fn build_ir_resources_from_bytes(
         256
     };
 
-    let cabsim = load_cabsim_from_verified_bytes(data, host_rate, sys, path_for_diagnostic)?;
-    let pair = crate::clap::extensions::ir_level_policy::build_cabsim_pair_from_raw(
-        &cabsim.samples,
-        cabsim.original_rate,
-        host_rate,
-        partition_size,
-        ir_level_policy,
-        sys,
-    )?;
-
-    Ok(IrResources {
-        pair: Some(Box::new(pair)),
-        samples: cabsim.samples,
-        sample_rate: cabsim.original_rate,
-    })
+    match kind {
+        CabAssetKind::WavIr => {
+            let cabsim =
+                load_cabsim_from_verified_bytes(data, host_rate, sys, path_for_diagnostic)?;
+            let pair = crate::clap::extensions::ir_level_policy::build_cabsim_pair_from_raw(
+                &cabsim.samples,
+                cabsim.original_rate,
+                host_rate,
+                partition_size,
+                ir_level_policy,
+                sys,
+            )?;
+            let ui_meta = CabUiMeta::from_wav(
+                path_for_diagnostic,
+                cabsim.samples.len(),
+                cabsim.original_rate,
+            );
+            Ok(IrResources {
+                slot: Some(CabSlotDsp::WavIr(Box::new(pair))),
+                kind: CabAssetKind::WavIr,
+                samples: cabsim.samples,
+                sample_rate: cabsim.original_rate,
+                nam_raw: None,
+                ui_meta,
+            })
+        }
+        CabAssetKind::NamModel | CabAssetKind::NambModel => {
+            let (cab_nam, meta) = build_cab_nam_from_bytes(
+                data,
+                kind,
+                path_for_diagnostic,
+                host_rate,
+                partition_size,
+                cfg!(feature = "dual-mono"),
+                sys,
+            )?;
+            let ui_meta = CabUiMeta::from_nam(path_for_diagnostic, &meta);
+            Ok(IrResources {
+                slot: Some(CabSlotDsp::NamModel(cab_nam)),
+                kind,
+                samples: Vec::new(),
+                sample_rate: meta.sample_rate,
+                nam_raw: Some((kind, data.to_vec())),
+                ui_meta,
+            })
+        }
+    }
 }
 
 /// Builds IR resources from a filesystem path without side-effects (reads bytes once).
@@ -935,6 +1000,13 @@ pub(crate) fn validate_ir(
         return Err(PluginError::Message(errors::state_txn::IR_HASH_MALFORMED));
     }
 
+    let Some(cab_kind) = CabAssetKind::detect_from_path(ir_path) else {
+        log::error!("NAM-Plug: State restore failed — unsupported cabinet format for {ir_path:?}");
+        return Err(PluginError::Message(
+            errors::dsp_resources::CAB_NAM_BUILD_FAILED,
+        ));
+    };
+
     // Read bytes once: hash computation and decoding operate on the exact same buffer in memory.
     let ir_bytes = read_ir_file_bytes(ir_path).map_err(|e| {
         log::error!("NAM-Plug: Failed to read IR file at {:?}: {}", ir_path, e);
@@ -952,8 +1024,9 @@ pub(crate) fn validate_ir(
         return Err(PluginError::Message(errors::state_txn::IR_HASH_MISMATCH));
     }
 
-    let resources = build_ir_resources_from_bytes(
+    let resources = build_cab_resources_from_bytes(
         &ir_bytes,
+        cab_kind,
         ir_path,
         ir_level_policy,
         host_rate,

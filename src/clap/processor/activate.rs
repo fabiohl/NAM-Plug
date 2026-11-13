@@ -6,6 +6,8 @@
 //! Handles pre-allocation of RT-safe buffers and initialization of all DSP
 //! sub-components (models, resamplers, cab-sim IRs, oversamplers, and smoothers).
 
+use crate::clap::extensions::cabinet::{CabAssetKind, CabSlotDsp, build_cab_nam_from_shared};
+use crate::clap::extensions::params::bypass_u32_to_bool;
 use crate::clap::plugin::errors::{self, static_plugin_error};
 use crate::clap::plugin::shared::{PendingRestartOs, StagedRestore, StagedSwap};
 use crate::clap::plugin::{CommandConsumer, NamClapMainThread, NamClapShared};
@@ -146,6 +148,23 @@ fn build_cab_sim_from_raw_samples(
     })))
 }
 
+fn build_cab_slot_from_cold_storage(
+    shared: &NamClapShared,
+    override_wav: Option<(&[f32], u32)>,
+    override_nam: Option<(CabAssetKind, &[u8])>,
+    partition_size: usize,
+    host_rate: u32,
+) -> Result<Option<CabSlotDsp>, PluginError> {
+    if let Some(slot) = build_cab_nam_from_shared(shared, override_nam, partition_size, host_rate)?
+    {
+        return Ok(Some(slot));
+    }
+    Ok(
+        build_cab_sim_from_raw_samples(shared, override_wav, partition_size, host_rate)?
+            .map(CabSlotDsp::WavIr),
+    )
+}
+
 impl<'a> NamClapProcessor<'a> {
     /// Activates the real-time audio processor.
     ///
@@ -239,6 +258,20 @@ impl<'a> NamClapProcessor<'a> {
             let buf_xfd_scratch_r = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32)
                 .map_err(|e| buffer_prealloc_error("crossfade scratch", e))?;
 
+            // 2e. Cabinet bypass & neural cabinet scratch buffers (zero RT alloc).
+            let buf_cab_dry_l = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("cab dry delay", e))?;
+            let buf_cab_dry_r = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("cab dry delay", e))?;
+            let buf_cab_nam_in_l = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("cab nam input", e))?;
+            let buf_cab_nam_in_r = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("cab nam input", e))?;
+            let buf_cab_zero_l = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("cab zero input", e))?;
+            let buf_cab_zero_r = AlignedVec::new(buf_capacity, 0.0f32)
+                .map_err(|e| buffer_prealloc_error("cab zero input", e))?;
+
             // 3. DSP component initialization
             let model_rate = shared.cold.model_sample_rate.load(Ordering::Relaxed);
             let model_rate = if model_rate == 0 { 48000 } else { model_rate };
@@ -290,7 +323,9 @@ impl<'a> NamClapProcessor<'a> {
                     // changes reuse the adapter — keeping its partition (and
                     // the latency the host already received) instead of paying
                     // a full FFT rebuild per buffer-size change.
-                    let cab_matches = deact.cabsim_pair.is_some() && rate_matches;
+                    let cab_matches = deact.cab_slot.as_ref().is_some_and(|c| {
+                        c.is_compatible_with_host(host_rate, host_buffer as usize)
+                    });
                     // The streaming adapter's FIFO capacities are sized by the
                     // worst-case host block, so it also needs `buf_matches`.
                     let stream_matches = rate_matches && buf_matches;
@@ -329,8 +364,9 @@ impl<'a> NamClapProcessor<'a> {
                     let cab = if cab_matches {
                         None
                     } else {
-                        Some(build_cab_sim_from_raw_samples(
+                        Some(build_cab_slot_from_cold_storage(
                             shared,
+                            None,
                             None,
                             audio_config.max_frames_count as usize,
                             host_rate,
@@ -384,8 +420,9 @@ impl<'a> NamClapProcessor<'a> {
                         })?,
                     );
 
-                    let cab = Some(build_cab_sim_from_raw_samples(
+                    let cab = Some(build_cab_slot_from_cold_storage(
                         shared,
+                        None,
                         None,
                         audio_config.max_frames_count as usize,
                         host_rate,
@@ -492,22 +529,27 @@ impl<'a> NamClapProcessor<'a> {
                     m.new_stream = new_stream;
                 }
 
-                if let Some(Some(ref mut adapter)) = r.txn.ir
-                    && (adapter.sample_rate != host_rate
-                        || adapter.partition_size() != host_buffer as usize)
+                if let Some(Some(ref mut cab_slot)) = r.txn.ir
+                    && !cab_slot.is_exact_host_config(host_rate, host_buffer as usize)
                 {
-                    let override_samples = r
+                    let override_wav = r
                         .publish
                         .ir_raw_samples
                         .as_deref()
                         .map(|s| (s, r.publish.ir_raw_sample_rate));
-                    if let Some(new_a) = build_cab_sim_from_raw_samples(
+                    let override_nam = r
+                        .publish
+                        .cab_nam_raw_bytes
+                        .as_ref()
+                        .map(|(k, b)| (*k, b.as_slice()));
+                    if let Some(new_slot) = build_cab_slot_from_cold_storage(
                         shared,
-                        override_samples,
+                        override_wav,
+                        override_nam,
                         host_buffer as usize,
                         host_rate,
                     )? {
-                        *adapter = new_a;
+                        *cab_slot = new_slot;
                     }
                 }
             }
@@ -578,17 +620,17 @@ impl<'a> NamClapProcessor<'a> {
                     m.new_stream = new_stream;
                 }
 
-                if let Some(Some(ref mut adapter)) = s.ir
-                    && (adapter.sample_rate != host_rate
-                        || adapter.partition_size() != host_buffer as usize)
-                    && let Some(new_a) = build_cab_sim_from_raw_samples(
+                if let Some(Some(ref mut cab_slot)) = s.ir
+                    && !cab_slot.is_exact_host_config(host_rate, host_buffer as usize)
+                    && let Some(new_slot) = build_cab_slot_from_cold_storage(
                         shared,
+                        None,
                         None,
                         host_buffer as usize,
                         host_rate,
                     )?
                 {
-                    *adapter = new_a;
+                    *cab_slot = new_slot;
                 }
             }
 
@@ -666,12 +708,12 @@ impl<'a> NamClapProcessor<'a> {
                         )
                     };
 
-                    let cabsim_pair = if let Some(ir) = txn.ir {
+                    let cab_slot = if let Some(ir) = txn.ir {
                         ir
                     } else if let Some(new_c) = new_cabsim {
                         new_c
                     } else {
-                        deact.cabsim_pair
+                        deact.cab_slot
                     };
 
                     let (os_l, os_r) = if let Some((l, r)) = new_os {
@@ -688,7 +730,7 @@ impl<'a> NamClapProcessor<'a> {
                         stream,
                         os_l,
                         os_r,
-                        cabsim_pair,
+                        cab_slot,
                         model_input_mult_adj,
                         model_output_mult_adj,
                         model_cal_meta,
@@ -733,7 +775,7 @@ impl<'a> NamClapProcessor<'a> {
                         )
                     };
 
-                    let cabsim_pair = if let Some(ir) = txn.ir {
+                    let cab_slot = if let Some(ir) = txn.ir {
                         ir
                     } else {
                         new_cabsim.ok_or_else(|| {
@@ -753,7 +795,7 @@ impl<'a> NamClapProcessor<'a> {
                         stream,
                         os_l,
                         os_r,
-                        cabsim_pair,
+                        cab_slot,
                         model_input_mult_adj,
                         model_output_mult_adj,
                         model_cal_meta,
@@ -802,12 +844,12 @@ impl<'a> NamClapProcessor<'a> {
                         deact.model_cal_meta,
                     )
                 };
-                let cabsim_pair = if let Some(ir) = staged_ir {
+                let cab_slot = if let Some(ir) = staged_ir {
                     ir
                 } else if let Some(new_c) = new_cabsim {
                     new_c
                 } else {
-                    deact.cabsim_pair
+                    deact.cab_slot
                 };
                 let (os_l, os_r) = if let Some((l, r)) = new_os {
                     (l, r)
@@ -822,7 +864,7 @@ impl<'a> NamClapProcessor<'a> {
                     stream,
                     os_l,
                     os_r,
-                    cabsim_pair,
+                    cab_slot,
                     model_input_mult_adj,
                     model_output_mult_adj,
                     model_cal_meta,
@@ -906,13 +948,12 @@ impl<'a> NamClapProcessor<'a> {
             // clear the FDL and FIFO history in place. Zero-alloc — the IR and
             // the RFFT plan are preserved, so a quantum renegotiation still
             // avoids the full rebuild.
-            let cabsim_pair = {
-                let mut cabsim_pair = cabsim_pair;
-                if let Some(ref mut pair) = cabsim_pair {
-                    pair.l.reset();
-                    pair.r.reset();
+            let cab_slot = {
+                let mut cab_slot = cabsim_pair;
+                if let Some(ref mut cab) = cab_slot {
+                    cab.reset();
                 }
-                cabsim_pair
+                cab_slot
             };
 
             // Complete any outstanding split-stabilization pass of the
@@ -1013,6 +1054,8 @@ impl<'a> NamClapProcessor<'a> {
                 20.0,
             );
             let cal_config = shared.calibration_config();
+            let cab_bypass =
+                bypass_u32_to_bool(shared.ui_to_rt.param_cab_bypass.load(Ordering::Relaxed));
             let gate_mode = shared.gate_mode();
             let musical_gate = crate::clap::processor::dsp::musical_gate::MusicalNoiseGate::new(
                 audio_config.sample_rate.round().clamp(1.0, u32::MAX as f64) as u32,
@@ -1065,9 +1108,8 @@ impl<'a> NamClapProcessor<'a> {
             // authoritative PDC value.
             let mut initial_latency = stream.latency_samples();
             initial_latency += os_l.latency_samples() as u32;
-            if let Some(ref pair) = cabsim_pair {
-                initial_latency += pair.partition_size() as u32;
-            }
+            let cab_latency = cab_slot.as_ref().map_or(0, CabSlotDsp::latency_samples);
+            initial_latency += cab_latency;
             // Publish the installed latency contributions so the main thread
             // can decide continuous-vs-staged swaps (same latency ⇒ continuous,
             // different ⇒ staged + restart) for future model/IR loads. Written
@@ -1076,21 +1118,16 @@ impl<'a> NamClapProcessor<'a> {
                 .cold
                 .current_stream_latency
                 .store(stream.latency_samples(), Ordering::Relaxed);
-            shared.cold.current_cabsim_latency.store(
-                cabsim_pair
-                    .as_ref()
-                    .map_or(0, |p| p.partition_size() as u32),
-                Ordering::Relaxed,
-            );
+            shared
+                .cold
+                .current_cabsim_latency
+                .store(cab_latency, Ordering::Relaxed);
             // Publish the CabSim tail telemetry on the restart install path
             // too — `cold_load_cabsim` only covers the continuous SPSC swap,
             // leaving the atomic at 0 (and the host tail extension wrong) after
             // a staged IR lands via `activate()`.
             shared.rt_to_ui.cabsim_tail_samples.store(
-                cabsim_pair
-                    .as_ref()
-                    .map(|p| (p.l.num_partitions() * p.l.latency_samples()) as u32)
-                    .unwrap_or(0),
+                cab_slot.as_ref().map_or(0, CabSlotDsp::tail_samples),
                 Ordering::Relaxed,
             );
             shared
@@ -1133,6 +1170,7 @@ impl<'a> NamClapProcessor<'a> {
                 .max(MAX_RESAMP_BUF)
                 .saturating_add(DRY_DELAY_MAX_EXTRA);
             let dry_delay = DryDelayLine::new(dry_delay_capacity, initial_latency as usize);
+            let cab_dry_delay = DryDelayLine::new(dry_delay_capacity, cab_latency as usize);
 
             let recovered_commands = std::mem::take(
                 &mut *shared
@@ -1146,7 +1184,11 @@ impl<'a> NamClapProcessor<'a> {
                 model_l,
                 model_r,
                 model_generation,
-                cabsim_pair,
+                cab_slot,
+                cab_bypass,
+                cab_needs_reset: false,
+                cab_bypass_xfade: BypassCrossfader::new(cab_bypass),
+                cab_dry_delay,
                 recovered_commands,
                 resampler,
                 stream,
@@ -1166,6 +1208,12 @@ impl<'a> NamClapProcessor<'a> {
                 buf_os_model_r,
                 buf_xfade_dry_l,
                 buf_xfade_dry_r,
+                buf_cab_dry_l,
+                buf_cab_dry_r,
+                buf_cab_nam_in_l,
+                buf_cab_nam_in_r,
+                buf_cab_zero_l,
+                buf_cab_zero_r,
                 buf_xfd_scratch_l,
                 buf_xfd_scratch_r,
                 silence_hyst,

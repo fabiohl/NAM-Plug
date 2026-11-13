@@ -616,13 +616,14 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.os_l.reset();
             self.os_r.reset();
 
-            // 5. CabSim convolution adapter: clears the FDL and the input/output
-            //    FIFOs, rewinds the partition accumulator and the IR ring-out
-            //    budget (keeps the IR).
-            if let Some(pair) = &mut self.cabsim_pair {
-                pair.l.reset();
-                pair.r.reset();
+            // 5. Cabinet slot (WAV IR convolution or neural NAM model): clears
+            //    filter/recurrent memory and FIFOs in place while preserving the asset.
+            if let Some(cab) = &mut self.cab_slot {
+                cab.reset();
             }
+            self.cab_needs_reset = false;
+            self.cab_bypass_xfade = BypassCrossfader::new(self.cab_bypass);
+            self.cab_dry_delay.reset();
 
             // 6. Noise-gate hysteresis FSMs back to the initial Open state
             //    (unity multiplier, no ramp).
@@ -666,6 +667,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.buf_xfade_dry_r.fill(0.0);
             self.buf_xfd_scratch_l.fill(0.0);
             self.buf_xfd_scratch_r.fill(0.0);
+            self.buf_cab_dry_l.fill(0.0);
+            self.buf_cab_dry_r.fill(0.0);
+            self.buf_cab_nam_in_l.fill(0.0);
+            self.buf_cab_nam_in_r.fill(0.0);
+            self.buf_cab_zero_l.fill(0.0);
+            self.buf_cab_zero_r.fill(0.0);
 
             // 12. Per-block caches a fresh activation starts with: gate cache
             //     invalidated (recomputed from the preserved params on the

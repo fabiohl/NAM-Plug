@@ -44,6 +44,8 @@ fn test_v1_round_trip() {
         ir_level_policy: Default::default(),
         calibration: None,
         gate_mode: None,
+        cab_bypass: false,
+        cab_kind: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
 
@@ -66,6 +68,8 @@ fn test_v1_save_format() {
         ir_level_policy: Default::default(),
         calibration: None,
         gate_mode: None,
+        cab_bypass: false,
+        cab_kind: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -107,6 +111,8 @@ fn test_v1_round_trip_with_search_fields() {
         ir_level_policy: Default::default(),
         calibration: None,
         gate_mode: None,
+        cab_bypass: false,
+        cab_kind: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
 
@@ -128,6 +134,8 @@ fn test_v1_search_fields_serialization_format() {
         ir_level_policy: Default::default(),
         calibration: None,
         gate_mode: None,
+        cab_bypass: false,
+        cab_kind: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -147,6 +155,8 @@ fn test_v1_round_trip_with_ir_path() {
         ir_level_policy: Default::default(),
         calibration: None,
         gate_mode: None,
+        cab_bypass: false,
+        cab_kind: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
 
@@ -167,6 +177,8 @@ fn test_v1_ir_path_serialization_format() {
         ir_level_policy: Default::default(),
         calibration: None,
         gate_mode: None,
+        cab_bypass: false,
+        cab_kind: None,
     };
     let json = serde_json::to_vec(&envelope).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();

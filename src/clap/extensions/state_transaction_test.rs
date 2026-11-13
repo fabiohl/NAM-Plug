@@ -40,6 +40,7 @@ fn make_validated(params: ProcessingParams) -> ValidatedRestore {
         ir_level_policy: Default::default(),
         calibration: Default::default(),
         gate_mode: Default::default(),
+        cab_bypass: false,
     }
 }
 

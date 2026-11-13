@@ -4,9 +4,13 @@
 import { SelectorButton } from "SelectorButton.slint";
 
 export component IrCard inherits Rectangle {
-    in property <string> ir-name: "No IR loaded";
-    in property <string> ir-status: "Bypassed";
+    in property <string> ir-name: "No cabinet loaded";
+    in property <string> ir-status: "—";
     in property <string> ir-policy-label: "Peak";
+    in property <string> cab-kind-label: "CAB";
+    in property <string> cab-detail: "";
+    in property <bool> cab-is-neural: false;
+    in property <bool> cab-bypassed: false;
     in property <bool> has-ir: false;
     in property <bool> is-loading: false;
     in property <bool> is-error: false;
@@ -16,6 +20,7 @@ export component IrCard inherits Rectangle {
     callback load-clicked();
     callback clear-clicked();
     callback cycle-policy-clicked();
+    callback toggle-cab-bypass-clicked();
 
     background: transparent;
 
@@ -28,7 +33,7 @@ export component IrCard inherits Rectangle {
             alignment: space-between;
             height: 12px;
             Text {
-                text: "CABINET IR";
+                text: "CABINET";
                 font-size: 8.5px;
                 font-weight: 700;
                 color: #8fa1b3;
@@ -36,7 +41,7 @@ export component IrCard inherits Rectangle {
             }
             HorizontalLayout {
                 spacing: 3px;
-                touch_policy := TouchArea {
+                if (!root.has-ir || !root.cab-is-neural) : touch_policy := TouchArea {
                     mouse-cursor: pointer;
                     clicked => {
                         root.cycle-policy-clicked();
@@ -60,34 +65,76 @@ export component IrCard inherits Rectangle {
                         }
                     }
                 }
-                if root.has-ir : Rectangle {
-                    background: #1c3628;
+                if root.has-ir && root.cab-is-neural : Rectangle {
+                    background: #1a1e26;
                     border-radius: 2px;
                     border-width: 0.5px;
-                    border-color: #43E97B;
+                    border-color: #3b4252;
+                    height: 12px;
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        padding-right: 4px;
+                        Text {
+                            text: "UNITY";
+                            font-size: 7px;
+                            font-weight: 700;
+                            color: #88c0d0;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                if root.has-ir : Rectangle {
+                    background: root.cab-is-neural ? #242138 : #1b2838;
+                    border-radius: 2px;
+                    border-width: 0.5px;
+                    border-color: root.cab-is-neural ? #b48ead : #3498db;
                     height: 12px;
                     HorizontalLayout {
                         padding-left: 3px;
                         padding-right: 3px;
                         Text {
-                            text: "IR ON";
-                            font-size: 7.5px;
+                            text: root.cab-kind-label;
+                            font-size: 7px;
                             font-weight: 800;
-                            color: #43E97B;
+                            color: root.cab-is-neural ? #d8b4e2 : #81c4f0;
                             vertical-alignment: center;
+                        }
+                    }
+                }
+                if root.has-ir || root.cab-bypassed : touch_cab_bypass := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.toggle-cab-bypass-clicked();
+                    }
+                    Rectangle {
+                        background: root.cab-bypassed ? #332718 : #1c3628;
+                        border-radius: 2px;
+                        border-width: 0.5px;
+                        border-color: touch_cab_bypass.has-hover ? #ffffff : (root.cab-bypassed ? #EBCB8B : #43E97B);
+                        height: 12px;
+                        HorizontalLayout {
+                            padding-left: 3px;
+                            padding-right: 3px;
+                            Text {
+                                text: root.cab-bypassed ? "BYP" : "ON";
+                                font-size: 7px;
+                                font-weight: 800;
+                                color: root.cab-bypassed ? #EBCB8B : #43E97B;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Active IR Display Surface
+        // Active Cabinet Display Surface
         Rectangle {
             height: 36px;
             background: #141518;
             border-radius: 4px;
             border-width: 1px;
-            border-color: root.is-error ? #F74E4E : #2E3440;
+            border-color: root.is-error ? #F74E4E : (root.has-ir && root.cab-bypassed ? #EBCB8B : #2E3440);
             clip: true;
 
             VerticalLayout {
@@ -99,7 +146,7 @@ export component IrCard inherits Rectangle {
                 spacing: 1px;
 
                 if root.is-loading : Text {
-                    text: "Loading impulse...";
+                    text: "Loading cabinet...";
                     font-size: 9px;
                     font-weight: 600;
                     color: #F5A623;
@@ -108,8 +155,8 @@ export component IrCard inherits Rectangle {
                 }
 
                 if root.is-error : Text {
-                    text: root.error-message != "" ? root.error-message : "IR load failed";
-                    font-size: 9px;
+                    text: root.error-message != "" ? root.error-message : "Cabinet load failed";
+                    font-size: 8.5px;
                     font-weight: 600;
                     color: #F74E4E;
                     horizontal-alignment: center;
@@ -120,29 +167,35 @@ export component IrCard inherits Rectangle {
                     text: root.ir-name;
                     font-size: 9.5px;
                     font-weight: 600;
-                    color: root.has-ir ? #E5E9F0 : #8fa1b3;
+                    color: !root.has-ir ? #8fa1b3 : (root.cab-bypassed ? #EBCB8B : #E5E9F0);
                     horizontal-alignment: center;
                     overflow: elide;
                 }
 
                 if !root.is-error : Text {
-                    text: root.has-ir ? ("Active • " + root.ir-status) : "Select .wav impulse";
-                    font-size: 8px;
-                    color: root.has-ir ? #43E97B : #636e7b;
+                    text: !root.has-ir
+                        ? (root.cab-bypassed ? "Bypassed • No cabinet loaded" : "Select .wav IR or 1x1 .nam/.namb")
+                        : (root.cab-bypassed
+                            ? ("Bypassed (latency kept) • " + root.ir-status)
+                            : (root.cab-is-neural
+                                ? ("+CPU/lat • " + root.ir-status + (root.cab-detail != "" ? (" • " + root.cab-detail) : ""))
+                                : ("Active • " + root.ir-status)));
+                    font-size: 7.5px;
+                    color: !root.has-ir ? #636e7b : (root.cab-bypassed ? #EBCB8B : (root.cab-is-neural ? #88C0D0 : #43E97B));
                     horizontal-alignment: center;
                     overflow: elide;
                 }
             }
         }
 
-        // Action Trigger Row (Load IR + Contextual Clear)
+        // Action Trigger Row (Load Cabinet + Contextual Clear)
         HorizontalLayout {
             spacing: 3px;
             height: 24px;
 
             SelectorButton {
-                text: "LOAD IR";
-                badge: "WAV";
+                text: "LOAD CAB";
+                badge: root.has-ir ? root.cab-kind-label : "WAV/NAM";
                 accent-color: root.accent-color;
                 clicked => {
                     root.load-clicked();

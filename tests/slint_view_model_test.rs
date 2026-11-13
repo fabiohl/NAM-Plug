@@ -348,7 +348,7 @@ fn test_slint_view_model_full_lifecycle() {
         "ui_clear_ir must be set to true"
     );
     assert!(!window.get_has_ir(), "has_ir on window must be false");
-    assert_eq!(window.get_ir_name(), "No IR loaded");
+    assert_eq!(window.get_ir_name(), "No cabinet loaded");
 
     // Select Model Clicked Trigger (F-UX-06): the dialog is open, but no load
     // has started — `ui_dialog_open` and `ui_loading` are separate states and

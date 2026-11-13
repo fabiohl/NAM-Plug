@@ -36,8 +36,10 @@ pub const PARAM_INPUT_CALIBRATION_LEVEL: u32 = 10;
 pub const PARAM_OUTPUT_MODE: u32 = 11;
 /// Noise gate operating mode parameter ID (`0 = Silence` legacy, `1 = Musical` expander).
 pub const PARAM_GATE_MODE: u32 = 12;
+/// Independent cabinet slot bypass parameter ID (`0.0 = Active`, `1.0 = Bypassed`).
+pub const PARAM_CAB_BYPASS: u32 = 13;
 /// Total number of exposed CLAP parameters.
-pub const PARAM_COUNT: usize = 13;
+pub const PARAM_COUNT: usize = 14;
 
 /// Bypass atomic value: off.
 pub const BYPASS_OFF: u32 = 0;
@@ -183,6 +185,15 @@ pub fn sanitize_param_value(id: u32, val: f32) -> f32 {
                 0.0
             } else {
                 val.round().clamp(0.0, 1.0)
+            }
+        }
+        PARAM_CAB_BYPASS => {
+            if !val.is_finite() {
+                0.0
+            } else if val >= 0.5 {
+                1.0
+            } else {
+                0.0
             }
         }
         _ => {

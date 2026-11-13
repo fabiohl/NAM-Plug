@@ -192,8 +192,8 @@ fn test_parameters_non_regression_snapshot() {
 
     assert_eq!(
         params_ext.count(&handle),
-        13,
-        "Total parameter count must be 13 (including calibration and gate mode parameters)"
+        14,
+        "Total parameter count must be 14 (including calibration, gate mode, and cab bypass parameters)"
     );
 
     struct ParamExpectation {
@@ -363,6 +363,16 @@ fn test_parameters_non_regression_snapshot() {
             required_flags: ParamInfoFlags::IS_AUTOMATABLE
                 | ParamInfoFlags::IS_STEPPED
                 | ParamInfoFlags::IS_ENUM,
+            forbidden_flags: ParamInfoFlags::IS_READONLY | ParamInfoFlags::IS_BYPASS,
+        },
+        ParamExpectation {
+            id: PARAM_CAB_BYPASS,
+            name: b"Cabinet Bypass",
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            initial_value: 0.0,
+            required_flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
             forbidden_flags: ParamInfoFlags::IS_READONLY | ParamInfoFlags::IS_BYPASS,
         },
     ];

@@ -161,17 +161,19 @@ In guitar production, an authentic recorded amp tone consists of two distinct co
 
 * **[TONE3000](https://tone3000.com/):** Thousands of curated community captures of boutique tube amps, vintage heads, bass rigs, and overdrive pedals.
 * **[NeuralAmpModeler.com](https://www.neuralampmodeler.com/):** The official home and model repository for the NAM ecosystem.
-* **Cabinet IRs:** Any standard 24-bit or 32-bit float mono `.wav` speaker impulse response (44.1 kHz, 48 kHz, or 96 kHz) works out of the box with zero manual conversion.
+* **Cabinet Stage (Single Exclusive Slot):** Accepts either a standard 24-bit or 32-bit float mono `.wav` speaker impulse response (44.1 kHz, 48 kHz, or 96 kHz) via UPOLS convolution **or** a 1-in/1-out neural cabinet model (`.nam` / `.namb`, at unity gain, keeping a dedicated independent bypass toggle).
 
 ### 3. Quick-Start Step-by-Step
 
 ```text
-[Dry Guitar DI] ➔ [INPUT Gain] ➔ [GATE] ➔ [Neural Model (.nam)] ➔ [Cab IR (.wav)] ➔ [OUTPUT Gain] ➔ [DAW Track]
+[Dry Guitar DI] ➔ [INPUT Gain] ➔ [GATE] ➔ [Neural Model (.nam)] ➔ [Cab Slot (.wav | .nam/.namb)] ➔ [OUTPUT Gain] ➔ [DAW Track]
 ```
 
 1. **Insert NAM-Plug:** Add NAM-Plug as an audio effect on your dry guitar or bass track. Set your audio interface gain so your guitar's strongest picking hits around **-18 to -12 dBFS**.
 2. **Load an Amp Model:** Click **`LOAD .NAM`** in the AMP MODEL card and select your `.nam` or `.namb` file.
-3. **Load a Cabinet IR:** Click **`LOAD IR`** in the CABINET IR card and select your `.wav` speaker impulse response. Click the **IR level policy badge** (`Peak` / `Preserved` / `Legacy`) in the card header to choose between peak normalization (`peak-normalized`, default), 1:1 original WAV amplitude (`preserved`), or legacy C++ plugin level scaling (`legacy-nam-plugin`, $10^{-18/20} \times 48000 / f_s$, preserving Rust polyphase resampling and full IR length). Old project states without a policy field default to `Peak`.
+3. **Load a Cabinet (.wav or .nam/.namb):** Click **`LOAD CAB`** in the CABINET card and select either a `.wav` speaker impulse response or a 1-in/1-out neural cabinet model (`.nam` / `.namb`) in the single exclusive slot (loading one asset atomically replaces any active cabinet asset, showing a `WAV`, `NAM`, or `NAMB` format badge and disambiguated `parent/file.ext` label, while preserving the previous cabinet on failure).
+   * For `.wav` IRs, click the **IR level policy badge** (`Peak` / `Preserved` / `Legacy`) in the card header to choose between peak normalization (`peak-normalized`, default), 1:1 original WAV amplitude (`preserved`), or legacy C++ plugin level scaling (`legacy-nam-plugin`, $10^{-18/20} \times 48000 / f_s$). Neural cabinet models (`.nam`/`.namb`) ignore amp calibration and `IrLevelPolicy`, always running at unity gain (and add neural inference CPU/latency when active).
+   * Click the cabinet **`ON` / `BYP`** toggle (`PARAM_CAB_BYPASS`) at any time to bypass only the cabinet stage with click-free 64-sample cosine crossfading and constant PDC latency.
 4. **Dial in Gain Staging:**
    * Adjust **`INPUT`** ($-20\text{ to }+20\text{ dB}$, default `0.0 dB`) to feed the model the right amount of drive.
    * Adjust **`OUTPUT`** ($-40\text{ to }+20\text{ dB}$, default `-3.0 dB`) to balance levels with your overall mix.

@@ -19,12 +19,13 @@ use clack_extensions::params::HostParams;
 use neural_amp_modeler_rs::math::common::{InstructionSet, SIMD_MATH};
 use slint::ComponentHandle;
 
+use crate::clap::extensions::cabinet::{CabAssetKind, disambiguated_cab_label};
 use crate::clap::extensions::calibration::{OutputMode, sanitize_calibration_level_dbu};
 use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE, PARAM_GATE_THRESH,
-    PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE,
-    PARAM_OVERSAMPLE,
+    PARAM_ACTIVATION, PARAM_BYPASS, PARAM_CAB_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE,
+    PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
+    PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE,
 };
 use crate::clap::gui::GuiHostBridge;
 use crate::clap::gui::file_dialogs::{spawn_file_dialog, spawn_ir_file_dialog};
@@ -357,6 +358,7 @@ pub(crate) struct SlintViewModelInner {
     last_gate_thresh: f32,
     last_gate_mode: u32,
     last_bypass: bool,
+    last_cab_bypass: bool,
     last_oversampling: u32,
     last_activation: u32,
     last_calibrate_input: bool,
@@ -366,6 +368,9 @@ pub(crate) struct SlintViewModelInner {
     last_model_name: String,
     last_model_arch: String,
     last_ir_path: Option<String>,
+    last_cab_kind: u8,
+    last_cab_status: String,
+    last_cab_detail: String,
     last_ir_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     last_dsp_load_pct: Option<u32>,
     last_seen_xrun_epoch: u32,
@@ -631,6 +636,17 @@ impl SlintViewModelInner {
             self.window.set_bypass_active(bypass);
         }
 
+        let cab_bypass = self
+            .shared
+            .ui_to_rt
+            .param_cab_bypass
+            .load(Ordering::Relaxed)
+            != 0;
+        if cab_bypass != self.last_cab_bypass || cab_bypass != self.window.get_cab_bypassed() {
+            self.last_cab_bypass = cab_bypass;
+            self.window.set_cab_bypassed(cab_bypass);
+        }
+
         let os = self
             .shared
             .ui_to_rt
@@ -766,23 +782,70 @@ impl SlintViewModelInner {
             }
         }
 
-        if let Ok(ir_guard) = self.shared.cold.ir_path.try_lock() {
-            let has_ir = ir_guard.is_some();
-            if has_ir != self.window.get_has_ir() {
-                self.window.set_has_ir(has_ir);
+        let cab_kind_raw = self.shared.cold.cab_kind.load(Ordering::Relaxed);
+        if cab_kind_raw != self.last_cab_kind {
+            self.last_cab_kind = cab_kind_raw;
+            if let Some(kind) = CabAssetKind::from_u8(cab_kind_raw) {
+                self.window.set_cab_kind_label(kind.badge_label().into());
+                self.window.set_cab_is_neural(kind.is_neural());
+            } else {
+                self.window.set_cab_kind_label("CAB".into());
+                self.window.set_cab_is_neural(false);
             }
-            if let Some(ref path_str) = *ir_guard {
-                let name = std::path::Path::new(path_str)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path_str.as_str());
-                if self.last_ir_path.as_deref() != Some(name) {
-                    self.last_ir_path = Some(name.to_string());
-                    self.window.set_ir_name(name.into());
+        }
+
+        if let Ok(meta_guard) = self.shared.cold.cab_ui_meta.try_lock() {
+            if let Some(ref meta) = *meta_guard {
+                if self.last_ir_path.as_deref() != Some(meta.disambiguated_name.as_str()) {
+                    self.last_ir_path = Some(meta.disambiguated_name.clone());
+                    self.window
+                        .set_ir_name(meta.disambiguated_name.as_str().into());
                 }
-            } else if self.last_ir_path.is_some() {
-                self.last_ir_path = None;
-                self.window.set_ir_name("No IR loaded".into());
+                if self.last_cab_status != meta.status_summary {
+                    self.last_cab_status = meta.status_summary.clone();
+                    self.window
+                        .set_ir_status(meta.status_summary.as_str().into());
+                }
+                let detail = meta.gear_summary.as_deref().unwrap_or("");
+                if self.last_cab_detail != detail {
+                    self.last_cab_detail = detail.to_string();
+                    self.window.set_cab_detail(detail.into());
+                }
+                if !self.window.get_has_ir() {
+                    self.window.set_has_ir(true);
+                }
+            } else if let Ok(ir_guard) = self.shared.cold.ir_path.try_lock() {
+                let has_ir = ir_guard.is_some();
+                if has_ir != self.window.get_has_ir() {
+                    self.window.set_has_ir(has_ir);
+                }
+                if let Some(ref path_str) = *ir_guard {
+                    let label = disambiguated_cab_label(std::path::Path::new(path_str));
+                    if self.last_ir_path.as_deref() != Some(label.as_str()) {
+                        self.last_ir_path = Some(label.clone());
+                        self.window.set_ir_name(label.as_str().into());
+                    }
+                    if let Some(kind) =
+                        CabAssetKind::detect_from_path(std::path::Path::new(path_str))
+                        && cab_kind_raw == 0
+                    {
+                        self.window.set_cab_kind_label(kind.badge_label().into());
+                        self.window.set_cab_is_neural(kind.is_neural());
+                    }
+                } else {
+                    if self.last_ir_path.is_some() {
+                        self.last_ir_path = None;
+                        self.window.set_ir_name("No cabinet loaded".into());
+                    }
+                    if !self.last_cab_status.is_empty() {
+                        self.last_cab_status.clear();
+                        self.window.set_ir_status("—".into());
+                    }
+                    if !self.last_cab_detail.is_empty() {
+                        self.last_cab_detail.clear();
+                        self.window.set_cab_detail("".into());
+                    }
+                }
             }
         }
         let ir_policy = crate::clap::extensions::ir_level_policy::IrLevelPolicy::from_u8(
@@ -1011,23 +1074,49 @@ impl SlintViewModel {
             .ok()
             .map(|guard| guard.is_some())
             .unwrap_or(false);
-        let initial_ir_name = shared
+        let initial_cab_kind = shared.cold.cab_kind.load(Ordering::Relaxed);
+        let initial_cab_meta = shared
             .cold
-            .ir_path
+            .cab_ui_meta
             .try_lock()
             .ok()
-            .and_then(|guard| {
-                guard.as_ref().map(|path| {
-                    std::path::Path::new(path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(path.as_str())
-                        .to_string()
+            .and_then(|guard| guard.clone());
+        let initial_ir_name = if let Some(ref meta) = initial_cab_meta {
+            meta.disambiguated_name.clone()
+        } else {
+            shared
+                .cold
+                .ir_path
+                .try_lock()
+                .ok()
+                .and_then(|guard| {
+                    guard
+                        .as_ref()
+                        .map(|path| disambiguated_cab_label(std::path::Path::new(path)))
                 })
-            })
-            .unwrap_or_else(|| "No IR loaded".to_string());
-        window.set_has_ir(initial_has_ir);
-        window.set_ir_name(initial_ir_name.into());
+                .unwrap_or_else(|| "No cabinet loaded".to_string())
+        };
+        let initial_cab_status = initial_cab_meta
+            .as_ref()
+            .map(|m| m.status_summary.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let initial_cab_detail = initial_cab_meta
+            .as_ref()
+            .and_then(|m| m.gear_summary.clone())
+            .unwrap_or_default();
+        if let Some(kind) = CabAssetKind::from_u8(initial_cab_kind) {
+            window.set_cab_kind_label(kind.badge_label().into());
+            window.set_cab_is_neural(kind.is_neural());
+        } else {
+            window.set_cab_kind_label("CAB".into());
+            window.set_cab_is_neural(false);
+        }
+        window.set_has_ir(initial_has_ir || initial_cab_meta.is_some());
+        window.set_ir_name(initial_ir_name.as_str().into());
+        window.set_ir_status(initial_cab_status.as_str().into());
+        window.set_cab_detail(initial_cab_detail.as_str().into());
+        let initial_cab_bypass = shared.ui_to_rt.param_cab_bypass.load(Ordering::Relaxed) != 0;
+        window.set_cab_bypassed(initial_cab_bypass);
         let initial_ir_policy = crate::clap::extensions::ir_level_policy::IrLevelPolicy::from_u8(
             shared.cold.ir_level_policy.load(Ordering::Relaxed),
         );
@@ -1420,7 +1509,29 @@ impl SlintViewModel {
                 }
                 if let Some(w) = window_weak.upgrade() {
                     w.set_has_ir(false);
-                    w.set_ir_name("No IR loaded".into());
+                    w.set_ir_name("No cabinet loaded".into());
+                    w.set_ir_status("—".into());
+                    w.set_cab_detail("".into());
+                    w.set_cab_kind_label("CAB".into());
+                    w.set_cab_is_neural(false);
+                }
+            });
+        }
+
+        // ── Bind Cabinet Bypass Toggle Callback ───────────────────────────────
+        {
+            let shared = Arc::clone(&shared);
+            let window_weak = window.as_weak();
+            window.on_toggle_cab_bypass_clicked(move || {
+                let prev = shared.ui_to_rt.param_cab_bypass.load(Ordering::Relaxed) != 0;
+                let next = !prev;
+                shared
+                    .ui_to_rt
+                    .param_cab_bypass
+                    .store(u32::from(next), Ordering::Relaxed);
+                commit_gui_param(host.as_ref(), &shared, PARAM_CAB_BYPASS);
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_cab_bypassed(next);
                 }
             });
         }
@@ -1431,6 +1542,12 @@ impl SlintViewModel {
             let window_weak = window.as_weak();
             window.on_cycle_ir_policy_clicked(move || {
                 use crate::clap::extensions::ir_level_policy::IrLevelPolicy;
+                if let Some(kind) =
+                    CabAssetKind::from_u8(shared.cold.cab_kind.load(Ordering::Relaxed))
+                    && kind.is_neural()
+                {
+                    return;
+                }
                 shared.note_ui_interaction();
                 let current =
                     IrLevelPolicy::from_u8(shared.cold.ir_level_policy.load(Ordering::Relaxed));
@@ -1521,6 +1638,7 @@ impl SlintViewModel {
             last_gate_thresh: initial_gate_th,
             last_gate_mode: initial_gate_mode,
             last_bypass: initial_bypass,
+            last_cab_bypass: initial_cab_bypass,
             last_oversampling: initial_os,
             last_activation: initial_act,
             last_calibrate_input: initial_cal_in,
@@ -1529,7 +1647,18 @@ impl SlintViewModel {
             last_cal_flags: initial_cal_flags,
             last_model_name: initial_model_name,
             last_model_arch: initial_model_arch,
-            last_ir_path: None,
+            last_ir_path: if initial_has_ir || initial_cab_meta.is_some() {
+                Some(initial_ir_name)
+            } else {
+                None
+            },
+            last_cab_kind: initial_cab_kind,
+            last_cab_status: if initial_has_ir || initial_cab_meta.is_some() {
+                initial_cab_status
+            } else {
+                String::new()
+            },
+            last_cab_detail: initial_cab_detail,
             last_ir_policy: initial_ir_policy,
             last_dsp_load_pct: None,
             last_seen_xrun_epoch: 0,

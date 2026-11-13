@@ -12,14 +12,17 @@
 //! the GC cascade — zero drop on the audio thread.
 
 use super::{CMD_SWAP_TUNABLES, NamClapProcessor, SLIMMABLE_SWAP_TUNABLES};
+use crate::clap::extensions::cabinet::CabSlotDsp;
+use crate::clap::extensions::params::bypass_bool_to_u32;
 use crate::clap::plugin::{ClapParamPayload, NamClapShared, SlimmableRebuild, StructuralKind};
+use crate::clap::processor::dsp::dry_delay::DryDelayLine;
+use crate::clap::processor::state::BypassCrossfader;
 use clack_extensions::tail::HostTail;
 use clack_plugin::host::HostAudioProcessorHandle;
 use clack_plugin::prelude::OutputEvents;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{GcItem, GcSink, RtSwapHandler, SwapBudget};
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
@@ -268,7 +271,12 @@ macro_rules! command_swap_parts {
                 stream: &mut $s.stream,
                 os_l: &mut $s.os_l,
                 os_r: &mut $s.os_r,
-                cabsim_pair: &mut $s.cabsim_pair,
+                cab_slot: &mut $s.cab_slot,
+                cab_bypass: &mut $s.cab_bypass,
+                cab_needs_reset: &mut $s.cab_needs_reset,
+                cab_bypass_xfade: &mut $s.cab_bypass_xfade,
+                cab_dry_delay: &mut $s.cab_dry_delay,
+                max_frames_count: $s.max_frames_count,
                 params: &mut $s.params,
                 applied_os_factor: &mut $s.applied_os_factor,
                 cal_config: &mut $s.cal_config,
@@ -473,8 +481,18 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     /// Oversample engines (L/R) and the factor they were actually built for.
     pub(super) os_l: &'p mut Box<OversampleEngine>,
     pub(super) os_r: &'p mut Box<OversampleEngine>,
-    /// Cab-sim convolution pair (`None` = bypass cabsim).
-    pub(super) cabsim_pair: &'p mut Option<Box<CabSimPair>>,
+    /// Single cabinet slot (WAV IR convolution pair or 1-in/1-out NAM/NAMB).
+    pub(super) cab_slot: &'p mut Option<CabSlotDsp>,
+    /// Independent cabinet bypass toggle state.
+    pub(super) cab_bypass: &'p mut bool,
+    /// Pending cabinet reset latch when returning from steady-state bypass.
+    pub(super) cab_needs_reset: &'p mut bool,
+    /// Click-free crossfade state machine for cabinet bypass.
+    pub(super) cab_bypass_xfade: &'p mut BypassCrossfader,
+    /// Phase alignment delay line matching `cab_slot.latency_samples()`.
+    pub(super) cab_dry_delay: &'p mut DryDelayLine,
+    /// Active host maximum block size for cabinet epoch verification.
+    pub(super) max_frames_count: usize,
     /// Last full parameter snapshot applied from the ring.
     pub(super) params: &'p mut RtProcessingParams,
     /// Oversampling factor of the installed engines.
@@ -621,6 +639,12 @@ impl ClapCommandSwapHandler<'_, '_> {
                     *self.gate_dirty = true;
                 }
             }
+            ClapParamPayload::CabBypass(bypass) => {
+                if bypass != *self.cab_bypass {
+                    *self.cab_bypass = bypass;
+                    self.cab_bypass_xfade.trigger(bypass);
+                }
+            }
             ClapParamPayload::LoadModel {
                 generation,
                 model_l,
@@ -690,7 +714,7 @@ impl ClapCommandSwapHandler<'_, '_> {
             }
             ClapParamPayload::LoadCabIr { pair } => {
                 if let Some(old) = pair {
-                    gc.retire(GcItem::CabSimPair(old));
+                    old.retire_to_gc(|item| gc.retire(item));
                 }
             }
             ClapParamPayload::SetOversample { os_l, os_r } => {
@@ -827,54 +851,51 @@ impl ClapCommandSwapHandler<'_, '_> {
         // samples, so its value is authoritative.
         let mut effective_latency = self.stream.latency_samples();
         effective_latency += self.os_l.latency_samples() as u32;
-        if let Some(pair) = self.cabsim_pair.as_ref() {
-            effective_latency += pair.partition_size() as u32;
-        }
+        let cab_latency = self
+            .cab_slot
+            .as_ref()
+            .map_or(0, CabSlotDsp::latency_samples);
+        effective_latency += cab_latency;
         *self.cached_effective_latency = effective_latency;
         self.dry_delay.set_delay(effective_latency as usize);
+        self.cab_dry_delay.set_delay(cab_latency as usize);
     }
 
-    /// Installs a new cab-sim convolution pair (or clears to bypass),
-    /// retiring the replaced one to the GC, and notifies the host that the
-    /// plugin tail changed.
+    /// Installs a new single-slot cabinet (`WavIr` or `NamModel`) or clears it,
+    /// retiring replaced assets to the GC and notifying the host of tail updates.
     #[cold]
-    fn cold_load_cabsim(&mut self, pair: Option<Box<CabSimPair>>, gc: &mut GcSink<'_>) {
-        // A pair built for an older audio epoch must never overwrite the
-        // active one: its FFT partitions were resampled to a stale host rate.
-        // Reject it visibly (host contract violation) and retire it off-RT;
-        // the next explicit load or activation rebuilds it for the live epoch.
-        if let Some(ref candidate) = pair {
+    fn cold_load_cabsim(&mut self, slot: Option<CabSlotDsp>, gc: &mut GcSink<'_>) {
+        // A cabinet asset built for an older audio epoch must never overwrite
+        // the active one: verify rate (and NAM streaming capacity) before swap.
+        if let Some(ref candidate) = slot {
             let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
-            if host_rate != 0 && candidate.sample_rate != host_rate {
+            if host_rate != 0
+                && !candidate.is_compatible_with_host(host_rate, self.max_frames_count)
+            {
                 self.rt_status.set_flag(
                     neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION,
                 );
-                if let Some(stale) = pair {
-                    gc.retire(GcItem::CabSimPair(stale));
+                if let Some(stale) = slot {
+                    stale.retire_to_gc(|item| gc.retire(item));
                 }
                 return;
             }
         }
-        // The incoming pair is already heap-boxed by the main thread;
-        // `mem::replace` moves the old `Box` by value into the GC queue with
-        // zero allocations on the audio thread. The off-RT GC drops it.
-        if let Some(old_pair) = std::mem::replace(self.cabsim_pair, pair) {
-            gc.retire(GcItem::CabSimPair(old_pair));
+        // Retire replaced heap boxes cleanly off-RT via GcItem.
+        if let Some(old_slot) = std::mem::replace(self.cab_slot, slot) {
+            old_slot.retire_to_gc(|item| gc.retire(item));
         }
-        // Publish the cabsim latency contribution of the *installed* pair
-        // (0 = no IR). The main thread reads this to decide whether an IR
-        // load/clear changes the physical latency.
+        *self.cab_needs_reset = false;
+        self.cab_dry_delay.reset();
+        // Publish the cabslot latency contribution of the *installed* slot
+        // (0 = no cabinet). Constant-latency bypass preserves this latency while loaded.
         self.shared.cold.current_cabsim_latency.store(
-            self.cabsim_pair
+            self.cab_slot
                 .as_ref()
-                .map_or(0, |p| p.partition_size() as u32),
+                .map_or(0, CabSlotDsp::latency_samples),
             Ordering::Relaxed,
         );
-        let cabsim_tail = self
-            .cabsim_pair
-            .as_ref()
-            .map(|p| (p.l.num_partitions() * p.l.latency_samples()) as u32)
-            .unwrap_or(0);
+        let cabsim_tail = self.cab_slot.as_ref().map_or(0, CabSlotDsp::tail_samples);
         self.shared
             .rt_to_ui
             .cabsim_tail_samples
@@ -966,6 +987,13 @@ impl ClapCommandSwapHandler<'_, '_> {
         if let Some(ir) = txn.ir {
             self.cold_load_cabsim(ir, gc);
         }
+        *self.cab_bypass = txn.cab_bypass;
+        *self.cab_needs_reset = false;
+        *self.cab_bypass_xfade = BypassCrossfader::new(txn.cab_bypass);
+        self.shared
+            .ui_to_rt
+            .param_cab_bypass
+            .store(bypass_bool_to_u32(txn.cab_bypass), Ordering::Relaxed);
         self.apply_params_from_spsc(txn.params);
         self.shared
             .cold

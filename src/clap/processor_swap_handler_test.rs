@@ -184,6 +184,7 @@ mod tests {
             params: RtProcessingParams::default(),
             calibration: Default::default(),
             gate_mode: Default::default(),
+            cab_bypass: false,
         })
     }
 
@@ -241,18 +242,20 @@ mod tests {
         let proc_ptr = audio_processor_ptr(&mut plugin_instance);
         let proc = unsafe { &mut *proc_ptr };
 
-        assert!(proc.cabsim_pair.is_none());
+        assert!(proc.cab_slot.is_none());
         let mut pair = make_pair(256);
         pair.sample_rate = 44100;
         mt.cmd_producer
             .borrow_mut()
-            .push_command(ClapParamPayload::LoadCabIr { pair: Some(pair) })
+            .push_command(ClapParamPayload::LoadCabIr {
+                pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(pair)),
+            })
             .expect("stale IR push");
 
         run_drain(proc);
 
         assert!(
-            proc.cabsim_pair.is_none(),
+            proc.cab_slot.is_none(),
             "a stale-rate pair must never be installed"
         );
         assert!(
@@ -350,7 +353,9 @@ mod tests {
             mt.cmd_producer
                 .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr {
-                    pair: Some(make_pair(ir_len)),
+                    pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                        make_pair(ir_len),
+                    )),
                 })
                 .expect("command push");
         }
@@ -417,7 +422,9 @@ mod tests {
         mt.cmd_producer
             .borrow_mut()
             .push_command(ClapParamPayload::LoadCabIr {
-                pair: Some(make_pair(512)),
+                pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                    make_pair(512),
+                )),
             })
             .expect("push IR");
         mt.cmd_producer
@@ -512,13 +519,17 @@ mod tests {
         mt.cmd_producer
             .borrow_mut()
             .push_command(ClapParamPayload::LoadCabIr {
-                pair: Some(make_pair(512)),
+                pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                    make_pair(512),
+                )),
             })
             .expect("push IR A");
         mt.cmd_producer
             .borrow_mut()
             .push_command(ClapParamPayload::LoadCabIr {
-                pair: Some(make_pair(1024)),
+                pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                    make_pair(1024),
+                )),
             })
             .expect("push IR B");
         mt.cmd_producer

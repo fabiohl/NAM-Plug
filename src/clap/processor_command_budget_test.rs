@@ -179,6 +179,7 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
                     params: RtProcessingParams::default(),
                     calibration: Default::default(),
                     gate_mode: Default::default(),
+                    cab_bypass: false,
                 },
             ))
             .expect("restore push after reactivation must succeed");
@@ -229,6 +230,7 @@ fn test_structural_budget_one_per_callback() {
                     params: RtProcessingParams::default(),
                     calibration: Default::default(),
                     gate_mode: Default::default(),
+                    cab_bypass: false,
                 },
             ))
             .expect("restore burst must fit the ring");
@@ -300,18 +302,25 @@ fn test_structural_coalescing_supersedes_same_kind() {
     let ir_c = make_pair(2048);
 
     {
+        use crate::clap::extensions::cabinet::CabSlotDsp;
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
-            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: Some(ir_a) })
+            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
+                pair: Some(CabSlotDsp::WavIr(ir_a)),
+            })
             .expect("IR A push must succeed");
         mt.cmd_producer
             .borrow_mut()
-            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: Some(ir_b) })
+            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
+                pair: Some(CabSlotDsp::WavIr(ir_b)),
+            })
             .expect("IR B push must succeed");
         mt.cmd_producer
             .borrow_mut()
-            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: Some(ir_c) })
+            .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
+                pair: Some(CabSlotDsp::WavIr(ir_c)),
+            })
             .expect("IR C push must succeed");
     }
 
@@ -369,13 +378,16 @@ fn test_structural_coalescing_supersedes_same_kind() {
                     params: RtProcessingParams::default(),
                     calibration: Default::default(),
                     gate_mode: Default::default(),
+                    cab_bypass: false,
                 },
             ))
             .expect("restore push must succeed");
         mt.cmd_producer
             .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
-                pair: Some(make_pair(1024)),
+                pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                    make_pair(1024),
+                )),
             })
             .expect("IR B2 push must succeed");
     }
@@ -400,7 +412,9 @@ fn test_structural_coalescing_supersedes_same_kind() {
         mt.cmd_producer
             .borrow_mut()
             .push_command(crate::clap::plugin::ClapParamPayload::LoadCabIr {
-                pair: Some(make_pair(512)),
+                pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                    make_pair(512),
+                )),
             })
             .expect("IR D push must succeed");
     }
@@ -464,6 +478,7 @@ fn test_structural_burst_deferral_counts_deterministic() {
                         params: RtProcessingParams::default(),
                         calibration: Default::default(),
                         gate_mode: Default::default(),
+                        cab_bypass: false,
                     },
                 ))
                 .expect("restore burst must fit the ring");
@@ -537,6 +552,7 @@ fn test_structural_burst_p99_within_contract() {
                         params: RtProcessingParams::default(),
                         calibration: Default::default(),
                         gate_mode: Default::default(),
+                        cab_bypass: false,
                     },
                 ))
                 .expect("restore burst must fit the ring");

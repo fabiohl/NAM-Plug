@@ -86,7 +86,7 @@ pub(crate) fn spawn_ir_file_dialog(
         {
             || {
                 rfd::FileDialog::new()
-                    .add_filter("WAV Impulse Response", &["wav"])
+                    .add_filter("Cabinet (.wav IR / .nam / .namb)", &["wav", "nam", "namb"])
                     .pick_file()
             }
         },

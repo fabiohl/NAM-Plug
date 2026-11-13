@@ -3,6 +3,7 @@
 
 //! Processor state (struct definition).
 
+use crate::clap::extensions::cabinet::CabSlotDsp;
 use crate::clap::plugin::{CommandConsumer, NamClapShared, SlimmableRebuild};
 use crate::clap::processor::dsp::dry_delay::DryDelayLine;
 use crate::clap::processor::dsp::orchestrator::ScheduledEvent;
@@ -12,7 +13,6 @@ use neural_amp_modeler_rs::common::spsc::{
     GcItem, GcOverflowBuffer, RtStatusFlags, RtSwapDrain, SwapTunables,
 };
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::gate::{DynamicHysteresis, GateParams};
 use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
@@ -161,10 +161,20 @@ pub struct NamClapProcessor<'a> {
     /// publishes it into the rebuild request and the slimmable swap handler
     /// compares it against each rebuilt delivery to reject stale results.
     pub(crate) model_generation: u64,
-    /// Active cab-sim convolution pair (None = bypass, zero cost).
-    /// Held in `Box` end-to-end (main thread → SPSC → RT swap → GC) so
-    /// installing/swapping/clearing an IR never allocates on the audio thread.
-    pub(crate) cabsim_pair: Option<Box<CabSimPair>>,
+    /// Active cabinet slot (WAV IR convolution pair or 1-in/1-out NAM/NAMB model).
+    /// `None` when no cabinet is loaded. Held pre-allocated end-to-end
+    /// (main thread -> SPSC -> RT swap -> GC) so installing/swapping/clearing
+    /// never allocates or frees on the audio thread.
+    pub(crate) cab_slot: Option<CabSlotDsp>,
+    /// Independent cabinet bypass state (`PARAM_CAB_BYPASS`).
+    pub(crate) cab_bypass: bool,
+    /// Set while the cabinet is bypassed or cleared so re-engaging wet calls
+    /// `cab_slot.reset()` cleanly before fading back in.
+    pub(crate) cab_needs_reset: bool,
+    /// Click-free 64-sample crossfade state machine for cabinet bypass.
+    pub(crate) cab_bypass_xfade: BypassCrossfader,
+    /// Phase-aligns the dry cabinet-bypass signal with `cab_slot.latency_samples()`.
+    pub(crate) cab_dry_delay: DryDelayLine,
     /// Non-model commands recovered from a failed activation, replayed once at
     /// the start of the first callback. Moved off `ColdShared` in `activate()`
     /// (main thread), so the audio thread never locks or allocates for it.
@@ -241,6 +251,13 @@ pub struct NamClapProcessor<'a> {
     /// *delayed* dry signal for the bypass output and the crossfade blend.
     pub(crate) buf_xfade_dry_l: AlignedVec<f32>,
     pub(crate) buf_xfade_dry_r: AlignedVec<f32>,
+    /// Pre-allocated scratch buffers for cabinet bypass dry delay & neural cabinet I/O.
+    pub(crate) buf_cab_dry_l: AlignedVec<f32>,
+    pub(crate) buf_cab_dry_r: AlignedVec<f32>,
+    pub(crate) buf_cab_nam_in_l: AlignedVec<f32>,
+    pub(crate) buf_cab_nam_in_r: AlignedVec<f32>,
+    pub(crate) buf_cab_zero_l: AlignedVec<f32>,
+    pub(crate) buf_cab_zero_r: AlignedVec<f32>,
     /// 6. WaveNet crossfade scratch buffers (motor 0.5.0 `run_inference`):
     ///    second-pass output used when processing is chunked (active
     ///    resampler). Pre-allocated `MAX_RESAMP_BUF` each — zero alloc in

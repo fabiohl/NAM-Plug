@@ -111,6 +111,11 @@ pub mod dsp_resources {
     /// The cab-sim IR raw-sample storage mutex is poisoned.
     pub const CABSIM_STORAGE_LOCK_POISONED: &str =
         "Cab-sim IR sample storage lock unavailable during plugin activation";
+    /// A cabinet `.nam`/`.namb` model could not be built.
+    pub const CAB_NAM_BUILD_FAILED: &str = "Failed to build the cabinet neural model";
+    /// The cabinet NAM storage mutex is poisoned during plugin activation.
+    pub const CAB_NAM_STORAGE_LOCK_POISONED: &str =
+        "Cabinet NAM storage lock unavailable during plugin activation";
     /// The clear-model (Full restore without a model) resampler could not be built.
     pub const CLEAR_MODEL_RESAMPLER_FAILED: &str = "Failed to build the clear-model resampler";
     /// The clear-model (Full restore without a model) streaming adapter could not be built.

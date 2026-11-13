@@ -33,7 +33,7 @@ fn test_slint_widgets_and_five_zones_lifecycle() {
     assert!(!window.get_model_loading());
     assert!(!window.get_model_error());
 
-    assert_eq!(window.get_ir_name(), "No IR loaded");
+    assert_eq!(window.get_ir_name(), "No cabinet loaded");
     assert_eq!(window.get_ir_status(), "—");
     assert!(!window.get_has_ir());
     assert!(!window.get_ir_loading());

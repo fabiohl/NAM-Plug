@@ -6,9 +6,9 @@ use crate::clap::extensions::calibration::{
 };
 use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE,
-    PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
-    PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CAB_BYPASS,
+    PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE, PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL,
+    PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
 };
 use crate::clap::plugin::{PendingRestartOs, UiToRt};
 use crate::clap::processor::dsp::musical_gate::MusicalNoiseGate;
@@ -69,6 +69,7 @@ pub(crate) fn apply_scheduled_event(
     value: f32,
     is_mod: bool,
     params: &mut RtProcessingParams,
+    cab_bypass: &mut bool,
     cal_config: &mut CalibrationConfig,
     model_cal_meta: &ModelCalibrationMeta,
     model_input_mult_adj: &mut f32,
@@ -181,6 +182,13 @@ pub(crate) fn apply_scheduled_event(
                 params.bypass = bypass;
                 ui_to_rt
                     .param_bypass
+                    .store(bypass_bool_to_u32(bypass), Ordering::Relaxed);
+            }
+            PARAM_CAB_BYPASS => {
+                let bypass = bypass_f32_to_bool(val);
+                *cab_bypass = bypass;
+                ui_to_rt
+                    .param_cab_bypass
                     .store(bypass_bool_to_u32(bypass), Ordering::Relaxed);
             }
             PARAM_ADAPTIVE_COMPUTE => {

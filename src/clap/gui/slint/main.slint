@@ -25,9 +25,13 @@ export component MainWindow inherits Window {
     in-out property <bool> model_error: false;
     in-out property <string> model_error_msg: "";
 
-    in-out property <string> ir_name: "No IR loaded";
+    in-out property <string> ir_name: "No cabinet loaded";
     in-out property <string> ir_status: "—";
     in-out property <string> ir_policy_label: "Peak";
+    in-out property <string> cab_kind_label: "CAB";
+    in-out property <string> cab_detail: "";
+    in-out property <bool> cab_is_neural: false;
+    in-out property <bool> cab_bypassed: false;
     in-out property <bool> has_ir: false;
     in-out property <bool> ir_loading: false;
     in-out property <bool> ir_error: false;
@@ -98,6 +102,7 @@ export component MainWindow inherits Window {
     callback load_ir_clicked();
     callback clear_ir_clicked();
     callback cycle_ir_policy_clicked();
+    callback toggle_cab_bypass_clicked();
     callback reset_clip_clicked();
     callback reset_in_clip_clicked();
     callback input_gain_changed(float);
@@ -207,11 +212,15 @@ export component MainWindow inherits Window {
                         background: #2E3440;
                     }
 
-                    // Cabinet IR Card
+                    // Single Cabinet Slot Card (WAV IR or 1x1 NAM/NAMB)
                     IrCard {
                         ir-name: root.ir_name;
                         ir-status: root.ir_status;
                         ir-policy-label: root.ir_policy_label;
+                        cab-kind-label: root.cab_kind_label;
+                        cab-detail: root.cab_detail;
+                        cab-is-neural: root.cab_is_neural;
+                        cab-bypassed: root.cab_bypassed;
                         has-ir: root.has_ir;
                         is-loading: root.ir_loading;
                         is-error: root.ir_error;
@@ -220,6 +229,7 @@ export component MainWindow inherits Window {
                         load-clicked => { root.load_ir_clicked(); }
                         clear-clicked => { root.clear_ir_clicked(); }
                         cycle-policy-clicked => { root.cycle_ir_policy_clicked(); }
+                        toggle-cab-bypass-clicked => { root.toggle_cab_bypass_clicked(); }
                     }
                 }
             }

@@ -43,6 +43,7 @@ fn make_restore_txn(generation: u64, gain: f32, mult_adj: f32) -> RestoreTxn {
         params: rt_gain(gain),
         calibration: Default::default(),
         gate_mode: Default::default(),
+        cab_bypass: false,
     }
 }
 
@@ -674,6 +675,7 @@ fn structural_classification_light_vs_heavy() {
             params: RtProcessingParams::default(),
             calibration: Default::default(),
             gate_mode: Default::default(),
+            cab_bypass: false,
         }),
     ];
     for payload in &heavy {

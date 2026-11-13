@@ -17,8 +17,7 @@ pub(crate) mod validate;
 
 pub(crate) use commit::publish_restore;
 pub(crate) use validate::{
-    compute_bytes_hash, compute_file_hash, is_valid_sha256_hex, load_cabsim_from_verified_bytes,
-    read_ir_file_bytes,
+    compute_bytes_hash, compute_file_hash, is_valid_sha256_hex, read_ir_file_bytes,
 };
 
 #[cfg(test)]
@@ -52,8 +51,8 @@ pub(crate) fn restore_state_transactional(
     }
 
     // ══════ Phase 1: PREPARE — deserialise ══════
-    let (loaded_params, ir_level_policy, calibration, gate_mode) =
-        super::state::load_state_with_policy_calibration_and_gate_mode(buffer)?;
+    let (loaded_params, ir_level_policy, calibration, gate_mode, cab_bypass, _cab_kind) =
+        super::state::load_state_with_full_metadata(buffer)?;
 
     let host_rate = {
         let rate = main_thread.shared.cold.sample_rate.load(Ordering::Relaxed);
@@ -62,11 +61,12 @@ pub(crate) fn restore_state_transactional(
     let buffer_size = main_thread.shared.cold.buffer_size.load(Ordering::Relaxed);
 
     // ══════ Phase 2: VALIDATE — build resources off-RT ══════
-    let validated = validate::validate_and_build(
+    let validated = validate::validate_and_build_with_cab(
         &loaded_params,
         ir_level_policy,
         calibration,
         gate_mode,
+        cab_bypass,
         host_rate,
         buffer_size,
         &main_thread.sys,

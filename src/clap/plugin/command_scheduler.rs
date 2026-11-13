@@ -62,6 +62,7 @@ struct CoalesceBuffer {
     dirty_mask: u16,
     pending_calibration: Option<CalibrationConfig>,
     pending_gate_mode: Option<GateMode>,
+    pending_cab_bypass: Option<bool>,
 }
 
 impl Default for CoalesceBuffer {
@@ -71,6 +72,7 @@ impl Default for CoalesceBuffer {
             dirty_mask: 0,
             pending_calibration: None,
             pending_gate_mode: None,
+            pending_cab_bypass: None,
         }
     }
 }
@@ -321,6 +323,13 @@ impl<'a> CommandProducer<'a> {
         !had_pending
     }
 
+    /// Queues a coalesced cabinet bypass update for delivery to RT.
+    pub fn push_cab_bypass(&mut self, bypass: bool) -> bool {
+        let had_pending = self.coalescing.pending_cab_bypass.is_some();
+        self.coalescing.pending_cab_bypass = Some(bypass);
+        !had_pending
+    }
+
     /// Queues a non-coalescable command (model load, IR swap,
     /// oversampling engine hot-swap).
     ///
@@ -408,6 +417,17 @@ impl<'a> CommandProducer<'a> {
                 }
                 Err(rtrb::PushError::Full(_)) => {
                     self.coalescing.pending_gate_mode = Some(mode);
+                    return Err(PushError::Full);
+                }
+            }
+        }
+        if let Some(bypass) = self.coalescing.pending_cab_bypass.take() {
+            match self.tx.push(Box::new(ClapParamPayload::CabBypass(bypass))) {
+                Ok(()) => {
+                    last_seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                }
+                Err(rtrb::PushError::Full(_)) => {
+                    self.coalescing.pending_cab_bypass = Some(bypass);
                     return Err(PushError::Full);
                 }
             }

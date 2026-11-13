@@ -269,6 +269,7 @@ impl<'a> NamClapProcessor<'a> {
                 let mut input_clipped = false;
 
                 self.bypass_xfade.trigger(self.params.bypass);
+                self.cab_bypass_xfade.trigger(self.cab_bypass);
 
                 let mut slice_start = 0usize;
                 while slice_start < n_samples_raw {
@@ -411,6 +412,7 @@ impl<'a> NamClapProcessor<'a> {
             // by SPSC event sync (process_events) before this block, trigger
             // the crossfade to avoid click artifacts.
             self.bypass_xfade.trigger(self.params.bypass);
+            self.cab_bypass_xfade.trigger(self.cab_bypass);
 
             self.process_wet_sub_blocks(
                 0,
@@ -448,6 +450,7 @@ impl<'a> NamClapProcessor<'a> {
                     evt.value,
                     evt.is_mod,
                     &mut self.params,
+                    &mut self.cab_bypass,
                     &mut self.cal_config,
                     &self.model_cal_meta,
                     &mut self.model_input_mult_adj,
@@ -476,6 +479,7 @@ impl<'a> NamClapProcessor<'a> {
             if remaining_applied {
                 self.refresh_gate_config();
                 self.bypass_xfade.trigger(self.params.bypass);
+                self.cab_bypass_xfade.trigger(self.cab_bypass);
             }
         }
 
@@ -578,6 +582,7 @@ impl<'a> NamClapProcessor<'a> {
                     evt.value,
                     evt.is_mod,
                     &mut self.params,
+                    &mut self.cab_bypass,
                     &mut self.cal_config,
                     &self.model_cal_meta,
                     &mut self.model_input_mult_adj,
@@ -607,6 +612,7 @@ impl<'a> NamClapProcessor<'a> {
             if out_of_order_applied {
                 self.refresh_gate_config();
                 self.bypass_xfade.trigger(self.params.bypass);
+                self.cab_bypass_xfade.trigger(self.cab_bypass);
             }
 
             // Resolve the next sub-block boundary: the first event that
@@ -669,6 +675,7 @@ impl<'a> NamClapProcessor<'a> {
                         value,
                         is_mod,
                         &mut self.params,
+                        &mut self.cab_bypass,
                         &mut self.cal_config,
                         &self.model_cal_meta,
                         &mut self.model_input_mult_adj,
@@ -750,7 +757,7 @@ impl<'a> NamClapProcessor<'a> {
                         adaptive: &mut self.adaptive_compute,
                         bridge_writer: None,
                         conv: None,
-                        conv_pair: self.cabsim_pair.as_deref_mut(),
+                        conv_pair: None,
                     };
 
                     let mut scratch = audio_loop::SubBlockScratch {
@@ -767,6 +774,19 @@ impl<'a> NamClapProcessor<'a> {
                         buf_xfd_scratch_l: &mut self.buf_xfd_scratch_l,
                         buf_xfd_scratch_r: &mut self.buf_xfd_scratch_r,
                     };
+                    let mut cab_stage = audio_loop::CabinetStage {
+                        cab_slot: &mut self.cab_slot,
+                        cab_bypass: self.cab_bypass,
+                        cab_needs_reset: &mut self.cab_needs_reset,
+                        cab_bypass_xfade: &mut self.cab_bypass_xfade,
+                        cab_dry_delay: &mut self.cab_dry_delay,
+                        buf_cab_dry_l: &mut self.buf_cab_dry_l,
+                        buf_cab_dry_r: &mut self.buf_cab_dry_r,
+                        buf_cab_nam_in_l: &mut self.buf_cab_nam_in_l,
+                        buf_cab_nam_in_r: &mut self.buf_cab_nam_in_r,
+                        buf_cab_zero_l: &self.buf_cab_zero_l,
+                        buf_cab_zero_r: &self.buf_cab_zero_r,
+                    };
 
                     audio_loop::process_sub_block(
                         block_offset,
@@ -781,6 +801,7 @@ impl<'a> NamClapProcessor<'a> {
                         &mut self.bypass_xfade,
                         &mut self.dry_delay,
                         &mut scratch,
+                        &mut cab_stage,
                         input_clipped,
                         &mut self.smoother_in,
                         &mut self.smoother_out,
@@ -840,6 +861,7 @@ impl<'a> NamClapProcessor<'a> {
                     evt.value,
                     evt.is_mod,
                     &mut self.params,
+                    &mut self.cab_bypass,
                     &mut self.cal_config,
                     &self.model_cal_meta,
                     &mut self.model_input_mult_adj,
@@ -870,6 +892,7 @@ impl<'a> NamClapProcessor<'a> {
             // Trigger bypass crossfade if the bypass state changed via
             // a host event at this sub-block boundary.
             self.bypass_xfade.trigger(self.params.bypass);
+            self.cab_bypass_xfade.trigger(self.cab_bypass);
 
             block_offset = sub_end;
         }
@@ -890,6 +913,7 @@ impl<'a> NamClapProcessor<'a> {
                     evt.value,
                     evt.is_mod,
                     &mut self.params,
+                    &mut self.cab_bypass,
                     &mut self.cal_config,
                     &self.model_cal_meta,
                     &mut self.model_input_mult_adj,
@@ -919,6 +943,7 @@ impl<'a> NamClapProcessor<'a> {
             if remaining_applied {
                 self.refresh_gate_config();
                 self.bypass_xfade.trigger(self.params.bypass);
+                self.cab_bypass_xfade.trigger(self.cab_bypass);
             }
         }
     }
@@ -1040,6 +1065,7 @@ impl<'a> NamClapProcessor<'a> {
                 evt.value,
                 evt.is_mod,
                 &mut self.params,
+                &mut self.cab_bypass,
                 &mut self.cal_config,
                 &self.model_cal_meta,
                 &mut self.model_input_mult_adj,

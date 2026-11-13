@@ -13,9 +13,9 @@
 //! audio configuration. If the host changed either, the affected resources are
 //! discarded and rebuilt from scratch. Model weights are always reusable.
 
+use crate::clap::extensions::cabinet::CabSlotDsp;
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::processor::NamClapProcessor;
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::StaticModel;
@@ -31,13 +31,10 @@ pub(crate) struct DeactivatedDspState {
     /// Monotonic generation of the active model identity,
     /// persisted with the model so a reactivation keeps the same generation.
     pub(crate) model_generation: u64,
-    /// Cab-sim convolution pair. The underlying `process_block` driver is
-    /// block-agnostic — host blocks of any size are chunked against the fixed
-    /// partition internally — so the pair is reusable across buffer-size
-    /// changes and only a host sample-rate change (the IR is resampled to the
-    /// host rate at build time) forces a rebuild. Kept `Box`ed to preserve the
-    /// end-to-end real-time safe ownership contract.
-    pub(crate) cabsim_pair: Option<Box<CabSimPair>>,
+    /// Active cabinet slot occupant (`WavIr` or `NamModel`).
+    /// For `.wav` IRs, only sample rate invalidates the convolution adapter;
+    /// for `.nam`/`.namb`, both sample rate and buffer size must match `StreamingResampleBuffer`.
+    pub(crate) cab_slot: Option<CabSlotDsp>,
     /// Polyphase sinc resampler. Reusable only if `host_rate` matches the
     /// current host sample rate (phase interpolation banks are rate-dependent).
     pub(crate) resampler: Box<NamResampler>,
@@ -142,7 +139,7 @@ pub(crate) fn deactivate<'a>(
                 model_l: processor.model_l,
                 model_r: processor.model_r,
                 model_generation: processor.model_generation,
-                cabsim_pair: processor.cabsim_pair,
+                cab_slot: processor.cab_slot,
                 resampler: processor.resampler,
                 stream: processor.stream,
                 os_l: processor.os_l,

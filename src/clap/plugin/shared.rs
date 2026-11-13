@@ -3,6 +3,7 @@
 
 //! Lock-free shared state between the audio thread and the main thread.
 
+use crate::clap::extensions::cabinet::{CabAssetKind, CabSlotDsp, CabUiMeta};
 use crate::clap::extensions::calibration::{
     CalibrationConfig, INPUT_CALIBRATION_LEVEL_DEFAULT_DBU, ModelCalibrationMeta, OutputMode,
 };
@@ -18,7 +19,6 @@ use neural_amp_modeler_rs::common::diagnostics::NamErrorCode;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::{GcItem, GcOverflowBuffer, RtStatusFlags};
-use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
 use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::models::StaticModel;
@@ -151,6 +151,8 @@ pub enum ClapParamPayload {
     Calibration(CalibrationConfig),
     /// Noise gate mode update (`Silence` legacy vs `Musical` expander).
     GateMode(GateMode),
+    /// Independent cabinet slot bypass update (`true` = bypassed, `false` = active).
+    CabBypass(bool),
     /// Loading of a new model pair (transferred/constructed outside RT) and its resampler.
     LoadModel {
         /// Monotonic model generation this load belongs to.
@@ -179,13 +181,12 @@ pub enum ClapParamPayload {
         /// selects the conservative per-family prewarm table.
         prewarm_cost_ns: Option<f32>,
     },
-    /// Loading of a new cab-sim convolution pair via SPSC.
-    /// Follows the same pattern as `LoadModel`: the pair is boxed and
-    /// constructed outside the RT thread, then swapped atomically in the
-    /// audio thread — the old `Box` moves by value to the GC.
+    /// Loading of a new cabinet slot asset (WAV IR or 1x1 NAM model) via SPSC.
+    /// Constructed off-RT, swapped atomically on the audio thread, and retired
+    /// via `GcItem` without dropping heap memory on RT.
     LoadCabIr {
-        /// Pre-built, boxed convolution pair (None = bypass cabsim).
-        pair: Option<Box<CabSimPair>>,
+        /// Pre-built cabinet slot asset (`None` = clear cabinet slot).
+        pair: Option<CabSlotDsp>,
     },
     /// Oversampling factor change: carries new pre-built engines for the audio thread.
     SetOversample {
@@ -244,7 +245,8 @@ impl ClapParamPayload {
         match self {
             ClapParamPayload::Params(_)
             | ClapParamPayload::Calibration(_)
-            | ClapParamPayload::GateMode(_) => None,
+            | ClapParamPayload::GateMode(_)
+            | ClapParamPayload::CabBypass(_) => None,
             ClapParamPayload::LoadModel { .. } => Some(StructuralKind::Model),
             ClapParamPayload::LoadCabIr { .. } => Some(StructuralKind::CabIr),
             ClapParamPayload::SetOversample { .. } => Some(StructuralKind::Oversample),
@@ -261,6 +263,7 @@ impl ClapParamPayload {
             ClapParamPayload::Params(_)
                 | ClapParamPayload::Calibration(_)
                 | ClapParamPayload::GateMode(_)
+                | ClapParamPayload::CabBypass(_)
         )
     }
 }
@@ -314,8 +317,8 @@ pub struct LoadModelPayload {
 pub(crate) struct StagedSwap {
     /// Model component (`model_l: None` clears the model).
     pub(crate) model: Option<LoadModelPayload>,
-    /// Cab-sim component (`None` clears the IR).
-    pub(crate) ir: Option<Option<Box<CabSimPair>>>,
+    /// Cabinet slot component (`None` clears the cabinet slot).
+    pub(crate) ir: Option<Option<CabSlotDsp>>,
 }
 
 impl StagedSwap {
@@ -351,16 +354,17 @@ pub struct RestoreTxn {
     /// Model component: `Some(payload)` loads (or clears when `model_l` is None),
     /// `None` leaves the active model untouched (ForPreset without model).
     pub model: Option<LoadModelPayload>,
-    /// IR component: `Some(Some(pair))` loads, `Some(None)` clears,
-    /// `None` leaves the active IR untouched (ForPreset without IR).
-    /// The pair travels `Box`ed end-to-end for RT-safe swaps.
-    pub ir: Option<Option<Box<CabSimPair>>>,
+    /// Cabinet slot component: `Some(Some(cab))` loads, `Some(None)` clears,
+    /// `None` leaves the active cabinet untouched (ForPreset without cabinet).
+    pub ir: Option<Option<CabSlotDsp>>,
     /// Full RT parameter snapshot applied atomically with the model/IR.
     pub params: RtProcessingParams,
     /// Calibration configuration restored atomically with the preset/project state.
     pub calibration: CalibrationConfig,
     /// Gate mode restored atomically with the preset/project state.
     pub gate_mode: GateMode,
+    /// Independent cabinet bypass state restored atomically with the preset/project state.
+    pub cab_bypass: bool,
 }
 
 /// Model publication data retained until the restore transaction is acked.
@@ -406,8 +410,16 @@ pub struct RestorePublish {
     pub ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     /// Input calibration and output mode configuration restored with this transaction.
     pub calibration: crate::clap::extensions::calibration::CalibrationConfig,
-    /// Noise gate mode restored with this transaction.
+    /// Gate mode restored with this transaction.
     pub gate_mode: GateMode,
+    /// Cabinet bypass state restored with this transaction.
+    pub cab_bypass: bool,
+    /// Cabinet asset kind (`None` when cabinet slot is empty).
+    pub cab_kind: Option<CabAssetKind>,
+    /// Preserved raw cabinet `.nam`/`.namb` bytes for rate renegotiation rebuilds.
+    pub cab_nam_raw_bytes: Option<(CabAssetKind, Vec<u8>)>,
+    /// Disambiguated cabinet UI metadata.
+    pub cab_ui_meta: Option<CabUiMeta>,
 }
 
 /// A staged restore awaiting atomic delivery and ack-gated publication.
@@ -562,6 +574,8 @@ pub struct UiToRt {
     pub param_output_mode: AtomicU32,
     /// Noise gate operating mode (0=Silence legacy, 1=Musical expander; default 0).
     pub param_gate_mode: AtomicU32,
+    /// Independent cabinet slot bypass (0=Active, 1=Bypassed; default 0).
+    pub param_cab_bypass: AtomicU32,
     /// Gesture and modification flag bitmap per parameter (GUI -> Host/Processor).
     pub gesture_flags: AtomicU64,
     /// Monotonic generation counter bumped (Release) by GUI on any param write.
@@ -619,6 +633,7 @@ impl Default for UiToRt {
             ),
             param_output_mode: AtomicU32::new(OutputMode::Normalized.to_u32()),
             param_gate_mode: AtomicU32::new(GateMode::Silence.to_u32()),
+            param_cab_bypass: AtomicU32::new(0),
             gesture_flags: AtomicU64::new(0),
             gui_param_generation: AtomicU32::new(0),
             host_r_deactivated: AtomicBool::new(false),
@@ -808,6 +823,14 @@ pub struct ColdShared {
     pub ir_raw_sample_rate: AtomicU32,
     /// Active cabinet IR level policy (`IrLevelPolicy::to_u8()`).
     pub ir_level_policy: std::sync::atomic::AtomicU8,
+    /// Active cabinet slot format (`0` = none, `1` = WAV IR, `2` = NAM, `3` = NAMB).
+    pub cab_kind: AtomicU8,
+    /// Preserved raw cabinet neural model bytes (`(CabAssetKind, Vec<u8>)`) for reactivation/resampling rebuilds.
+    pub cab_nam_raw_bytes: Mutex<Option<(CabAssetKind, Vec<u8>)>>,
+    /// Disambiguated cabinet display metadata (format, parent/file label, arch/rate, gear tags).
+    pub cab_ui_meta: Mutex<Option<CabUiMeta>>,
+    /// In-flight cabinet bypass state update retained when SPSC push saturates.
+    pub in_flight_cab_bypass: Mutex<Option<bool>>,
     /// Flag signaling that the IR level policy changed in the UI and the
     /// active `CabSimPair` should be rebuilt from `ir_raw_samples`.
     pub ui_ir_policy_rebuild_pending: AtomicBool,
@@ -1095,6 +1118,10 @@ impl ColdShared {
             ir_level_policy: std::sync::atomic::AtomicU8::new(
                 crate::clap::extensions::ir_level_policy::IrLevelPolicy::PeakNormalized.to_u8(),
             ),
+            cab_kind: AtomicU8::new(0),
+            cab_nam_raw_bytes: Mutex::new(None),
+            cab_ui_meta: Mutex::new(None),
+            in_flight_cab_bypass: Mutex::new(None),
             ui_ir_policy_rebuild_pending: AtomicBool::new(false),
             slimmable_tx: Mutex::new(Some(slimmable_tx)),
             slimmable_rx: Mutex::new(Some(slimmable_rx)),
@@ -1276,6 +1303,18 @@ impl GuiSharedState {
             .store(mode.to_u32(), Ordering::Relaxed);
     }
 
+    /// Reads the current independent cabinet bypass state from `ui_to_rt` atomics.
+    pub fn cab_bypass(&self) -> bool {
+        self.ui_to_rt.param_cab_bypass.load(Ordering::Relaxed) != 0
+    }
+
+    /// Stores `bypass` into `ui_to_rt` atomics.
+    pub fn store_cab_bypass(&self, bypass: bool) {
+        self.ui_to_rt
+            .param_cab_bypass
+            .store(u32::from(bypass), Ordering::Relaxed);
+    }
+
     /// Zeros out all gesture flags.
     pub fn clear_gestures(&self) {
         self.ui_to_rt.gesture_flags.store(0, Ordering::Relaxed);
@@ -1339,9 +1378,10 @@ impl GuiSharedState {
     /// off-RT (housekeeping logs it) — never an invisible loss.
     pub fn write_gui_events(&self, output: &mut OutputEvents) {
         use crate::clap::extensions::params::{
-            PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
-            PARAM_GATE_MODE, PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN,
-            PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
+            PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CAB_BYPASS,
+            PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE, PARAM_GATE_THRESH,
+            PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE,
+            PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
         };
         use clack_plugin::events::event_types::{
             ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent,
@@ -1355,7 +1395,7 @@ impl GuiSharedState {
             return;
         }
 
-        let params: [(u32, u32, &AtomicU32, bool); 12] = [
+        let params: [(u32, u32, &AtomicU32, bool); 13] = [
             (
                 PARAM_INPUT_GAIN,
                 Self::param_index(PARAM_INPUT_GAIN) as u32,
@@ -1426,6 +1466,12 @@ impl GuiSharedState {
                 PARAM_GATE_MODE,
                 Self::param_index(PARAM_GATE_MODE) as u32,
                 &self.ui_to_rt.param_gate_mode,
+                false,
+            ),
+            (
+                PARAM_CAB_BYPASS,
+                Self::param_index(PARAM_CAB_BYPASS) as u32,
+                &self.ui_to_rt.param_cab_bypass,
                 false,
             ),
         ];

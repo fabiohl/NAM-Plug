@@ -3,10 +3,12 @@
 
 //! Sub-block processing loop and streaming neural audio execution for NAM-Plug.
 
+use crate::clap::extensions::cabinet::CabSlotDsp;
 use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::processor::dsp::dry_delay::DryDelayLine;
 use crate::clap::processor::dsp::musical_gate::MusicalNoiseGate;
 use crate::clap::processor::state::BypassCrossfader;
+use neural_amp_modeler_rs::common::spsc::RtStatusFlags;
 use neural_amp_modeler_rs::dsp::gate::{DynamicHysteresis, GateState};
 use neural_amp_modeler_rs::dsp::pipeline::{
     DspPipelineContext, apply_input_stage, apply_input_stage_mono, apply_output_stage,
@@ -56,6 +58,21 @@ pub(crate) struct SubBlockScratch<'a> {
     pub buf_xfd_scratch_l: &'a mut [f32],
     /// Inference scratch shared with the crossfade wet leg.
     pub buf_xfd_scratch_r: &'a mut [f32],
+}
+
+/// Disjoint single-cabinet slot state and pre-allocated scratch buffers for one sub-block.
+pub(crate) struct CabinetStage<'a> {
+    pub cab_slot: &'a mut Option<CabSlotDsp>,
+    pub cab_bypass: bool,
+    pub cab_needs_reset: &'a mut bool,
+    pub cab_bypass_xfade: &'a mut BypassCrossfader,
+    pub cab_dry_delay: &'a mut DryDelayLine,
+    pub buf_cab_dry_l: &'a mut [f32],
+    pub buf_cab_dry_r: &'a mut [f32],
+    pub buf_cab_nam_in_l: &'a mut [f32],
+    pub buf_cab_nam_in_r: &'a mut [f32],
+    pub buf_cab_zero_l: &'a [f32],
+    pub buf_cab_zero_r: &'a [f32],
 }
 
 /// Telemetry and processing metrics returned by [`process_sub_block`].
@@ -131,6 +148,7 @@ pub(crate) fn process_sub_block(
     crossfader: &mut BypassCrossfader,
     dry_delay: &mut DryDelayLine,
     scratch: &mut SubBlockScratch<'_>,
+    cab: &mut CabinetStage<'_>,
     input_clipped: &mut bool,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
@@ -156,6 +174,7 @@ pub(crate) fn process_sub_block(
             crossfader,
             dry_delay,
             scratch,
+            cab,
             input_clipped,
             smoother_in,
             smoother_out,
@@ -209,6 +228,7 @@ pub(crate) fn process_sub_block(
             process_mono,
             crossfader,
             scratch,
+            cab,
             input_clipped,
             smoother_in,
             smoother_out,
@@ -308,6 +328,7 @@ pub(crate) fn process_sub_block(
             smoother_out,
             smoother_cal_out,
             scratch,
+            cab,
             shared_sample_rate,
             gain_steps,
         );
@@ -372,44 +393,14 @@ pub(crate) fn process_sub_block(
         );
     }
 
-    if let Some(ref mut pair) = ctx.conv_pair {
-        if !pair.l.is_passthrough() {
-            if !process_mono {
-                pair.process_block_stereo(
-                    &mut buf_out_l[..n_out],
-                    &mut buf_out_r[..n_out],
-                    Some(ctx.rt_status),
-                );
-                pair.rearm_tail();
-            } else {
-                pair.l
-                    .process_block(&mut buf_out_l[..n_out], Some(ctx.rt_status));
-                pair.l.rearm_tail();
-            }
-        }
-    } else if let Some(ref mut conv) = ctx.conv
-        && !conv.is_passthrough()
-    {
-        // The IR operates directly on the final output scratch: `process_block`
-        // consumes the model output and writes the convolution result back into
-        // the same buffer, so no intermediate model buffer (and no transfer copy)
-        // is needed on the audio callback. The driver is block-agnostic — it
-        // chunks arbitrary host blocks against the fixed partition internally —
-        // so the output stream is invariant to host block-size variations
-        // (including sizes that exceed the partition) and the partition-cap
-        // clamp of the legacy call can never flag a contract violation here.
-        conv.process_block(&mut buf_out_l[..n_out], Some(ctx.rt_status));
-        // The tail budget is re-armed to the full IR duration whenever active
-        // audio is effectively fed into the convolution module. Without this,
-        // the first gate close consumes the budget to zero and every later note
-        // is truncated to immediate silence on the next close. Rearming in the
-        // drain paths is deliberately avoided (no signal reaches the conv there)
-        // so the drain always terminates.
-        conv.rearm_tail();
-        if !process_mono {
-            buf_out_r[..n_out].copy_from_slice(&buf_out_l[..n_out]);
-        }
-    }
+    process_cabinet_stage(
+        cab,
+        &mut buf_out_l[..n_out],
+        &mut buf_out_r[..n_out],
+        n_out,
+        process_mono,
+        ctx.rt_status,
+    );
 
     apply_output_stage_calibrated(
         &mut buf_out_l[..n_out],
@@ -487,6 +478,7 @@ fn process_sub_block_chunked(
     crossfader: &mut BypassCrossfader,
     dry_delay: &mut DryDelayLine,
     scratch: &mut SubBlockScratch<'_>,
+    cab: &mut CabinetStage<'_>,
     input_clipped: &mut bool,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
@@ -525,6 +517,7 @@ fn process_sub_block_chunked(
             crossfader,
             dry_delay,
             scratch,
+            cab,
             input_clipped,
             smoother_in,
             smoother_out,
@@ -597,6 +590,7 @@ fn drain_tail_into(
     smoother_out: &mut ParamSmoother,
     smoother_cal_out: &mut ParamSmoother,
     scratch: &mut SubBlockScratch<'_>,
+    cab: &mut CabinetStage<'_>,
     shared_sample_rate: u32,
     gain_steps: &[GainStep],
 ) -> usize {
@@ -614,40 +608,61 @@ fn drain_tail_into(
         buf_xfd_scratch_l: _,
         buf_xfd_scratch_r: _,
     } = scratch;
-    let drain = n_samples.min(if let Some(ref pair) = ctx.conv_pair {
-        if pair.l.is_passthrough() && pair.r.is_passthrough() {
-            0
-        } else if !process_mono {
-            pair.remaining_tail_samples()
-        } else {
-            pair.l.remaining_tail_samples()
-        }
-    } else if let Some(ref conv) = ctx.conv {
-        if conv.is_passthrough() {
-            0
-        } else {
-            conv.remaining_tail_samples()
-        }
-    } else {
-        0
-    });
+    let Some(ref mut slot) = *cab.cab_slot else {
+        cab.cab_bypass_xfade.active = false;
+        return 0;
+    };
+    cab.cab_dry_delay.process_block(
+        &cab.buf_cab_zero_l[..n_samples],
+        &cab.buf_cab_zero_r[..n_samples],
+        &mut cab.buf_cab_dry_l[..n_samples],
+        &mut cab.buf_cab_dry_r[..n_samples],
+        n_samples,
+        process_mono,
+    );
+    if cab.cab_bypass && !cab.cab_bypass_xfade.active {
+        *cab.cab_needs_reset = true;
+        return 0;
+    }
+    let drain = n_samples.min(slot.remaining_tail_samples(process_mono));
 
     if drain > 0 {
-        if let Some(ref mut pair) = ctx.conv_pair {
-            if !process_mono {
-                pair.drain_tail_stereo(
+        match slot {
+            CabSlotDsp::WavIr(pair) => {
+                if !process_mono {
+                    pair.drain_tail_stereo(
+                        &mut buf_out_l[..drain],
+                        &mut buf_out_r[..drain],
+                        Some(ctx.rt_status),
+                    );
+                } else {
+                    pair.l
+                        .drain_tail(&mut buf_out_l[..drain], Some(ctx.rt_status));
+                }
+            }
+            CabSlotDsp::NamModel(nam) => {
+                let _ = nam.drain_tail(
+                    &cab.buf_cab_zero_l[..drain],
+                    &cab.buf_cab_zero_r[..drain],
                     &mut buf_out_l[..drain],
                     &mut buf_out_r[..drain],
-                    Some(ctx.rt_status),
+                    drain,
+                    process_mono,
                 );
-            } else {
-                pair.l
-                    .drain_tail(&mut buf_out_l[..drain], Some(ctx.rt_status));
             }
-        } else if let Some(ref mut conv) = ctx.conv {
-            conv.drain_tail(&mut buf_out_l[..drain], Some(ctx.rt_status));
-            if !process_mono {
-                buf_out_r[..drain].copy_from_slice(&buf_out_l[..drain]);
+        }
+        if cab.cab_bypass_xfade.active {
+            blend_cabinet_crossfade(
+                cab.cab_bypass_xfade,
+                &cab.buf_cab_dry_l[..drain],
+                &cab.buf_cab_dry_r[..drain],
+                &mut buf_out_l[..drain],
+                &mut buf_out_r[..drain],
+                drain,
+                process_mono,
+            );
+            if !cab.cab_bypass_xfade.active && cab.cab_bypass {
+                *cab.cab_needs_reset = true;
             }
         }
         apply_output_stage_calibrated(
@@ -736,6 +751,7 @@ fn process_tail_drain(
     smoother_out: &mut ParamSmoother,
     smoother_cal_out: &mut ParamSmoother,
     scratch: &mut SubBlockScratch<'_>,
+    cab: &mut CabinetStage<'_>,
     shared_sample_rate: u32,
     gain_steps: &[GainStep],
 ) -> (f32, f32, f32, f32) {
@@ -746,6 +762,7 @@ fn process_tail_drain(
         smoother_out,
         smoother_cal_out,
         scratch,
+        cab,
         shared_sample_rate,
         gain_steps,
     );
@@ -803,6 +820,7 @@ fn process_crossfade_sub_block(
     process_mono: bool,
     crossfader: &mut BypassCrossfader,
     scratch: &mut SubBlockScratch<'_>,
+    cab: &mut CabinetStage<'_>,
     input_clipped: &mut bool,
     smoother_in: &mut ParamSmoother,
     smoother_out: &mut ParamSmoother,
@@ -880,6 +898,7 @@ fn process_crossfade_sub_block(
             smoother_out,
             smoother_cal_out,
             scratch,
+            cab,
             shared_sample_rate,
             &[],
         );
@@ -918,36 +937,14 @@ fn process_crossfade_sub_block(
             );
         }
 
-        if let Some(ref mut pair) = ctx.conv_pair {
-            if !pair.l.is_passthrough() {
-                if !process_mono {
-                    pair.process_block_stereo(
-                        &mut scratch.buf_out_l[..n_o],
-                        &mut scratch.buf_out_r[..n_o],
-                        Some(ctx.rt_status),
-                    );
-                    pair.rearm_tail();
-                } else {
-                    pair.l
-                        .process_block(&mut scratch.buf_out_l[..n_o], Some(ctx.rt_status));
-                    pair.l.rearm_tail();
-                }
-            }
-        } else if let Some(ref mut conv) = ctx.conv
-            && !conv.is_passthrough()
-        {
-            // The IR operates directly on the final output scratch (see the
-            // main-path comment in `process_sub_block`): the block-agnostic
-            // driver keeps the crossfade wet stream invariant to host
-            // block-size variations as well.
-            conv.process_block(&mut scratch.buf_out_l[..n_o], Some(ctx.rt_status));
-            // Re-arm the tail budget for active audio (see the main-path
-            // comment in `process_sub_block`).
-            conv.rearm_tail();
-            if !process_mono {
-                scratch.buf_out_r[..n_o].copy_from_slice(&scratch.buf_out_l[..n_o]);
-            }
-        }
+        process_cabinet_stage(
+            cab,
+            &mut scratch.buf_out_l[..n_o],
+            &mut scratch.buf_out_r[..n_o],
+            n_o,
+            process_mono,
+            ctx.rt_status,
+        );
 
         apply_output_stage_calibrated(
             &mut scratch.buf_out_l[..n_o],
@@ -1072,6 +1069,131 @@ fn process_crossfade_sub_block(
         out_peak_r,
         out_sum_sq_l,
         out_sum_sq_r,
+    }
+}
+
+#[inline]
+fn process_cabinet_stage(
+    cab: &mut CabinetStage<'_>,
+    buf_out_l: &mut [f32],
+    buf_out_r: &mut [f32],
+    n_out: usize,
+    process_mono: bool,
+    rt_status: &RtStatusFlags,
+) {
+    if n_out == 0 {
+        return;
+    }
+    let Some(ref mut slot) = *cab.cab_slot else {
+        cab.cab_bypass_xfade.active = false;
+        return;
+    };
+    cab.cab_dry_delay.process_block(
+        &buf_out_l[..n_out],
+        &buf_out_r[..n_out],
+        &mut cab.buf_cab_dry_l[..n_out],
+        &mut cab.buf_cab_dry_r[..n_out],
+        n_out,
+        process_mono,
+    );
+    if cab.cab_bypass && !cab.cab_bypass_xfade.active {
+        *cab.cab_needs_reset = true;
+        buf_out_l[..n_out].copy_from_slice(&cab.buf_cab_dry_l[..n_out]);
+        if !process_mono {
+            buf_out_r[..n_out].copy_from_slice(&cab.buf_cab_dry_r[..n_out]);
+        }
+        return;
+    }
+    if *cab.cab_needs_reset && (!cab.cab_bypass || !cab.cab_bypass_xfade.target) {
+        slot.reset();
+        *cab.cab_needs_reset = false;
+    }
+    match slot {
+        CabSlotDsp::WavIr(pair) => {
+            if !pair.l.is_passthrough() {
+                if !process_mono {
+                    pair.process_block_stereo(
+                        &mut buf_out_l[..n_out],
+                        &mut buf_out_r[..n_out],
+                        Some(rt_status),
+                    );
+                    pair.rearm_tail();
+                } else {
+                    pair.l
+                        .process_block(&mut buf_out_l[..n_out], Some(rt_status));
+                    pair.l.rearm_tail();
+                }
+            }
+        }
+        CabSlotDsp::NamModel(nam) => {
+            cab.buf_cab_nam_in_l[..n_out].copy_from_slice(&buf_out_l[..n_out]);
+            if !process_mono {
+                cab.buf_cab_nam_in_r[..n_out].copy_from_slice(&buf_out_r[..n_out]);
+            }
+            nam.process_block(
+                &cab.buf_cab_nam_in_l[..n_out],
+                &cab.buf_cab_nam_in_r[..n_out],
+                &mut buf_out_l[..n_out],
+                &mut buf_out_r[..n_out],
+                n_out,
+                process_mono,
+            );
+            nam.rearm_tail();
+        }
+    }
+    if cab.cab_bypass_xfade.active {
+        blend_cabinet_crossfade(
+            cab.cab_bypass_xfade,
+            &cab.buf_cab_dry_l[..n_out],
+            &cab.buf_cab_dry_r[..n_out],
+            &mut buf_out_l[..n_out],
+            &mut buf_out_r[..n_out],
+            n_out,
+            process_mono,
+        );
+        if !cab.cab_bypass_xfade.active && cab.cab_bypass {
+            *cab.cab_needs_reset = true;
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn blend_cabinet_crossfade(
+    crossfader: &mut BypassCrossfader,
+    dry_l: &[f32],
+    dry_r: &[f32],
+    wet_l: &mut [f32],
+    wet_r: &mut [f32],
+    n_out: usize,
+    process_mono: bool,
+) {
+    let n_xfade = n_out.min(crossfader.remaining);
+    let step = crossfader.step;
+    let mut mix = crossfader.mix;
+    for i in 0..n_xfade {
+        let d_l = dry_l[i];
+        wet_l[i] = d_l + (wet_l[i] - d_l) * mix;
+        if !process_mono {
+            let d_r = dry_r[i];
+            wet_r[i] = d_r + (wet_r[i] - d_r) * mix;
+        }
+        mix += step;
+    }
+    let final_mix = if crossfader.target { 0.0 } else { 1.0 };
+    if (final_mix - 1.0f32).abs() > f32::EPSILON {
+        for i in n_xfade..n_out {
+            wet_l[i] = dry_l[i];
+            if !process_mono {
+                wet_r[i] = dry_r[i];
+            }
+        }
+    }
+    crossfader.mix = mix.clamp(0.0, 1.0);
+    crossfader.remaining = crossfader.remaining.saturating_sub(n_xfade);
+    if crossfader.remaining == 0 {
+        crossfader.active = false;
+        crossfader.mix = final_mix;
     }
 }
 

@@ -1076,9 +1076,11 @@ impl<'a> NamClapMainThread<'a> {
                     .ui_ir_loading
                     .store(false, Ordering::Relaxed);
                 match res {
-                    Ok(_) => {}
-                    Err(e) => {
-                        let err_msg = e.error_code().message();
+                    Ok(_) => {
+                        self.shared
+                            .cold
+                            .ui_ir_load_error
+                            .store(false, Ordering::Relaxed);
                         let mut msg_guard = self
                             .shared
                             .cold
@@ -1088,68 +1090,143 @@ impl<'a> NamClapMainThread<'a> {
                                 log::error!("PoisonError in ui_ir_load_error_msg lock: {e:?}");
                                 e.into_inner()
                             });
-                        *msg_guard = err_msg.to_string();
+                        msg_guard.clear();
+                    }
+                    Err(e) => {
+                        let detail = e.to_string();
+                        let err_msg = if detail.trim().is_empty() {
+                            e.error_code().message().to_string()
+                        } else {
+                            detail
+                        };
+                        let mut msg_guard = self
+                            .shared
+                            .cold
+                            .ui_ir_load_error_msg
+                            .lock()
+                            .unwrap_or_else(|e| {
+                                log::error!("PoisonError in ui_ir_load_error_msg lock: {e:?}");
+                                e.into_inner()
+                            });
+                        *msg_guard = err_msg;
                         self.shared
                             .cold
                             .ui_ir_load_error
                             .store(true, Ordering::Relaxed);
 
-                        log::error!("Failed to load cab-sim IR from GUI: {e:?}");
+                        log::error!("Failed to load cabinet asset from GUI: {e:?}");
                     }
                 }
             }
         }
 
         if self.shared.cold.ui_clear_ir.load(Ordering::Relaxed) {
-            // Strict Restart Policy: clearing the active IR changes
-            // the physical latency (partition → 0), so it is staged and a
-            // host restart is requested — the DSP keeps the IR (and the
-            // still-reported latency) until `activate()` installs the
-            // staged clear. A clear when no IR is installed is a no-op.
+            // Strict Restart Policy: clearing a latency-bearing cabinet changes
+            // the physical latency (lat -> 0), so it is staged and a host restart
+            // is requested. Zero-latency neural cabinets (host_rate == model_rate)
+            // clear continuously over SPSC without interrupting host latency.
             let current_cabsim_latency = self
                 .shared
                 .cold
                 .current_cabsim_latency
                 .load(Ordering::Relaxed);
-            if current_cabsim_latency == 0 {
+            let has_cab_path = self
+                .shared
+                .cold
+                .ir_path
+                .lock()
+                .unwrap_or_else(|e| {
+                    log::error!("PoisonError in ir_path lock: {e:?}");
+                    e.into_inner()
+                })
+                .is_some();
+            if current_cabsim_latency == 0 && !has_cab_path {
                 self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
             } else {
-                // Scoped borrow: `staged_swap` is released before the host
-                // `request_restart()` call below.
-                {
-                    let mut staged_swap = self.staged_swap.borrow_mut();
-                    let staged = staged_swap.get_or_insert_with(StagedSwap::default);
-                    staged.ir = Some(None);
-                }
-                self.host.request_restart();
-                self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
-                {
-                    let mut ir_guard = self.shared.cold.ir_path.lock().unwrap_or_else(|e| {
+                let cleared = if current_cabsim_latency == 0 {
+                    let processor_active = self
+                        .shared
+                        .cold
+                        .param_rx
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_none();
+                    let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
+                    if processor_active && buffer_size > 0 {
+                        match self.cmd_producer.borrow_mut().try_push_command(
+                            crate::clap::plugin::ClapParamPayload::LoadCabIr { pair: None },
+                        ) {
+                            Ok(_) => true,
+                            Err(_) => {
+                                self.host.request_callback();
+                                false
+                            }
+                        }
+                    } else {
+                        true
+                    }
+                } else {
+                    {
+                        let mut staged_swap = self.staged_swap.borrow_mut();
+                        let staged = staged_swap.get_or_insert_with(StagedSwap::default);
+                        staged.ir = Some(None);
+                    }
+                    self.host.request_restart();
+                    true
+                };
+
+                if cleared {
+                    self.shared.cold.ui_clear_ir.store(false, Ordering::Relaxed);
+                    self.shared.cold.cab_kind.store(0, Ordering::Relaxed);
+                    self.shared
+                        .cold
+                        .ui_ir_load_error
+                        .store(false, Ordering::Relaxed);
+                    *self
+                        .shared
+                        .cold
+                        .ui_ir_load_error_msg
+                        .lock()
+                        .unwrap_or_else(|e| {
+                            log::error!("PoisonError in ui_ir_load_error_msg lock: {e:?}");
+                            e.into_inner()
+                        }) = String::new();
+                    *self.shared.cold.ir_path.lock().unwrap_or_else(|e| {
                         log::error!("PoisonError in ir_path lock: {e:?}");
                         e.into_inner()
-                    });
-                    *ir_guard = None;
-                }
-                {
-                    let mut hash_guard = self.shared.cold.ir_hash.lock().unwrap_or_else(|e| {
+                    }) = None;
+                    *self.shared.cold.ir_hash.lock().unwrap_or_else(|e| {
                         log::error!("PoisonError in ir_hash lock: {e:?}");
                         e.into_inner()
-                    });
-                    *hash_guard = None;
-                }
-                {
-                    let mut raw_guard =
-                        self.shared.cold.ir_raw_samples.lock().unwrap_or_else(|e| {
-                            log::error!("PoisonError in ir_raw_samples lock: {e:?}");
-                            e.into_inner()
-                        });
-                    *raw_guard = None;
+                    }) = None;
+                    *self.shared.cold.ir_raw_samples.lock().unwrap_or_else(|e| {
+                        log::error!("PoisonError in ir_raw_samples lock: {e:?}");
+                        e.into_inner()
+                    }) = None;
                     self.shared
                         .cold
                         .ir_raw_sample_rate
                         .store(0, Ordering::Relaxed);
+                    *self
+                        .shared
+                        .cold
+                        .cab_nam_raw_bytes
+                        .lock()
+                        .unwrap_or_else(|e| {
+                            log::error!("PoisonError in cab_nam_raw_bytes lock: {e:?}");
+                            e.into_inner()
+                        }) = None;
+                    *self.shared.cold.cab_ui_meta.lock().unwrap_or_else(|e| {
+                        log::error!("PoisonError in cab_ui_meta lock: {e:?}");
+                        e.into_inner()
+                    }) = None;
+                    {
+                        let mut params = self.params.borrow_mut();
+                        params.ir_path = None;
+                        params.ir_hash = None;
+                    }
+                    log::info!("NAM-Plug: cabinet asset cleared via GUI");
                 }
-                log::info!("NAM-Plug: cab-sim IR cleared via GUI (staged for host restart)");
             }
         }
 
@@ -1169,15 +1246,22 @@ impl<'a> NamClapMainThread<'a> {
             .ui_ir_policy_rebuild_pending
             .swap(false, Ordering::AcqRel)
         {
+            let active_kind = crate::clap::extensions::cabinet::CabAssetKind::from_u8(
+                self.shared.cold.cab_kind.load(Ordering::Relaxed),
+            );
+            let is_wav = active_kind == Some(crate::clap::extensions::cabinet::CabAssetKind::WavIr)
+                || active_kind.is_none();
             let policy = crate::clap::extensions::ir_level_policy::IrLevelPolicy::from_u8(
                 self.shared.cold.ir_level_policy.load(Ordering::Relaxed),
             );
-            let raw_opt = {
+            let raw_opt = if is_wav {
                 let guard = self.shared.cold.ir_raw_samples.lock().unwrap_or_else(|e| {
                     log::error!("PoisonError in ir_raw_samples lock: {e:?}");
                     e.into_inner()
                 });
                 guard.clone()
+            } else {
+                None
             };
             if let Some(raw_samples) = raw_opt {
                 let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
@@ -1206,7 +1290,11 @@ impl<'a> NamClapMainThread<'a> {
                                 .borrow_mut()
                                 .try_push_command(
                                     crate::clap::plugin::ClapParamPayload::LoadCabIr {
-                                        pair: Some(Box::new(pair)),
+                                        pair: Some(
+                                            crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                                                Box::new(pair),
+                                            ),
+                                        ),
                                     },
                                 )
                                 .is_err()
@@ -1321,7 +1409,18 @@ impl<'a> NamClapMainThread<'a> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        if snapshot.is_some() || cal_snapshot.is_some() || gate_mode_snapshot.is_some() {
+        let cab_bypass_snapshot = self
+            .shared
+            .cold
+            .in_flight_cab_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if snapshot.is_some()
+            || cal_snapshot.is_some()
+            || gate_mode_snapshot.is_some()
+            || cab_bypass_snapshot.is_some()
+        {
             // Scoped producer borrow: released before the poisoned-lock
             // recovery below (no host call happens here, but keeping the
             // borrow window minimal is the house rule).
@@ -1336,11 +1435,16 @@ impl<'a> NamClapMainThread<'a> {
                 if let Some(mode) = gate_mode_snapshot {
                     producer.push_gate_mode(mode);
                 }
+                if let Some(bypass) = cab_bypass_snapshot {
+                    producer.push_cab_bypass(bypass);
+                }
                 producer.force_flush()
             };
             match flush_result {
                 Ok(_) => {
-                    log::trace!("In-flight params/calibration/gate_mode delivered on retry");
+                    log::trace!(
+                        "In-flight params/calibration/gate_mode/cab_bypass delivered on retry"
+                    );
                 }
                 Err(crate::clap::plugin::command_scheduler::PushError::Full) => {
                     if let Some(params) = snapshot {
@@ -1381,6 +1485,20 @@ impl<'a> NamClapMainThread<'a> {
                             },
                         );
                         *guard = Some(mode);
+                    }
+                    if let Some(bypass) = cab_bypass_snapshot {
+                        let mut guard = self
+                            .shared
+                            .cold
+                            .in_flight_cab_bypass
+                            .lock()
+                            .unwrap_or_else(|e| {
+                                log::error!(
+                                    "in_flight_cab_bypass mutex poisoned during flush, recovering"
+                                );
+                                e.into_inner()
+                            });
+                        *guard = Some(bypass);
                     }
                     self.shared.bump_generation();
                 }

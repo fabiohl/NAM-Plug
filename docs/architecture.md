@@ -132,14 +132,14 @@ Core DSP neural inference is mono by definition. Buffer extraction and VU meteri
 
 ### 3.2 Parameter Surface Catalog
 
-Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–11):
+Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–13):
 
 | Parameter                    | ID                            | Type    | Range / Options                                                 | Description                                                                     |
 |:---------------------------- |:----------------------------- |:------- |:--------------------------------------------------------------- |:------------------------------------------------------------------------------- |
 | **Input Gain**               | `input_gain_db` (0)           | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.                                   |
 | **Output Gain**              | `output_gain_db` (1)          | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.                                  |
 | **Gate Threshold**           | `gate_threshold_db` (2)       | dB      | `-90.0` to `-40.0` (default `-90.0`, off by default)            | Noise-gate opening threshold.                                                   |
-| **Bypass**                   | `bypass` (3)                  | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables neural processing (64-sample click-free linear crossfade passthrough). |
+| **Bypass**                   | `bypass` (3)                  | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables full plugin processing (64-sample click-free linear crossfade passthrough). |
 | **Active Model**             | `active_model` (4)            | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.                            |
 | **Adaptive Compute**         | `adaptive_compute` (5)        | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                                              |
 | **Slim Override**            | `slim_override` (6)           | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                                      |
@@ -149,10 +149,11 @@ Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/process
 | **Input Calibration Level**  | `input_calibration_level` (10)| dBu     | `-60.0` to `+60.0` dBu (default `12.0`)                         | Reference 0 dBFS input level in dBu used for calibrated gain equations.         |
 | **Output Mode**              | `output_mode` (11)            | Stepped | `0` (`Raw`), `1` (`Normalized` / default), `2` (`Calibrated`)   | Output level normalization mode (`loudness`, `output_level`, or unity).         |
 | **Gate Mode**                | `gate_mode` (12)              | Stepped | `0` (`Silence` / default), `1` (`Musical`)                      | Gate topology (`Silence` post-IR Schmitt gate vs `Musical` pre-IR expander).     |
+| **Cab Bypass**               | `cab_bypass` (13)             | Binary  | `0.0` (false / default) / `1.0` (true)                          | Independently bypasses the cabinet slot with constant PDC latency and 64-sample cosine crossfade. |
 
 The table lists the host-facing (authoritative) ranges. The GUI knobs expose a narrower, ergonomic subset (`INPUT` −20 to +20 dB, `OUTPUT` −40 to +20 dB); values written by the GUI are clamped to the host range by the parameter layer (`src/clap/extensions/params/mod.rs`).
 
-Model file paths (`.nam`/`.namb`) and CabSim IR file paths (`.wav`) are managed as **DAW State Properties** (`clap_plugin_state`), enabling project-level serialization and restoration.
+Model file paths (`.nam`/`.namb`) and Cabinet slot file paths (`.wav`, `.nam`, or `.namb`) are managed as **DAW State Properties** (`clap_plugin_state`), enabling project-level serialization and restoration.
 
 ### 3.3 Mandatory Asset Identity (SHA-256)
 
@@ -435,7 +436,7 @@ To ensure strict separation of concerns, the real-time audio processor lifecycle
    - Runs `NamModel::process()` (with optional 2x/4x oversampling around neural activations).
    - Downsamples 48 kHz back to host sample rate.
 6. **Output Stage & Degradation Check:** Compensates dither, applies linear gate fade ramps, and checks block deadlines for `AdaptiveCompute` CPU fallback.
-7. **CabSim IR Stage (Optional):** Runs Uniform-Partitioned Overlap-Save (UPOLS) frequency-domain convolution (`ConvEngine::process()`) if an IR is loaded.
+7. **Cabinet Stage (Optional Single Exclusive Slot):** Executes either Uniform-Partitioned Overlap-Save (UPOLS) frequency-domain convolution (`WavIr` via `ConvEngine::process()`) for `.wav` IRs **or** a dedicated 1-in/1-out neural cabinet model (`NamModel` dual-mono `model_l`/`model_r` with dedicated `StreamingResampleBuffer`, strict unity gain isolated from amp calibration and `IrLevelPolicy`, and fail-closed WaveNet post-stack `head` rejection scoped strictly to the cabinet slot). Independent `PARAM_CAB_BYPASS` (13) routes the cabinet stage through a latency-aligned `DryDelayLine`, 64-sample cosine crossfade, lazy `reset()` on re-engagement, and steady-state DSP skip while preserving constant host PDC.
 8. **Output Gain & Clipping:** Applies output gain (SIMD + `ParamSmoother`), enforces hard clipping at `+0 dBFS` if configured, and updates peak telemetry atomics.
 
 ### 6.2 Branchless FMA Bypass Crossfader (`process_crossfade_sub_block`)
@@ -459,7 +460,7 @@ NAM models may supply embedded metadata (`input_level_dbu`, `output_level_dbu`, 
 
 - `input_mult_adj`: when `calibrate_input` is enabled and `input_level_dbu` exists, `10^((input_calibration_level_dbu - input_level_dbu) / 20)` applied post-gate / pre-nonlinearity; otherwise `1.0` (the noise gate continues evaluating raw pre-calibration input).
 - `output_mult_adj`: `Raw` -> `1.0`; `Normalized` -> `10^((-18.0 - loudness) / 20)` if `loudness` exists else `1.0`; `Calibrated` -> `10^((output_level_dbu - input_calibration_level_dbu) / 20)` if `output_level_dbu` exists else `1.0`.
-- **State Migration (`StateEnvelope` v2):** Sessions persist `CalibrationState` (`calibrate_input`, `input_calibration_level_dbu`, `output_mode`) and optional `gate_mode` (`Silence` / `Musical`). Restoring `v0`/`v1` envelopes lacking `"calibration"` preserves upstream legacy playback semantics (`calibrate_input = true`, `12.0` dBu, `Normalized`), while missing `gate_mode` defaults cleanly to `Silence`. In `Musical` mode, `MusicalNoiseGate` triggers post-user-trim / pre-calibration and applies gain post-model / pre-CabSim IR while keeping neural inference continuous without hard cutouts.
+- **State Migration (`StateEnvelope` v2):** Sessions persist `CalibrationState` (`calibrate_input`, `input_calibration_level_dbu`, `output_mode`), optional `gate_mode` (`Silence` / `Musical`), and optional `cab_bypass` (`bool`) alongside cabinet slot `.wav`/`.nam`/`.namb` identity (`ir_path` + `ir_hash`). Restoring `v0`/`v1` envelopes lacking `"calibration"` preserves upstream legacy playback semantics (`calibrate_input = true`, `12.0` dBu, `Normalized`), while missing `gate_mode` / `cab_bypass` default cleanly to `Silence` / `false`. In `Musical` mode, `MusicalNoiseGate` triggers post-user-trim / pre-calibration and applies gain post-model / pre-cabinet while keeping neural inference continuous without hard cutouts.
 
 ### 6.4 Host Event Scheduling, In-Block Slicing & Anomaly Containment
 

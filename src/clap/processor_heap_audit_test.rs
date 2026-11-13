@@ -276,7 +276,9 @@ mod tests {
             mt.cmd_producer
                 .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr {
-                    pair: Some(Box::new(pair_a)),
+                    pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                        Box::new(pair_a),
+                    )),
                 })
                 .expect("Load IR 1 push must succeed");
         }
@@ -310,7 +312,9 @@ mod tests {
             mt.cmd_producer
                 .borrow_mut()
                 .push_command(ClapParamPayload::LoadCabIr {
-                    pair: Some(Box::new(pair_b)),
+                    pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                        Box::new(pair_b),
+                    )),
                 })
                 .expect("Swap IR 2 push must succeed");
         }
@@ -606,7 +610,9 @@ mod tests {
                     mt.cmd_producer
                         .borrow_mut()
                         .push_command(ClapParamPayload::LoadCabIr {
-                            pair: Some(build_ir(len)),
+                            pair: Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                                build_ir(len),
+                            )),
                         })
                         .expect("IR burst push must succeed");
                 }
@@ -724,10 +730,13 @@ mod tests {
                             },
                             prewarm_cost_ns: None,
                         }),
-                        ir: Some(Some(build_ir(4096))),
+                        ir: Some(Some(crate::clap::extensions::cabinet::CabSlotDsp::WavIr(
+                            build_ir(4096),
+                        ))),
                         params: RtProcessingParams::default().with_oversample(OversampleFactor::X2),
                         calibration: crate::clap::extensions::calibration::CalibrationConfig::new_project_default(),
                         gate_mode: Default::default(),
+                        cab_bypass: false,
                     }))
                     .expect("mixed RestoreTxn push must succeed");
             }
@@ -761,6 +770,7 @@ mod tests {
                                 .with_oversample(OversampleFactor::X2),
                             calibration: crate::clap::extensions::calibration::CalibrationConfig::new_project_default(),
                             gate_mode: Default::default(),
+                            cab_bypass: false,
                         }))
                         .expect("restore burst push must succeed");
                 }

@@ -16,10 +16,10 @@
 use super::NamClapProcessor;
 use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE,
-    PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
-    PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32,
-    bypass_f32_to_bool, bypass_u32_to_bool, sanitize_param_value,
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CAB_BYPASS,
+    PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE, PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL,
+    PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
+    bypass_bool_to_u32, bypass_f32_to_bool, bypass_u32_to_bool, sanitize_param_value,
 };
 use crate::clap::plugin::PendingRestartOs;
 use crate::clap::processor::events::{ClapCommandSwapHandler, command_swap_parts};
@@ -94,6 +94,17 @@ impl<'a> NamClapProcessor<'a> {
         self.shared
             .ui_to_rt
             .param_bypass
+            .store(bypass_bool_to_u32(bypass), Ordering::Relaxed);
+    }
+
+    /// Sets the independent cabinet bypass state (`PARAM_CAB_BYPASS`).
+    pub(crate) fn set_cab_bypass(&mut self, val: f32) {
+        let val = sanitize_param_value(PARAM_CAB_BYPASS, val);
+        let bypass = bypass_f32_to_bool(val);
+        self.cab_bypass = bypass;
+        self.shared
+            .ui_to_rt
+            .param_cab_bypass
             .store(bypass_bool_to_u32(bypass), Ordering::Relaxed);
     }
 
@@ -316,6 +327,19 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes independent cabinet bypass state from the GUI/UI thread.
+    pub(super) fn sync_cab_bypass_from_gui(&mut self) {
+        let shared_bypass = bypass_u32_to_bool(
+            self.shared
+                .ui_to_rt
+                .param_cab_bypass
+                .load(Ordering::Relaxed),
+        );
+        if shared_bypass != self.cab_bypass {
+            self.cab_bypass = shared_bypass;
+        }
+    }
+
     /// Synchronizes adaptive compute mode from the GUI/UI thread.
     ///
     /// Atomically loads the mode integer via `Ordering::Relaxed`, sanitizes the value,
@@ -441,6 +465,7 @@ impl<'a> NamClapProcessor<'a> {
         self.sync_gate_thresh_from_gui();
         self.sync_gate_mode_from_gui();
         self.sync_bypass_from_gui();
+        self.sync_cab_bypass_from_gui();
         self.sync_adaptive_compute_from_gui();
         self.sync_slim_override_from_gui();
         self.sync_oversample_from_gui();

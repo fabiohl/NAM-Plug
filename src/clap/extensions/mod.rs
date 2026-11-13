@@ -24,6 +24,7 @@
 
 pub mod audio_ports;
 pub mod audio_ports_activation;
+pub(crate) mod cabinet;
 pub mod calibration;
 pub mod gate_mode;
 pub(crate) mod ir_level_policy;

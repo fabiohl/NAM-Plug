@@ -5,6 +5,7 @@
 
 use super::RestoreMode;
 use super::validate::{IrResources, ModelResources, ValidatedRestore};
+use crate::clap::extensions::cabinet::{CabAssetKind, CabSlotDsp};
 use crate::clap::plugin::command_scheduler::PushError;
 use crate::clap::plugin::errors::{self, static_plugin_error};
 use crate::clap::plugin::lock::lock_cold;
@@ -91,8 +92,8 @@ fn atomic_commit(
     };
 
     let cabsim_latency_differs = match txn.ir.as_ref() {
-        Some(maybe_pair) => {
-            let new_lat = maybe_pair.as_ref().map_or(0, |p| p.partition_size() as u32);
+        Some(maybe_slot) => {
+            let new_lat = maybe_slot.as_ref().map_or(0, CabSlotDsp::latency_samples);
             new_lat != current_cabsim_latency
         }
         None => false,
@@ -171,6 +172,7 @@ pub(crate) fn build_restore_package(
         ir_level_policy,
         calibration,
         gate_mode,
+        cab_bypass,
     } = validated;
 
     // Effective params: Full replaces everything; ForPreset only the
@@ -291,22 +293,26 @@ pub(crate) fn build_restore_package(
         },
     };
 
-    let ir_publish = ir.as_ref().map(|r| (r.samples.clone(), r.sample_rate));
-    let ir_component = match ir {
+    let (ir_publish, cab_kind_pub, cab_nam_raw_pub, cab_ui_meta_pub, ir_component) = match ir {
         Some(resources) => {
             let IrResources {
-                pair,
-                samples: _,
-                sample_rate: _,
+                slot,
+                kind,
+                samples,
+                sample_rate,
+                nam_raw,
+                ui_meta,
             } = resources;
-            // `pair` is already `Option<Box<CabSimPair>>` — None clears
-            // the IR. The box preserves the RT-safe end-to-end ownership
-            // contract.
-            Some(pair)
+            let wav_pub = if kind == CabAssetKind::WavIr {
+                Some((samples, sample_rate))
+            } else {
+                None
+            };
+            (wav_pub, Some(kind), nam_raw, Some(ui_meta), Some(slot))
         }
         None => match mode {
-            RestoreMode::Full => Some(None),
-            RestoreMode::ForPreset => None,
+            RestoreMode::Full => (None, None, None, None, Some(None)),
+            RestoreMode::ForPreset => (None, None, None, None, None),
         },
     };
 
@@ -325,6 +331,10 @@ pub(crate) fn build_restore_package(
         ir_level_policy,
         calibration,
         gate_mode,
+        cab_bypass,
+        cab_kind: cab_kind_pub,
+        cab_nam_raw_bytes: cab_nam_raw_pub,
+        cab_ui_meta: cab_ui_meta_pub,
     };
 
     let txn = RestoreTxn {
@@ -334,6 +344,7 @@ pub(crate) fn build_restore_package(
         params: RtProcessingParams::from_processing_params(&effective_params),
         calibration,
         gate_mode,
+        cab_bypass,
     };
 
     Ok((publish, txn))
@@ -407,6 +418,10 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         ir_level_policy,
         calibration,
         gate_mode,
+        cab_bypass,
+        cab_kind,
+        cab_nam_raw_bytes,
+        cab_ui_meta,
     } = publish;
     let mode = if mode_full {
         RestoreMode::Full
@@ -482,12 +497,31 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
     if let Some(ref ir_path_str) = ir_path_on_disk {
         *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = Some(ir_path_str.clone());
         *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = ir_hash.clone();
-        *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = ir_raw_samples;
         main_thread
             .shared
             .cold
-            .ir_raw_sample_rate
-            .store(ir_raw_sample_rate, Ordering::Relaxed);
+            .cab_kind
+            .store(cab_kind.map_or(0, CabAssetKind::to_u8), Ordering::Relaxed);
+        *lock_cold(
+            &main_thread.shared.cold.cab_nam_raw_bytes,
+            "cab_nam_raw_bytes",
+        ) = cab_nam_raw_bytes;
+        *lock_cold(&main_thread.shared.cold.cab_ui_meta, "cab_ui_meta") = cab_ui_meta;
+        if cab_kind == Some(CabAssetKind::WavIr) {
+            *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = ir_raw_samples;
+            main_thread
+                .shared
+                .cold
+                .ir_raw_sample_rate
+                .store(ir_raw_sample_rate, Ordering::Relaxed);
+        } else {
+            *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = None;
+            main_thread
+                .shared
+                .cold
+                .ir_raw_sample_rate
+                .store(0, Ordering::Relaxed);
+        }
         {
             let mut params = main_thread.params.borrow_mut();
             params.ir_path = Some(PathBuf::from(ir_path_str.clone()));
@@ -496,6 +530,12 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
     } else if mode_full {
         *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = None;
         *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = None;
+        main_thread.shared.cold.cab_kind.store(0, Ordering::Relaxed);
+        *lock_cold(
+            &main_thread.shared.cold.cab_nam_raw_bytes,
+            "cab_nam_raw_bytes",
+        ) = None;
+        *lock_cold(&main_thread.shared.cold.cab_ui_meta, "cab_ui_meta") = None;
         *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = None;
         main_thread
             .shared
@@ -593,6 +633,11 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         &main_thread.shared.cold.in_flight_gate_mode,
         "in_flight_gate_mode",
     ) = None;
+    main_thread.shared.store_cab_bypass(cab_bypass);
+    *lock_cold(
+        &main_thread.shared.cold.in_flight_cab_bypass,
+        "in_flight_cab_bypass",
+    ) = None;
     main_thread.shared.bump_generation();
 
     if let Some(params_ext) = main_thread
@@ -628,6 +673,7 @@ fn local_commit(
         ir_level_policy,
         calibration,
         gate_mode,
+        cab_bypass,
     } = validated;
 
     // ── Commit model (local) ──
@@ -746,23 +792,45 @@ fn local_commit(
         .store(ir_level_policy.to_u8(), Ordering::Relaxed);
     if let Some(resources) = ir {
         let IrResources {
-            pair,
+            slot,
+            kind,
             samples,
             sample_rate,
+            nam_raw,
+            ui_meta,
         } = resources;
-        if let Some(pair) = pair {
+        if let Some(slot) = slot {
             let mut staged_swap = main_thread.staged_swap.borrow_mut();
             let staged = staged_swap.get_or_insert_with(StagedSwap::default);
-            staged.ir = Some(Some(pair));
+            staged.ir = Some(Some(slot));
         }
         *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = ir_path_on_disk.clone();
         *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = ir_hash.clone();
-        *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = Some(samples);
         main_thread
             .shared
             .cold
-            .ir_raw_sample_rate
-            .store(sample_rate, Ordering::Relaxed);
+            .cab_kind
+            .store(kind.to_u8(), Ordering::Relaxed);
+        *lock_cold(
+            &main_thread.shared.cold.cab_nam_raw_bytes,
+            "cab_nam_raw_bytes",
+        ) = nam_raw;
+        *lock_cold(&main_thread.shared.cold.cab_ui_meta, "cab_ui_meta") = Some(ui_meta);
+        if kind == CabAssetKind::WavIr {
+            *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = Some(samples);
+            main_thread
+                .shared
+                .cold
+                .ir_raw_sample_rate
+                .store(sample_rate, Ordering::Relaxed);
+        } else {
+            *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = None;
+            main_thread
+                .shared
+                .cold
+                .ir_raw_sample_rate
+                .store(0, Ordering::Relaxed);
+        }
         {
             let mut params = main_thread.params.borrow_mut();
             params.ir_path = ir_path_on_disk.map(PathBuf::from);
@@ -774,6 +842,12 @@ fn local_commit(
         staged.ir = Some(None);
         *lock_cold(&main_thread.shared.cold.ir_path, "ir_path") = None;
         *lock_cold(&main_thread.shared.cold.ir_hash, "ir_hash") = None;
+        main_thread.shared.cold.cab_kind.store(0, Ordering::Relaxed);
+        *lock_cold(
+            &main_thread.shared.cold.cab_nam_raw_bytes,
+            "cab_nam_raw_bytes",
+        ) = None;
+        *lock_cold(&main_thread.shared.cold.cab_ui_meta, "cab_ui_meta") = None;
         *lock_cold(&main_thread.shared.cold.ir_raw_samples, "ir_raw_samples") = None;
         main_thread
             .shared
@@ -870,6 +944,11 @@ fn local_commit(
     *lock_cold(
         &main_thread.shared.cold.in_flight_gate_mode,
         "in_flight_gate_mode",
+    ) = None;
+    main_thread.shared.store_cab_bypass(cab_bypass);
+    *lock_cold(
+        &main_thread.shared.cold.in_flight_cab_bypass,
+        "in_flight_cab_bypass",
     ) = None;
     main_thread.shared.bump_generation();
 

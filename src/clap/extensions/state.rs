@@ -12,9 +12,11 @@
 //! - v2 (current): envelope `StateEnvelope { version: 2, params, ir_level_policy, calibration }`
 //!   with explicit opt-in calibration fields (new-project default `calibrate_input = false`).
 
+use crate::clap::extensions::cabinet::CabAssetKind;
 use crate::clap::extensions::calibration::CalibrationConfig;
 use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::ir_level_policy::IrLevelPolicy;
+use crate::clap::extensions::params::bypass_u32_to_bool;
 use crate::clap::extensions::state_transaction::{self, RestoreMode};
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::plugin::debug_assert_main_thread;
@@ -62,6 +64,10 @@ pub(crate) struct StateEnvelope {
     pub(crate) calibration: Option<CalibrationConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) gate_mode: Option<GateMode>,
+    #[serde(default)]
+    pub(crate) cab_bypass: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cab_kind: Option<CabAssetKind>,
 }
 
 /// Shared helper: serialises `ProcessingParams` wrapped in a v2 `StateEnvelope`
@@ -95,12 +101,26 @@ pub(crate) fn serialize_envelope_v2_with_gate_mode(
     calibration: CalibrationConfig,
     gate_mode: GateMode,
 ) -> Result<Vec<u8>, PluginError> {
+    serialize_envelope_v2_with_cab(params, ir_level_policy, calibration, gate_mode, false, None)
+}
+
+/// Serialises complete v2 `StateEnvelope` including independent cabinet bypass & format hint.
+pub(crate) fn serialize_envelope_v2_with_cab(
+    params: &ProcessingParams,
+    ir_level_policy: IrLevelPolicy,
+    calibration: CalibrationConfig,
+    gate_mode: GateMode,
+    cab_bypass: bool,
+    cab_kind: Option<CabAssetKind>,
+) -> Result<Vec<u8>, PluginError> {
     let envelope = StateEnvelope {
         version: CURRENT_STATE_VERSION,
         params: params.clone(),
         ir_level_policy,
         calibration: Some(calibration.sanitized()),
         gate_mode: Some(gate_mode),
+        cab_bypass,
+        cab_kind,
     };
     serde_json::to_vec(&envelope)
         .map_err(|e| PluginError::Error(Box::new(StateError::Serialize(e))))
@@ -192,11 +212,20 @@ impl<'a> PluginStateImpl for NamClapMainThread<'a> {
             IrLevelPolicy::from_u8(self.shared.cold.ir_level_policy.load(Ordering::Relaxed));
         let calibration = self.shared.calibration_config();
         let gate_mode = self.shared.gate_mode();
-        let serialized = serialize_envelope_v2_with_gate_mode(
+        let cab_bypass = bypass_u32_to_bool(
+            self.shared
+                .ui_to_rt
+                .param_cab_bypass
+                .load(Ordering::Relaxed),
+        );
+        let cab_kind = CabAssetKind::from_u8(self.shared.cold.cab_kind.load(Ordering::Relaxed));
+        let serialized = serialize_envelope_v2_with_cab(
             &self.params.borrow(),
             ir_policy,
             calibration,
             gate_mode,
+            cab_bypass,
+            cab_kind,
         )?;
         let blob_len = serialized.len();
 
@@ -248,9 +277,28 @@ pub(crate) fn load_state_with_policy_and_calibration(
     Ok((params, policy, calibration))
 }
 
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn load_state_with_policy_calibration_and_gate_mode(
     buffer: &[u8],
 ) -> Result<(ProcessingParams, IrLevelPolicy, CalibrationConfig, GateMode), PluginError> {
+    let (params, policy, calibration, gate_mode, _cab_bypass, _cab_kind) =
+        load_state_with_full_metadata(buffer)?;
+    Ok((params, policy, calibration, gate_mode))
+}
+
+/// Unpacked metadata tuple returned by [`load_state_with_full_metadata`].
+pub(crate) type LoadedFullMetadata = (
+    ProcessingParams,
+    IrLevelPolicy,
+    CalibrationConfig,
+    GateMode,
+    bool,
+    Option<CabAssetKind>,
+);
+
+pub(crate) fn load_state_with_full_metadata(
+    buffer: &[u8],
+) -> Result<LoadedFullMetadata, PluginError> {
     if let Ok(envelope) = serde_json::from_slice::<StateEnvelope>(buffer) {
         let calibration = match envelope.calibration {
             Some(cal) => {
@@ -267,6 +315,8 @@ pub(crate) fn load_state_with_policy_calibration_and_gate_mode(
             envelope.ir_level_policy,
             calibration,
             gate_mode,
+            envelope.cab_bypass,
+            envelope.cab_kind,
         ));
     }
 
@@ -287,6 +337,8 @@ pub(crate) fn load_state_with_policy_calibration_and_gate_mode(
         IrLevelPolicy::PeakNormalized,
         CalibrationConfig::legacy_restored_default(),
         GateMode::Silence,
+        false,
+        None,
     ))
 }
 
