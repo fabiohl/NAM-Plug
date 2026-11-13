@@ -1013,6 +1013,10 @@ impl<'a> NamClapProcessor<'a> {
                 20.0,
             );
             let cal_config = shared.calibration_config();
+            let gate_mode = shared.gate_mode();
+            let musical_gate = crate::clap::processor::dsp::musical_gate::MusicalNoiseGate::new(
+                audio_config.sample_rate.round().clamp(1.0, u32::MAX as f64) as u32,
+            );
             let has_cal_meta = model_cal_meta.input_level_dbu.is_some()
                 || model_cal_meta.output_level_dbu.is_some()
                 || model_cal_meta.loudness.is_some();
@@ -1201,6 +1205,8 @@ impl<'a> NamClapProcessor<'a> {
                 cached_threshold_close_sq: 0.0,
                 cached_gate_params: GateParams::default(),
                 gate_dirty: true,
+                gate_mode,
+                musical_gate,
                 rt_thread_setup_done: false,
                 // Fresh models arrive converged from the off-RT loader and the
                 // eager drain above finishes any deactivate-interrupted pass,

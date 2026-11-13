@@ -1081,7 +1081,8 @@ mod load_error_code_tests {
     use super::*;
 
     fn write_temp_nam(name: &str, json: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("nam_plug_s06_{}_{name}.nam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("nam_plug_s06_{}_{name}.nam", std::process::id()));
         std::fs::write(&path, json).expect("write temp .nam fixture");
         path
     }

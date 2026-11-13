@@ -183,6 +183,7 @@ mod tests {
             ir: None,
             params: RtProcessingParams::default(),
             calibration: Default::default(),
+            gate_mode: Default::default(),
         })
     }
 

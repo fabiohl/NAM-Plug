@@ -28,7 +28,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 *The hardware-accelerated Slint interface running inside a Linux DAW. Organized into five ergonomic zones:*
 
 1. **Asset Selection & Identity (Left Panel):** Load `.nam` / `.namb` neural amp models and `.wav` speaker cabinet impulse responses (IRs), accompanied by the SIMD badge (`AVX2+FMA`) and version info.
-2. **Analog Gain, Gate & Quality Stages (Center Panel):** Input trim ($-20\text{ to }+20\text{ dB}$), Output level ($-40\text{ to }+20\text{ dB}$), integrated noise gate ($-90\text{ to }0\text{ dB}$) with dynamic LED indicator, anti-aliasing oversampling (`Off`, `2×`, `4×`), and activation precision (`Std` vs `Fast`).
+2. **Analog Gain, Gate & Quality Stages (Center Panel):** Input trim ($-20\text{ to }+20\text{ dB}$), Output level ($-40\text{ to }+20\text{ dB}$), integrated noise gate ($-90\text{ to }0\text{ dB}$, `"OFF"` at `-90.0 dB`) with selectable topology (`Sil` block-RMS silence gate or `Mus` C++-reference quadratic downward expander) and dynamic LED indicator, anti-aliasing oversampling (`Off`, `2×`, `4×`), and activation precision (`Std` vs `Fast`).
 3. **Dual-Stage Precision Metering:** Dual stereo/mono input (post-trim, pre-model) and output (post-gain) level meters with simultaneous IEC 60268-10 Type I quasi-peak ballistics, solid inner EWMA RMS cores ($\tau = 300\text{ ms}$), 2-second peak-hold bars, and independent latching IN CLIP / OUT CLIP indicators with click-to-reset.
 4. **Master Bypass:** Hardware toggle switch transitioning cleanly between `DSP ACTIVE` and `BYPASS` via a 64-sample click-free crossfade.
 5. **Real-Time Telemetry Bar (Footer):** Live status reporting sample rate (`SR`), buffer size (`BUF`), latency (`LAT`), channel layout (`CH`), DSP load percentage (`% DSP` with overload/XRUN alert LED and tooltip), contextual alert pill, and window backend.
@@ -176,7 +176,7 @@ In guitar production, an authentic recorded amp tone consists of two distinct co
    * Adjust **`INPUT`** ($-20\text{ to }+20\text{ dB}$, default `0.0 dB`) to feed the model the right amount of drive.
    * Adjust **`OUTPUT`** ($-40\text{ to }+20\text{ dB}$, default `-3.0 dB`) to balance levels with your overall mix.
    * Watch the tricolor peak meters and reset the red clip LED if digital clipping occurs.
-5. **Set the Noise Gate:** If your guitar pickups produce single-coil hum or high-gain hiss, turn the **`GATE`** knob up from `-90.0 dB` (off by default) until silence is reached between notes; the indicator switches to `GATE ACTIVE`.
+5. **Set the Noise Gate:** If your guitar pickups produce single-coil hum or high-gain hiss, turn the **`GATE`** knob up from `-90.0 dB` (`"OFF"` by default) until silence is reached between notes (`GATE ACTIVE` indicator). Use **`Sil`** (default) for CPU-skipping silence shutoff after the IR, or **`Mus`** for continuous C++-reference quadratic downward expansion applied post-model / pre-CabSim IR so cabinet impulse tails decay naturally.
 6. **Choose Oversampling:**
    * **`Off` (Live Mode):** Pure zero added latency, perfect for real-time tracking and monitoring.
    * **`2×` / `4×` (HQ Mode):** Eliminates non-linear high-frequency aliasing foldover on heavy high-gain amps during mixdown and mastering.
@@ -336,7 +336,7 @@ The table below summarizes verified GUI presentation and host integration behavi
 
 When running in a host or display server environment where the custom graphical interface is not displayed (such as Fender Studio Pro under native Wayland), NAM-Plug remains fully operational via the host's generic parameter controls:
 
-* **DSP Parameter Control:** All continuous and discrete audio parameters (Input Trim, Output Level, Noise Gate Threshold, Active Bypass, Oversampling Mode, Activation Precision, Calibrate Input, Input Calibration Level, and Output Mode) are exposed to the host and can be automated, adjusted, or modulated directly from the generic parameter panel.
+* **DSP Parameter Control:** All continuous and discrete audio parameters (Input Trim, Output Level, Noise Gate Threshold, Noise Gate Mode, Active Bypass, Oversampling Mode, Activation Precision, Calibrate Input, Input Calibration Level, and Output Mode) are exposed to the host and can be automated, adjusted, or modulated directly from the generic parameter panel.
 * **Model Selection in Generic Hosts:** In Fender Studio Pro 8.2 the host does query the plugin's CLAP preset discovery provider (the provider descriptor is read and one provider instance is created, which declares `~/.nam/models`), but it does not request model metadata or issue a preset load; the module is then recorded as presetless and the preset selector shows an empty list. Consequently the available models are not exposed in the host preset browser, and the plugin does not provide an in-host model picker outside its custom GUI.
 * **Session Persistence & State Restores:**
   * When a DAW project, track template, or host preset is saved, the host serializes the full plugin state (including the active model file path, basename, and SHA-256 hash).

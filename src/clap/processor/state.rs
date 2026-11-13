@@ -342,6 +342,10 @@ pub struct NamClapProcessor<'a> {
     pub(crate) cached_threshold_close_sq: f32,
     pub(crate) cached_gate_params: GateParams,
     pub(crate) gate_dirty: bool,
+    /// Selected noise gate operating mode (`Silence` legacy vs `Musical` expander).
+    pub(crate) gate_mode: crate::clap::extensions::gate_mode::GateMode,
+    /// Reference-compatible downward expander state & pre-allocated scratch buffers.
+    pub(crate) musical_gate: crate::clap::processor::dsp::musical_gate::MusicalNoiseGate,
     /// One-shot RT-thread setup latch for the current audio thread.
     ///
     /// Set by `start_processing()` (the CLAP audio-thread callback) after the

@@ -5,14 +5,16 @@
 
 use super::{
     PARAM_ACTIVATION, PARAM_ACTIVE_MODEL, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS,
-    PARAM_CALIBRATE_INPUT, PARAM_COUNT, PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL,
-    PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
-    bypass_bool_to_u32, bypass_f32_to_bool, sanitize_param_value, sanitize_param_value_f64,
+    PARAM_CALIBRATE_INPUT, PARAM_COUNT, PARAM_GATE_MODE, PARAM_GATE_THRESH,
+    PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE,
+    PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32, bypass_f32_to_bool,
+    sanitize_param_value, sanitize_param_value_f64,
 };
 use crate::clap::extensions::calibration::{
     CalibrationConfig, INPUT_CALIBRATION_LEVEL_DEFAULT_DBU, INPUT_CALIBRATION_LEVEL_MAX_DBU,
     INPUT_CALIBRATION_LEVEL_MIN_DBU, OutputMode,
 };
+use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::plugin::lock::lock_cold;
 use clack_extensions::params::{
@@ -192,6 +194,20 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     default_value: OutputMode::Normalized.to_f32() as f64,
                 });
             }
+            PARAM_GATE_MODE => {
+                info.set(&ParamInfo {
+                    id: ClapId::new(PARAM_GATE_MODE),
+                    flags: ParamInfoFlags::IS_AUTOMATABLE
+                        | ParamInfoFlags::IS_STEPPED
+                        | ParamInfoFlags::IS_ENUM,
+                    cookie: clack_plugin::utils::Cookie::empty(),
+                    name: b"Gate Mode",
+                    module: b"",
+                    min_value: 0.0,
+                    max_value: 1.0,
+                    default_value: GateMode::Silence.to_f32() as f64,
+                });
+            }
             _ => {}
         }
     }
@@ -278,6 +294,12 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     .param_output_mode
                     .load(std::sync::atomic::Ordering::Relaxed) as f64,
             ),
+            PARAM_GATE_MODE => Some(
+                self.shared
+                    .ui_to_rt
+                    .param_gate_mode
+                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
+            ),
             _ => None,
         }
     }
@@ -338,6 +360,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
             }
             PARAM_INPUT_CALIBRATION_LEVEL => writer.write_fmt(format_args!("{:.1} dBu", value)),
             PARAM_OUTPUT_MODE => writer.write_str(OutputMode::from_f32(value as f32).as_str()),
+            PARAM_GATE_MODE => writer.write_str(GateMode::from_f32(value as f32).as_str()),
             _ => Ok(()),
         }
     }
@@ -445,6 +468,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 if val.is_finite() { Some(val) } else { None }
             }
             PARAM_OUTPUT_MODE => OutputMode::from_text(text_str).map(|m| m.to_f32() as f64),
+            PARAM_GATE_MODE => GateMode::from_text(text_str).map(|m| m.to_f32() as f64),
             _ => None,
         };
 
@@ -456,6 +480,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
 
         let mut param_changed = false;
         let mut cal_changed = false;
+        let mut gate_mode_changed = false;
 
         for event in input {
             let Some(param_event) = event.as_event::<ParamValueEvent>() else {
@@ -559,12 +584,21 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                     cal_changed = true;
                     continue;
                 }
+                PARAM_GATE_MODE => {
+                    let mode = GateMode::from_f32(val);
+                    self.shared
+                        .ui_to_rt
+                        .param_gate_mode
+                        .store(mode.to_u32(), std::sync::atomic::Ordering::Relaxed);
+                    gate_mode_changed = true;
+                    continue;
+                }
                 _ => continue,
             }
             param_changed = true;
         }
 
-        if param_changed || cal_changed {
+        if param_changed || cal_changed || gate_mode_changed {
             // Scoped params borrow: released before the SPSC producer borrow
             // below, and both are released before the host
             // `request_callback()` in the error path.
@@ -572,6 +606,7 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 .then(|| RtProcessingParams::from_processing_params(&self.params.borrow()));
             let cal_cfg: Option<CalibrationConfig> =
                 cal_changed.then(|| self.shared.calibration_config());
+            let gm: Option<GateMode> = gate_mode_changed.then(|| self.shared.gate_mode());
             let flush_result = {
                 let mut producer = self.cmd_producer.borrow_mut();
                 if let Some(s) = snapshot {
@@ -579,6 +614,9 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                 }
                 if let Some(c) = cal_cfg {
                     producer.push_calibration(c);
+                }
+                if let Some(m) = gm {
+                    producer.push_gate_mode(m);
                 }
                 producer.force_flush()
             };
@@ -591,6 +629,10 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
                         &self.shared.cold.in_flight_calibration,
                         "in_flight_calibration",
                     ) = Some(c);
+                }
+                if let Some(m) = gm {
+                    *lock_cold(&self.shared.cold.in_flight_gate_mode, "in_flight_gate_mode") =
+                        Some(m);
                 }
                 self.shared.bump_generation();
                 self.host.request_callback();

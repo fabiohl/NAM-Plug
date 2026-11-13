@@ -4,7 +4,7 @@
 //! `PluginAudioProcessorParams` implementation for the Audio Thread.
 
 use super::{
-    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE,
     PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
     PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
 };
@@ -69,6 +69,7 @@ impl NamClapProcessor<'_> {
                     PARAM_CALIBRATE_INPUT => self.set_calibrate_input(val),
                     PARAM_INPUT_CALIBRATION_LEVEL => self.set_input_calibration_level(val),
                     PARAM_OUTPUT_MODE => self.set_output_mode(val),
+                    PARAM_GATE_MODE => self.set_gate_mode(val),
                     _ => continue,
                 }
                 param_changed = true;

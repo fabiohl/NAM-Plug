@@ -727,6 +727,7 @@ mod tests {
                         ir: Some(Some(build_ir(4096))),
                         params: RtProcessingParams::default().with_oversample(OversampleFactor::X2),
                         calibration: crate::clap::extensions::calibration::CalibrationConfig::new_project_default(),
+                        gate_mode: Default::default(),
                     }))
                     .expect("mixed RestoreTxn push must succeed");
             }
@@ -759,6 +760,7 @@ mod tests {
                             params: RtProcessingParams::default()
                                 .with_oversample(OversampleFactor::X2),
                             calibration: crate::clap::extensions::calibration::CalibrationConfig::new_project_default(),
+                            gate_mode: Default::default(),
                         }))
                         .expect("restore burst push must succeed");
                 }

@@ -285,6 +285,8 @@ macro_rules! command_swap_parts {
                 mod_input_gain: &mut $s.mod_input_gain,
                 mod_output_gain: &mut $s.mod_output_gain,
                 gate_dirty: &mut $s.gate_dirty,
+                gate_mode: &mut $s.gate_mode,
+                musical_gate: &mut $s.musical_gate,
                 prewarm_pending: &mut $s.prewarm_pending,
                 prewarm_cost_ns_per_sample: &mut $s.prewarm_cost_ns_per_sample,
                 prewarm_zero_budget_count: &mut $s.prewarm_zero_budget_count,
@@ -500,6 +502,10 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     pub(super) mod_output_gain: &'p mut f32,
     /// Gate coefficient invalidation flag (recomputed in the DSP block).
     pub(super) gate_dirty: &'p mut bool,
+    /// Active noise gate operating mode (`Silence` legacy vs `Musical` expander).
+    pub(super) gate_mode: &'p mut crate::clap::extensions::gate_mode::GateMode,
+    /// Musical downward expander state (reset when mode changes).
+    pub(super) musical_gate: &'p mut crate::clap::processor::dsp::musical_gate::MusicalNoiseGate,
     /// Two-phase reset latch (`prewarm_pending`): a model install ends the
     /// amortization window — fresh models arrive converged from the off-RT
     /// loader, so a model swapped in mid-window restarts converged (never
@@ -606,6 +612,13 @@ impl ClapCommandSwapHandler<'_, '_> {
                     *self.model_output_mult_adj = out_mult;
                     self.smoother_cal_in.set_target(in_mult);
                     self.smoother_cal_out.set_target(out_mult);
+                }
+            }
+            ClapParamPayload::GateMode(mode) => {
+                if mode != *self.gate_mode {
+                    *self.gate_mode = mode;
+                    self.musical_gate.reset();
+                    *self.gate_dirty = true;
                 }
             }
             ClapParamPayload::LoadModel {
@@ -926,6 +939,13 @@ impl ClapCommandSwapHandler<'_, '_> {
         gc: &mut GcSink<'_>,
     ) {
         *self.cal_config = txn.calibration.sanitized();
+        if *self.gate_mode != txn.gate_mode {
+            *self.gate_mode = txn.gate_mode;
+            self.musical_gate.reset();
+            *self.gate_dirty = true;
+        } else if txn.model.is_some() {
+            self.musical_gate.reset();
+        }
         let had_model_swap = txn.model.is_some();
         if let Some(model) = txn.model {
             self.cold_load_model(model, gc);

@@ -148,6 +148,7 @@ Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/process
 | **Calibrate Input**          | `calibrate_input` (9)         | Binary  | `0` (`Off` / default) / `1` (`On`)                              | Enables pre-nonlinearity input calibration from model `input_level` dBu.         |
 | **Input Calibration Level**  | `input_calibration_level` (10)| dBu     | `-60.0` to `+60.0` dBu (default `12.0`)                         | Reference 0 dBFS input level in dBu used for calibrated gain equations.         |
 | **Output Mode**              | `output_mode` (11)            | Stepped | `0` (`Raw`), `1` (`Normalized` / default), `2` (`Calibrated`)   | Output level normalization mode (`loudness`, `output_level`, or unity).         |
+| **Gate Mode**                | `gate_mode` (12)              | Stepped | `0` (`Silence` / default), `1` (`Musical`)                      | Gate topology (`Silence` post-IR Schmitt gate vs `Musical` pre-IR expander).     |
 
 The table lists the host-facing (authoritative) ranges. The GUI knobs expose a narrower, ergonomic subset (`INPUT` −20 to +20 dB, `OUTPUT` −40 to +20 dB); values written by the GUI are clamped to the host range by the parameter layer (`src/clap/extensions/params/mod.rs`).
 
@@ -458,7 +459,7 @@ NAM models may supply embedded metadata (`input_level_dbu`, `output_level_dbu`, 
 
 - `input_mult_adj`: when `calibrate_input` is enabled and `input_level_dbu` exists, `10^((input_calibration_level_dbu - input_level_dbu) / 20)` applied post-gate / pre-nonlinearity; otherwise `1.0` (the noise gate continues evaluating raw pre-calibration input).
 - `output_mult_adj`: `Raw` -> `1.0`; `Normalized` -> `10^((-18.0 - loudness) / 20)` if `loudness` exists else `1.0`; `Calibrated` -> `10^((output_level_dbu - input_calibration_level_dbu) / 20)` if `output_level_dbu` exists else `1.0`.
-- **State Migration (`StateEnvelope` v2):** Sessions persist `CalibrationState` (`calibrate_input`, `input_calibration_level_dbu`, `output_mode`). Restoring `v0`/`v1` envelopes lacking `"calibration"` preserves upstream legacy playback semantics (`calibrate_input = true`, `12.0` dBu, `Normalized`), while new instances default to `calibrate_input = false`, `12.0` dBu, `Normalized`.
+- **State Migration (`StateEnvelope` v2):** Sessions persist `CalibrationState` (`calibrate_input`, `input_calibration_level_dbu`, `output_mode`) and optional `gate_mode` (`Silence` / `Musical`). Restoring `v0`/`v1` envelopes lacking `"calibration"` preserves upstream legacy playback semantics (`calibrate_input = true`, `12.0` dBu, `Normalized`), while missing `gate_mode` defaults cleanly to `Silence`. In `Musical` mode, `MusicalNoiseGate` triggers post-user-trim / pre-calibration and applies gain post-model / pre-CabSim IR while keeping neural inference continuous without hard cutouts.
 
 ### 6.4 Host Event Scheduling, In-Block Slicing & Anomaly Containment
 
@@ -517,7 +518,7 @@ The graphical interface is built using Slint (v1.18) under `src/clap/gui/`.
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  5-Zone UI Layout (main.slint)                                              │
 │    Zone 1: Identity Bar (Brand, SIMD badge, ModelCard, IrCard)              │
-│    Zone 2: Gain & Gate Stages (INPUT / OUTPUT / GATE knobs, Gate LED)       │
+│    Zone 2: Gain & Gate Stages (INPUT/OUTPUT/GATE knobs, Sil/Mus, Gate LED)  │
 │            + Oversample (Off/2×/4×) and Precision (Std/Fast) selectors      │
 │    Zone 3: Meters Section (Adaptive VuMeter: Mono / Stereo, clip LED)       │
 │    Zone 4: Master Bypass (ToggleSwitch, "DSP ACTIVE" / "BYPASS")            │

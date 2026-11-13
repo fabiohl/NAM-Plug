@@ -14,8 +14,9 @@
 //! methods here are thin split-view adapters.
 
 use super::NamClapProcessor;
+use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE,
     PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
     PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE, bypass_bool_to_u32,
     bypass_f32_to_bool, bypass_u32_to_bool, sanitize_param_value,
@@ -204,6 +205,22 @@ impl<'a> NamClapProcessor<'a> {
                 .param_output_mode
                 .store(mode.to_u32(), Ordering::Relaxed);
             self.retarget_calibration_smoothers();
+        }
+    }
+
+    /// Sets the noise gate operating mode (`Silence` legacy vs `Musical` expander).
+    pub(crate) fn set_gate_mode(&mut self, val: f32) {
+        let sanitized = sanitize_param_value(PARAM_GATE_MODE, val);
+        let mode = GateMode::from_f32(sanitized);
+        if mode != self.gate_mode {
+            self.gate_mode = mode;
+            self.shared
+                .ui_to_rt
+                .param_gate_mode
+                .store(mode.to_u32(), Ordering::Relaxed);
+            self.musical_gate.reset();
+            self.silence_hyst.reset();
+            self.gate_dirty = true;
         }
     }
 
@@ -403,6 +420,17 @@ impl<'a> NamClapProcessor<'a> {
         }
     }
 
+    /// Synchronizes noise gate mode from `UiToRt`.
+    pub(super) fn sync_gate_mode_from_gui(&mut self) {
+        let shared_mode = self.shared.gate_mode();
+        if shared_mode != self.gate_mode {
+            self.gate_mode = shared_mode;
+            self.musical_gate.reset();
+            self.silence_hyst.reset();
+            self.gate_dirty = true;
+        }
+    }
+
     /// Synchronizes all parameters changed via GUI from shared UI-to-RT atomics,
     /// retargeting smoothers, flagging gate recalculation, and updating controllers.
     ///
@@ -411,12 +439,45 @@ impl<'a> NamClapProcessor<'a> {
         self.sync_input_gain_from_gui();
         self.sync_output_gain_from_gui();
         self.sync_gate_thresh_from_gui();
+        self.sync_gate_mode_from_gui();
         self.sync_bypass_from_gui();
         self.sync_adaptive_compute_from_gui();
         self.sync_slim_override_from_gui();
         self.sync_oversample_from_gui();
         self.sync_activation_from_gui();
         self.sync_calibration_from_gui();
+    }
+
+    /// Recomputes cached thresholds and musical gate state whenever gate settings change.
+    #[inline]
+    pub(crate) fn refresh_gate_config(&mut self) {
+        if !self.gate_dirty {
+            return;
+        }
+        let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
+        match self.gate_mode {
+            GateMode::Silence => {
+                let close_db = modulated_gate_db - 6.0;
+                let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
+                self.cached_threshold_open_sq = open_linear * open_linear;
+                let close_linear = self.gain_lut.db_to_linear(close_db);
+                self.cached_threshold_close_sq = close_linear * close_linear;
+                self.cached_gate_params.threshold_open_db = modulated_gate_db;
+                self.cached_gate_params.threshold_close_db = close_db;
+            }
+            GateMode::Musical => {
+                // Keep Silence gate FSM permanently open so neural inference runs continuously
+                // without block-energy dropouts; MusicalNoiseGate handles per-sample expansion.
+                self.cached_threshold_open_sq = 0.0;
+                self.cached_threshold_close_sq = 0.0;
+                self.cached_gate_params.threshold_open_db = -90.0;
+                self.cached_gate_params.threshold_close_db = -96.0;
+                self.silence_hyst.reset();
+                self.musical_gate
+                    .set_threshold(modulated_gate_db as f64, modulated_gate_db > -90.0);
+            }
+        }
+        self.gate_dirty = false;
     }
 }
 

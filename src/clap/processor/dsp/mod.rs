@@ -6,6 +6,7 @@
 
 pub mod channels;
 pub mod dry_delay;
+pub mod musical_gate;
 pub mod orchestrator;
 pub mod peaks;
 pub mod telemetry;

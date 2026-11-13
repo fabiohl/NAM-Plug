@@ -56,7 +56,13 @@ impl<'a> PluginStateContextImpl for NamClapMainThread<'a> {
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
         let calibration = self.shared.calibration_config();
-        let serialized = super::state::serialize_envelope_v2(&save_params, ir_policy, calibration)?;
+        let gate_mode = self.shared.gate_mode();
+        let serialized = super::state::serialize_envelope_v2_with_gate_mode(
+            &save_params,
+            ir_policy,
+            calibration,
+            gate_mode,
+        )?;
 
         output
             .write_all(&serialized)

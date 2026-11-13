@@ -3,7 +3,9 @@
 
 //! Sub-block processing loop and streaming neural audio execution for NAM-Plug.
 
+use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::processor::dsp::dry_delay::DryDelayLine;
+use crate::clap::processor::dsp::musical_gate::MusicalNoiseGate;
 use crate::clap::processor::state::BypassCrossfader;
 use neural_amp_modeler_rs::dsp::gate::{DynamicHysteresis, GateState};
 use neural_amp_modeler_rs::dsp::pipeline::{
@@ -136,6 +138,8 @@ pub(crate) fn process_sub_block(
     smoother_cal_out: &mut ParamSmoother,
     shared_sample_rate: u32,
     gain_steps: &[GainStep],
+    gate_mode: GateMode,
+    musical_gate: &mut MusicalNoiseGate,
 ) -> SubBlockMetrics {
     if n_samples > neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF {
         core::hint::cold_path();
@@ -158,6 +162,8 @@ pub(crate) fn process_sub_block(
             smoother_cal_in,
             smoother_cal_out,
             shared_sample_rate,
+            gate_mode,
+            musical_gate,
         );
     }
 
@@ -209,10 +215,15 @@ pub(crate) fn process_sub_block(
             smoother_cal_in,
             smoother_cal_out,
             shared_sample_rate,
+            gate_mode,
+            musical_gate,
         );
     }
 
     if bypass {
+        if gate_mode == GateMode::Musical {
+            musical_gate.reset();
+        }
         advance_smoother_if_active(smoother_cal_in, n_samples);
         advance_smoother_if_active(smoother_cal_out, n_samples);
         let (in_peak_l, in_sum_sq_l) =
@@ -263,6 +274,15 @@ pub(crate) fn process_sub_block(
     } else {
         compute_peak_and_sum_sq(&buf_host_r[offset..offset + n_samples])
     };
+
+    if gate_mode == GateMode::Musical {
+        musical_gate.process_trigger(
+            &buf_host_l[offset..offset + n_samples],
+            &buf_host_r[offset..offset + n_samples],
+            n_samples,
+            process_mono,
+        );
+    }
 
     let gate_state = if process_mono {
         apply_input_stage_mono(&mut buf_host_l[offset..offset + n_samples], n_samples, ctx)
@@ -342,6 +362,15 @@ pub(crate) fn process_sub_block(
         buf_xfd_scratch_l,
         buf_xfd_scratch_r,
     );
+
+    if gate_mode == GateMode::Musical {
+        musical_gate.apply_gain(
+            &mut buf_out_l[..n_out],
+            &mut buf_out_r[..n_out],
+            n_out,
+            process_mono,
+        );
+    }
 
     if let Some(ref mut pair) = ctx.conv_pair {
         if !pair.l.is_passthrough() {
@@ -464,6 +493,8 @@ fn process_sub_block_chunked(
     smoother_cal_in: &mut ParamSmoother,
     smoother_cal_out: &mut ParamSmoother,
     shared_sample_rate: u32,
+    gate_mode: GateMode,
+    musical_gate: &mut MusicalNoiseGate,
 ) -> SubBlockMetrics {
     let mut total_out = 0;
     let mut last_gate = GateState::Open;
@@ -501,6 +532,8 @@ fn process_sub_block_chunked(
             smoother_cal_out,
             shared_sample_rate,
             &[],
+            gate_mode,
+            musical_gate,
         );
         total_out += m.n_out;
         last_gate = m.gate_state;
@@ -776,6 +809,8 @@ fn process_crossfade_sub_block(
     smoother_cal_in: &mut ParamSmoother,
     smoother_cal_out: &mut ParamSmoother,
     shared_sample_rate: u32,
+    gate_mode: GateMode,
+    musical_gate: &mut MusicalNoiseGate,
 ) -> SubBlockMetrics {
     // The scratch borrows are re-taken per phase (rather than destructured once
     // at the top) because the gate-closed phase passes `scratch` whole to the
@@ -807,6 +842,15 @@ fn process_crossfade_sub_block(
     } else {
         compute_peak_and_sum_sq(&scratch.buf_host_r[offset..offset + n_samples])
     };
+
+    if gate_mode == GateMode::Musical {
+        musical_gate.process_trigger(
+            &scratch.buf_host_l[offset..offset + n_samples],
+            &scratch.buf_host_r[offset..offset + n_samples],
+            n_samples,
+            process_mono,
+        );
+    }
 
     let gate_state = if process_mono {
         apply_input_stage_mono(
@@ -864,6 +908,15 @@ fn process_crossfade_sub_block(
             scratch.buf_xfd_scratch_l,
             scratch.buf_xfd_scratch_r,
         );
+
+        if gate_mode == GateMode::Musical {
+            musical_gate.apply_gain(
+                &mut scratch.buf_out_l[..n_o],
+                &mut scratch.buf_out_r[..n_o],
+                n_o,
+                process_mono,
+            );
+        }
 
         if let Some(ref mut pair) = ctx.conv_pair {
             if !pair.l.is_passthrough() {

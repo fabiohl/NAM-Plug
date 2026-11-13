@@ -91,6 +91,8 @@ pub(crate) struct ValidatedRestore {
     pub(crate) ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     /// Restored input calibration and output mode configuration.
     pub(crate) calibration: crate::clap::extensions::calibration::CalibrationConfig,
+    /// Restored noise gate operating mode.
+    pub(crate) gate_mode: crate::clap::extensions::gate_mode::GateMode,
 }
 
 /// Tuple result of off-RT model validation:
@@ -117,10 +119,15 @@ pub(crate) type IrValidationResult = (Option<IrResources>, Option<String>, Optio
 ///
 /// Returns a [`ValidatedRestore`] containing all pre-warmed resources, or a descriptive
 /// [`PluginError`] if any asset is missing, corrupted, or incompatible.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Atomic state restore transaction carries loaded policy, calibration, gate mode, host config, and mode"
+)]
 pub(crate) fn validate_and_build(
     loaded_params: &ProcessingParams,
     ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     calibration: crate::clap::extensions::calibration::CalibrationConfig,
+    gate_mode: crate::clap::extensions::gate_mode::GateMode,
     host_rate: u32,
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
@@ -160,6 +167,7 @@ pub(crate) fn validate_and_build(
         ir_hash,
         ir_level_policy,
         calibration,
+        gate_mode,
     })
 }
 

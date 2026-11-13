@@ -1314,7 +1314,14 @@ impl<'a> NamClapMainThread<'a> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        if snapshot.is_some() || cal_snapshot.is_some() {
+        let gate_mode_snapshot = self
+            .shared
+            .cold
+            .in_flight_gate_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if snapshot.is_some() || cal_snapshot.is_some() || gate_mode_snapshot.is_some() {
             // Scoped producer borrow: released before the poisoned-lock
             // recovery below (no host call happens here, but keeping the
             // borrow window minimal is the house rule).
@@ -1326,11 +1333,14 @@ impl<'a> NamClapMainThread<'a> {
                 if let Some(cal) = cal_snapshot {
                     producer.push_calibration(cal);
                 }
+                if let Some(mode) = gate_mode_snapshot {
+                    producer.push_gate_mode(mode);
+                }
                 producer.force_flush()
             };
             match flush_result {
                 Ok(_) => {
-                    log::trace!("In-flight params/calibration delivered on retry");
+                    log::trace!("In-flight params/calibration/gate_mode delivered on retry");
                 }
                 Err(crate::clap::plugin::command_scheduler::PushError::Full) => {
                     if let Some(params) = snapshot {
@@ -1360,6 +1370,17 @@ impl<'a> NamClapMainThread<'a> {
                                 e.into_inner()
                             });
                         *guard = Some(cal);
+                    }
+                    if let Some(mode) = gate_mode_snapshot {
+                        let mut guard = self.shared.cold.in_flight_gate_mode.lock().unwrap_or_else(
+                            |e| {
+                                log::error!(
+                                    "in_flight_gate_mode mutex poisoned during flush, recovering"
+                                );
+                                e.into_inner()
+                            },
+                        );
+                        *guard = Some(mode);
                     }
                     self.shared.bump_generation();
                 }

@@ -39,8 +39,9 @@ export component MainWindow inherits Window {
     in-out property <float> gate_thresh_db: -90.0;
     in-out property <string> input_gain_text: "0.0 dB";
     in-out property <string> output_gain_text: "-3.0 dB";
-    in-out property <string> gate_thresh_text: "-90 dB";
+    in-out property <string> gate_thresh_text: "OFF";
     in-out property <bool> gate_active: false;
+    in-out property <int> gate_mode: 0; // 0: Silence, 1: Musical
     in-out property <int> oversample_mode: 0; // 0: Off, 1: 2x, 2: 4x
     in-out property <int> activation_mode: 1; // 1: Standard, 0: Fast
     in-out property <bool> calibrate_input: false;
@@ -108,6 +109,7 @@ export component MainWindow inherits Window {
     callback gate_thresh_changed(float);
     callback gate_thresh_gesture_begin();
     callback gate_thresh_gesture_end();
+    callback gate_mode_changed(int);
     callback oversample_changed(int);
     callback activation_changed(int);
     callback cycle_oversample();
@@ -303,7 +305,7 @@ export component MainWindow inherits Window {
                                 root.gate_thresh_gesture_begin();
                             }
                             value-changed(v) => {
-                                root.gate_thresh_text = Math.round(v) + " dB";
+                                root.gate_thresh_text = Math.round(v) <= -90 ? "OFF" : Math.round(v) + " dB";
                                 root.gate_thresh_changed(v);
                             }
                             editing-finished(_) => {
@@ -312,15 +314,68 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // Noise Gate Dynamic Status LED
+                    // Noise Gate Dynamic Status LED & Mode Toggle
                     HorizontalLayout {
-                        alignment: center;
+                        alignment: space-between;
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        height: 18px;
+
                         LedIndicator {
                             active: root.gate_active;
                             color-on: #43E97B;
                             color-off: #2E3440;
                             label: root.gate_active ? "GATE ACTIVE" : "GATE OPEN";
                             size: 8px;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 2px;
+                            alignment: end;
+                            TouchArea {
+                                width: 24px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.gate_mode = 0;
+                                    root.gate_mode_changed(0);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.gate_mode == 0 ? #F5A623 : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.gate_mode == 0 ? #F5A623 : #2E3440;
+                                    Text {
+                                        text: "Sil";
+                                        font-size: 8px;
+                                        font-weight: 700;
+                                        color: root.gate_mode == 0 ? #121315 : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 26px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.gate_mode = 1;
+                                    root.gate_mode_changed(1);
+                                }
+                                Rectangle {
+                                    border-radius: 2px;
+                                    background: root.gate_mode == 1 ? #00D4AA : (parent.has-hover ? #2e3440 : #1a1d23);
+                                    border-width: 0.5px;
+                                    border-color: root.gate_mode == 1 ? #00D4AA : #2E3440;
+                                    Text {
+                                        text: "Mus";
+                                        font-size: 8px;
+                                        font-weight: 700;
+                                        color: root.gate_mode == 1 ? #121315 : #8fa1b3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
                         }
                     }
 

@@ -170,6 +170,7 @@ pub(crate) fn build_restore_package(
         ir_hash,
         ir_level_policy,
         calibration,
+        gate_mode,
     } = validated;
 
     // Effective params: Full replaces everything; ForPreset only the
@@ -323,6 +324,7 @@ pub(crate) fn build_restore_package(
         ir_hash,
         ir_level_policy,
         calibration,
+        gate_mode,
     };
 
     let txn = RestoreTxn {
@@ -331,6 +333,7 @@ pub(crate) fn build_restore_package(
         ir: ir_component,
         params: RtProcessingParams::from_processing_params(&effective_params),
         calibration,
+        gate_mode,
     };
 
     Ok((publish, txn))
@@ -403,6 +406,7 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         ir_hash,
         ir_level_policy,
         calibration,
+        gate_mode,
     } = publish;
     let mode = if mode_full {
         RestoreMode::Full
@@ -584,6 +588,11 @@ pub(crate) fn publish_restore(publish: RestorePublish, main_thread: &NamClapMain
         &main_thread.shared.cold.in_flight_calibration,
         "in_flight_calibration",
     ) = None;
+    main_thread.shared.store_gate_mode(gate_mode);
+    *lock_cold(
+        &main_thread.shared.cold.in_flight_gate_mode,
+        "in_flight_gate_mode",
+    ) = None;
     main_thread.shared.bump_generation();
 
     if let Some(params_ext) = main_thread
@@ -618,6 +627,7 @@ fn local_commit(
         ir_hash,
         ir_level_policy,
         calibration,
+        gate_mode,
     } = validated;
 
     // ── Commit model (local) ──
@@ -855,6 +865,11 @@ fn local_commit(
     *lock_cold(
         &main_thread.shared.cold.in_flight_calibration,
         "in_flight_calibration",
+    ) = None;
+    main_thread.shared.store_gate_mode(gate_mode);
+    *lock_cold(
+        &main_thread.shared.cold.in_flight_gate_mode,
+        "in_flight_gate_mode",
     ) = None;
     main_thread.shared.bump_generation();
 

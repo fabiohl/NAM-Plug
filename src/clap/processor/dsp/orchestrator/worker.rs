@@ -4,12 +4,14 @@
 use crate::clap::extensions::calibration::{
     CalibrationConfig, ModelCalibrationMeta, OutputMode, compute_calibration_multipliers,
 };
+use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
+    PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE,
     PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
     PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
 };
 use crate::clap::plugin::{PendingRestartOs, UiToRt};
+use crate::clap::processor::dsp::musical_gate::MusicalNoiseGate;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::common::spsc::RtStatusFlags;
 use neural_amp_modeler_rs::dsp::adaptive::AdaptiveCompute;
@@ -76,6 +78,8 @@ pub(crate) fn apply_scheduled_event(
     smoother_cal_in: &mut ParamSmoother,
     smoother_cal_out: &mut ParamSmoother,
     gate_dirty: &mut bool,
+    gate_mode: &mut GateMode,
+    musical_gate: &mut MusicalNoiseGate,
     mod_input_gain: &mut f32,
     mod_output_gain: &mut f32,
     mod_gate_thresh: &mut f32,
@@ -160,6 +164,17 @@ pub(crate) fn apply_scheduled_event(
                     .param_gate_thresh
                     .store(val.to_bits(), Ordering::Relaxed);
                 *gate_dirty = true;
+            }
+            PARAM_GATE_MODE => {
+                let mode = GateMode::from_f32(val);
+                if mode != *gate_mode {
+                    *gate_mode = mode;
+                    ui_to_rt
+                        .param_gate_mode
+                        .store(mode.to_u32(), Ordering::Relaxed);
+                    musical_gate.reset();
+                    *gate_dirty = true;
+                }
             }
             PARAM_BYPASS => {
                 let bypass = bypass_f32_to_bool(val);

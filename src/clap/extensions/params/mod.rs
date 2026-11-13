@@ -34,8 +34,10 @@ pub const PARAM_CALIBRATE_INPUT: u32 = 9;
 pub const PARAM_INPUT_CALIBRATION_LEVEL: u32 = 10;
 /// Model output gain mode parameter ID (`0 = Raw`, `1 = Normalized`, `2 = Calibrated`).
 pub const PARAM_OUTPUT_MODE: u32 = 11;
+/// Noise gate operating mode parameter ID (`0 = Silence` legacy, `1 = Musical` expander).
+pub const PARAM_GATE_MODE: u32 = 12;
 /// Total number of exposed CLAP parameters.
-pub const PARAM_COUNT: usize = 12;
+pub const PARAM_COUNT: usize = 13;
 
 /// Bypass atomic value: off.
 pub const BYPASS_OFF: u32 = 0;
@@ -174,6 +176,13 @@ pub fn sanitize_param_value(id: u32, val: f32) -> f32 {
                 1.0
             } else {
                 val.round().clamp(0.0, 2.0)
+            }
+        }
+        PARAM_GATE_MODE => {
+            if !val.is_finite() {
+                0.0
+            } else {
+                val.round().clamp(0.0, 1.0)
             }
         }
         _ => {

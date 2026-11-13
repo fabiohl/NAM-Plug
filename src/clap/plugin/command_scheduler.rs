@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const CMD_QUEUE_CAPACITY: usize = 256;
 
 use crate::clap::extensions::calibration::CalibrationConfig;
+use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::params::PARAM_COUNT;
 
 /// Error returned when the SPSC ring buffer is full and the
@@ -60,6 +61,7 @@ struct CoalesceBuffer {
     slots: [Option<f64>; PARAM_COUNT],
     dirty_mask: u16,
     pending_calibration: Option<CalibrationConfig>,
+    pending_gate_mode: Option<GateMode>,
 }
 
 impl Default for CoalesceBuffer {
@@ -68,6 +70,7 @@ impl Default for CoalesceBuffer {
             slots: [None; PARAM_COUNT],
             dirty_mask: 0,
             pending_calibration: None,
+            pending_gate_mode: None,
         }
     }
 }
@@ -311,6 +314,13 @@ impl<'a> CommandProducer<'a> {
         !had_pending
     }
 
+    /// Queues a coalesced noise gate mode update for delivery to RT.
+    pub fn push_gate_mode(&mut self, mode: GateMode) -> bool {
+        let had_pending = self.coalescing.pending_gate_mode.is_some();
+        self.coalescing.pending_gate_mode = Some(mode);
+        !had_pending
+    }
+
     /// Queues a non-coalescable command (model load, IR swap,
     /// oversampling engine hot-swap).
     ///
@@ -387,6 +397,17 @@ impl<'a> CommandProducer<'a> {
                 }
                 Err(rtrb::PushError::Full(_)) => {
                     self.coalescing.pending_calibration = Some(cal);
+                    return Err(PushError::Full);
+                }
+            }
+        }
+        if let Some(mode) = self.coalescing.pending_gate_mode.take() {
+            match self.tx.push(Box::new(ClapParamPayload::GateMode(mode))) {
+                Ok(()) => {
+                    last_seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                }
+                Err(rtrb::PushError::Full(_)) => {
+                    self.coalescing.pending_gate_mode = Some(mode);
                     return Err(PushError::Full);
                 }
             }

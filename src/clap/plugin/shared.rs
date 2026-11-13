@@ -6,6 +6,7 @@
 use crate::clap::extensions::calibration::{
     CalibrationConfig, INPUT_CALIBRATION_LEVEL_DEFAULT_DBU, ModelCalibrationMeta, OutputMode,
 };
+use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::params::PARAM_COUNT;
 use crate::clap::gui::dialog_state::{DialogSharedState, IrDialogSharedState};
 use crate::clap::plugin::command_scheduler::CMD_QUEUE_CAPACITY;
@@ -148,6 +149,8 @@ pub enum ClapParamPayload {
     Params(RtProcessingParams),
     /// Amp model input calibration & output mode update (`Calibrate Input`, dBu level, `Output Mode`).
     Calibration(CalibrationConfig),
+    /// Noise gate mode update (`Silence` legacy vs `Musical` expander).
+    GateMode(GateMode),
     /// Loading of a new model pair (transferred/constructed outside RT) and its resampler.
     LoadModel {
         /// Monotonic model generation this load belongs to.
@@ -239,7 +242,9 @@ impl ClapParamPayload {
     /// Command Budgeting.
     pub const fn structural_kind(&self) -> Option<StructuralKind> {
         match self {
-            ClapParamPayload::Params(_) | ClapParamPayload::Calibration(_) => None,
+            ClapParamPayload::Params(_)
+            | ClapParamPayload::Calibration(_)
+            | ClapParamPayload::GateMode(_) => None,
             ClapParamPayload::LoadModel { .. } => Some(StructuralKind::Model),
             ClapParamPayload::LoadCabIr { .. } => Some(StructuralKind::CabIr),
             ClapParamPayload::SetOversample { .. } => Some(StructuralKind::Oversample),
@@ -253,7 +258,9 @@ impl ClapParamPayload {
     pub const fn is_structural(&self) -> bool {
         !matches!(
             self,
-            ClapParamPayload::Params(_) | ClapParamPayload::Calibration(_)
+            ClapParamPayload::Params(_)
+                | ClapParamPayload::Calibration(_)
+                | ClapParamPayload::GateMode(_)
         )
     }
 }
@@ -352,6 +359,8 @@ pub struct RestoreTxn {
     pub params: RtProcessingParams,
     /// Calibration configuration restored atomically with the preset/project state.
     pub calibration: CalibrationConfig,
+    /// Gate mode restored atomically with the preset/project state.
+    pub gate_mode: GateMode,
 }
 
 /// Model publication data retained until the restore transaction is acked.
@@ -397,6 +406,8 @@ pub struct RestorePublish {
     pub ir_level_policy: crate::clap::extensions::ir_level_policy::IrLevelPolicy,
     /// Input calibration and output mode configuration restored with this transaction.
     pub calibration: crate::clap::extensions::calibration::CalibrationConfig,
+    /// Noise gate mode restored with this transaction.
+    pub gate_mode: GateMode,
 }
 
 /// A staged restore awaiting atomic delivery and ack-gated publication.
@@ -549,6 +560,8 @@ pub struct UiToRt {
     pub param_input_calibration_level: AtomicU32,
     /// Model output mode (0=Raw, 1=Normalized, 2=Calibrated; default 1).
     pub param_output_mode: AtomicU32,
+    /// Noise gate operating mode (0=Silence legacy, 1=Musical expander; default 0).
+    pub param_gate_mode: AtomicU32,
     /// Gesture and modification flag bitmap per parameter (GUI -> Host/Processor).
     pub gesture_flags: AtomicU64,
     /// Monotonic generation counter bumped (Release) by GUI on any param write.
@@ -605,6 +618,7 @@ impl Default for UiToRt {
                 INPUT_CALIBRATION_LEVEL_DEFAULT_DBU.to_bits(),
             ),
             param_output_mode: AtomicU32::new(OutputMode::Normalized.to_u32()),
+            param_gate_mode: AtomicU32::new(GateMode::Silence.to_u32()),
             gesture_flags: AtomicU64::new(0),
             gui_param_generation: AtomicU32::new(0),
             host_r_deactivated: AtomicBool::new(false),
@@ -851,6 +865,8 @@ pub struct ColdShared {
     pub in_flight_params: Mutex<Option<neural_amp_modeler_rs::common::params::RtProcessingParams>>,
     /// In-flight calibration snapshot retained when SPSC push saturates.
     pub in_flight_calibration: Mutex<Option<CalibrationConfig>>,
+    /// In-flight gate mode update retained when SPSC push saturates.
+    pub in_flight_gate_mode: Mutex<Option<GateMode>>,
     /// Model loaded before `activate()` (state restore while `buffer_size == 0`),
     /// deferred to avoid heap allocation on the audio thread.
     /// See `flush_pending_model()` in load.rs and housekeeping.rs.
@@ -1093,6 +1109,7 @@ impl ColdShared {
             last_reported_tail_samples: AtomicU32::new(0),
             in_flight_params: Mutex::new(None),
             in_flight_calibration: Mutex::new(None),
+            in_flight_gate_mode: Mutex::new(None),
             pending_model: Mutex::new(None),
             deactivated_dsp: Mutex::new(None),
             dialog_state: Some(Arc::new(DialogSharedState::new())),
@@ -1247,6 +1264,18 @@ impl GuiSharedState {
             .store(cfg.output_mode.to_u32(), Ordering::Relaxed);
     }
 
+    /// Reads the current [`GateMode`] snapshot from `ui_to_rt` atomics.
+    pub fn gate_mode(&self) -> GateMode {
+        GateMode::from_u32(self.ui_to_rt.param_gate_mode.load(Ordering::Relaxed))
+    }
+
+    /// Stores `mode` into `ui_to_rt` atomics.
+    pub fn store_gate_mode(&self, mode: GateMode) {
+        self.ui_to_rt
+            .param_gate_mode
+            .store(mode.to_u32(), Ordering::Relaxed);
+    }
+
     /// Zeros out all gesture flags.
     pub fn clear_gestures(&self) {
         self.ui_to_rt.gesture_flags.store(0, Ordering::Relaxed);
@@ -1311,8 +1340,8 @@ impl GuiSharedState {
     pub fn write_gui_events(&self, output: &mut OutputEvents) {
         use crate::clap::extensions::params::{
             PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CALIBRATE_INPUT,
-            PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN,
-            PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
+            PARAM_GATE_MODE, PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN,
+            PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
         };
         use clack_plugin::events::event_types::{
             ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent,
@@ -1326,7 +1355,7 @@ impl GuiSharedState {
             return;
         }
 
-        let params: [(u32, u32, &AtomicU32, bool); 11] = [
+        let params: [(u32, u32, &AtomicU32, bool); 12] = [
             (
                 PARAM_INPUT_GAIN,
                 Self::param_index(PARAM_INPUT_GAIN) as u32,
@@ -1391,6 +1420,12 @@ impl GuiSharedState {
                 PARAM_OUTPUT_MODE,
                 Self::param_index(PARAM_OUTPUT_MODE) as u32,
                 &self.ui_to_rt.param_output_mode,
+                false,
+            ),
+            (
+                PARAM_GATE_MODE,
+                Self::param_index(PARAM_GATE_MODE) as u32,
+                &self.ui_to_rt.param_gate_mode,
                 false,
             ),
         ];

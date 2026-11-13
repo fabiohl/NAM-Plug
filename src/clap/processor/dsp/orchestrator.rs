@@ -9,6 +9,7 @@ pub mod worker;
 pub(crate) use worker::ScheduledEvent;
 
 use super::super::NamClapProcessor;
+use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::plugin::PendingRestartOs;
 use crate::clap::processor::dsp::{channels, peaks};
 use clack_plugin::events::event_types::{ParamModEvent, ParamValueEvent};
@@ -244,17 +245,7 @@ impl<'a> NamClapProcessor<'a> {
                     self.cached_gate_params.mono_epsilon = 1e-4;
                 }
 
-                if self.gate_dirty {
-                    let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
-                    let close_db = modulated_gate_db - 6.0;
-                    let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
-                    self.cached_threshold_open_sq = open_linear * open_linear;
-                    let close_linear = self.gain_lut.db_to_linear(close_db);
-                    self.cached_threshold_close_sq = close_linear * close_linear;
-                    self.cached_gate_params.threshold_open_db = modulated_gate_db;
-                    self.cached_gate_params.threshold_close_db = close_db;
-                    self.gate_dirty = false;
-                }
+                self.refresh_gate_config();
 
                 let model_load_fail = self.model_l.is_none() && !self.params.bypass;
                 let current_fail_flag = self
@@ -332,17 +323,7 @@ impl<'a> NamClapProcessor<'a> {
                     slice_start += slice_len;
                 }
 
-                let is_gate_active = any_active && last_gate_state == GateState::Closed;
-                self.shared
-                    .rt_to_ui
-                    .ui_gate_active
-                    .store(is_gate_active, Ordering::Relaxed);
-
-                if any_active {
-                    gate_flags::report_gate_flags(&self.rt_status, last_gate_state);
-                } else {
-                    gate_flags::report_gate_flags(&self.rt_status, GateState::Closed);
-                }
+                self.report_gate_telemetry(any_active, last_gate_state);
 
                 self.update_rms_and_telemetry(
                     &metrics,
@@ -404,17 +385,7 @@ impl<'a> NamClapProcessor<'a> {
                 (None, None)
             };
 
-            if self.gate_dirty {
-                let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
-                let close_db = modulated_gate_db - 6.0;
-                let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
-                self.cached_threshold_open_sq = open_linear * open_linear;
-                let close_linear = self.gain_lut.db_to_linear(close_db);
-                self.cached_threshold_close_sq = close_linear * close_linear;
-                self.cached_gate_params.threshold_open_db = modulated_gate_db;
-                self.cached_gate_params.threshold_close_db = close_db;
-                self.gate_dirty = false;
-            }
+            self.refresh_gate_config();
 
             let model_load_fail = self.model_l.is_none() && !self.params.bypass;
             let current_fail_flag = self
@@ -454,17 +425,7 @@ impl<'a> NamClapProcessor<'a> {
                 true,
             );
 
-            let is_gate_active = any_active && last_gate_state == GateState::Closed;
-            self.shared
-                .rt_to_ui
-                .ui_gate_active
-                .store(is_gate_active, Ordering::Relaxed);
-
-            if any_active {
-                gate_flags::report_gate_flags(&self.rt_status, last_gate_state);
-            } else {
-                gate_flags::report_gate_flags(&self.rt_status, GateState::Closed);
-            }
+            self.report_gate_telemetry(any_active, last_gate_state);
 
             self.update_rms_and_telemetry(
                 &metrics,
@@ -496,6 +457,8 @@ impl<'a> NamClapProcessor<'a> {
                     &mut self.smoother_cal_in,
                     &mut self.smoother_cal_out,
                     &mut self.gate_dirty,
+                    &mut self.gate_mode,
+                    &mut self.musical_gate,
                     &mut self.mod_input_gain,
                     &mut self.mod_output_gain,
                     &mut self.mod_gate_thresh,
@@ -511,17 +474,7 @@ impl<'a> NamClapProcessor<'a> {
                 remaining_applied = true;
             }
             if remaining_applied {
-                if self.gate_dirty {
-                    let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
-                    let close_db = modulated_gate_db - 6.0;
-                    let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
-                    self.cached_threshold_open_sq = open_linear * open_linear;
-                    let close_linear = self.gain_lut.db_to_linear(close_db);
-                    self.cached_threshold_close_sq = close_linear * close_linear;
-                    self.cached_gate_params.threshold_open_db = modulated_gate_db;
-                    self.cached_gate_params.threshold_close_db = close_db;
-                    self.gate_dirty = false;
-                }
+                self.refresh_gate_config();
                 self.bypass_xfade.trigger(self.params.bypass);
             }
         }
@@ -634,6 +587,8 @@ impl<'a> NamClapProcessor<'a> {
                     &mut self.smoother_cal_in,
                     &mut self.smoother_cal_out,
                     &mut self.gate_dirty,
+                    &mut self.gate_mode,
+                    &mut self.musical_gate,
                     &mut self.mod_input_gain,
                     &mut self.mod_output_gain,
                     &mut self.mod_gate_thresh,
@@ -650,17 +605,7 @@ impl<'a> NamClapProcessor<'a> {
             }
 
             if out_of_order_applied {
-                if self.gate_dirty {
-                    let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
-                    let close_db = modulated_gate_db - 6.0;
-                    let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
-                    self.cached_threshold_open_sq = open_linear * open_linear;
-                    let close_linear = self.gain_lut.db_to_linear(close_db);
-                    self.cached_threshold_close_sq = close_linear * close_linear;
-                    self.cached_gate_params.threshold_open_db = modulated_gate_db;
-                    self.cached_gate_params.threshold_close_db = close_db;
-                    self.gate_dirty = false;
-                }
+                self.refresh_gate_config();
                 self.bypass_xfade.trigger(self.params.bypass);
             }
 
@@ -733,6 +678,8 @@ impl<'a> NamClapProcessor<'a> {
                         &mut self.smoother_cal_in,
                         &mut self.smoother_cal_out,
                         &mut self.gate_dirty,
+                        &mut self.gate_mode,
+                        &mut self.musical_gate,
                         &mut self.mod_input_gain,
                         &mut self.mod_output_gain,
                         &mut self.mod_gate_thresh,
@@ -841,6 +788,8 @@ impl<'a> NamClapProcessor<'a> {
                         &mut self.smoother_cal_out,
                         shared_sample_rate,
                         &gain_steps[..n_steps],
+                        self.gate_mode,
+                        &mut self.musical_gate,
                     )
                 };
 
@@ -900,6 +849,8 @@ impl<'a> NamClapProcessor<'a> {
                     &mut self.smoother_cal_in,
                     &mut self.smoother_cal_out,
                     &mut self.gate_dirty,
+                    &mut self.gate_mode,
+                    &mut self.musical_gate,
                     &mut self.mod_input_gain,
                     &mut self.mod_output_gain,
                     &mut self.mod_gate_thresh,
@@ -914,17 +865,7 @@ impl<'a> NamClapProcessor<'a> {
                 *event_idx += 1;
             }
 
-            if self.gate_dirty {
-                let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
-                let close_db = modulated_gate_db - 6.0;
-                let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
-                self.cached_threshold_open_sq = open_linear * open_linear;
-                let close_linear = self.gain_lut.db_to_linear(close_db);
-                self.cached_threshold_close_sq = close_linear * close_linear;
-                self.cached_gate_params.threshold_open_db = modulated_gate_db;
-                self.cached_gate_params.threshold_close_db = close_db;
-                self.gate_dirty = false;
-            }
+            self.refresh_gate_config();
 
             // Trigger bypass crossfade if the bypass state changed via
             // a host event at this sub-block boundary.
@@ -958,6 +899,8 @@ impl<'a> NamClapProcessor<'a> {
                     &mut self.smoother_cal_in,
                     &mut self.smoother_cal_out,
                     &mut self.gate_dirty,
+                    &mut self.gate_mode,
+                    &mut self.musical_gate,
                     &mut self.mod_input_gain,
                     &mut self.mod_output_gain,
                     &mut self.mod_gate_thresh,
@@ -974,17 +917,7 @@ impl<'a> NamClapProcessor<'a> {
             }
 
             if remaining_applied {
-                if self.gate_dirty {
-                    let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
-                    let close_db = modulated_gate_db - 6.0;
-                    let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
-                    self.cached_threshold_open_sq = open_linear * open_linear;
-                    let close_linear = self.gain_lut.db_to_linear(close_db);
-                    self.cached_threshold_close_sq = close_linear * close_linear;
-                    self.cached_gate_params.threshold_open_db = modulated_gate_db;
-                    self.cached_gate_params.threshold_close_db = close_db;
-                    self.gate_dirty = false;
-                }
+                self.refresh_gate_config();
                 self.bypass_xfade.trigger(self.params.bypass);
             }
         }
@@ -1116,6 +1049,8 @@ impl<'a> NamClapProcessor<'a> {
                 &mut self.smoother_cal_in,
                 &mut self.smoother_cal_out,
                 &mut self.gate_dirty,
+                &mut self.gate_mode,
+                &mut self.musical_gate,
                 &mut self.mod_input_gain,
                 &mut self.mod_output_gain,
                 &mut self.mod_gate_thresh,
@@ -1132,17 +1067,7 @@ impl<'a> NamClapProcessor<'a> {
         // Parameter applications can invalidate the gate coefficients; keep
         // the cached gate parameters current so the first wet block starts
         // with the same gate math the wet pipeline would have.
-        if self.gate_dirty {
-            let modulated_gate_db = self.params.gate_threshold_db + self.mod_gate_thresh;
-            let close_db = modulated_gate_db - 6.0;
-            let open_linear = self.gain_lut.db_to_linear(modulated_gate_db);
-            self.cached_threshold_open_sq = open_linear * open_linear;
-            let close_linear = self.gain_lut.db_to_linear(close_db);
-            self.cached_threshold_close_sq = close_linear * close_linear;
-            self.cached_gate_params.threshold_open_db = modulated_gate_db;
-            self.cached_gate_params.threshold_close_db = close_db;
-            self.gate_dirty = false;
-        }
+        self.refresh_gate_config();
 
         let mut metrics = BlockMetricsAccumulator::default();
         for mut port_pair in audio {
@@ -1340,6 +1265,9 @@ impl<'a> NamClapProcessor<'a> {
 
         // Bypass-leg telemetry projection: gate reported open, no FSM
         // advance, peaks from the delayed dry.
+        if self.gate_mode == GateMode::Musical {
+            self.musical_gate.reset();
+        }
         self.shared
             .rt_to_ui
             .ui_gate_active
@@ -1361,5 +1289,40 @@ impl<'a> NamClapProcessor<'a> {
         self.process_telemetry(start_nanos);
 
         Ok(ProcessStatus::Continue)
+    }
+
+    #[inline]
+    fn report_gate_telemetry(&self, any_active: bool, last_gate_state: GateState) {
+        match self.gate_mode {
+            GateMode::Silence => {
+                let is_gate_active = any_active && last_gate_state == GateState::Closed;
+                self.shared
+                    .rt_to_ui
+                    .ui_gate_active
+                    .store(is_gate_active, Ordering::Relaxed);
+
+                if any_active {
+                    gate_flags::report_gate_flags(&self.rt_status, last_gate_state);
+                } else {
+                    gate_flags::report_gate_flags(&self.rt_status, GateState::Closed);
+                }
+            }
+            GateMode::Musical => {
+                let attenuating =
+                    !self.params.bypass && self.musical_gate.is_attenuating(self.process_mono);
+                self.shared
+                    .rt_to_ui
+                    .ui_gate_active
+                    .store(attenuating, Ordering::Relaxed);
+                gate_flags::report_gate_flags(
+                    &self.rt_status,
+                    if attenuating {
+                        GateState::Closed
+                    } else {
+                        GateState::Open
+                    },
+                );
+            }
+        }
     }
 }

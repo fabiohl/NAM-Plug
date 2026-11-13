@@ -683,6 +683,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.cached_threshold_close_sq = 0.0;
             self.cached_gate_params = GateParams::default();
             self.gate_dirty = true;
+            self.musical_gate.reset();
             self.rt_thread_setup_done = false;
         }));
         if let Err(err) = result {

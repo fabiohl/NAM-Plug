@@ -20,8 +20,9 @@ use neural_amp_modeler_rs::math::common::{InstructionSet, SIMD_MATH};
 use slint::ComponentHandle;
 
 use crate::clap::extensions::calibration::{OutputMode, sanitize_calibration_level_dbu};
+use crate::clap::extensions::gate_mode::GateMode;
 use crate::clap::extensions::params::{
-    PARAM_ACTIVATION, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_THRESH,
+    PARAM_ACTIVATION, PARAM_BYPASS, PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE, PARAM_GATE_THRESH,
     PARAM_INPUT_CALIBRATION_LEVEL, PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE,
     PARAM_OVERSAMPLE,
 };
@@ -354,6 +355,7 @@ pub(crate) struct SlintViewModelInner {
     last_input_gain: f32,
     last_output_gain: f32,
     last_gate_thresh: f32,
+    last_gate_mode: u32,
     last_bypass: bool,
     last_oversampling: u32,
     last_activation: u32,
@@ -615,6 +617,12 @@ impl SlintViewModelInner {
             self.window.set_gate_thresh_db(gate_th);
             self.window
                 .set_gate_thresh_text(format_gate_text(gate_th).into());
+        }
+
+        let gate_mode = self.shared.gate_mode().to_u32();
+        if gate_mode != self.last_gate_mode || gate_mode as i32 != self.window.get_gate_mode() {
+            self.last_gate_mode = gate_mode;
+            self.window.set_gate_mode(gate_mode as i32);
         }
 
         let bypass = self.shared.ui_to_rt.param_bypass.load(Ordering::Relaxed) != 0;
@@ -1053,6 +1061,7 @@ impl SlintViewModel {
             f32::from_bits(shared.ui_to_rt.param_output_gain.load(Ordering::Relaxed));
         let initial_gate_th =
             f32::from_bits(shared.ui_to_rt.param_gate_thresh.load(Ordering::Relaxed));
+        let initial_gate_mode = shared.gate_mode().to_u32();
         let initial_bypass = shared.ui_to_rt.param_bypass.load(Ordering::Relaxed) != 0;
         let initial_os = shared.ui_to_rt.param_oversample.load(Ordering::Relaxed);
         let initial_act = shared.ui_to_rt.param_activation.load(Ordering::Relaxed);
@@ -1063,6 +1072,7 @@ impl SlintViewModel {
         window.set_output_gain_text(format_gain_text(initial_out_gain).into());
         window.set_gate_thresh_db(initial_gate_th);
         window.set_gate_thresh_text(format_gate_text(initial_gate_th).into());
+        window.set_gate_mode(initial_gate_mode as i32);
         window.set_bypass_active(initial_bypass);
         window.set_oversample_mode(initial_os as i32);
         window.set_oversample_text(match initial_os {
@@ -1171,6 +1181,20 @@ impl SlintViewModel {
             let shared = Arc::clone(&shared);
             window.on_gate_thresh_gesture_end(move || {
                 shared.end_gesture(PARAM_GATE_THRESH);
+                flush_params(host.as_ref(), &shared);
+            });
+        }
+
+        // ── Bind Gate Mode Selector Callback ──────────────────────────────────
+        {
+            let shared = Arc::clone(&shared);
+            window.on_gate_mode_changed(move |val| {
+                let mode = GateMode::from_u32(val.max(0) as u32);
+                shared.store_gate_mode(mode);
+                shared.begin_gesture(PARAM_GATE_MODE);
+                shared.mark_param_changed(PARAM_GATE_MODE);
+                shared.end_gesture(PARAM_GATE_MODE);
+                shared.bump_generation();
                 flush_params(host.as_ref(), &shared);
             });
         }
@@ -1495,6 +1519,7 @@ impl SlintViewModel {
             last_input_gain: initial_in_gain,
             last_output_gain: initial_out_gain,
             last_gate_thresh: initial_gate_th,
+            last_gate_mode: initial_gate_mode,
             last_bypass: initial_bypass,
             last_oversampling: initial_os,
             last_activation: initial_act,
