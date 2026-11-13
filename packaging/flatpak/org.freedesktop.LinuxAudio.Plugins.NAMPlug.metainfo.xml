@@ -59,6 +59,16 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
     <keyword>plugin</keyword>
   </keywords>
   <releases>
+    <release version="1.2.0" date="2026-11-12">
+      <description>
+        <p>NAM-Plug 1.2.0:</p>
+        <ul>
+          <li>Dual IN/OUT Metering: Lock-free input (post-trim/pre-model) and output (post-gain) peak and EWMA RMS VU metering with dual clip latching.</li>
+          <li>Gate Threshold Alignment: Harmonized gate threshold parameter contract and sanitizer to [-90.0, 0.0] dB with -90.0 dB default.</li>
+          <li>Explicit IR Level Policy: Selectable Preserve, GainMatched, and Normalized cab-sim IR normalization with backwards-compatible state persistence.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-11-10">
       <description>
         <p>NAM-Plug 1.1.0:</p>

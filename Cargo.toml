@@ -14,7 +14,7 @@ keywords = ["audio", "dsp", "nam", "neural-amp-modeler", "clap", "plugin"]
 categories = ["multimedia::audio", "multimedia"]
 
 [dependencies]
-NeuralAmpModeler-rs = { version = "2.0.0", default-features = false, features = [
+NeuralAmpModeler-rs = { version = "2.1.0", default-features = false, features = [
     "dual-mono",
 ] }
 clack-common = "0.2"

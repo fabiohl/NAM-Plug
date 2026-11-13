@@ -95,8 +95,8 @@ mod tests {
                 Some(PARAM_OUTPUT_GAIN)
             );
             assert_eq!(page.param_ids[2].map(|id| id.get()), Some(PARAM_BYPASS));
-            for i in 3..8 {
-                assert!(page.param_ids[i].is_none());
+            for id in &page.param_ids[3..8] {
+                assert!(id.is_none());
             }
         }
 
@@ -115,8 +115,8 @@ mod tests {
                 page.param_ids[0].map(|id| id.get()),
                 Some(PARAM_GATE_THRESH)
             );
-            for i in 1..8 {
-                assert!(page.param_ids[i].is_none());
+            for id in &page.param_ids[1..8] {
+                assert!(id.is_none());
             }
         }
     }

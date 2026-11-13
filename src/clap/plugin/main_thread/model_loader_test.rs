@@ -461,8 +461,11 @@ fn test_multi_instance_housekeeping_tick_stays_fast() {
         let start = std::time::Instant::now();
         instance.call_on_main_thread_callback();
         let ms = start.elapsed().as_secs_f64() * 1e3;
+        // 10 ms tolerates debug-build + shared CI runner scheduler jitter while
+        // still failing immediately if `prepare()` ever ran synchronously on
+        // the main thread (a2/WaveNet load takes tens of milliseconds).
         assert!(
-            ms < 2.0,
+            ms < 10.0,
             "housekeeping() blocked for {ms:.3} ms with a pending heavy load; \
              the prepare phase must run on the nam-model-loader worker"
         );

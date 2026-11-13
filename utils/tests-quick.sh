@@ -16,7 +16,10 @@ trap 'trap_fail $?' ERR
 
 PHASE_NAME=tests; CUR_LOG="$LOG_DIR/quick-tests.log"; phase tests
 rc_tests=0
-cargo test --locked --features testing --no-fail-fast > "$CUR_LOG" 2>&1 || rc_tests=$?
+cargo build --locked --lib > "$CUR_LOG" 2>&1 || rc_tests=$?
+if [ "$rc_tests" -eq 0 ]; then
+  cargo test --locked --features testing --no-fail-fast >> "$CUR_LOG" 2>&1 || rc_tests=$?
+fi
 if [ "$rc_tests" -ne 0 ]; then
   grep -C 3 -E '(panicked at|FAILED)' "$CUR_LOG" | head -n 50 || true
   grep -q -E '(panicked at|FAILED)' "$CUR_LOG" || { echo "--- Cargo/build failure (tail of $CUR_LOG) ---" >&2; tail -n 25 "$CUR_LOG" >&2; }

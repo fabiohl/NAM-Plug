@@ -122,10 +122,6 @@ fn test_cabsim_stereo_asymmetric_inputs_channels_independent() {
             .ir_raw_sample_rate
             .store(48000, Ordering::Relaxed);
         shared.cold.ir_level_policy.store(1, Ordering::Relaxed); // IrLevelPolicy::Preserved
-        shared
-            .cold
-            .ir_level_policy
-            .store(1, Ordering::Relaxed); // IrLevelPolicy::Preserved
     }
 
     let n = 256;
@@ -266,10 +262,6 @@ fn test_cabsim_mono_input_bit_exact_with_reference() {
             .ir_raw_sample_rate
             .store(48000, Ordering::Relaxed);
         shared.cold.ir_level_policy.store(1, Ordering::Relaxed); // IrLevelPolicy::Preserved
-        shared
-            .cold
-            .ir_level_policy
-            .store(1, Ordering::Relaxed); // IrLevelPolicy::Preserved
     }
 
     let n = 256;
