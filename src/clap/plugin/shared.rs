@@ -641,6 +641,27 @@ impl Default for UiToRt {
     }
 }
 
+/// Owned representation of a CLAP preset discovery `Location` for async notifications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresetLocationOrigin {
+    /// `CLAP_PRESET_DISCOVERY_LOCATION_FILE` with its file-system path.
+    File(CString),
+    /// `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN` (internal plugin preset catalog).
+    Plugin,
+}
+
+impl PresetLocationOrigin {
+    /// Converts this owned origin back into a borrowed CLAP `Location<'_>`.
+    pub fn as_clap_location(&self) -> clack_extensions::preset_discovery::prelude::Location<'_> {
+        match self {
+            Self::File(path) => clack_extensions::preset_discovery::prelude::Location::File {
+                path: path.as_c_str(),
+            },
+            Self::Plugin => clack_extensions::preset_discovery::prelude::Location::Plugin,
+        }
+    }
+}
+
 /// Origin of a model load request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelRequestOrigin {
@@ -648,8 +669,8 @@ pub enum ModelRequestOrigin {
     Gui,
     /// Triggered via CLAP preset-load extension.
     Preset {
-        /// Owned copy of the file-system path from the `Location`.
-        location: CString,
+        /// Owned representation of the CLAP `Location`.
+        location: PresetLocationOrigin,
         /// Owned copy of the `load_key` (preset identifier from discovery provider).
         load_key: Option<CString>,
     },

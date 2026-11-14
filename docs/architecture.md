@@ -201,7 +201,7 @@ Extensions are registered in `declare_extensions()` (`src/clap/plugin/mod.rs`) v
 > [!NOTE]
 > `clap_plugin_track_info` and `clap_plugin_param_indication` are fully negotiated and their data is stored in shared state (e.g., `track_accent_color`), but the current Slint GUI does not yet render track-color accents or mapping/automation indications.
 
-Besides the plugin factory, `NamEntry` (`src/clap/entry.rs`) registers a **preset discovery factory** (`NamPresetDiscoveryFactory`, `src/clap/factory/preset_discovery.rs`) that declares `~/.nam/models` as a preset location and serves `.nam` model metadata to compatible host browsers.
+Besides the plugin factory, `NamEntry` (`src/clap/entry.rs`) registers a **preset discovery factory** (`NamPresetDiscoveryFactory`, `src/clap/factory/preset_discovery.rs`) that serves `.nam`/`.namb` model metadata from `~/.nam/models` to host browsers. Using `IndexerInfo` at `create_provider()` time, it declares `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN` (with per-file `load_key` metadata) for PreSonus/Fender indexers and `CLAP_PRESET_DISCOVERY_LOCATION_FILE` for Bitwig Studio and other standard indexers, while `PluginPresetLoadImpl::load_from_location` (`src/clap/extensions/preset_load.rs`) accepts both location kinds symmetrically and preserves `PresetLocationOrigin` across asynchronous model load notifications.
 
 ### 4.1 Windowing Support Matrix
 
@@ -224,7 +224,7 @@ Besides the plugin factory, `NamEntry` (`src/clap/entry.rs`) registers a **prese
 | **Bitwig Studio** (X11)                    | Embedded (XEmbed)                     | Native XEmbed child window integration; fully verified.                                                                                                                                                                             |
 | **REAPER** (Native Linux, X11)             | Embedded (XEmbed)                     | Native XEmbed child window integration; fully verified.                                                                                                                                                                             |
 | **X11 Hosts in General**                   | Embedded / Floating                   | Supported as negotiated by host (`is_floating`).                                                                                                                                                                                    |
-| **Fender Studio Pro 8.2** (Linux, Wayland) | Generic Host Controls (No Plugin GUI) | Host requests only embedded Wayland (`CLAP_WINDOW_API_WAYLAND` with `is_floating = false`), which is not defined in the core CLAP specification. Host does not negotiate floating; falls back to native generic parameter controls. |
+| **Fender Studio Pro 8.2** (Linux, Wayland) | Generic Host Controls (No Plugin GUI) | Host requests only embedded Wayland (`CLAP_WINDOW_API_WAYLAND` with `is_floating = false`) and does not negotiate floating by host design, falling back to its native generic parameter controls. Preset browsing/loading from `~/.nam/models` via `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN` and `.song` state persistence are verified. |
 | **Wayland Hosts Requesting Floating**      | Floating Window (*Experimental*)      | Plugin code supports `CLAP_WINDOW_API_WAYLAND` with `is_floating = true`; marked **experimental** due to absence of an available test host that negotiates floating windows under Wayland.                                          |
 
 ### 4.2 Audio Port Layout Negotiation Protocol

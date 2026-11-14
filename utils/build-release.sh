@@ -218,7 +218,6 @@ ENV_LOG="$LOG_DIR/build-release-env_verify.log"
     rustc --version
     cargo --version
 } 2>&1 | tee "$ENV_LOG"
-emit "PHASE: env_verify PASS log=$ENV_LOG"
 
 VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml 2>/dev/null || echo "1.0.0")
 ARCHIVE_NAME="nam-plug-${VERSION}-linux-x86_64"
@@ -333,6 +332,7 @@ if [ "$DO_STRICT" -eq 1 ] && [ -f "$CEREMONY_RECEIPT" ]; then
             ;;
     esac
 fi
+emit "PHASE: env_verify PASS log=$ENV_LOG"
 
 # -----------------------------------------------------------------------------
 # PHASE 2: PGO Workload Profiling
@@ -473,13 +473,13 @@ elif [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
             --instrumentation-file-append-pid > "$BOLT_DIR/bolt-instrument.log" 2>&1
 
         echo "[Step 2/3] Collecting BOLT workload profiles..."
-        RUSTFLAGS="$BASE_RUSTFLAGS" cargo build --locked --profile dist --features testing --bin pgo_profiling_workload
+        cargo build --locked --release --features testing --bin pgo_profiling_workload
         rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.* "$BOLT_PROFILE"
         BOLT_WORKLOAD_RECEIPT="$LOG_DIR/bolt-workload-receipt.json"
         BOLT_WORKLOAD_LOG="$LOG_DIR/build-release-bolt_workload.log"
 
         NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
-            "$PROJECT_DIR/target/dist/pgo_profiling_workload" --clap-only --receipt "$BOLT_WORKLOAD_RECEIPT" 2>&1 | tee "$BOLT_WORKLOAD_LOG"
+            "$PROJECT_DIR/target/release/pgo_profiling_workload" --clap-only --receipt "$BOLT_WORKLOAD_RECEIPT" 2>&1 | tee "$BOLT_WORKLOAD_LOG"
 
         CLAP_FDATA_FILES=()
         while IFS= read -r -d '' f; do

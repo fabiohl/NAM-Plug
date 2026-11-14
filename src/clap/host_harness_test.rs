@@ -719,32 +719,60 @@ fn test_watchdog_timer_syncs_latency_without_other_stimulus() {
     send_oversample_request(&mut started, OversampleFactor::X2);
     assert!(state.restart_requested.load(Ordering::SeqCst));
 
-    // Perform host restart: deactivate -> activate -> start_processing
+    // Perform host restart: deactivate -> activate -> start_processing.
+    // Per CLAP 1.2.2, `activate()` immediately syncs `PluginLatency::get()` and emits
+    // `HostLatency::changed()` without requiring any main-thread or timer stimulus.
     let started = perform_restart(&mut instance, started, &state, audio_config);
     let _ = started;
 
-    // Notice we DO NOT call call_on_main_thread_callback() here!
-    // Instead, latency notification must be triggered purely by watchdog timer tick.
-    assert_eq!(
-        state.latency_changed_count.load(Ordering::SeqCst),
-        0,
-        "No latency notification before timer tick"
-    );
-
-    // Fire the registered watchdog timer
-    fire_registered_timer(&mut instance, &state);
-
-    // Measured: latency_changed_count=1 after single timer tick
     assert_eq!(
         state.latency_changed_count.load(Ordering::SeqCst),
         1,
-        "Watchdog timer must poll latency and emit HostLatency::changed()"
+        "activate() must emit HostLatency::changed() immediately on latency change"
     );
-    // Measured: physical filter-chain latency equals OS_LATENCY_2X
     assert_eq!(
         plugin_latency_get(&mut instance),
         OS_LATENCY_2X,
-        "Announced plugin latency must match active oversample latency"
+        "Announced plugin latency must match active oversample latency immediately after activate()"
+    );
+
+    // Firing the registered watchdog timer outside activate() must NOT emit another
+    // `HostLatency::changed()` (CLAP forbids calling it outside `activate()`).
+    fire_registered_timer(&mut instance, &state);
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        1,
+        "Watchdog timer must not re-emit HostLatency::changed() outside activate()"
+    );
+}
+
+#[test]
+fn test_housekeeping_requests_restart_instead_of_illegal_latency_changed() {
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let audio_config = default_audio_config();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    let stopped = instance
+        .activate(|_, _| make_harness_audio_processor(&state), audio_config)
+        .expect("activate failed");
+    let _started = stopped.start_processing().expect("start_processing failed");
+
+    assert_eq!(state.latency_changed_count.load(Ordering::SeqCst), 0);
+    assert!(!state.restart_requested.load(Ordering::SeqCst));
+
+    // Simulate an active RT latency divergence after activate().
+    shared.rt_to_ui.current_latency.store(16, Ordering::Relaxed);
+    instance.call_on_main_thread_callback();
+
+    // CLAP 1.2.2 contract: never call HostLatency::changed() outside activate();
+    // instead request a restart once so the host re-activates cleanly.
+    assert_eq!(
+        state.latency_changed_count.load(Ordering::SeqCst),
+        0,
+        "HostLatency::changed() must NEVER be called outside activate()"
+    );
+    assert!(
+        state.restart_requested.load(Ordering::SeqCst),
+        "Active latency divergence must request host restart"
     );
 }
 

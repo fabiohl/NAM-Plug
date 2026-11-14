@@ -275,11 +275,188 @@ fn test_pre_enqueuing_validation() {
     assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
     assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
 
-    // 3. Plugin container
+    // 3. Plugin container without load_key
     let res3 = preset_load_ext.load_from_location(&handle, Location::Plugin, None);
-    assert!(res3.is_err(), "Plugin container location must be rejected");
+    assert!(
+        res3.is_err(),
+        "Plugin container location with None load_key must be rejected"
+    );
     assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
     assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
+
+    // 4. Plugin container with empty load_key
+    let res4 = preset_load_ext.load_from_location(&handle, Location::Plugin, Some(c""));
+    assert!(
+        res4.is_err(),
+        "Plugin container location with empty load_key must be rejected"
+    );
+    assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
+    assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
+
+    // 5. Plugin container with non-existent path in load_key
+    let res5 = preset_load_ext.load_from_location(
+        &handle,
+        Location::Plugin,
+        Some(c"/non/existent/model/path/foo.nam"),
+    );
+    assert!(
+        res5.is_err(),
+        "Plugin container location with non-existent load_key must be rejected"
+    );
+    assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
+    assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
+
+    // 6. Plugin container with directory path in load_key
+    let res6 = preset_load_ext.load_from_location(&handle, Location::Plugin, Some(&dir_cstr));
+    assert!(
+        res6.is_err(),
+        "Plugin container location with directory load_key must be rejected"
+    );
+    assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
+    assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
+
+    // 7. Plugin container with relative parent traversal in load_key
+    let res7 =
+        preset_load_ext.load_from_location(&handle, Location::Plugin, Some(c"../escape.nam"));
+    assert!(
+        res7.is_err(),
+        "Plugin container location with parent traversal load_key must be rejected"
+    );
+    assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
+    assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
+
+    // 8. Plugin container with unsupported file extension (.wav / .txt)
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "nam_plug_preset_ext_test_{}_{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&tmp_dir).expect("create temp dir");
+    for bad_name in ["ir.wav", "notes.txt"] {
+        let bad_file = tmp_dir.join(bad_name);
+        std::fs::write(&bad_file, b"dummy").expect("write non-model file");
+        let bad_cstr = CString::new(bad_file.to_str().unwrap()).unwrap();
+        let res = preset_load_ext.load_from_location(&handle, Location::Plugin, Some(&bad_cstr));
+        assert!(
+            res.is_err(),
+            "Unsupported extension {bad_name} must be rejected in Location::Plugin"
+        );
+        assert_eq!(shared.cold.pending_model_requests.lock().unwrap().len(), 0);
+        assert!(!shared.cold.ui_loading.load(Ordering::Relaxed));
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_preset_load_from_plugin_location_with_valid_load_key() {
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+
+    let preset_load_ext = instance
+        .plugin_handle()
+        .get_extension::<PluginPresetLoad>()
+        .expect("PluginPresetLoad extension not found");
+
+    let model_path = test_util::model_path("lstm.nam");
+    let path_str = model_path.to_str().expect("Valid UTF-8 model path");
+    let path_cstr = CString::new(path_str).expect("Valid CString");
+
+    let counter_before = shared.cold.model_load_counter.load(Ordering::Relaxed);
+    let handle = instance.plugin_handle();
+    preset_load_ext
+        .load_from_location(&handle, Location::Plugin, Some(&path_cstr))
+        .expect("Location::Plugin with valid load_key should enqueue");
+
+    test_util::drain_async_model_loading(&mut instance, shared);
+
+    let counter_after = shared.cold.model_load_counter.load(Ordering::Relaxed);
+    assert_eq!(
+        counter_after,
+        counter_before + 1,
+        "model_load_counter must increment on Location::Plugin preset load"
+    );
+    assert_eq!(
+        *shared.cold.ui_model_name.lock().unwrap(),
+        "lstm.nam",
+        "ui_model_name must update on Location::Plugin preset load"
+    );
+
+    let events = state.snapshot();
+    let loaded_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, HostEvent::PresetLoaded { .. }))
+        .collect();
+    assert_eq!(loaded_events.len(), 1);
+    assert_eq!(
+        loaded_events[0],
+        &HostEvent::PresetLoaded {
+            location: String::new(),
+            load_key: Some(path_str.to_string()),
+        }
+    );
+}
+
+#[test]
+fn test_preset_load_from_plugin_location_error_notifies_plugin_location() {
+    let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+
+    let preset_load_ext = instance
+        .plugin_handle()
+        .get_extension::<PluginPresetLoad>()
+        .expect("PluginPresetLoad extension not found");
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "nam_plug_preset_err_test_{}_{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&tmp_dir).expect("create temp dir");
+    let bad_model = tmp_dir.join("corrupt.nam");
+    test_util::write_invalid_model_fixture(&bad_model);
+    let path_str = bad_model
+        .to_str()
+        .expect("Valid UTF-8 model path")
+        .to_string();
+    let path_cstr = CString::new(path_str.as_str()).expect("Valid CString");
+
+    let handle = instance.plugin_handle();
+    preset_load_ext
+        .load_from_location(&handle, Location::Plugin, Some(&path_cstr))
+        .expect("Corrupt .nam file still passes pre-enqueue extension/file check");
+
+    test_util::drain_async_model_loading(&mut instance, shared);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    assert!(
+        shared.cold.ui_load_error.load(Ordering::Relaxed),
+        "ui_load_error must be flagged when Location::Plugin async load fails"
+    );
+
+    let events = state.snapshot();
+    let error_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, HostEvent::PresetLoadError { .. }))
+        .collect();
+    assert_eq!(error_events.len(), 1);
+    match error_events[0] {
+        HostEvent::PresetLoadError {
+            location, load_key, ..
+        } => {
+            assert_eq!(
+                location, "",
+                "Error callback must notify Location::Plugin (empty location string)"
+            );
+            assert_eq!(load_key.as_deref(), Some(path_str.as_str()));
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[test]

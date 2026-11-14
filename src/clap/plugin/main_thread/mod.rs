@@ -176,6 +176,13 @@ pub struct NamClapMainThread<'a> {
     /// most one GUI load is ever pending at a time.
     pub(crate) pending_async_loads:
         RefCell<std::collections::VecDeque<model_loader::ModelLoaderJob>>,
+    /// Whether the audio processor is currently activated (`activate()`..`deactivate()`).
+    /// Used to enforce the CLAP 1.2.2 contract that `HostLatency::changed()` is only
+    /// emitted inside `clap_plugin::activate()`.
+    pub(crate) is_active: Cell<bool>,
+    /// Diverged active latency for which `host.request_restart()` has already been
+    /// emitted, avoiding redundant restart requests while waiting for the host.
+    pub(crate) latency_restart_requested_for: Cell<Option<u32>>,
 }
 
 impl<'a> NamClapMainThread<'a> {

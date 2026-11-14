@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+name: Load environment variables
+description: Source variables.env via Bash and export pinned dependency variables to GITHUB_ENV.
+
+runs:
+  using: composite
+  steps:
+    - name: Load variables.env
+      shell: bash
+      run: |
+        set -euo pipefail
+        [ -f variables.env ] || { echo "ERROR: variables.env not found" >&2; exit 1; }
+        . ./variables.env
+        for var in ENGINE_REPO ENGINE_COMMIT CLAP_VALIDATOR_VERSION CLAP_VALIDATOR_URL CLAP_VALIDATOR_SHA256; do
+          val="${!var:-}"
+          [ -n "$val" ] || { echo "ERROR: $var missing in variables.env" >&2; exit 1; }
+          case "$val" in
+            *$'\n'*) echo "ERROR: $var contains newline" >&2; exit 1 ;;
+          esac
+          printf '%s=%s\n' "$var" "$val" >> "$GITHUB_ENV"
+        done
+        if [ -n "${ENGINE_TAG:-}" ]; then
+          printf 'ENGINE_TAG=%s\n' "$ENGINE_TAG" >> "$GITHUB_ENV"
+        fi

@@ -15,9 +15,37 @@ Control begins formally with version 1.0.0.
 
 ## [Unreleased]
 
-### Changed
+## [1.2.0] - 2026-11-14
 
-- **Dual-Stack Flatpak Runtime Architecture (26.08 and 25.08):** Upgraded `packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml` and configured `utils/build-release.sh` with zero-recompile multi-stack bundling targeting both `26.08` (canonical, next-gen DAWs like Fender Studio Pro 8) and `25.08` (compatibility, Bitwig Studio and REAPER), enabling simultaneous coexistence and universal Flatpak DAW discovery.
+### Added [1.2.0]
+
+- **CLAP Preset Discovery & Loading via `Location::Plugin`:**
+  - Extended `NamPresetDiscoveryFactory`, `PluginPresetLoadImpl`, `PresetLocationOrigin`, and main-thread notifications (`housekeeping.rs`) to support `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN` with per-file `load_key` metadata alongside `CLAP_PRESET_DISCOVERY_LOCATION_FILE`.
+  - Added deterministic host indexer routing in `create_provider()` (`use_plugin_location`), declaring `Location::Plugin` for PreSonus/Fender indexers and `Location::File` for Bitwig Studio and other standard indexers while supporting both location kinds in `get_metadata()` and `load_from_location()`.
+  - Verified empirical preset browsing, model loading, dynamic detection of newly added `.nam` files in `~/.nam/models`, and model-bearing `.song`/`.clappreset` state persistence in Fender Studio Pro 8.2 under Linux Wayland.
+- **Exclusive Cabinet Slot & Independent Bypass (`PARAM_CAB_BYPASS`):**
+  - Expanded the single exclusive Cabinet slot (`src/clap/extensions/cabinet.rs`) to accept either `.wav` impulse responses or 1-in/1-out neural cabinet models (`.nam`/`.namb`, dual-mono at strict unity gain with WaveNet post-stack head rejection scoped to the cabinet slot).
+  - Added independent `Cabinet Bypass` (`PARAM_CAB_BYPASS`, ID 13) with latency-aligned dry delay compensation, 64-sample cosine crossfade, lazy state reset on re-engagement, and steady-state DSP skip while preserving constant host PDC.
+  - Added explicit selectable IR Level Policy (`Preserve`, `GainMatched`, `Normalized`) with backwards-compatible state persistence.
+- **Input Calibration & Output Normalization Modes:**
+  - Added `Calibrate Input` (`PARAM_CALIBRATE_INPUT`, ID 9), `Input Cal Level` (`PARAM_INPUT_CALIBRATION_LEVEL`, ID 10, `[-60.0, +60.0]` dBu), and `Output Mode` (`PARAM_OUTPUT_MODE`, ID 11: `Raw`, `Normalized`, `Calibrated`) backed by StateEnvelope v2 migration.
+- **Musical Noise Gate Mode & Dual IN/OUT Metering:**
+  - Added selectable `Gate Mode` (`PARAM_GATE_MODE`, ID 12: `Silence` legacy Schmitt gate vs. `Musical` C++-compatible downward expander).
+  - Implemented lock-free dual IN (post-trim/pre-model) and OUT (post-gain) peak + EWMA RMS VU metering (`tau = 300 ms`) with dual clip latching in the Slint GUI.
+
+### Changed [1.2.0]
+
+- **DSP Engine Update (`NeuralAmpModeler-rs` `v2.1.0`):** Updated engine dependency and pinned provenance metadata to consume calibration, musical gate, and neural cabinet capabilities.
+- **Gate Threshold & Parameter Contract Alignment:**
+  - Harmonized `Gate Threshold` (`PARAM_GATE_THRESH`) range and sanitizer to `[-90.0, 0.0]` dB (default `-90.0` dB).
+  - Expanded CLAP exposed parameter set from 9 to 14 parameters (`PARAM_COUNT = 14`), applying `ParamInfoFlags::IS_ENUM` across stepped parameters and `ParamRescanFlags::VALUES | ParamRescanFlags::TEXT` on model changes.
+- **Dual-Stack Flatpak Runtime Architecture (`26.08` and `25.08`):** Upgraded `packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml` and configured `utils/build-release.sh` with zero-recompile multi-stack bundling targeting both `26.08` (modern hosts such as Fender Studio Pro 8) and `25.08` (Bitwig Studio and REAPER), enabling simultaneous coexistence and universal Flatpak DAW discovery.
+- **CI & QA Infrastructure Modularization:** Extracted shared composite GitHub Actions (`engine-checkout`, `qa-summary`, `record-provenance`) and typed quick/build status parsing.
+
+### Fixed [1.2.0]
+
+- **Model Load Error Reporting:** Preserved specific `NamErrorCode` diagnostics when asynchronous model loading fails instead of collapsing error categories.
+- **Documentation & Generic Host Workflow:** Updated `README.md`, `docs/architecture.md`, and `docs/functional-tests.md` with the full 14-parameter generic host surface, `Location::Plugin` preset discovery behavior, and exclusive Cabinet slot boundaries.
 
 ## [1.1.0] - 2026-11-10
 
@@ -109,6 +137,7 @@ Control begins formally with version 1.0.0.
 - **Linker-Level Symbol Isolation**: Scoped version script (`hide-libm-shadow.map`) ensuring libm symbols resolve dynamically to `glibc` without dangerous PLT/GOT self-referential loops in release builds.
 - **Automated QA & Verification Suite**: Multi-tier test scripts (`lints.sh`, `tests-quick.sh`, `tests-long.sh`, `tests-gui.sh`, `verify_rt_codegen.sh`, `tests-performance-regression.sh`) validating static RT safety, machine code codegen, property-based tests, and multi-rate C++ oracle parity.
 
-[Unreleased]: https://github.com/fabiohl/NAM-Plug/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/fabiohl/NAM-Plug/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/fabiohl/NAM-Plug/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/fabiohl/NAM-Plug/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/fabiohl/NAM-Plug/releases/tag/v1.0.0

@@ -11,13 +11,12 @@ use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
 impl<'a> PluginLatencyImpl for NamClapMainThread<'a> {
     /// Returns the current plugin latency in samples.
     ///
-    /// The value is the one last reported to the host: `housekeeping()` samples
-    /// the RT-published combined latency (`rt_to_ui.current_latency`) into
-    /// `last_reported_latency` and immediately emits `HostLatency::changed()`
-    /// when it advances. Reading the reported snapshot (instead of the raw
-    /// cross-thread atomic) keeps `get()` consistent with the change
-    /// notifications the host has actually received, and stays valid under the
-    /// shared-reference (`&self`) main-thread contract.
+    /// The value is synchronized inside `NamClapProcessor::activate()` alongside
+    /// `HostLatency::changed()` (per the CLAP 1.2.2 requirement that latency only
+    /// changes during `clap_plugin::activate()`). Reading the reported snapshot
+    /// (instead of the raw cross-thread atomic) keeps `get()` consistent with the
+    /// change notifications the host has actually received, and stays valid under
+    /// the shared-reference (`&self`) main-thread contract.
     fn get(&self) -> u32 {
         self.last_reported_latency.get()
     }

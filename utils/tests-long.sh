@@ -152,7 +152,7 @@ append_receipt() {
 close_phase() {
     local pid=$1 pname=$2 rc=$3 plog=$4 dur=$5 tests=$6 ex=${7:-false} pgaps=${8:-} req_tests=${9:-1} st=PASSED
     if [ -z "$tests" ] && [ -f "$plog" ]; then
-        tests=$(awk '/^test result:/ { for (i=1; i<=NF; i++) if ($i == "passed;") s += $(i-1) } END { if (s > 0) print s }' "$plog")
+        tests=$(awk '/^test result:/ { for (i=1; i<=NF; i++) if ($i == "passed;") s += $(i-1) } END { printf "%d\n", s + 0 }' "$plog")
     fi
     if [ "$rc" -eq 0 ] && { [ "$req_tests" = "0" ] || ran_tests "$plog"; }; then
         emit "PHASE: $pname PASS log=$plog"
@@ -197,7 +197,7 @@ if should_run "catch-all"; then
     t_start=$SECONDS; plog="$LOG_DIR/long-catch-all.log"; phase "catch-all"
     catch_rc=0
     # Build outside the execution timeout; every #[ignore] suite has a dedicated phase.
-    timeout --kill-after=30 1200 cargo test --locked --release --features testing --no-run > "$plog" 2>&1 || catch_rc=$?
+    timeout --kill-after=30 1200 cargo test --locked --release --features testing --no-run --lib --bins --tests > "$plog" 2>&1 || catch_rc=$?
     if [ "$catch_rc" -eq 0 ]; then
         if ! timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-300}" cargo test --locked --release --features testing --no-fail-fast --lib --bins --tests 2>&1 | tee -a "$plog"; then
             catch_rc=1

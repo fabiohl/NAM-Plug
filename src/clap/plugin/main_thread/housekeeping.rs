@@ -6,9 +6,9 @@
 use super::NamClapMainThread;
 use crate::clap::gui::dialog_state;
 use crate::clap::plugin::shared::{
-    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, SlimmableRebuild,
-    StagedSwap, UI_ALERT_CABSIM_CONTRACT, UI_ALERT_DEGRADE_MINIMAL, UI_ALERT_DEGRADE_REDUCED,
-    UI_ALERT_HOST_CONTRACT, UI_ALERT_NON_FINITE_INPUT, UI_ALERT_POISONED,
+    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, PresetLocationOrigin,
+    SlimmableRebuild, StagedSwap, UI_ALERT_CABSIM_CONTRACT, UI_ALERT_DEGRADE_MINIMAL,
+    UI_ALERT_DEGRADE_REDUCED, UI_ALERT_HOST_CONTRACT, UI_ALERT_NON_FINITE_INPUT, UI_ALERT_POISONED,
     UI_ALERT_RESAMPLER_FAILED,
 };
 use clack_extensions::preset_discovery::prelude::*;
@@ -1330,26 +1330,32 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// Syncs latency changes with the CLAP host and records slimmable stale telemetry.
+    /// Syncs latency changes with the CLAP host (strictly restart-gated) and
+    /// records slimmable stale telemetry.
     fn sync_latency_and_telemetry(&self) {
-        // Check if latency changed (stream resampler, oversample, or cabsim).
-        // `rt_to_ui.current_latency` is the authoritative combined total (stream +
-        // oversampling + cabsim) maintained by the RT processor in `activate()` and
-        // updated by `recompute_effective_latency` on every resource swap.
+        // CLAP 1.2.2 C ABI (`clap/ext/latency.h`): `clap_host_latency::changed()`
+        // may ONLY be called during `clap_plugin::activate()`. Never call it from
+        // `on_main_thread()` or `on_timer()`. `activate()` already updates
+        // `last_reported_latency` and calls `HostLatency::changed()`.
+        //
+        // If `rt_to_ui.current_latency` diverges while active (e.g., a deferred
+        // pre-activate load landed on the first `process()` callback), request a
+        // host restart once per target latency so the host re-activates and
+        // receives the new latency legally inside `activate()`.
         let current_latency = self.shared.rt_to_ui.current_latency.load(Ordering::Relaxed);
 
-        if current_latency != self.last_reported_latency.get() {
-            self.last_reported_latency.set(current_latency);
+        if current_latency != self.last_reported_latency.get()
+            && self.is_active.get()
+            && self.latency_restart_requested_for.get() != Some(current_latency)
+        {
+            self.latency_restart_requested_for
+                .set(Some(current_latency));
             log::info!(
-                "[Housekeeping] Latency changed: {} samples reported to host.",
+                "[Housekeeping] Active latency diverged ({} -> {} samples); requesting host restart per CLAP contract.",
+                self.last_reported_latency.get(),
                 current_latency
             );
-            if let Some(latency_ext) = self
-                .host
-                .get_extension::<clack_extensions::latency::HostLatency>()
-            {
-                latency_ext.changed(&self.host);
-            }
+            self.host.request_restart();
         }
 
         // Track cabsim tail changes for UI/telemetry observability.
@@ -1511,14 +1517,11 @@ impl<'a> NamClapMainThread<'a> {
 /// Reconstructs the `Location` and calls `HostPresetLoad::loaded()`.
 fn notify_preset_loaded(
     host: &HostMainThreadHandle,
-    location_path: &std::ffi::CStr,
+    location: &PresetLocationOrigin,
     load_key: Option<&std::ffi::CStr>,
 ) {
     if let Some(preset_load) = host.get_extension::<HostPresetLoad>() {
-        let location = Location::File {
-            path: location_path,
-        };
-        preset_load.loaded(host, location, load_key);
+        preset_load.loaded(host, location.as_clap_location(), load_key);
         log::info!("Host notified: preset loaded successfully");
     }
 }
@@ -1526,18 +1529,21 @@ fn notify_preset_loaded(
 /// Notify the host that a preset load failed.
 fn notify_preset_error(
     host: &HostMainThreadHandle,
-    location_path: &std::ffi::CStr,
+    location: &PresetLocationOrigin,
     load_key: Option<&std::ffi::CStr>,
     os_error: i32,
     message: &str,
 ) {
     if let Some(preset_load) = host.get_extension::<HostPresetLoad>() {
-        let location = Location::File {
-            path: location_path,
-        };
         let msg_cstr = std::ffi::CString::new(message);
         let msg_ref = msg_cstr.as_deref().ok();
-        preset_load.on_error(host, location, load_key, os_error, msg_ref);
+        preset_load.on_error(
+            host,
+            location.as_clap_location(),
+            load_key,
+            os_error,
+            msg_ref,
+        );
         log::error!("Host notified: preset load failed (os_error={os_error})");
     }
 }

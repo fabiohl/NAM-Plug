@@ -172,6 +172,8 @@ pub(crate) fn deactivate<'a>(
         // dropped yet — a single drain_gc_final call releases the SPSC +
         // overflow + the 16 parking-lot slots on the main thread.
         main_thread.drain_gc_final(&mut processor.parking_lot);
+        main_thread.is_active.set(false);
+        main_thread.latency_restart_requested_for.set(None);
     }));
     if let Err(err) = result {
         // Deactivate panicked — resources may leak but crash report

@@ -265,6 +265,8 @@ impl DefaultPluginFactory for NamClapPlugin {
             dispatched_model_is_gui: Cell::new(false),
             rebuild_slots: crate::clap::plugin::main_thread::model_loader::RebuildSlots::new(),
             pending_async_loads: RefCell::new(std::collections::VecDeque::new()),
+            is_active: Cell::new(false),
+            latency_restart_requested_for: Cell::new(None),
         };
 
         // Register periodic main-thread watchdog timer (F-NP-R1).

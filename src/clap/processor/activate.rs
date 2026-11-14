@@ -1149,6 +1149,27 @@ impl<'a> NamClapProcessor<'a> {
             // ownership back for processor construction. Guard Drop is now a no-op.
             let channels = rollback.defuse()?;
 
+            // CLAP 1.2.2 C ABI (`clap/ext/latency.h`): `clap_host_latency::changed()`
+            // is ONLY legal inside `clap_plugin::activate()`. Sync `last_reported_latency`
+            // first so reentrant `PluginLatency::get()` already observes `initial_latency`,
+            // then notify the host if the activated latency changed.
+            main_thread.is_active.set(true);
+            main_thread.latency_restart_requested_for.set(None);
+            let prev_reported_latency = main_thread.last_reported_latency.replace(initial_latency);
+            if initial_latency != prev_reported_latency {
+                log::info!(
+                    "[Activate] Latency updated: {} -> {} samples reported to host.",
+                    prev_reported_latency,
+                    initial_latency
+                );
+                if let Some(latency_ext) = main_thread
+                    .host
+                    .get_extension::<clack_extensions::latency::HostLatency>()
+                {
+                    latency_ext.changed(&main_thread.host);
+                }
+            }
+
             // The engine structural-swap scheduler owns the command consumer
             // end-to-end: the 3-phase drain (deferred resolution, bounded
             // coalescing, budgeted apply-or-park) runs on this single ring

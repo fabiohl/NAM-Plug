@@ -93,8 +93,8 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
   *Expected:* Audio gain ramps smoothly without zipper noise or audio dropouts, and UI display synchronizes with current parameter values.
 - [ ] **2C.4 Full Project State Reload:** Set custom gain, gate, oversampling, activation, model, and IR → save DAW project → close DAW → reopen project.
   *Expected:* All parameters, model path, and IR path restore perfectly with identical audio output. Missing model files degrade cleanly to `"No model loaded"`.
-- [ ] **2C.5 Preset Discovery Browser:** Open the host's preset browser for NAM-Plug → inspect entries → load one.
-  *Expected:* Each entry displays the model name, creator, and gear model (from `.nam` metadata). Loading the preset applies the model cleanly.
+- [ ] **2C.5 Preset Discovery Browser:** Place `.nam`/`.namb` models in `~/.nam/models` → open the host's preset browser / FX browser for NAM-Plug → inspect entries → load one.
+  *Expected:* Under standard file-location hosts (e.g., Bitwig Studio, `CLAP_PRESET_DISCOVERY_LOCATION_FILE`) and plugin-location hosts (e.g., Fender Studio Pro 8+, `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN`), entries display model name, creator, and gear metadata; selecting a preset loads the model cleanly without XRUNs, and reopening the host or rescanning plugins detects newly added files in `~/.nam/models`.
 - [ ] **2C.6 Preset Portability (`clap.state-context`):** Move `.nam` model file to a different directory → load saved DAW device preset.
   *Expected:* Plugin locates model via fallback search paths or basename and restores full state.
 - [ ] **2C.7 GUI Window Negotiation (Embedded & Floating):**

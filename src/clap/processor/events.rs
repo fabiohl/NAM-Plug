@@ -99,11 +99,10 @@ impl<'a> NamClapProcessor<'a> {
         //
         // RT-safety: `host.request_callback()` is intentionally NOT called here
         // (it would write to eventfd/pipe, violating "Zero Blocking I/O").
-        // The atomic store is sufficient — the main thread's housekeeping loop
-        // (driven autonomously by the 250 ms CLAP watchdog timer via
-        // `clap_plugin_timer_support`) polls `current_latency` and emits
-        // `HostLatency::changed()` without depending on sporadic GUI events or
-        // user interactions. Worst case: one timer period (250 ms) delay.
+        // Latency changes are announced inside `activate()` via `HostLatency::changed()`,
+        // and the main thread's housekeeping loop (driven by the 250 ms CLAP watchdog
+        // timer) monitors `current_latency` so any unexpected active divergence triggers
+        // `host.request_restart()` cleanly per CLAP 1.2.2.
         //
         // The effective latency is cached (`cached_effective_latency`) and
         // recomputed only in the cold swap handlers — never on this hot path.

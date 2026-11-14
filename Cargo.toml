@@ -132,9 +132,9 @@ crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 strip = true
-lto = "fat"
+lto = "thin"
 opt-level = 3
-codegen-units = 1
+codegen-units = 16
 panic = "unwind"
 
 # Criterion builds (`cargo bench`, `cargo bench --no-run`) inherit the release
@@ -151,6 +151,8 @@ codegen-units = 16
 
 [profile.dist]
 inherits = "release"
+lto = "fat"
+codegen-units = 1
 panic = "unwind"
 
 [profile.dev]

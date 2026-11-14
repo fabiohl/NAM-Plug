@@ -9,7 +9,7 @@ use crate::clap::host_harness::{
 };
 use crate::clap::plugin::main_thread::load::{set_test_mid_load_hook, test_mid_load_hook_lock};
 use crate::clap::plugin::shared::{
-    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest,
+    MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, PresetLocationOrigin,
 };
 use crate::clap::test_util;
 use clack_common::process::PluginAudioConfiguration;
@@ -151,7 +151,7 @@ fn test_secondary_queue_stays_bounded() {
             .push_back(PendingModelRequest {
                 path: model.clone(),
                 origin: ModelRequestOrigin::Preset {
-                    location: location.clone(),
+                    location: PresetLocationOrigin::File(location.clone()),
                     load_key: None,
                 },
             });

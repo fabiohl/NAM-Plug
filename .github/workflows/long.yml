@@ -34,16 +34,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Load environment variables
-        run: |
-          while IFS='=' read -r key val; do
-            [[ "$key" =~ ^[[:space:]]*# ]] && continue
-            [ -z "$key" ] && continue
-            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
-            echo "$key=$val" >> "$GITHUB_ENV"
-          done < variables.env
-          . ./variables.env
-          [ -n "${ENGINE_REPO:-}" ] || { echo "ERROR: ENGINE_REPO missing in variables.env" >&2; exit 1; }
-          [ -n "${ENGINE_COMMIT:-}" ] || { echo "ERROR: ENGINE_COMMIT missing in variables.env" >&2; exit 1; }
+        uses: ./.github/actions/load-env
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
         uses: ./.github/actions/engine-checkout
         with:
@@ -87,6 +78,10 @@ jobs:
       - name: Build canonical artifact
         # Hosted QA builds are never strict; the operator release chain owns it.
         run: ./utils/build-release.sh
+      - name: Provision preset discovery fixtures
+        run: |
+          mkdir -p "$HOME/.nam/models"
+          cp tests/fixtures/models/*.nam "$HOME/.nam/models/"
       - name: Long QA Suite (artifact)
         # Recommended hosted-safe configuration, fixed by design. `perf` and
         # `rt-heap` are reserved for the operator's isolated host.
