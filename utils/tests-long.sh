@@ -385,6 +385,7 @@ if should_run "heap-audit"; then
     if run_heap_test --lib test_gc_drain_on_destroy_no_leak -- --ignored; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --lib test_teardown_drains_rt_parking_lot_off_rt -- --ignored; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1; then heap_cases=$((heap_cases + 1)); fi
+    if run_heap_test --test cabinet_slot_and_bypass_test t08_3_cab_bypass_constant_latency_phase_crossfade_and_heap_audit; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --test heap_audit prop_gc_swap_idempotence -- --ignored; then heap_cases=$((heap_cases + 500)); fi
     if run_heap_test --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1; then heap_cases=$((heap_cases + 1)); fi
 

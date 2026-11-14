@@ -33,17 +33,32 @@ runs:
         else
           echo 'No canonical summary (target/logs/summary.txt missing).' >> "$GITHUB_STEP_SUMMARY"
         fi
+        if [ -f target/logs/ci-provenance.log ]; then
+          {
+            echo '<details><summary>Engine provenance</summary>'
+            echo ''
+            echo '```text'
+            cat target/logs/ci-provenance.log
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
         if [ -f target/logs/summary.txt ]; then
           fails=$(grep -E '^PHASE: .* FAIL( |$)' target/logs/summary.txt || true)
           if [ -n "$fails" ]; then
             printf '%s\n' "$fails" | while IFS= read -r line; do
               log=$(printf '%s\n' "$line" | sed -n 's/.* log=\([^ ]*\).*/\1/p')
               [ -f "$log" ] || continue
+              excerpt="${log%.log}-fail.log"
               {
                 echo "<details><summary>Failure: $(basename "$log")</summary>"
                 echo ''
                 echo '```text'
-                tail -n 40 "$log"
+                if [ -f "$excerpt" ]; then
+                  cat "$excerpt"
+                else
+                  tail -n 40 "$log"
+                fi
                 echo '```'
                 echo '</details>'
               } >> "$GITHUB_STEP_SUMMARY"

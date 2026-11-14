@@ -1099,7 +1099,7 @@ mod load_error_code_tests {
     }
 
     #[test]
-    fn prepare_model_preserves_unknown_activation_and_invalid_topology_codes() {
+    fn prepare_model_preserves_unknown_activation_code() {
         let sys = SystemSnapshot::capture();
 
         let unknown_act_json = r#"{
@@ -1128,6 +1128,11 @@ mod load_error_code_tests {
             .expect("unknown activation must fail");
         let _ = std::fs::remove_file(&p1);
         assert_eq!(err1.error_code(), NamErrorCode::NamJsonUnknownActivation);
+    }
+
+    #[test]
+    fn prepare_model_preserves_invalid_gating_mode_code() {
+        let sys = SystemSnapshot::capture();
 
         let bad_gating_json = r#"{
             "version": "0.6.0",

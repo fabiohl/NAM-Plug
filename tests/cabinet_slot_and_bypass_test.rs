@@ -20,10 +20,13 @@
 
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::state::PluginState;
+#[cfg(feature = "heap-audit")]
 use clack_extensions::tail::{PluginTail, TailLength};
+#[cfg(feature = "heap-audit")]
 use clack_host::events::event_types::ParamValueEvent;
 use clack_host::prelude::*;
 use nam_plug::clap::extensions::calibration::{CalibrationConfig, OutputMode};
+#[cfg(feature = "heap-audit")]
 use nam_plug::clap::extensions::params::{PARAM_BYPASS, PARAM_CAB_BYPASS, PARAM_OUTPUT_MODE};
 use nam_plug::clap::test_util::{self, TestHost};
 #[cfg(feature = "heap-audit")]
@@ -35,16 +38,21 @@ use neural_amp_modeler_rs::testing::reference_oracle::{PrecisionConfig, oracle_f
 use neural_amp_modeler_rs::testing::wav::write_wav_f32;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "heap-audit")]
 use std::sync::Arc;
+#[cfg(feature = "heap-audit")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "heap-audit")]
 struct CabAuditHost;
 
+#[cfg(feature = "heap-audit")]
 struct CabAuditShared {
     restart_was_called: Arc<AtomicBool>,
 }
 
+#[cfg(feature = "heap-audit")]
 impl SharedHandler<'_> for CabAuditShared {
     fn initializing(&self, _instance: InitializingPluginHandle<'_>) {}
     fn request_restart(&self) {
@@ -54,6 +62,7 @@ impl SharedHandler<'_> for CabAuditShared {
     fn request_callback(&self) {}
 }
 
+#[cfg(feature = "heap-audit")]
 impl HostHandlers for CabAuditHost {
     type Shared<'a> = CabAuditShared;
     type MainThread<'a> = ();
@@ -259,6 +268,7 @@ fn load_state(instance: &mut PluginInstance<TestHost>, bytes: &[u8]) -> Result<(
     load_state_generic(instance, bytes)
 }
 
+#[cfg(feature = "heap-audit")]
 fn save_state(instance: &mut PluginInstance<TestHost>) -> Vec<u8> {
     let state_ext = instance
         .plugin_handle()
@@ -401,6 +411,7 @@ fn process_blocks<H: HostHandlers>(
     process_blocks_impl(proc, in_l, in_r, block_size, false, per_block_events)
 }
 
+#[cfg(feature = "heap-audit")]
 fn process_blocks_audited<H: HostHandlers>(
     proc: &mut StartedPluginAudioProcessor<H>,
     in_l: &[f32],
@@ -411,6 +422,7 @@ fn process_blocks_audited<H: HostHandlers>(
     process_blocks_impl(proc, in_l, in_r, block_size, true, per_block_events)
 }
 
+#[cfg(feature = "heap-audit")]
 fn push_bool_param(ev: &mut EventBuffer, param_id: u32, val: bool) {
     let event = ParamValueEvent::new(
         0,
@@ -421,6 +433,7 @@ fn push_bool_param(ev: &mut EventBuffer, param_id: u32, val: bool) {
     ev.push(&event);
 }
 
+#[cfg(feature = "heap-audit")]
 fn push_u32_param(ev: &mut EventBuffer, param_id: u32, val: u32) {
     let event = ParamValueEvent::new(0, ClapId::new(param_id), Pckn::match_all(), val as f64);
     ev.push(&event);
@@ -650,6 +663,9 @@ fn t08_2_single_slot_exclusivity_metadata_isolation_and_oracle_parity() {
     }
 }
 
+// long: heap-audit only; the allocation assertion is meaningless without
+// `--features heap-audit`, so this test must not run in the plain quick suite.
+#[cfg(feature = "heap-audit")]
 #[test]
 fn t08_3_cab_bypass_constant_latency_phase_crossfade_and_heap_audit() {
     let wav_ir = unique_tmp_path("byp_wav", "wav");

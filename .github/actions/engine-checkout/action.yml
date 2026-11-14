@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
+
+name: Engine checkout
+description: Check out the pinned NeuralAmpModeler-rs sibling and verify its commit.
+
+inputs:
+  ref:
+    description: Expected engine commit SHA.
+    required: true
+  repository:
+    description: Engine repository in owner/repo form.
+    required: false
+    default: fabiohl/NeuralAmpModeler-rs
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout NeuralAmpModeler-rs
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ inputs.repository }}
+        path: NeuralAmpModeler-rs
+        ref: ${{ inputs.ref }}
+        persist-credentials: false
+    - name: Link and verify engine sibling
+      shell: bash
+      env:
+        ENGINE_REF: ${{ inputs.ref }}
+      run: |
+        ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
+        actual=$(git -C "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" rev-parse HEAD)
+        if [ "$actual" != "$ENGINE_REF" ]; then
+          echo "ERROR: engine HEAD $actual != pinned ENGINE_COMMIT $ENGINE_REF" >&2
+          exit 1
+        fi

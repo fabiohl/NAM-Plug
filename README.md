@@ -287,6 +287,14 @@ flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 > **Host Memory Management:**
 > On systems with constrained RAM, configure `CARGO_BUILD_JOBS` in your host shell profile (e.g. `~/.bashrc`) to prevent memory exhaustion during parallel codegen.
 
+> [!IMPORTANT]
+> **Engine checkout required:** NAM-Plug consumes `NeuralAmpModeler-rs` from the sibling path `../NeuralAmpModeler-rs` at the commit recorded in `variables.env` (`ENGINE_COMMIT`) through `[patch.crates-io]`. The published crates.io release (currently `2.0.0`) is not the source used by this build. Clone the engine next to this repository and check out the pinned commit first:
+>
+> ```bash
+> git clone https://github.com/fabiohl/NeuralAmpModeler-rs ../NeuralAmpModeler-rs
+> git -C ../NeuralAmpModeler-rs checkout "$(sed -n 's/^ENGINE_COMMIT="\(.*\)"/\1/p' variables.env)"
+> ```
+
 For native DAWs installed directly on your system:
 
 ```bash

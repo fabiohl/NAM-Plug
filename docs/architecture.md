@@ -171,7 +171,7 @@ Every asset reference persisted in state **must** carry its SHA-256 hex digest (
 
 All adoption paths compute the digest up-front and **fail closed** if it cannot be computed (e.g., file exceeding the 256 MiB streaming-hash limit). An asset without a digest is never adopted and never persisted.
 
-> **GAP-IR-INMEMORY-DECODE:** IR bytes are read once, bounded by 256 MiB, hashed, and staged to an exclusively-created private temp file (`create_new`, removed on every exit path) before `CabSimIr::load` decodes them. The published engine (`NeuralAmpModeler-rs` 2.0.0) exposes no `load_from_bytes` API, so a true in-memory decode cannot be implemented without expanding engine scope. The temp round-trip is content-safe (the verified buffer is written verbatim, never re-read from the source path), but it remains a documented residual GAP; removing it requires a new engine API.
+> **GAP-IR-INMEMORY-DECODE:** IR bytes are read once, bounded by 256 MiB, hashed, and staged to an exclusively-created private temp file (`create_new`, removed on every exit path) before `CabSimIr::load` decodes them. The pinned engine (`NeuralAmpModeler-rs` 2.1.0) exposes no `load_from_bytes` API, so a true in-memory decode cannot be implemented without expanding engine scope. The temp round-trip is content-safe (the verified buffer is written verbatim, never re-read from the source path), but it remains a documented residual GAP; removing it requires a new engine API.
 
 ---
 

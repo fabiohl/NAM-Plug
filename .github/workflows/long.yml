@@ -42,16 +42,13 @@ jobs:
             echo "$key=$val" >> "$GITHUB_ENV"
           done < variables.env
           . ./variables.env
+          [ -n "${ENGINE_REPO:-}" ] || { echo "ERROR: ENGINE_REPO missing in variables.env" >&2; exit 1; }
           [ -n "${ENGINE_COMMIT:-}" ] || { echo "ERROR: ENGINE_COMMIT missing in variables.env" >&2; exit 1; }
       - name: Checkout NeuralAmpModeler-rs (engine sibling)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: ./.github/actions/engine-checkout
         with:
-          repository: fabiohl/NeuralAmpModeler-rs
-          path: NeuralAmpModeler-rs
+          repository: ${{ env.ENGINE_REPO }}
           ref: ${{ env.ENGINE_COMMIT }}
-          persist-credentials: false
-      - name: Set up engine sibling symlink
-        run: ln -sfn "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" "$RUNNER_WORKSPACE/NeuralAmpModeler-rs"
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -86,47 +83,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/dev') }}
       - name: Record provenance
-        run: |
-          mkdir -p target/logs
-          sha=$(git rev-parse HEAD)
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          eng_type="GAP:missing_lockfile"
-          eng_ver="unknown"
-          eng_chk="none"
-          if [ -f Cargo.lock ]; then
-            read -r eng_type eng_ver eng_chk < <(awk '
-              /^\[\[package\]\]/ { in_pkg=0 }
-              /^name = "NeuralAmpModeler-rs"/ { in_pkg=1 }
-              in_pkg && /^version = / { gsub(/"/, "", $3); ver=$3 }
-              in_pkg && /^source = / { gsub(/"/, "", $3); src=$3 }
-              in_pkg && /^checksum = / { gsub(/"/, "", $3); chk=$3 }
-              END {
-                if (!ver) {
-                  print "GAP:engine_not_found unknown none"
-                  exit 0
-                }
-                if (src ~ /^registry\+/) {
-                  type="registry"
-                } else if (src ~ /^git\+/) {
-                  type="git"
-                } else if (src) {
-                  type=src
-                } else {
-                  type="path"
-                }
-                printf "%s %s %s\n", type, ver, (chk ? chk : "none")
-              }
-            ' Cargo.lock)
-          fi
-          if aux_sha=$(git -C "$GITHUB_WORKSPACE/NeuralAmpModeler-rs" rev-parse HEAD 2>/dev/null); then
-            aux_engine="sha=$aux_sha"
-          else
-            aux_engine="GAP:sibling_absent"
-          fi
-          rustc_v=$(rustc --version)
-          cargo_v=$(cargo --version)
-          printf 'PHASE: provenance sha=%s package_version=%s engine_type=%s engine_version=%s engine_checksum=%s auxiliary_engine=%s rustc=%s cargo=%s\n' \
-            "$sha" "$version" "$eng_type" "$eng_ver" "$eng_chk" "$aux_engine" "$rustc_v" "$cargo_v" | tee target/logs/ci-provenance.log
+        uses: ./.github/actions/record-provenance
       - name: Build canonical artifact
         # Hosted QA builds are never strict; the operator release chain owns it.
         run: ./utils/build-release.sh
