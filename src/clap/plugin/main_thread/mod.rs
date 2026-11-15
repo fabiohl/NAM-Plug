@@ -75,6 +75,8 @@ pub struct NamClapMainThread<'a> {
     pub cmd_producer: RefCell<CommandProducer<'a>>,
     /// Consumer to collect garbage (obsolete models) from the audio thread.
     pub gc_rx: RefCell<Consumer<GcItem>>,
+    /// Consumer to drop inert `Box` envelopes retired off the audio thread.
+    pub(crate) box_gc_rx: RefCell<Consumer<crate::clap::plugin::retired_box::RetiredBox>>,
     /// Producer to send slimmable-rebuilt models to the audio thread.
     /// Boxed end-to-end so the engine `SwapRing` surface applies with zero
     /// allocation on the audio thread (boxes created only on the main thread).
@@ -594,6 +596,20 @@ impl<'a> NamClapMainThread<'a> {
             .drains
             .fetch_add(second as u32, Ordering::Relaxed);
     }
+
+    /// Drains retired command/slimmable `Box` envelopes from the RT SPSC ring,
+    /// parking lot handoff, and atomic overflow table on the main thread.
+    pub(crate) fn drain_retired_boxes_final(
+        &self,
+        parking_lot: &mut [Option<crate::clap::plugin::retired_box::RetiredBox>; 16],
+    ) {
+        let mut rx = self.box_gc_rx.borrow_mut();
+        let _ = crate::clap::plugin::retired_box::drain_retired_boxes(
+            &mut rx,
+            &self.shared.cold.box_overflow,
+            parking_lot,
+        );
+    }
 }
 
 /// RAII fallback for teardown quiescence.
@@ -709,6 +725,9 @@ impl<'a> Drop for NamClapMainThread<'a> {
         // RT producer is active — and the drain covers SPSC + overflow one final time.
         let mut empty_rt_parking_lot: [Option<GcItem>; 16] = Default::default();
         self.drain_gc_final(&mut empty_rt_parking_lot);
+        let mut empty_box_lot: [Option<crate::clap::plugin::retired_box::RetiredBox>; 16] =
+            Default::default();
+        self.drain_retired_boxes_final(&mut empty_box_lot);
     }
 }
 
@@ -721,6 +740,9 @@ impl<'a> PluginMainThread<'a, NamClapShared> for NamClapMainThread<'a> {
             // the lot arrived drained during handoff; final drain covers SPSC + overflow.
             let mut empty_rt_parking_lot: [Option<GcItem>; 16] = Default::default();
             self.drain_gc_final(&mut empty_rt_parking_lot);
+            let mut empty_box_lot: [Option<crate::clap::plugin::retired_box::RetiredBox>; 16] =
+                Default::default();
+            self.drain_retired_boxes_final(&mut empty_box_lot);
             return;
         }
         self.housekeeping();

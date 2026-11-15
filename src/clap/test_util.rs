@@ -293,48 +293,39 @@ pub fn register_test_sink() -> (TestSinkCapture, TestSink) {
 /// Runs `f` with allocation tracking enabled and asserts no allocations occurred.
 /// `label` identifies the test context in the failure message.
 ///
-/// With the `heap-audit` feature, `AUDIT_ENABLED` is forced off for the counted
-/// window: when it is set, the processor installs its own `TrackingGuard`
-/// inside `process()`, and that guard zeroes this thread's counters at entry
-/// and exit — making the measured delta read as zero regardless of what `f`
-/// actually allocated. Forcing it off keeps the TLS diff authoritative (the
-/// processor's own `RT_STATUS_HEAP_ALLOC` telemetry, activated with
-/// `AUDIT_ENABLED = true`, remains the authoritative signal in the dedicated
-/// heap-audit lane). Without the feature the counting allocator is not even
-/// installed, so there is nothing to mask.
+/// With the `heap-audit` feature, the thread's processor arm is forced off for
+/// the counted window: when it is set, the processor installs its own
+/// `TrackingGuard` inside `process()`, and that guard zeroes this thread's
+/// counters at entry and exit, masking the delta measured here. The arm is
+/// thread-local and restored on scope exit (panic-safe), so no other test is
+/// affected. Without the feature the counting allocator is not installed.
 pub fn assert_zero_alloc<F: FnOnce()>(label: &str, f: F) {
     #[cfg(feature = "heap-audit")]
-    struct RestoreAuditEnabled(bool);
-
-    #[cfg(feature = "heap-audit")]
-    impl Drop for RestoreAuditEnabled {
-        fn drop(&mut self) {
-            if self.0 {
-                neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED
-                    .store(true, Ordering::Relaxed);
-            }
-        }
-    }
-
-    // Restores the previous global audit state on scope exit (panic-safe), so
-    // concurrent heap-audit telemetry keeps its intended `AUDIT_ENABLED`.
-    #[cfg(feature = "heap-audit")]
-    let _restore = {
-        let was_enabled =
-            neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED.load(Ordering::Relaxed);
-        neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED.store(false, Ordering::Relaxed);
-        RestoreAuditEnabled(was_enabled)
-    };
+    let _disarm = crate::clap::processor::heap_audit::ArmGuard::set(false);
 
     let _guard = TrackingGuard::new();
-    let before = get_alloc_count();
+    let before_alloc = get_alloc_count();
+    #[cfg(feature = "heap-audit")]
+    let (before_dealloc, before_realloc) = (
+        neural_amp_modeler_rs::common::alloc_audit::get_dealloc_count(),
+        neural_amp_modeler_rs::common::alloc_audit::get_realloc_count(),
+    );
     f();
-    let after = get_alloc_count();
+    let after_alloc = get_alloc_count();
     assert_eq!(
-        after - before,
+        after_alloc - before_alloc,
         0,
         "{label}: allocations detected in hot-path"
     );
+    #[cfg(feature = "heap-audit")]
+    {
+        let deallocs =
+            neural_amp_modeler_rs::common::alloc_audit::get_dealloc_count() - before_dealloc;
+        let reallocs =
+            neural_amp_modeler_rs::common::alloc_audit::get_realloc_count() - before_realloc;
+        assert_eq!(deallocs, 0, "{label}: deallocations detected in hot-path");
+        assert_eq!(reallocs, 0, "{label}: reallocations detected in hot-path");
+    }
 }
 
 /// Runs one stereo processing block reusing the audio ports and the output

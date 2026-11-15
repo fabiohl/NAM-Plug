@@ -89,6 +89,9 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .drains
             .fetch_add(drained as u32, Ordering::Relaxed);
+        let mut empty_box_lot: [Option<crate::clap::plugin::retired_box::RetiredBox>; 16] =
+            Default::default();
+        self.drain_retired_boxes_final(&mut empty_box_lot);
 
         let current_bits = self
             .shared
@@ -433,8 +436,10 @@ impl<'a> NamClapMainThread<'a> {
                 match self
                     .slimmable_tx
                     .borrow_mut()
-                    .push(Box::new(SlimmableRebuild { generation, model }))
-                {
+                    .push(Box::new(SlimmableRebuild {
+                        generation,
+                        model: Some(model),
+                    })) {
                     Ok(()) => {
                         self.shared
                             .cold
@@ -975,13 +980,13 @@ impl<'a> NamClapMainThread<'a> {
     /// Lazily spawns the per-instance asynchronous model loader. The worker also
     /// receives the rebuild delivery slots and polls the `RT_STATUS_NEEDS_*` flags.
     fn spawn_model_loader(&self) -> Result<(), &'static str> {
-        let (host_static, shared_arc) = self.host_static_and_shared();
+        let (host, shared_arc) = self.host_bridge_and_shared();
         let rebuilds = Some(self.rebuild_slots.clone());
         let loader = super::model_loader::ModelLoader::spawn(
             self.shared.cold.instance_id,
             self.sys.clone(),
             shared_arc,
-            host_static,
+            host,
             Arc::clone(&self.model_result_slot),
             rebuilds,
         )?;

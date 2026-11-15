@@ -337,8 +337,10 @@ fn simd_badge_text(isa: InstructionSet) -> &'static str {
 #[inline]
 fn flush_params(host: Option<&GuiHostBridge>, shared: &GuiSharedState) {
     if let Some(bridge) = host {
-        let host_static = bridge.as_static();
         shared.cold.host_call_quiescence.host_call(|| {
+            // SAFETY: the handle is created and used only inside `host_call`,
+            // which refuses entry once `alive_fence` is lowered at teardown.
+            let host_static = unsafe { bridge.as_static() };
             if let Some(params_ext) = host_static.get_extension::<HostParams>() {
                 params_ext.request_flush(&host_static);
             }
@@ -1423,10 +1425,9 @@ impl SlintViewModel {
                     shared.cold.ui_dialog_open.store(true, Ordering::Relaxed);
                     dialog_state_arc.active.store(true, Ordering::Relaxed);
                     if let Some(bridge) = host {
-                        let host_static = bridge.as_static();
                         let handle = spawn_file_dialog(
                             Arc::clone(dialog_state_arc),
-                            host_static,
+                            bridge,
                             Arc::clone(&shared.cold.alive_fence),
                             Arc::clone(&shared.cold.host_call_quiescence),
                         );
@@ -1446,9 +1447,9 @@ impl SlintViewModel {
                 shared.note_ui_interaction();
                 shared.cold.ui_clear_model.store(true, Ordering::Relaxed);
                 if let Some(bridge) = host {
-                    let host_static = bridge.as_static();
                     shared.cold.host_call_quiescence.host_call(|| {
-                        host_static.request_callback();
+                        // SAFETY: created inside `host_call`; see `flush_params`.
+                        unsafe { bridge.as_static() }.request_callback();
                     });
                 }
                 if let Some(w) = window_weak.upgrade() {
@@ -1479,10 +1480,9 @@ impl SlintViewModel {
                         w.set_ir_loading(true);
                     }
                     if let Some(bridge) = host {
-                        let host_static = bridge.as_static();
                         let handle = spawn_ir_file_dialog(
                             Arc::clone(ir_dialog_state_arc),
-                            host_static,
+                            bridge,
                             Arc::clone(&shared.cold.alive_fence),
                             Arc::clone(&shared.cold.host_call_quiescence),
                         );
@@ -1502,9 +1502,9 @@ impl SlintViewModel {
                 shared.note_ui_interaction();
                 shared.cold.ui_clear_ir.store(true, Ordering::Relaxed);
                 if let Some(bridge) = host {
-                    let host_static = bridge.as_static();
                     shared.cold.host_call_quiescence.host_call(|| {
-                        host_static.request_callback();
+                        // SAFETY: created inside `host_call`; see `flush_params`.
+                        unsafe { bridge.as_static() }.request_callback();
                     });
                 }
                 if let Some(w) = window_weak.upgrade() {
@@ -1561,9 +1561,9 @@ impl SlintViewModel {
                     .ui_ir_policy_rebuild_pending
                     .store(true, Ordering::Release);
                 if let Some(bridge) = host {
-                    let host_static = bridge.as_static();
                     shared.cold.host_call_quiescence.host_call(|| {
-                        host_static.request_callback();
+                        // SAFETY: created inside `host_call`; see `flush_params`.
+                        unsafe { bridge.as_static() }.request_callback();
                     });
                 }
                 if let Some(w) = window_weak.upgrade() {

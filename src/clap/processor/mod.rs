@@ -27,7 +27,7 @@ mod events;
 mod ftz;
 mod gc;
 #[cfg(feature = "heap-audit")]
-mod heap_audit;
+pub(crate) mod heap_audit;
 mod params;
 pub(crate) mod prewarm_policy;
 mod rollback;
@@ -341,8 +341,8 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             }
 
             #[cfg(feature = "heap-audit")]
-            let _guard = if neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED
-                .load(Ordering::Relaxed)
+            let _guard = if heap_audit::is_armed()
+                && !neural_amp_modeler_rs::common::alloc_audit::is_tracking_active()
             {
                 Some(neural_amp_modeler_rs::common::alloc_audit::TrackingGuard::new())
             } else {

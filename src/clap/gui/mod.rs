@@ -100,19 +100,27 @@ impl GuiHostBridge {
 
     /// Reconstructs the `HostSharedHandle` with `'static` lifetime.
     ///
+    /// The `'static` lifetime is a fiction: the real lifetime is the plugin
+    /// instance's, enforced at runtime by the teardown fence, not by the type
+    /// system. Returning it from a safe function would let a safe caller keep
+    /// the handle after the host is gone, so the boundary is `unsafe`.
+    ///
     /// # Safety
     ///
-    /// The returned handle is only valid while the host is alive — which the
-    /// CLAP spec guarantees is longer than the plugin's lifetime. Callers must
-    /// not cache this handle beyond the plugin's `destroy()` call, and every
-    /// dereference from a background thread must be fenced by `alive_fence`
-    /// or `host_log_quiescence`.
+    /// The returned handle must not be stored, moved to another thread, or
+    /// dereferenced except within a window that the plugin's teardown protocol
+    /// fences. Acceptable windows are:
+    /// 1. a `HostCallQuiescence::host_call` (or `quiescence::host_call`)
+    ///    closure, which refuses entry once `alive_fence` is lowered; or
+    /// 2. a `HostLogQuiescence` guard, which `NamClapMainThread::drop` quiesces
+    ///    before the host is released.
+    ///
+    /// The handle must be obtained inside that window, not before it.
     #[inline]
-    pub fn as_static(&self) -> clack_plugin::host::HostSharedHandle<'static> {
-        // SAFETY: `self.raw` was obtained from a valid HostSharedHandle during initialization.
-        // The CLAP specification guarantees that the host outlives all plugin instances and their threads.
-        // Reconstructing the handle with 'static lifetime via HostAudioProcessorHandle::from_raw(...).shared()
-        // is sound because access is fenced during destruction.
+    pub unsafe fn as_static(&self) -> clack_plugin::host::HostSharedHandle<'static> {
+        // SAFETY: `self.raw` was obtained from a valid HostSharedHandle during
+        // initialization. The caller upholds the fencing contract above, which
+        // keeps every dereference inside the host's lifetime.
         unsafe { clack_plugin::host::HostAudioProcessorHandle::from_raw(self.raw).shared() }
     }
 }
@@ -142,7 +150,8 @@ mod tests {
             unsafe { clack_plugin::host::HostAudioProcessorHandle::from_raw(raw_ptr).shared() };
 
         let bridge = GuiHostBridge::new(&shared_handle);
-        let static_handle = bridge.as_static();
+        // SAFETY: `mock_host` outlives `static_handle`, and the handle is only compared, never dereferenced.
+        let static_handle = unsafe { bridge.as_static() };
 
         assert_eq!(
             static_handle.as_raw() as *const _,

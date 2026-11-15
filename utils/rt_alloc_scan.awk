@@ -61,7 +61,11 @@ BEGIN {
     patterns[20] = "VecDeque"
     patterns[21] = "collect\\(\\)"
     patterns[22] = "Box<dyn"
-    N = 22
+    patterns[23] = "\\*payload"
+    patterns[24] = "std::mem::take"
+    patterns[25] = "RecoveredCommands::"
+    patterns[26] = "drop_in_place"
+    N = 26
     matches = ""
 }
 
@@ -196,6 +200,17 @@ FNR == 1 {
     # `DelayLine::with_capacity` calls are off-RT by contract.
     if (skipping == 0 && FILENAME ~ /dsp\/dry_delay\.rs$/ &&
         $0 ~ /^[ \t]*(pub(\(crate\)|\(super\))? )?fn new[ \t]*\(/) {
+        begin_region()
+        depth_count(s)
+        maybe_close_region()
+        next
+    }
+
+    # --- Whitelisted off-RT rollback in `processor/rollback.rs` ---
+    # `ActivateRollbackGuard::drop` runs only when `activate()` fails on the
+    # main thread; recovering queued commands there is off-RT by contract.
+    if (skipping == 0 && FILENAME ~ /processor\/rollback\.rs$/ &&
+        $0 ~ /^[ \t]*fn drop[ \t]*\(/) {
         begin_region()
         depth_count(s)
         maybe_close_region()

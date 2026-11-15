@@ -308,6 +308,11 @@ pub struct NamClapProcessor<'a> {
     /// before retiring through the parking lot; cleared with `Release` by the
     /// audio thread once the sweep finds the lot empty.
     pub(crate) parking_lot_dirty: AtomicBool,
+    /// Parking lot for retired command/slimmable `Box` envelopes when the
+    /// off-RT box channel is full.
+    pub(crate) box_parking_lot: [Option<crate::clap::plugin::retired_box::RetiredBox>; 16],
+    /// Dirty latch avoiding full scans of `box_parking_lot` in steady state.
+    pub(crate) box_parking_lot_dirty: AtomicBool,
     /// Engine structural-swap scheduler for the command channel.
     ///
     /// Owns the audio-thread end of the command SPSC ([`CommandConsumer`],
@@ -343,6 +348,8 @@ pub struct NamClapProcessor<'a> {
     pub(crate) gc_tx: Producer<GcItem>,
     /// Fallback buffer for GC overflow (overwrite).
     pub(crate) gc_overflow: Arc<GcOverflowBuffer>,
+    /// SPSC producer returning inert `Box` shells to the main thread for off-RT drop.
+    pub(crate) box_gc_tx: Producer<crate::clap::plugin::retired_box::RetiredBox>,
     /// Modulation offsets (CLAP Parameter Modulation).
     pub(crate) mod_input_gain: f32,
     /// Modulation offsets (CLAP Parameter Modulation).

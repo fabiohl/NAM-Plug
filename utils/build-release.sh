@@ -167,11 +167,18 @@ if [ "$DO_CERTIFY" = true ]; then
     fi
 
     CERT_BIN=""
-    if [ -x "$PROJECT_DIR/target/release/plug_long_receipt" ]; then
-        CERT_BIN="$PROJECT_DIR/target/release/plug_long_receipt"
-    elif [ -x "$PROJECT_DIR/target/long/release/plug_long_receipt" ]; then
-        CERT_BIN="$PROJECT_DIR/target/long/release/plug_long_receipt"
-    fi
+    for cand in \
+        "${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/debug/plug_long_receipt" \
+        "${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/release/plug_long_receipt" \
+        "$PROJECT_DIR/target/debug/plug_long_receipt" \
+        "$PROJECT_DIR/target/release/plug_long_receipt" \
+        "$PROJECT_DIR/target/long/debug/plug_long_receipt" \
+        "$PROJECT_DIR/target/long/release/plug_long_receipt"; do
+        if [ -x "$cand" ]; then
+            CERT_BIN="$cand"
+            break
+        fi
+    done
 
     RC=0
     if [ -z "$CERT_BIN" ]; then
@@ -301,19 +308,20 @@ for candidate in llvm-objdump objdump; do
     fi
 done
 
-# Pre-build plug_long_receipt tool in release profile (reused by tests-long.sh and --certify)
-if ! cargo build --locked --release --features testing --bin plug_long_receipt >> "$ENV_LOG" 2>&1; then
+# Pre-build plug_long_receipt tool in dev profile (reused by tests-long.sh and --certify)
+if ! cargo build --locked --features testing --bin plug_long_receipt >> "$ENV_LOG" 2>&1; then
     FAILS+=("env_verify")
     emit "PHASE: env_verify FAIL rc=1 log=$ENV_LOG (failed to build plug_long_receipt)"
     finish
     die "cannot build the typed receipt tool (plug_long_receipt)"
 fi
+RECEIPT_BIN="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/debug/plug_long_receipt"
 
 CEREMONY_RECEIPT="$LOG_DIR/ab-opt-ceremony-receipt.json"
 CEREMONY_PREFLIGHT_VERDICT=""
 if [ "$DO_STRICT" -eq 1 ] && [ -f "$CEREMONY_RECEIPT" ]; then
     CEREMONY_PREFLIGHT_LOG="$LOG_DIR/build-release-ceremony_preflight.log"
-    if ! CEREMONY_PREFLIGHT_VERDICT=$(cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- \
+    if ! CEREMONY_PREFLIGHT_VERDICT=$("$RECEIPT_BIN" \
         ceremony-proof --receipt "$CEREMONY_RECEIPT" --git-sha "$GIT_COMMIT" 2>"$CEREMONY_PREFLIGHT_LOG"); then
         echo "ERROR: --strict rejected the A/B ceremony receipt (see $CEREMONY_PREFLIGHT_LOG)" | tee -a "$CEREMONY_PREFLIGHT_LOG" >&2
         FAILS+=("env_verify")
@@ -375,7 +383,7 @@ elif [ -n "$LLVM_PROFDATA" ]; then
         fi
 
         echo "Validating PGO workload receipt..."
-        cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- \
+        "$RECEIPT_BIN" \
             pgo-check --receipt "$PGO_WORKLOAD_RECEIPT" --log "$PGO_WORKLOAD_LOG"
     } 2>&1 | tee "$PGO_LOG"
     RC=${PIPESTATUS[0]}
@@ -444,11 +452,11 @@ mkdir -p "$BOLT_DIR"
 
 CEREMONY_VERDICT=""
 if [ -f "$CEREMONY_RECEIPT" ]; then
-    CEREMONY_VERDICT=$(cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- \
+    CEREMONY_VERDICT=$("$RECEIPT_BIN" \
         ceremony-proof --receipt "$CEREMONY_RECEIPT" --git-sha "$GIT_COMMIT" 2>"$LOG_DIR/build-release-ceremony_proof.err" || true)
 fi
 
-if [ -n "$CEREMONY_VERDICT" ] && [ "$CEREMONY_VERDICT" != "PGO+BOLT" ]; then
+if [ "$CEREMONY_VERDICT" != "PGO+BOLT" ]; then
     phase "bolt_optimize"
     BOLT_LOG="$LOG_DIR/build-release-bolt_optimize.log"
     if [ "$CEREMONY_VERDICT" = "UNOPTIMIZED" ]; then
@@ -459,6 +467,16 @@ if [ -n "$CEREMONY_VERDICT" ] && [ "$CEREMONY_VERDICT" != "PGO+BOLT" ]; then
         echo "A/B ceremony proved PGO-ONLY (BOLT applied, margin not met); fallback_pgo_only per promotion policy" | tee -a "$BOLT_LOG"
         BOLT_STATUS="not_proven"
         emit "PHASE: bolt_optimize PASS log=$BOLT_LOG"
+    else
+        echo "No valid PGO+BOLT ceremony proof at $CEREMONY_RECEIPT; skipping BOLT optimization" | tee -a "$BOLT_LOG"
+        BOLT_STATUS="not_proven"
+        if [ "$DO_STRICT" -eq 1 ]; then
+            FAILS+=("bolt_optimize")
+            emit "PHASE: bolt_optimize FAIL rc=1 log=$BOLT_LOG"
+            finish
+            exit 1
+        fi
+        gap "bolt_not_proven"
     fi
 elif [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
     phase "bolt_optimize"
@@ -609,7 +627,7 @@ if {
     nm -D "$STAGE_CLAP" | grep -w "clap_entry" >/dev/null || { echo "Missing clap_entry symbol!"; exit 1; }
     readelf -d "$STAGE_CLAP" | grep SONAME >/dev/null || { echo "Missing SONAME!"; exit 1; }
     echo "Running dynamic linker smoke test (smoke-load)..."
-    cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- smoke-load --artifact "$STAGE_CLAP"
+    "$RECEIPT_BIN" smoke-load --artifact "$STAGE_CLAP"
     mv -f "$STAGE_CLAP" "$CLAP_TARGET"
     printf '%s\n' "$STAGE_SHA" > "$CLAP_SHA_FILE"
     [ "$(sha256sum "$CLAP_TARGET" | cut -d' ' -f1)" = "$STAGE_SHA" ] || { echo "published SHA-256 differs from staged artifact"; exit 1; }
@@ -665,7 +683,7 @@ EOF
         TMP_EXTRACT=$(mktemp -d -t nam-plug-extract.XXXXXX)
         tar -I "zstd -d" -xf "$TARBALL" -C "$TMP_EXTRACT"
         [ -s "$TMP_EXTRACT/$ARCHIVE_NAME/nam_plug.clap" ] || { echo "ERROR: tarball extraction verification failed: nam_plug.clap missing" >&2; exit 1; }
-        cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- smoke-load --artifact "$TMP_EXTRACT/$ARCHIVE_NAME/nam_plug.clap"
+        "$RECEIPT_BIN" smoke-load --artifact "$TMP_EXTRACT/$ARCHIVE_NAME/nam_plug.clap"
         rm -rf "$TMP_EXTRACT"
 
         if command -v flatpak >/dev/null 2>&1; then
@@ -784,7 +802,7 @@ if [ "$DO_STRICT" -eq 1 ]; then
     RECEIPT_ARGS+=("--strict")
 fi
 
-cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- build-receipt "${RECEIPT_ARGS[@]}" 2>&1 | tee "$RECEIPT_LOG"
+"$RECEIPT_BIN" build-receipt "${RECEIPT_ARGS[@]}" 2>&1 | tee "$RECEIPT_LOG"
 RC=${PIPESTATUS[0]}
 
 if [ "$RC" -eq 0 ]; then
@@ -792,7 +810,7 @@ if [ "$RC" -eq 0 ]; then
     # when the three commands run as independent processes.
     printf '%s\n' "$NAM_RUN_ID" > "$LOG_DIR/build-run-id"
     if [ -f "$BUILD_RECEIPT" ]; then
-        if ! status_output=$(cargo run --quiet --locked --release --features testing --bin plug_long_receipt -- build-status --receipt "$BUILD_RECEIPT" --run-id "$NAM_RUN_ID" 2>>"$RECEIPT_LOG"); then
+        if ! status_output=$("$RECEIPT_BIN" build-status --receipt "$BUILD_RECEIPT" --run-id "$NAM_RUN_ID" 2>>"$RECEIPT_LOG"); then
             rm -f "$BUILD_RECEIPT"
             FAILS+=("build_receipt")
             emit "PHASE: build_receipt FAIL rc=1 log=$RECEIPT_LOG"

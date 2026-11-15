@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # verify_rt_codegen.sh — Validação de codegen e desmontagem SIMD do hot-path. Classe D.
-# Uso: utils/verify_rt_codegen.sh [binário] [--profile <path>] [--json-out <path>]
+# Uso: utils/verify_rt_codegen.sh [binário] [--phase-name <name>] [--profile <path>] [--json-out <path>]
 # Orçamento: 250
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -euo pipefail
@@ -13,7 +13,6 @@ FILTER="utils/dsp-hotpath-filter.py"
 REPORT="utils/codegen-report.py"
 PROFILE="utils/codegen-profile.json"
 JSON_OUT=""
-PRE_ASM_FULL=""
 PHASE_NAME="codegen"
 BUILD_IF_MISSING=0
 TEST_SYNTHETIC=0
@@ -24,11 +23,10 @@ while [ "$#" -gt 0 ]; do
         --build-if-missing) BUILD_IF_MISSING=1 ;;
         --test-synthetic-violation) TEST_SYNTHETIC=1 ;;
         --phase-name) shift; [ "$#" -gt 0 ] || usage_fail "--phase-name requires a value"; PHASE_NAME="$1" ;;
-        --full-dump) shift; [ "$#" -gt 0 ] || usage_fail "--full-dump requires a path"; PRE_ASM_FULL="$1" ;;
         --profile) shift; [ "$#" -gt 0 ] || usage_fail "--profile requires a path"; PROFILE="$1" ;;
         --json-out) shift; [ "$#" -gt 0 ] || usage_fail "--json-out requires a path"; JSON_OUT="$1" ;;
         -h|--help)
-            echo "Uso: utils/verify_rt_codegen.sh [binário] [--profile <path>] [--json-out <path>] [--phase-name <name>] [--full-dump <path>] [--build-if-missing] [--test-synthetic-violation] [-h|--help]"
+            echo "Uso: utils/verify_rt_codegen.sh [binário] [--phase-name <name>] [--profile <path>] [--json-out <path>] [--build-if-missing] [--test-synthetic-violation] [-h|--help]"
             exit 0
             ;;
         -*) usage_fail "Unknown option: $1" ;;
@@ -120,21 +118,16 @@ ASM_FILTERED="$(mktemp -t nam-plug-rt-codegen-filtered.XXXXXX.asm)"
 ASM_SUMMARY="$(mktemp -t nam-plug-rt-codegen-summary.XXXXXX.txt)"
 TMP_ERR="$(mktemp -t nam-plug-rt-codegen-err.XXXXXX.log)"
 
-if [ -n "$PRE_ASM_FULL" ] && [ -s "$PRE_ASM_FULL" ]; then
-    ASM_FULL="$PRE_ASM_FULL"
-    trap 'rm -f "$ASM_BOUNDED" "$HOT_SYMBOLS" "$ASM_FILTERED" "$ASM_SUMMARY" "$TMP_ERR"' EXIT
-else
-    ASM_FULL="$(mktemp -t nam-plug-rt-codegen.XXXXXX.asm)"
-    trap 'rm -f "$ASM_FULL" "$ASM_BOUNDED" "$HOT_SYMBOLS" "$ASM_FILTERED" "$ASM_SUMMARY" "$TMP_ERR"' EXIT
+ASM_FULL="$(mktemp -t nam-plug-rt-codegen.XXXXXX.asm)"
+trap 'rm -f "$ASM_FULL" "$ASM_BOUNDED" "$HOT_SYMBOLS" "$ASM_FILTERED" "$ASM_SUMMARY" "$TMP_ERR"' EXIT
 
-    if ! LC_ALL=C "$OBJDUMP_TOOL" -d --demangle --no-show-raw-insn "$TARGET_BIN" > "$ASM_FULL" 2> "$TMP_ERR"; then
-        cat "$TMP_ERR" >&2
-        cat "$TMP_ERR" >> "$CUR_LOG"
-        FAILS+=("objdump_full")
-        emit "PHASE: $PHASE_NAME FAIL rc=1 log=$CUR_LOG (objdump full disassembly failed)"
-        finish || true
-        exit 1
-    fi
+if ! LC_ALL=C "$OBJDUMP_TOOL" -d --demangle --no-show-raw-insn "$TARGET_BIN" > "$ASM_FULL" 2> "$TMP_ERR"; then
+    cat "$TMP_ERR" >&2
+    cat "$TMP_ERR" >> "$CUR_LOG"
+    FAILS+=("objdump_full")
+    emit "PHASE: $PHASE_NAME FAIL rc=1 log=$CUR_LOG (objdump full disassembly failed)"
+    finish || true
+    exit 1
 fi
 
 if [ ! -s "$ASM_FULL" ]; then

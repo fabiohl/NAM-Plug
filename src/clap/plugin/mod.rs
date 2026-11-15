@@ -7,6 +7,7 @@ pub mod command_scheduler;
 pub mod errors;
 pub(crate) mod lock;
 pub mod quiescence;
+pub(crate) mod retired_box;
 pub mod shared;
 pub use command_scheduler::{
     CMD_QUEUE_CAPACITY, CommandConsumer, CommandProducer, CommandScheduler,
@@ -150,6 +151,14 @@ impl DefaultPluginFactory for NamClapPlugin {
             .take()
             .ok_or(PluginError::Message("gc_rx consumer already taken"))?;
 
+        let box_gc_rx = shared
+            .cold
+            .box_gc_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or(PluginError::Message("box_gc_rx consumer already taken"))?;
+
         let slimmable_tx = shared
             .cold
             .slimmable_tx
@@ -186,7 +195,10 @@ impl DefaultPluginFactory for NamClapPlugin {
                         _ => LogSeverity::Info,
                     };
                     let cmsg = CString::new(msg).unwrap_or_default();
-                    let host_shared = host_bridge.as_static();
+                    // SAFETY: `_guard` keeps host-log quiescence active for this
+                    // dispatch; `NamClapMainThread::drop` quiesces it before the
+                    // host is released, so the handle does not outlive the host.
+                    let host_shared = unsafe { host_bridge.as_static() };
                     host_log.log(&host_shared, severity, &cmsg);
                 });
                 if let Some(nl) = NamLogger::global() {
@@ -235,6 +247,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             sys: SystemSnapshot::capture(),
             cmd_producer: RefCell::new(cmd_producer),
             gc_rx: RefCell::new(gc_rx),
+            box_gc_rx: RefCell::new(box_gc_rx),
             slimmable_tx: RefCell::new(slimmable_tx),
             last_reported_latency: Cell::new(0),
             last_reported_cabsim_tail: Cell::new(0),

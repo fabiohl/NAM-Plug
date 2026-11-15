@@ -14,6 +14,7 @@
 use super::{CMD_SWAP_TUNABLES, NamClapProcessor, SLIMMABLE_SWAP_TUNABLES};
 use crate::clap::extensions::cabinet::CabSlotDsp;
 use crate::clap::extensions::params::bypass_bool_to_u32;
+use crate::clap::plugin::retired_box::{RetiredBox, RetiredBoxSink};
 use crate::clap::plugin::{ClapParamPayload, NamClapShared, SlimmableRebuild, StructuralKind};
 use crate::clap::processor::dsp::dry_delay::DryDelayLine;
 use crate::clap::processor::state::BypassCrossfader;
@@ -45,6 +46,7 @@ impl<'a> NamClapProcessor<'a> {
         // 0. Drain parking lot: re-try items parked during previous swaps
         //    when the GC SPSC channel was full.
         self.drain_parking_lot();
+        self.drain_box_parking_lot();
 
         // 1. Structural-swap drains — engine scheduler
         //    (`neural_amp_modeler_rs::common::spsc::swap`). One shared
@@ -173,17 +175,17 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     /// Applies the commands staged by [`ActivateRollbackGuard`] after a failed
-    /// activation. The vector is moved into the processor by `activate()`, so
-    /// this path never locks or allocates; it runs at most once per
-    /// activation.
+    /// activation. The queue was moved into the processor by `activate()`, so
+    /// popping via `pop_front()` keeps the queue's buffer alive until `deactivate()`
+    /// drops it off-RT — zero locks, zero heap allocations, and zero deallocations
+    /// on the audio thread.
     #[cold]
     fn replay_recovered_commands(&mut self) {
         if self.recovered_commands.is_empty() {
             return;
         }
-        let recovered = std::mem::take(&mut self.recovered_commands);
         let (mut handler, mut gc) = command_swap_parts!(self);
-        for payload in recovered {
+        while let Some(payload) = self.recovered_commands.pop_front() {
             handler.install(payload, &mut gc);
         }
     }
@@ -301,6 +303,12 @@ macro_rules! command_swap_parts {
                 rt_status: &$s.rt_status,
                 gain_lut: $s.gain_lut,
                 host: &mut $s.host,
+                box_gc: $crate::clap::plugin::retired_box::RetiredBoxSink {
+                    producer: &mut $s.box_gc_tx,
+                    parking_lot: &mut $s.box_parking_lot,
+                    parking_lot_dirty: &$s.box_parking_lot_dirty,
+                    overflow: &$s.shared.cold.box_overflow,
+                },
                 resolved: 0,
             },
             neural_amp_modeler_rs::common::spsc::GcSink {
@@ -330,6 +338,12 @@ macro_rules! slimmable_swap_parts {
                 model_l: &mut $s.model_l,
                 model_generation: &$s.model_generation,
                 shared: $s.shared,
+                box_gc: $crate::clap::plugin::retired_box::RetiredBoxSink {
+                    producer: &mut $s.box_gc_tx,
+                    parking_lot: &mut $s.box_parking_lot,
+                    parking_lot_dirty: &$s.box_parking_lot_dirty,
+                    overflow: &$s.shared.cold.box_overflow,
+                },
             },
             neural_amp_modeler_rs::common::spsc::GcSink {
                 producer: &mut $s.gc_tx,
@@ -368,6 +382,8 @@ pub(crate) struct SlimmableSwapHandler<'p, 'a> {
     pub(super) model_generation: &'p u64,
     /// Shared main<->RT state (stale-discard telemetry counter).
     pub(super) shared: &'a NamClapShared,
+    /// Off-RT sink returning consumed `Box<SlimmableRebuild>` envelopes.
+    pub(super) box_gc: RetiredBoxSink<'p>,
 }
 
 impl RtSwapHandler for SlimmableSwapHandler<'_, '_> {
@@ -407,9 +423,12 @@ impl RtSwapHandler for SlimmableSwapHandler<'_, '_> {
     /// `take_slimmable_rebuild` at request time, and the full-channel
     /// reference must survive the install.
     #[cold]
-    fn install(&mut self, payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
-        let rebuild = *payload;
-        if let Some(old) = self.model_l.replace(rebuild.model) {
+    fn install(&mut self, mut payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
+        let model = payload.model.take();
+        self.box_gc.retire(RetiredBox::Slimmable(payload));
+        if let Some(model) = model
+            && let Some(old) = self.model_l.replace(model)
+        {
             gc.retire(GcItem::Model(old));
         }
     }
@@ -421,15 +440,19 @@ impl RtSwapHandler for SlimmableSwapHandler<'_, '_> {
     /// coalescing) is already covered by the engine's
     /// `RT_STATUS_STRUCTURAL_SUPERSEDED` telemetry.
     #[cold]
-    fn discard(&mut self, payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
-        let rebuild = *payload;
-        if rebuild.generation != *self.model_generation {
+    fn discard(&mut self, mut payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
+        let generation = payload.generation;
+        let model = payload.model.take();
+        self.box_gc.retire(RetiredBox::Slimmable(payload));
+        if generation != *self.model_generation {
             self.shared
                 .cold
                 .slimmable_stale_discarded_total
                 .fetch_add(1, Ordering::Relaxed);
         }
-        gc.retire(GcItem::Model(rebuild.model));
+        if let Some(model) = model {
+            gc.retire(GcItem::Model(model));
+        }
     }
 }
 
@@ -543,6 +566,8 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     pub(super) gain_lut: &'static GainLUT,
     /// Audio-thread host handle (`request_restart`, `HostTail::changed`).
     pub(super) host: &'p mut HostAudioProcessorHandle<'a>,
+    /// Off-RT sink returning inert `Box<ClapParamPayload>` envelopes.
+    pub(super) box_gc: RetiredBoxSink<'p>,
 
     /// Install/discard count of the current drain, consumed by
     /// [`RtSwapHandler::after_drain`] for the gapless ack publication.
@@ -571,17 +596,27 @@ impl RtSwapHandler for ClapCommandSwapHandler<'_, '_> {
     /// Applies one command. `#[cold]` — structural applies are rare; light
     /// `Params` snapshots arrive here only when the drain found one.
     #[cold]
-    fn install(&mut self, payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
+    fn install(&mut self, mut payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
         self.resolved += 1;
-        self.apply_structural(*payload, gc);
+        let taken = std::mem::replace(
+            payload.as_mut(),
+            ClapParamPayload::Params(RtProcessingParams::default()),
+        );
+        self.box_gc.retire(RetiredBox::Command(payload));
+        self.apply_structural(taken, gc);
     }
 
     /// Discards the heap resources of a superseded command off-RT.
     /// `#[cold]` — supersession only fires on coalesced bursts.
     #[cold]
-    fn discard(&mut self, payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
+    fn discard(&mut self, mut payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
         self.resolved += 1;
-        self.discard_structural_payload(*payload, gc);
+        let taken = std::mem::replace(
+            payload.as_mut(),
+            ClapParamPayload::Params(RtProcessingParams::default()),
+        );
+        self.box_gc.retire(RetiredBox::Command(payload));
+        self.discard_structural_payload(taken, gc);
     }
 
     /// Publishes the command acknowledgment for this drain.

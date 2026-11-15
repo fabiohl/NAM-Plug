@@ -10,6 +10,7 @@
 //! ready for the next `activate()` attempt.
 
 use crate::clap::plugin::lock::lock_cold;
+use crate::clap::plugin::retired_box::RetiredBox;
 use crate::clap::plugin::shared::PendingModel;
 use crate::clap::plugin::{ClapParamPayload, NamClapShared, PendingRestartOs, SlimmableRebuild};
 use clack_plugin::plugin::PluginError;
@@ -31,6 +32,7 @@ pub(crate) struct ActivateRollbackGuard<'a> {
     shared: &'a NamClapShared,
     pub(crate) param_rx: Option<Consumer<Box<ClapParamPayload>>>,
     pub(crate) gc_tx: Option<Producer<GcItem>>,
+    pub(crate) box_gc_tx: Option<Producer<RetiredBox>>,
     pub(crate) slimmable_rx: Option<Consumer<Box<SlimmableRebuild>>>,
     pub(crate) deactivated: Option<DeactivatedDspState>,
     pub(crate) pending_restart_os_factor: Option<PendingRestartOs>,
@@ -41,6 +43,7 @@ pub(crate) struct ActivateRollbackGuard<'a> {
 pub(crate) struct ActivatedResources {
     pub(crate) param_rx: Consumer<Box<ClapParamPayload>>,
     pub(crate) gc_tx: Producer<GcItem>,
+    pub(crate) box_gc_tx: Producer<RetiredBox>,
     pub(crate) slimmable_rx: Consumer<Box<SlimmableRebuild>>,
 }
 
@@ -50,6 +53,7 @@ impl<'a> ActivateRollbackGuard<'a> {
             shared,
             param_rx: None,
             gc_tx: None,
+            box_gc_tx: None,
             slimmable_rx: None,
             deactivated: None,
             pending_restart_os_factor: None,
@@ -68,6 +72,10 @@ impl<'a> ActivateRollbackGuard<'a> {
             .gc_tx
             .take()
             .ok_or_else(|| PluginError::Message("gc_tx must be set before defuse"))?;
+        let box_tx = self
+            .box_gc_tx
+            .take()
+            .ok_or_else(|| PluginError::Message("box_gc_tx must be set before defuse"))?;
         let slimmable = self
             .slimmable_rx
             .take()
@@ -77,6 +85,7 @@ impl<'a> ActivateRollbackGuard<'a> {
         Ok(ActivatedResources {
             param_rx: rx,
             gc_tx: tx,
+            box_gc_tx: box_tx,
             slimmable_rx: slimmable,
         })
     }
@@ -108,6 +117,14 @@ impl Drop for ActivateRollbackGuard<'_> {
                 .shared
                 .cold
                 .gc_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(tx);
+        }
+        if let Some(tx) = self.box_gc_tx.take() {
+            *self
+                .shared
+                .cold
+                .box_gc_tx
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(tx);
         }
@@ -217,10 +234,12 @@ mod tests {
         let mut guard = ActivateRollbackGuard::new(&shared);
         let (_param_tx, param_rx) = rtrb::RingBuffer::new(8);
         let (gc_tx, _gc_rx) = rtrb::RingBuffer::new(8);
+        let (box_gc_tx, _box_gc_rx) = rtrb::RingBuffer::new(8);
         let (_slimmable_tx, slimmable_rx) = rtrb::RingBuffer::new(8);
 
         guard.param_rx = Some(param_rx);
         guard.gc_tx = Some(gc_tx);
+        guard.box_gc_tx = Some(box_gc_tx);
         guard.slimmable_rx = Some(slimmable_rx);
 
         let resources = guard.defuse();
@@ -242,10 +261,12 @@ mod tests {
             let mut guard = ActivateRollbackGuard::new(&shared);
             let (_param_tx, param_rx) = rtrb::RingBuffer::new(8);
             let (gc_tx, _gc_rx) = rtrb::RingBuffer::new(8);
+            let (box_gc_tx, _box_gc_rx) = rtrb::RingBuffer::new(8);
             let (_slimmable_tx, slimmable_rx) = rtrb::RingBuffer::new(8);
 
             guard.param_rx = Some(param_rx);
             guard.gc_tx = Some(gc_tx);
+            guard.box_gc_tx = Some(box_gc_tx);
             guard.slimmable_rx = Some(slimmable_rx);
             guard.pending_restart_os_factor = Some(PendingRestartOs::Pending(
                 neural_amp_modeler_rs::dsp::oversample::OversampleFactor::X4,
@@ -262,6 +283,7 @@ mod tests {
         // Verify channels are back in ColdShared
         assert!(shared.cold.param_rx.lock().unwrap().is_some());
         assert!(shared.cold.gc_tx.lock().unwrap().is_some());
+        assert!(shared.cold.box_gc_tx.lock().unwrap().is_some());
         assert!(shared.cold.slimmable_rx.lock().unwrap().is_some());
     }
 
@@ -274,6 +296,7 @@ mod tests {
         let shared = make_test_shared();
         let (mut param_tx, param_rx) = rtrb::RingBuffer::new(8);
         let (gc_tx, _gc_rx) = rtrb::RingBuffer::new(8);
+        let (box_gc_tx, _box_gc_rx) = rtrb::RingBuffer::new(8);
         let (_slimmable_tx, slimmable_rx) = rtrb::RingBuffer::new(8);
 
         // A newer model is already deferred; the recovered ring carries an
@@ -315,6 +338,7 @@ mod tests {
             let mut guard = ActivateRollbackGuard::new(&shared);
             guard.param_rx = Some(param_rx);
             guard.gc_tx = Some(gc_tx);
+            guard.box_gc_tx = Some(box_gc_tx);
             guard.slimmable_rx = Some(slimmable_rx);
         }
 
@@ -345,6 +369,7 @@ mod tests {
         let shared = make_test_shared();
         let (mut param_tx, param_rx) = rtrb::RingBuffer::new(8);
         let (gc_tx, _gc_rx) = rtrb::RingBuffer::new(8);
+        let (box_gc_tx, _box_gc_rx) = rtrb::RingBuffer::new(8);
         let (_slimmable_tx, slimmable_rx) = rtrb::RingBuffer::new(8);
 
         *shared.cold.pending_model.lock().unwrap() = Some(PendingModel {
@@ -376,6 +401,7 @@ mod tests {
             let mut guard = ActivateRollbackGuard::new(&shared);
             guard.param_rx = Some(param_rx);
             guard.gc_tx = Some(gc_tx);
+            guard.box_gc_tx = Some(box_gc_tx);
             guard.slimmable_rx = Some(slimmable_rx);
         }
 
@@ -400,6 +426,7 @@ mod tests {
         let shared = make_test_shared();
         let (mut param_tx, param_rx) = rtrb::RingBuffer::new(8);
         let (gc_tx, _gc_rx) = rtrb::RingBuffer::new(8);
+        let (box_gc_tx, _box_gc_rx) = rtrb::RingBuffer::new(8);
         let (_slimmable_tx, slimmable_rx) = rtrb::RingBuffer::new(8);
 
         let resampler = Box::new(NamResampler::new_linear_simple(48000, 48000).unwrap());
@@ -423,6 +450,7 @@ mod tests {
             let mut guard = ActivateRollbackGuard::new(&shared);
             guard.param_rx = Some(param_rx);
             guard.gc_tx = Some(gc_tx);
+            guard.box_gc_tx = Some(box_gc_tx);
             guard.slimmable_rx = Some(slimmable_rx);
         }
 

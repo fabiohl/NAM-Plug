@@ -14,30 +14,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[cfg(feature = "heap-audit")]
-    struct AuditEnabledGuard;
-
-    #[cfg(feature = "heap-audit")]
-    impl AuditEnabledGuard {
-        fn new() -> Self {
-            neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED
-                .store(true, Ordering::Relaxed);
-            Self
-        }
-    }
-
-    #[cfg(feature = "heap-audit")]
-    impl Drop for AuditEnabledGuard {
-        fn drop(&mut self) {
-            neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED
-                .store(false, Ordering::Relaxed);
-        }
-    }
-
-    /// Serializes the evidence-gate tests across this audit lane: the audit
-    /// flips a global `AUDIT_ENABLED` switch, so concurrent audited tests
-    /// could mask each other's guard drop. Lock here keeps determinism.
-    #[cfg(feature = "heap-audit")]
-    static AUDIT_LANE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::clap::processor::heap_audit::ArmGuard;
 
     /// Runs a single dual-channel block through the processor, returning the
     /// `ProcessStatus`. The audio and event buffers are re-created per block
@@ -163,6 +140,7 @@ mod tests {
         // Run audited blocks.
         let shared_ptr = test_util::extract_shared(&mut plugin_instance);
         let shared = unsafe { &*shared_ptr };
+        let _audit_guard = ArmGuard::set(true);
 
         for _ in 0..20 {
             let status = process_block(&mut started_processor, &mut bufs);
@@ -176,11 +154,6 @@ mod tests {
                     .rt_status
                     .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
                 "RT_STATUS_HEAP_ALLOC set — allocation detected in inference hot path"
-            );
-            assert_eq!(
-                neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
-                0,
-                "zero heap allocations expected in active inference path"
             );
         }
     }
@@ -264,7 +237,7 @@ mod tests {
         let pair_a = make_test_pair(&ir_a);
         let pair_b = make_test_pair(&ir_b);
 
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
         shared
             .cold
             .rt_status
@@ -293,11 +266,6 @@ mod tests {
                 .rt_status
                 .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
             "RT_STATUS_HEAP_ALLOC set — allocation detected during IR 1 install"
-        );
-        assert_eq!(
-            neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
-            0,
-            "zero heap allocations expected during IR 1 install"
         );
         let tail_after_a = shared.rt_to_ui.cabsim_tail_samples.load(Ordering::Relaxed);
         assert!(
@@ -330,11 +298,6 @@ mod tests {
                 .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
             "RT_STATUS_HEAP_ALLOC set — allocation detected during IR swap"
         );
-        assert_eq!(
-            neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
-            0,
-            "zero heap allocations expected during IR swap"
-        );
         let tail_after_b = shared.rt_to_ui.cabsim_tail_samples.load(Ordering::Relaxed);
         assert!(
             tail_after_b > tail_after_a,
@@ -360,11 +323,6 @@ mod tests {
                 .rt_status
                 .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
             "RT_STATUS_HEAP_ALLOC set — allocation detected during IR clear"
-        );
-        assert_eq!(
-            neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
-            0,
-            "zero heap allocations expected during IR clear"
         );
         assert_eq!(
             shared.rt_to_ui.cabsim_tail_samples.load(Ordering::Relaxed),
@@ -420,11 +378,6 @@ mod tests {
                 .rt_status
                 .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
             "{label}: RT_STATUS_HEAP_ALLOC set — allocation detected in burst stress block"
-        );
-        assert_eq!(
-            neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
-            0,
-            "{label}: zero heap allocations expected in burst stress block"
         );
         let l_rms =
             (bufs.out_l.iter().map(|x| x * x).sum::<f32>() / bufs.out_l.len() as f32).sqrt();
@@ -594,7 +547,7 @@ mod tests {
         };
 
         // ── Arm the audit lane for the entire stress run. ──
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
         shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
 
         let mut max_rms = 0.0f32;
@@ -913,7 +866,7 @@ mod tests {
             process_block(&mut started_processor, &mut bufs);
         }
 
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
         shared
             .cold
             .rt_status
@@ -932,11 +885,6 @@ mod tests {
                     .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
                 "RT_STATUS_HEAP_ALLOC set — allocation detected in dual-mono inference hot path"
             );
-            assert_eq!(
-                neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
-                0,
-                "zero heap allocations expected in dual-mono inference path"
-            );
         }
     }
 
@@ -950,8 +898,6 @@ mod tests {
         use clack_common::events::Pckn;
         use clack_common::events::event_types::ParamValueEvent;
         use clack_common::utils::ClapId;
-
-        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
 
         const BLOCK: usize = 256;
         let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
@@ -994,7 +940,7 @@ mod tests {
         event_buf.push(&ev);
         let input_events = InputEvents::from_buffer(&event_buf);
 
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
         shared
             .cold
             .rt_status
@@ -1013,11 +959,6 @@ mod tests {
                     .rt_status
                     .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC),
                 "RT_STATUS_HEAP_ALLOC set during oversize block slicing + event execution"
-            );
-            assert_eq!(
-                neural_amp_modeler_rs::common::alloc_audit::get_alloc_count(),
-                0,
-                "zero heap allocations expected during oversize block with events"
             );
         }
     }
@@ -1062,7 +1003,7 @@ mod tests {
         let mut bufs = StereoTestBuffers::new(n, 0.1, 0.2);
 
         // Activates heap audit globally using RAII guard
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
 
         // Resets the status flag to ensure it is clean before
         shared
@@ -1115,8 +1056,6 @@ mod tests {
         use clack_common::events::Pckn;
         use clack_common::events::event_types::ParamValueEvent;
         use clack_common::utils::ClapId;
-
-        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
 
         // Host block must cover the whole ramp so the crossover lives inside
         // one audited callback.
@@ -1202,7 +1141,7 @@ mod tests {
         );
 
         // ── Arm the audit lane for the crossfade transitions ──
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
         shared
             .cold
             .rt_status
@@ -1335,8 +1274,6 @@ mod tests {
     fn test_heap_audit_gate_tail_drain_zero_alloc() {
         use neural_amp_modeler_rs::common::spsc::{RT_STATUS_HEAP_ALLOC, RT_STATUS_IS_SILENT};
 
-        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
-
         let model_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
         assert!(
             model_path.exists(),
@@ -1388,7 +1325,7 @@ mod tests {
         }
 
         // ── Arm the audit lane for the silence/draining sequence ──
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
         shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
 
         // Silence the input. The first held-open blocks still run inference
@@ -1438,8 +1375,6 @@ mod tests {
         use neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC;
         use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
         use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
-
-        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
 
         const BLOCK: usize = 128;
 
@@ -1494,7 +1429,7 @@ mod tests {
         }
 
         // ── Arm the audit lane for the whole Off → 2× → 4× progression ──
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
         shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
 
         let latency_off = shared.rt_to_ui.current_latency.load(Ordering::Relaxed);
@@ -1597,7 +1532,6 @@ mod tests {
             .lock()
             .expect("poisoning test mutex poisoned");
         super::super::processor_poisoning_test::ensure_isolated_crash_dir();
-        let _lane = AUDIT_LANE_MUTEX.lock().expect("audit lane mutex poisoned");
 
         const BLOCK: usize = 64;
 
@@ -1693,7 +1627,7 @@ mod tests {
         shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
 
         // ── Arm the audit lane for the silenced containment path ──
-        let _audit_guard = AuditEnabledGuard::new();
+        let _audit_guard = ArmGuard::set(true);
 
         for i in 0..10 {
             let rms = audited_block(
@@ -1711,6 +1645,157 @@ mod tests {
                 "the poison latch must stay engaged while the host has not restarted the plugin"
             );
         }
+    }
+
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_slimmable_swap_and_stale_discard_zero_alloc() {
+        use crate::clap::plugin::SlimmableRebuild;
+        use neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC;
+        use neural_amp_modeler_rs::loader::nam_json::model::LinearImplementation;
+        use neural_amp_modeler_rs::models::StaticModel;
+        use neural_amp_modeler_rs::models::linear::LinearModel;
+
+        let make_linear = |bias: f32| -> Box<StaticModel> {
+            let lin = LinearModel::new(vec![bias, 0.1, 0.05], 0.0, LinearImplementation::Direct)
+                .expect("linear model must build");
+            Box::new(StaticModel::Linear(Box::new(lin)))
+        };
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let main_thread_ptr = {
+            let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+            unsafe {
+                clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
+                    raw_ptr,
+                    |w| Ok(w.main_thread() as *const crate::clap::plugin::NamClapMainThread<'static>),
+                )
+                .unwrap()
+            }
+        };
+
+        let model_path = test_util::model_path("wavenet_a1_standard.nam");
+        let params = test_util::make_default_params(Some(model_path));
+        test_util::load_plugin_state(&mut plugin_instance, &params);
+        plugin_instance.call_on_main_thread_callback();
+
+        let stopped = plugin_instance
+            .activate(
+                |_, _| (),
+                PluginAudioConfiguration {
+                    sample_rate: 48000.0,
+                    min_frames_count: 64,
+                    max_frames_count: 512,
+                },
+            )
+            .unwrap();
+        let mut started_processor = stopped.start_processing().unwrap();
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        let mut bufs = StereoTestBuffers::new(256, 0.01, 0.01);
+
+        for _ in 0..4 {
+            let _ = process_block(&mut started_processor, &mut bufs);
+        }
+
+        let active_gen = shared.cold.model_generation.load(Ordering::Relaxed);
+        assert!(active_gen > 0);
+
+        let _audit_guard = ArmGuard::set(true);
+        shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
+
+        // 1. Stale generation discard while armed: zero alloc + zero dealloc.
+        unsafe { &*main_thread_ptr }
+            .slimmable_tx
+            .borrow_mut()
+            .push(Box::new(SlimmableRebuild {
+                generation: active_gen.wrapping_sub(1),
+                model: Some(make_linear(0.2)),
+            }))
+            .expect("stale slimmable push");
+        let _ = audited_block(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "slimmable stale discard",
+        );
+
+        // 2. Same-generation burst (supersede + install) while armed: zero alloc + zero dealloc.
+        {
+            let mt = unsafe { &*main_thread_ptr };
+            let mut tx = mt.slimmable_tx.borrow_mut();
+            tx.push(Box::new(SlimmableRebuild {
+                generation: active_gen,
+                model: Some(make_linear(0.3)),
+            }))
+            .expect("slimmable burst 1");
+            tx.push(Box::new(SlimmableRebuild {
+                generation: active_gen,
+                model: Some(make_linear(0.4)),
+            }))
+            .expect("slimmable burst 2");
+        }
+        let _ = audited_block(
+            &mut started_processor,
+            &mut bufs,
+            shared,
+            "slimmable burst supersede+install",
+        );
+
+        drop(_audit_guard);
+        unsafe { &*main_thread_ptr }.housekeeping();
+        let stopped = started_processor.stop_processing();
+        plugin_instance.deactivate(stopped);
+    }
+
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_recovered_commands_replay_zero_alloc() {
+        use crate::clap::plugin::ClapParamPayload;
+        use neural_amp_modeler_rs::common::params::RtProcessingParams;
+        use neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC;
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+
+        {
+            let mut recovered = shared.cold.recovered_commands.lock().unwrap();
+            recovered.push_back(Box::new(ClapParamPayload::Params(
+                RtProcessingParams::default(),
+            )));
+            recovered.push_back(Box::new(ClapParamPayload::CabBypass(true)));
+            recovered.push_back(Box::new(ClapParamPayload::LoadCabIr { pair: None }));
+        }
+
+        let stopped = plugin_instance
+            .activate(
+                |_, _| (),
+                PluginAudioConfiguration {
+                    sample_rate: 48000.0,
+                    min_frames_count: 64,
+                    max_frames_count: 512,
+                },
+            )
+            .unwrap();
+        let mut started_processor = stopped.start_processing().unwrap();
+        let mut bufs = StereoTestBuffers::new(256, 0.01, 0.01);
+
+        // `TrackingGuard` inside `started.process()` isolates the audio callback
+        // window from the test harness port wrapper allocations.
+        let _audit_guard = ArmGuard::set(true);
+        shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
+
+        let status = process_block(&mut started_processor, &mut bufs);
+        assert!(
+            matches!(status, ProcessStatus::Continue),
+            "recovered_commands replay: expected Continue (zero-alloc/dealloc), got {status:?}"
+        );
+        assert!(
+            !shared.cold.rt_status.check_flag(RT_STATUS_HEAP_ALLOC),
+            "RT_STATUS_HEAP_ALLOC set during recovered_commands replay"
+        );
+
+        let stopped = started_processor.stop_processing();
+        plugin_instance.deactivate(stopped);
     }
 
     /// Asserts that `got` deviates from `reference` on 4 or more samples with

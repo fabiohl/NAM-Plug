@@ -39,6 +39,8 @@ pub mod activation {
     pub const PARAM_RX_ALREADY_EXTRACTED: &str = "param_rx consumer has already been extracted";
     /// A single-owner GC producer was already extracted from `ColdShared`.
     pub const GC_TX_ALREADY_EXTRACTED: &str = "gc_tx producer has already been extracted";
+    /// A single-owner retired-box GC producer was already extracted from `ColdShared`.
+    pub const BOX_GC_TX_ALREADY_EXTRACTED: &str = "box_gc_tx producer has already been extracted";
     /// A single-owner channel consumer was already extracted from `ColdShared`.
     pub const SLIMMABLE_RX_ALREADY_EXTRACTED: &str =
         "slimmable_rx consumer has already been extracted";

@@ -107,6 +107,14 @@ pub(crate) fn deactivate<'a>(
             .unwrap_or_else(|e| e.into_inner());
         *gc_tx_guard = Some(processor.gc_tx);
 
+        let mut box_gc_tx_guard = processor
+            .shared
+            .cold
+            .box_gc_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *box_gc_tx_guard = Some(processor.box_gc_tx);
+
         let (slimmable_rx, parked_slimmable) = processor.slimmable_drain.into_parts();
         // A slimmable rebuild parked by the final callback drops here on
         // the main thread (safe — never on the audio thread). The plain
@@ -172,6 +180,7 @@ pub(crate) fn deactivate<'a>(
         // dropped yet — a single drain_gc_final call releases the SPSC +
         // overflow + the 16 parking-lot slots on the main thread.
         main_thread.drain_gc_final(&mut processor.parking_lot);
+        main_thread.drain_retired_boxes_final(&mut processor.box_parking_lot);
         main_thread.is_active.set(false);
         main_thread.latency_restart_requested_for.set(None);
     }));

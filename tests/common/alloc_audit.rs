@@ -22,6 +22,8 @@ use std::cell::Cell;
 thread_local! {
     static TRACKING_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static ALLOC_COUNT_TLS: Cell<usize> = const { Cell::new(0) };
+    static DEALLOC_COUNT_TLS: Cell<usize> = const { Cell::new(0) };
+    static REALLOC_COUNT_TLS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(not(feature = "heap-audit"))]
@@ -63,7 +65,23 @@ unsafe impl GlobalAlloc for CountingAllocator {
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if is_tracking_active() {
+            let _ = DEALLOC_COUNT_TLS.try_with(|count| {
+                count.set(count.get() + 1);
+            });
+        }
         unsafe { System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if is_tracking_active() {
+            let _ = REALLOC_COUNT_TLS.try_with(|count| {
+                count.set(count.get() + 1);
+            });
+            let _ = ALLOC_COUNT_TLS.try_with(|count| {
+                count.set(count.get() + 1);
+            });
+        }
+        unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
 
@@ -84,6 +102,8 @@ impl TrackingGuard {
         {
             set_tracking_active(true);
             set_local_alloc_count(0);
+            let _ = DEALLOC_COUNT_TLS.try_with(|c| c.set(0));
+            let _ = REALLOC_COUNT_TLS.try_with(|c| c.set(0));
             Self {}
         }
     }
@@ -106,5 +126,27 @@ pub fn get_alloc_count() -> usize {
     #[cfg(not(feature = "heap-audit"))]
     {
         get_local_alloc_count()
+    }
+}
+
+pub fn get_dealloc_count() -> usize {
+    #[cfg(feature = "heap-audit")]
+    {
+        neural_amp_modeler_rs::common::alloc_audit::get_dealloc_count()
+    }
+    #[cfg(not(feature = "heap-audit"))]
+    {
+        DEALLOC_COUNT_TLS.try_with(|c| c.get()).unwrap_or(0)
+    }
+}
+
+pub fn get_realloc_count() -> usize {
+    #[cfg(feature = "heap-audit")]
+    {
+        neural_amp_modeler_rs::common::alloc_audit::get_realloc_count()
+    }
+    #[cfg(not(feature = "heap-audit"))]
+    {
+        REALLOC_COUNT_TLS.try_with(|c| c.get()).unwrap_or(0)
     }
 }

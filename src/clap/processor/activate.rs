@@ -203,6 +203,17 @@ impl<'a> NamClapProcessor<'a> {
                 .ok_or_else(|| PluginError::Message(errors::activation::GC_TX_ALREADY_EXTRACTED))?;
             rollback.gc_tx = Some(gc_tx);
 
+            let box_gc_tx = shared
+                .cold
+                .box_gc_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .ok_or_else(|| {
+                    PluginError::Message(errors::activation::BOX_GC_TX_ALREADY_EXTRACTED)
+                })?;
+            rollback.box_gc_tx = Some(box_gc_tx);
+
             let slimmable_rx = shared
                 .cold
                 .slimmable_rx
@@ -1263,10 +1274,13 @@ impl<'a> NamClapProcessor<'a> {
                 out_rms_ewma_r: 0.0,
                 cmd_drain,
                 gc_tx: channels.gc_tx,
+                box_gc_tx: channels.box_gc_tx,
                 slimmable_drain,
                 gc_overflow: Arc::clone(&shared.cold.gc_overflow),
                 parking_lot: Default::default(),
                 parking_lot_dirty: std::sync::atomic::AtomicBool::new(false),
+                box_parking_lot: Default::default(),
+                box_parking_lot_dirty: std::sync::atomic::AtomicBool::new(false),
                 mod_input_gain: 0.0,
                 mod_output_gain: 0.0,
                 mod_gate_thresh: 0.0,

@@ -203,17 +203,16 @@ impl<'a> NamClapMainThread<'a> {
         }
     }
 
-    /// Returns the static host handle and shared Arc needed by window callbacks.
-    pub(crate) fn host_static_and_shared(
+    /// Returns the host bridge and shared Arc needed by window and loader callbacks.
+    ///
+    /// The bridge, not a `'static` host handle, is what crosses to background
+    /// threads: each host access is re-derived inside a fenced host-call window.
+    pub(crate) fn host_bridge_and_shared(
         &self,
-    ) -> (
-        clack_plugin::host::HostSharedHandle<'static>,
-        Arc<crate::clap::plugin::GuiSharedState>,
-    ) {
+    ) -> (GuiHostBridge, Arc<crate::clap::plugin::GuiSharedState>) {
         let bridge = GuiHostBridge::new(&self.host.shared());
-        let host_static = bridge.as_static();
         let shared_arc = Arc::clone(&self.shared.gui);
-        (host_static, shared_arc)
+        (bridge, shared_arc)
     }
 
     /// Starts the persistent GUI worker (if absent) and pre-warms the Slint
@@ -229,8 +228,8 @@ impl<'a> NamClapMainThread<'a> {
     /// spawns the worker itself, so pre-warming never blocks GUI creation.
     fn prewarm_gui_platform(&self, force_x11: bool) {
         if self.gui_worker.borrow().is_none() {
-            let (host_static, shared_arc) = self.host_static_and_shared();
-            match crate::clap::gui::worker::GuiWorker::spawn(shared_arc, host_static) {
+            let (host, shared_arc) = self.host_bridge_and_shared();
+            match crate::clap::gui::worker::GuiWorker::spawn(shared_arc, host) {
                 Ok(worker) => *self.gui_worker.borrow_mut() = Some(worker),
                 Err(msg) => {
                     log::warn!("NAM-Plug: GUI worker spawn failed during pre-warm: {msg}");
@@ -339,8 +338,8 @@ impl<'a> NamClapMainThread<'a> {
 
         // Ensure the persistent per-instance GUI worker exists.
         if self.gui_worker.borrow().is_none() {
-            let (host_static, shared_arc) = self.host_static_and_shared();
-            let worker = crate::clap::gui::worker::GuiWorker::spawn(shared_arc, host_static)
+            let (host, shared_arc) = self.host_bridge_and_shared();
+            let worker = crate::clap::gui::worker::GuiWorker::spawn(shared_arc, host)
                 .map_err(PluginError::Message)?;
             *self.gui_worker.borrow_mut() = Some(worker);
         }

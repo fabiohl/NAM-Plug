@@ -36,4 +36,14 @@ impl<'a> NamClapProcessor<'a> {
             self.parking_lot_dirty.store(false, Ordering::Release);
         }
     }
+
+    /// Flushes retired `Box` shells from the RT parking lot back into `box_gc_tx`.
+    #[inline]
+    pub(super) fn drain_box_parking_lot(&mut self) {
+        crate::clap::plugin::retired_box::drain_box_parking_lot(
+            &mut self.box_gc_tx,
+            &mut self.box_parking_lot,
+            &self.box_parking_lot_dirty,
+        );
+    }
 }

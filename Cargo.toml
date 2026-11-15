@@ -155,6 +155,13 @@ lto = "fat"
 codegen-units = 1
 panic = "unwind"
 
+# Non-LTO release profile for unit/integration test binaries (`tests-long.sh`):
+# keeps `opt-level = 3` and `debug-assertions = false` while avoiding ThinLTO
+# link bottlenecks across ~25 test executables.
+[profile.release-nolto]
+inherits = "release"
+lto = false
+
 [profile.dev]
 debug = 1
 opt-level = 0

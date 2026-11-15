@@ -42,7 +42,6 @@
 use crate::clap::gui::MainWindow;
 use crate::clap::gui::x11_embed;
 use crate::clap::plugin::GuiSharedState;
-use clack_plugin::host::HostSharedHandle;
 use slint::ComponentHandle;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -92,16 +91,16 @@ impl GuiWorker {
     /// Spawns the persistent `nam-slint-gui` thread.
     ///
     /// The thread owns the Slint platform for the instance and keeps
-    /// `shared_arc` and `host_static` alive for the window callbacks
+    /// `shared_arc` and the host bridge alive for the window callbacks
     /// (fence-gated no-ops once the instance is destroyed).
     pub(crate) fn spawn(
         shared_arc: Arc<GuiSharedState>,
-        host_static: HostSharedHandle<'static>,
+        host: crate::clap::gui::GuiHostBridge,
     ) -> Result<Self, &'static str> {
         let (tx, rx) = mpsc::channel::<GuiWorkerJob>();
         let handle = std::thread::Builder::new()
             .name("nam-slint-gui".to_string())
-            .spawn(move || worker_main(rx, shared_arc, host_static))
+            .spawn(move || worker_main(rx, shared_arc, host))
             .map_err(|_| "failed to spawn the persistent GUI worker thread")?;
         Ok(Self {
             tx,
@@ -182,7 +181,7 @@ impl GuiWorker {
 fn worker_main(
     rx: mpsc::Receiver<GuiWorkerJob>,
     shared_arc: Arc<GuiSharedState>,
-    host_static: HostSharedHandle<'static>,
+    host: crate::clap::gui::GuiHostBridge,
 ) {
     while let Ok(job) = rx.recv() {
         match job {
@@ -190,7 +189,7 @@ fn worker_main(
                 warm_up_backend(force_x11);
             }
             GuiWorkerJob::OpenWindow { job, reply } => {
-                run_window_generation(job, reply, Arc::clone(&shared_arc), host_static);
+                run_window_generation(job, reply, Arc::clone(&shared_arc), host);
             }
         }
     }
@@ -224,7 +223,7 @@ fn run_window_generation(
     job: GuiWindowJob,
     reply: mpsc::Sender<Result<slint::Weak<MainWindow>, &'static str>>,
     shared_arc: Arc<GuiSharedState>,
-    host_static: HostSharedHandle<'static>,
+    host: crate::clap::gui::GuiHostBridge,
 ) {
     // The Slint platform is pinned to this thread: the embedded path selects
     // the winit backend here (with the X11 event loop + dynamic embed hook),
@@ -262,7 +261,6 @@ fn run_window_generation(
         return;
     }
 
-    let host_close_notify = host_static;
     let shared_close_notify = Arc::clone(&shared_arc);
     window.window().on_close_requested(move || {
         // Publish the backend "user closed" signal for the main thread. The
@@ -275,21 +273,21 @@ fn run_window_generation(
             .store(true, Ordering::Release);
         log::debug!("NAM-Plug: GUI user closed");
         shared_close_notify.cold.host_call_quiescence.host_call(|| {
-            if let Some(gui_host) =
-                host_close_notify.get_extension::<clack_extensions::gui::HostGui>()
-            {
-                gui_host.closed(&host_close_notify, false);
+            // SAFETY: created inside the `host_call` window, which refuses entry
+            // once `alive_fence` is lowered; the handle never outlives the host.
+            let host_static = unsafe { host.as_static() };
+            if let Some(gui_host) = host_static.get_extension::<clack_extensions::gui::HostGui>() {
+                gui_host.closed(&host_static, false);
             }
-            host_close_notify.request_callback();
+            host_static.request_callback();
         });
         slint::CloseRequestResponse::HideWindow
     });
 
-    let host_bridge = crate::clap::gui::GuiHostBridge::new(&host_static);
     let _view_model = crate::clap::gui::SlintViewModel::new(
         window.clone_strong(),
         shared_arc,
-        Some(host_bridge),
+        Some(host),
         &job.backend_text,
     );
 

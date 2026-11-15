@@ -30,7 +30,9 @@ use nam_plug::clap::extensions::calibration::{CalibrationConfig, OutputMode};
 use nam_plug::clap::extensions::params::{PARAM_BYPASS, PARAM_CAB_BYPASS, PARAM_OUTPUT_MODE};
 use nam_plug::clap::test_util::{self, TestHost};
 #[cfg(feature = "heap-audit")]
-use neural_amp_modeler_rs::common::alloc_audit::{TrackingGuard, get_alloc_count};
+use neural_amp_modeler_rs::common::alloc_audit::{
+    TrackingGuard, get_alloc_count, get_dealloc_count, get_realloc_count,
+};
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::loader::nam_json::{WeightsLayout, parse_nam_json};
 use neural_amp_modeler_rs::loader::namb_encoder::encode_namb;
@@ -360,7 +362,7 @@ fn process_blocks_impl<H: HostHandlers>(
                 None,
             )
             .expect("process");
-            get_alloc_count()
+            get_alloc_count() + get_dealloc_count() + get_realloc_count()
         } else {
             proc.process(
                 &in_audio,

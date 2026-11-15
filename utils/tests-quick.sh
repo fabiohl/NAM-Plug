@@ -35,18 +35,17 @@ fi
 if [ "$rc_tests" -ne 0 ]; then
   capture_fail "$CUR_LOG"
 fi
-awk '/test result: / { p+=$4; f+=$6; i+=$8 } END { printf "Tests summary: %d passed, %d failed, %d ignored\n", p, f, i }' "$CUR_LOG"
+emit "$(awk '/test result: / { p+=$4; f+=$6; i+=$8 } END { printf "PHASE: tests-summary passed=%d failed=%d ignored=%d", p, f, i }' "$CUR_LOG")"
 # Measured: x86=534 passed (local, engine 07428b4); aarch64=527 expected (526 + split); threshold=400
 [ "$rc_tests" -eq 0 ] && assert_ran_tests "$CUR_LOG" 400 || { FAILS+=(tests); emit "PHASE: tests FAIL rc=$rc_tests log=$CUR_LOG"; PHASE_NAME=heap-audit; gap "blocked_by_tests"; finish || exit 1; exit 1; }
 emit "PHASE: tests PASS log=$CUR_LOG"
 
 # S9-T05: mantido no quick (custo medido 12.4% <= 20% do quick total; zero-alloc RT gate)
 PHASE_NAME=heap-audit; CUR_LOG="$LOG_DIR/quick-heap-audit.log"; phase heap-audit
-rc_heap=0
+rc_heap=0; rc_cab=0
 cargo test --locked --features testing,heap-audit --lib processor_heap_audit_test > "$CUR_LOG" 2>&1 || rc_heap=$?
-if [ "$rc_heap" -eq 0 ]; then
-  cargo test --locked --features testing,heap-audit --test cabinet_slot_and_bypass_test t08_3_cab_bypass_constant_latency_phase_crossfade_and_heap_audit >> "$CUR_LOG" 2>&1 || rc_heap=$?
-fi
+cargo test --locked --features testing,heap-audit --test cabinet_slot_and_bypass_test t08_3_cab_bypass_constant_latency_phase_crossfade_and_heap_audit >> "$CUR_LOG" 2>&1 || rc_cab=$?
+[ "$rc_heap" -ne 0 ] || rc_heap=$rc_cab
 if [ "$rc_heap" -ne 0 ]; then
   capture_fail "$CUR_LOG"
 fi

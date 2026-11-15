@@ -496,13 +496,12 @@ impl<'a> NamClapProcessor<'a> {
         self.process_telemetry(start_nanos);
 
         #[cfg(feature = "heap-audit")]
-        if neural_amp_modeler_rs::common::alloc_audit::AUDIT_ENABLED.load(Ordering::Relaxed) {
-            let allocs = neural_amp_modeler_rs::common::alloc_audit::get_alloc_count();
-            if allocs > 0 {
-                self.rt_status
-                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC);
-                return Ok(ProcessStatus::Sleep);
-            }
+        if crate::clap::processor::heap_audit::is_armed()
+            && crate::clap::processor::heap_audit::window_violations() > 0
+        {
+            self.rt_status
+                .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC);
+            return Ok(ProcessStatus::Sleep);
         }
 
         Ok(ProcessStatus::Continue)

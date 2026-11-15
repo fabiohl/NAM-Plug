@@ -197,9 +197,10 @@ if should_run "catch-all"; then
     t_start=$SECONDS; plog="$LOG_DIR/long-catch-all.log"; phase "catch-all"
     catch_rc=0
     # Build outside the execution timeout; every #[ignore] suite has a dedicated phase.
-    timeout --kill-after=30 1200 cargo test --locked --release --features testing --no-run --lib --bins --tests > "$plog" 2>&1 || catch_rc=$?
+    # Uses `release-nolto` (`opt-level = 3`, `lto = false`) so ~25 test binaries link without ThinLTO bottleneck.
+    timeout --kill-after=30 1200 cargo test --locked --profile release-nolto --features testing --no-run --lib --bins --tests > "$plog" 2>&1 || catch_rc=$?
     if [ "$catch_rc" -eq 0 ]; then
-        if ! timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-300}" cargo test --locked --release --features testing --no-fail-fast --lib --bins --tests 2>&1 | tee -a "$plog"; then
+        if ! timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-300}" cargo test --locked --profile release-nolto --features testing --no-fail-fast --lib --bins --tests 2>&1 | tee -a "$plog"; then
             catch_rc=1
         fi
     fi
@@ -352,7 +353,7 @@ if should_run "gui"; then
         for gt in "${GUI_TESTS[@]}"; do
             LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe NAM_GUI_DEDICATED_X11=1 NAM_GUI_TIMEOUT_MS="${NAM_GUI_TIMEOUT_MS:-15000}" \
                 run_named "gui" "$gt" timeout --kill-after=30 "$gui_to" xvfb-run -a --server-args="-screen 0 1280x800x24" \
-                cargo test --locked --features testing,gui-x11 --release --lib "$gt" -- --ignored --exact \
+                cargo test --locked --features testing,gui-x11 --profile release-nolto --lib "$gt" -- --ignored --exact \
                 && gui_passed=$((gui_passed + 1)) || gui_rc=1
         done
         close_phase "phase2" "gui" "$gui_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$gui_passed" false
@@ -371,7 +372,7 @@ if should_run "heap-audit"; then
         [ "$1" = "--test" ] && tname="$2-$3"
         sublog="$LOG_DIR/long-heap-${tname##*::}.log"
         echo "--- Running heap/RT test: $* ---" >> "$plog"
-        if ! timeout --kill-after=30 "$heap_to" cargo test --locked --features testing,heap-audit --release "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"; then
+        if ! timeout --kill-after=30 "$heap_to" cargo test --locked --features testing,heap-audit --profile release-nolto "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"; then
             rc=1
         fi
         if [ "$rc" -ne 0 ] || ! ran_tests "$sublog"; then
@@ -388,6 +389,8 @@ if should_run "heap-audit"; then
     if run_heap_test --test cabinet_slot_and_bypass_test t08_3_cab_bypass_constant_latency_phase_crossfade_and_heap_audit; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --test heap_audit prop_gc_swap_idempotence -- --ignored; then heap_cases=$((heap_cases + 500)); fi
     if run_heap_test --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1; then heap_cases=$((heap_cases + 1)); fi
+    if run_heap_test --test musical_gate_parity_test t05_musical_gate_rt_zero_alloc_proof; then heap_cases=$((heap_cases + 1)); fi
+    if run_heap_test --lib test_swap_handler_drain_zero_alloc; then heap_cases=$((heap_cases + 1)); fi
 
     close_phase "phase5" "heap-audit" "$heap_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$heap_cases" false
 else
@@ -403,7 +406,7 @@ if should_run "rt-heap"; then
         [ "$1" = "--test" ] && tname="$2-$3"
         sublog="$LOG_DIR/long-rt-heap-${tname##*::}.log"
         echo "--- Running RT timing test: $* ---" >> "$plog"
-        if ! timeout --kill-after=30 "$rt_to" cargo test --locked --features testing,heap-audit --release "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"; then
+        if ! timeout --kill-after=30 "$rt_to" cargo test --locked --features testing,heap-audit --profile release-nolto "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"; then
             rc=1
         fi
         if [ "$rc" -ne 0 ] || ! ran_tests "$sublog"; then

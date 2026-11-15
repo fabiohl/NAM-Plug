@@ -24,9 +24,6 @@ rustflags = [
 
   # Improves load speed by discarding listed libraries that are not actually used.
   "-Clink-arg=-Wl,--as-needed",
-
-  # Forces retention of the CLAP entry point symbol, preventing it from being discarded by gc-sections
-  "-Clink-arg=-Wl,-u,clap_entry",
 ]
 
 # Permanent regression guard for an ELF symbol-interposition hang — see

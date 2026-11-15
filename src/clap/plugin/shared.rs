@@ -12,6 +12,9 @@ use crate::clap::extensions::params::PARAM_COUNT;
 use crate::clap::gui::dialog_state::{DialogSharedState, IrDialogSharedState};
 use crate::clap::plugin::command_scheduler::CMD_QUEUE_CAPACITY;
 use crate::clap::plugin::lock::lock_cold;
+use crate::clap::plugin::retired_box::{
+    RETIRED_BOX_QUEUE_CAPACITY, RetiredBox, RetiredBoxOverflow,
+};
 use crate::clap::processor::DeactivatedDspState;
 use clack_plugin::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::ModelInfo;
@@ -724,6 +727,12 @@ pub struct ColdShared {
     pub gc_rx: Mutex<Option<Consumer<GcItem>>>,
     /// Fallback buffer for GC overflow (overwrite).
     pub gc_overflow: Arc<GcOverflowBuffer>,
+    /// Off-RT disposal channel for consumed command/slimmable `Box` envelopes.
+    pub(crate) box_gc_tx: Mutex<Option<Producer<RetiredBox>>>,
+    /// Main-thread consumer for retired `Box` envelopes.
+    pub(crate) box_gc_rx: Mutex<Option<Consumer<RetiredBox>>>,
+    /// Atomic overflow table for retired `Box` envelopes if SPSC + parking lot saturate.
+    pub(crate) box_overflow: RetiredBoxOverflow,
     /// Atomic status flags (RT->Main telemetry).
     pub rt_status: Arc<RtStatusFlags>,
     /// Aggregated UI alert bits derived from RT status flags by housekeeping.
@@ -1002,8 +1011,9 @@ pub struct SlimmableRebuild {
     /// requested (echoed from the audio-thread request payload).
     pub generation: u64,
     /// The rebuilt (sliced + prewarmed + resized) model, boxed for RT-safe
-    /// swap and GC disposal.
-    pub model: Box<StaticModel>,
+    /// swap and GC disposal (`Option` lets the RT handler move it out without
+    /// unboxing and dropping the `SlimmableRebuild` envelope on RT).
+    pub model: Option<Box<StaticModel>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,6 +1098,7 @@ impl ColdShared {
     pub fn new(instance_id: u64) -> Self {
         let (param_tx, param_rx) = RingBuffer::new(CMD_QUEUE_CAPACITY);
         let (gc_tx, gc_rx) = RingBuffer::new(32);
+        let (box_gc_tx, box_gc_rx) = RingBuffer::new(RETIRED_BOX_QUEUE_CAPACITY);
         let (slimmable_tx, slimmable_rx) = RingBuffer::new(4);
         let alive_fence = Arc::new(AtomicBool::new(true));
 
@@ -1100,6 +1111,9 @@ impl ColdShared {
             gc_overflow: Arc::new(GcOverflowBuffer::new(
                 neural_amp_modeler_rs::common::spsc::SPSC_CAPACITY,
             )),
+            box_gc_tx: Mutex::new(Some(box_gc_tx)),
+            box_gc_rx: Mutex::new(Some(box_gc_rx)),
+            box_overflow: RetiredBoxOverflow::new(),
             rt_status: Arc::new(RtStatusFlags::new()),
             ui_alert_bits: AtomicU32::new(0),
             model_sample_rate: AtomicU32::new(48000),

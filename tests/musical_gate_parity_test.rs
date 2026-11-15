@@ -16,6 +16,8 @@
 //!    non-finite input resilience, and state save/restore migration across `v0`,
 //!    `v1`, and `v2` payloads.
 //! 6. Zero-allocation RT proof under `feature = "heap-audit"`.
+//! 7. Envelope-ceiling boundary (`1000.0`, as `NoiseGate.cpp`) with a negative
+//!    control proving the stimulus discriminates a `1e12` ceiling.
 
 use clack_extensions::audio_ports_config::PluginAudioPortsConfig;
 use clack_extensions::params::PluginParams;
@@ -60,6 +62,7 @@ struct CppNoiseGateOracle {
     last_gr_db: f64,
     time_held: f64,
     holding: bool,
+    max_power: f64,
 }
 
 impl CppNoiseGateOracle {
@@ -70,9 +73,15 @@ impl CppNoiseGateOracle {
     const CLOSE_TIME_SEC: f64 = 0.05;
     const MIN_LOUDNESS_DB: f64 = -120.0;
     const MIN_LOUDNESS_POWER: f64 = 1e-12;
-    const MAX_LOUDNESS_POWER: f64 = 1e12;
+    /// `NoiseGate.cpp`: `std::clamp(..., MINIMUM_LOUDNESS_POWER, 1000.0)`.
+    const MAX_LOUDNESS_POWER: f64 = 1000.0;
 
     fn new(sample_rate: f64, threshold_db: f64) -> Self {
+        Self::with_max_power(sample_rate, threshold_db, Self::MAX_LOUDNESS_POWER)
+    }
+
+    /// Negative-control constructor: same equations with a different envelope ceiling.
+    fn with_max_power(sample_rate: f64, threshold_db: f64, max_power: f64) -> Self {
         let alpha = 0.5_f64.powf(1.0 / (Self::TIME_SEC * sample_rate));
         let max_gr = Self::gr_db(Self::MIN_LOUDNESS_DB, threshold_db);
         Self {
@@ -87,6 +96,7 @@ impl CppNoiseGateOracle {
             last_gr_db: max_gr,
             time_held: 0.0,
             holding: false,
+            max_power,
         }
     }
 
@@ -102,7 +112,7 @@ impl CppNoiseGateOracle {
     fn next_gain(&mut self, sample: f32) -> f32 {
         let x = f64::from(sample);
         self.level = (self.alpha * self.level + self.beta * (x * x))
-            .clamp(Self::MIN_LOUDNESS_POWER, Self::MAX_LOUDNESS_POWER);
+            .clamp(Self::MIN_LOUDNESS_POWER, self.max_power);
         let level_db = 10.0 * self.level.log10();
 
         if self.holding {
@@ -649,7 +659,9 @@ fn t04_live_clap_automation_mode_switch_and_state_migration() {
 #[cfg(feature = "heap-audit")]
 #[test]
 fn t05_musical_gate_rt_zero_alloc_proof() {
-    use neural_amp_modeler_rs::common::alloc_audit::{TrackingGuard, get_alloc_count};
+    use neural_amp_modeler_rs::common::alloc_audit::{
+        TrackingGuard, get_alloc_count, get_dealloc_count, get_realloc_count,
+    };
     let model = test_util::model_path("lstm.nam");
     let (_e, _h, _i, mut proc) = setup_plugin(
         &model,
@@ -688,7 +700,7 @@ fn t05_musical_gate_rt_zero_alloc_proof() {
     let mut out_events = OutputEvents::void();
 
     let _guard = TrackingGuard::new();
-    let before = get_alloc_count();
+    let before = get_alloc_count() + get_dealloc_count() + get_realloc_count();
     proc.process(
         &input_audio,
         &mut output_audio,
@@ -698,11 +710,86 @@ fn t05_musical_gate_rt_zero_alloc_proof() {
         None,
     )
     .expect("process");
-    let after = get_alloc_count();
+    let after = get_alloc_count() + get_dealloc_count() + get_realloc_count();
     assert_eq!(
         after - before,
         0,
-        "MusicalNoiseGate RT callback allocated {} times!",
+        "MusicalNoiseGate RT callback allocated/deallocated {} times!",
         after - before
     );
+}
+
+#[test]
+fn t06_envelope_ceiling_boundary_matches_cpp_and_discriminates_1e12() {
+    let sr = 48_000.0;
+    let model = test_util::model_path("lstm.nam");
+    let raw_cal = CalibrationConfig {
+        calibrate_input: false,
+        input_calibration_level_dbu: 12.0,
+        output_mode: OutputMode::Raw,
+    };
+    let thresh_db = -40.0;
+
+    // Burst with mean-square power ~1800 (> 1000 ceiling) followed by a long release
+    // through the -40 dB threshold: the envelope ceiling decides how long the gate stays open.
+    let mut stim = vec![0.0f32; BLOCK * 4];
+    stim.extend(sine_wave(BLOCK * 16, 220.0, 60.0, sr));
+    stim.extend(std::iter::repeat_n(0.0f32, BLOCK * 88));
+
+    let (_e0, _h0, _i0, mut proc_ungated) =
+        setup_plugin(&model, None, raw_cal, GateMode::Musical, -90.0, sr, false);
+    let (ungated_out, _) = process_stereo_with_events(&mut proc_ungated, &stim, &stim, |_, _| {});
+
+    let (_e1, _h1, _i1, mut proc_musical) = setup_plugin(
+        &model,
+        None,
+        raw_cal,
+        GateMode::Musical,
+        thresh_db,
+        sr,
+        false,
+    );
+    let (musical_out, _) = process_stereo_with_events(&mut proc_musical, &stim, &stim, |_, _| {});
+
+    let expected_cpp = expected_with_oracle(
+        CppNoiseGateOracle::new(sr, f64::from(thresh_db)),
+        &stim,
+        &ungated_out,
+    );
+    let expected_unclamped = expected_with_oracle(
+        CppNoiseGateOracle::with_max_power(sr, f64::from(thresh_db), 1e12),
+        &stim,
+        &ungated_out,
+    );
+
+    let peak = expected_cpp.iter().fold(1.0f32, |m, s| m.max(s.abs()));
+    let max_err = expected_cpp
+        .iter()
+        .zip(musical_out.iter())
+        .map(|(&a, &b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    let esr_cpp = compute_esr(&expected_cpp, &musical_out);
+    assert!(
+        esr_cpp < 1e-11 && max_err <= 1e-5 * peak,
+        "ceiling boundary: product diverges from C++ oracle (ESR={esr_cpp:e}, max_err={max_err:e}, peak={peak:e})"
+    );
+
+    // Measured: ESR(1e12 vs 1000 ceiling)=1.32e-7 on lstm.nam @ 48 kHz, four orders above the
+    // product-vs-oracle agreement limit (1e-11).
+    let esr_negative_control = compute_esr(&expected_unclamped, &expected_cpp);
+    assert!(
+        esr_negative_control > 1e-9,
+        "boundary stimulus must discriminate a 1e12 ceiling from 1000 (ESR={esr_negative_control:e})"
+    );
+}
+
+fn expected_with_oracle(
+    mut oracle: CppNoiseGateOracle,
+    stim: &[f32],
+    ungated_out: &[f32],
+) -> Vec<f32> {
+    stim.iter()
+        .zip(ungated_out.iter())
+        .map(|(&x, &y)| y * oracle.next_gain(x))
+        .collect()
 }

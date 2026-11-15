@@ -7,7 +7,9 @@
 
 use clack_host::prelude::*;
 #[cfg(feature = "heap-audit")]
-use neural_amp_modeler_rs::common::alloc_audit::{TrackingGuard, get_alloc_count};
+use neural_amp_modeler_rs::common::alloc_audit::{
+    TrackingGuard, get_alloc_count, get_dealloc_count, get_realloc_count,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -270,7 +272,7 @@ fn test_multi_instance_heap_audit_stress() {
                             None,
                         )
                         .expect("process() failed");
-                    let allocs = get_alloc_count();
+                    let allocs = get_alloc_count() + get_dealloc_count() + get_realloc_count();
                     total_allocs += allocs;
 
                     assert_eq!(

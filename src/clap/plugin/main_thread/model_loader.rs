@@ -48,9 +48,9 @@
 //! published and no host callback is issued.
 
 use super::load::{AudioEpoch, PreparedModel};
+use crate::clap::gui::GuiHostBridge;
 use crate::clap::plugin::GuiSharedState;
 use crate::clap::plugin::shared::{ModelRequestOrigin, SlimmableRebuild};
-use clack_plugin::host::HostSharedHandle;
 use neural_amp_modeler_rs::common::diagnostics::{NamDiagnostic, SystemSnapshot};
 use neural_amp_modeler_rs::common::spsc::{
     RT_STATUS_NEEDS_OS_REBUILD, RT_STATUS_NEEDS_SLIMMABLE_REBUILD,
@@ -161,7 +161,7 @@ impl ModelLoader {
     /// Spawns the `nam-model-loader` thread.
     ///
     /// `shared` keeps the plugin state alive for the worker's lifetime and
-    /// provides the `alive_fence`; `host_static` is used only to request the
+    /// provides the `alive_fence`; `host` is used only to request the
     /// main-thread callback that drains the result slots. `rebuilds` enables the
     /// adaptive-rebuild polling (`None` disables it for the synchronous rollback
     /// mode, where the main thread keeps the legacy inline path).
@@ -169,14 +169,14 @@ impl ModelLoader {
         instance_id: u64,
         sys: SystemSnapshot,
         shared: Arc<GuiSharedState>,
-        host_static: HostSharedHandle<'static>,
+        host: GuiHostBridge,
         slot: ModelResultSlot,
         rebuilds: Option<RebuildSlots>,
     ) -> Result<Self, &'static str> {
         let (tx, rx) = mpsc::channel::<ModelLoaderJob>();
         let handle = std::thread::Builder::new()
             .name("nam-model-loader".to_string())
-            .spawn(move || worker_main(rx, instance_id, sys, shared, host_static, slot, rebuilds))
+            .spawn(move || worker_main(rx, instance_id, sys, shared, host, slot, rebuilds))
             .map_err(|_| "failed to spawn the model loader worker thread")?;
         Ok(Self {
             tx,
@@ -243,7 +243,7 @@ fn build_slimmable(
             }
             SlimmableRebuildOutcome::Ready(Box::new(SlimmableRebuild {
                 generation,
-                model: Box::new(StaticModel::WavenetDyn(Box::new(slimmed))),
+                model: Some(Box::new(StaticModel::WavenetDyn(Box::new(slimmed)))),
             }))
         }
         Err(_) => SlimmableRebuildOutcome::Failed,
@@ -271,7 +271,7 @@ fn build_oversample(factor_val: u32) -> OversampleRebuildOutcome {
 /// flag is observed clear, the memory is reset so the next request rebuilds.
 fn poll_rebuilds(
     shared: &GuiSharedState,
-    host_static: &HostSharedHandle<'static>,
+    host: GuiHostBridge,
     rebuilds: &RebuildSlots,
     slimmable_built: &mut Option<(u32, u64)>,
     os_built: &mut Option<u32>,
@@ -290,7 +290,9 @@ fn poll_rebuilds(
             *rebuilds.slimmable.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
             *slimmable_built = Some(identity);
             shared.cold.host_call_quiescence.host_call(|| {
-                host_static.request_callback();
+                // SAFETY: created inside the `host_call` window, which refuses
+                // entry once `alive_fence` is lowered; the handle never outlives the host.
+                unsafe { host.as_static() }.request_callback();
             });
         }
     } else {
@@ -307,7 +309,9 @@ fn poll_rebuilds(
                 .unwrap_or_else(|e| e.into_inner()) = Some(outcome);
             *os_built = Some(factor);
             shared.cold.host_call_quiescence.host_call(|| {
-                host_static.request_callback();
+                // SAFETY: created inside the `host_call` window, which refuses
+                // entry once `alive_fence` is lowered; the handle never outlives the host.
+                unsafe { host.as_static() }.request_callback();
             });
         }
     } else {
@@ -322,7 +326,7 @@ fn worker_main(
     instance_id: u64,
     sys: SystemSnapshot,
     shared: Arc<GuiSharedState>,
-    host_static: HostSharedHandle<'static>,
+    host: GuiHostBridge,
     slot: ModelResultSlot,
     rebuilds: Option<RebuildSlots>,
 ) {
@@ -387,7 +391,9 @@ fn worker_main(
                 // Publish the wake-up through the quiescence barrier so after the
                 // fence drops no host callback is issued into a freed instance.
                 shared.cold.host_call_quiescence.host_call(|| {
-                    host_static.request_callback();
+                    // SAFETY: created inside the `host_call` window, which refuses
+                    // entry once `alive_fence` is lowered; the handle never outlives the host.
+                    unsafe { host.as_static() }.request_callback();
                 });
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -400,13 +406,7 @@ fn worker_main(
 
         if let Some(rebuilds) = &rebuilds {
             let poll_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                poll_rebuilds(
-                    &shared,
-                    &host_static,
-                    rebuilds,
-                    &mut slimmable_built,
-                    &mut os_built,
-                );
+                poll_rebuilds(&shared, host, rebuilds, &mut slimmable_built, &mut os_built);
             }));
             if poll_res.is_err() {
                 // Recover the publication state so the main thread clears
@@ -442,7 +442,9 @@ fn worker_main(
                 shared.cold.ui_load_error.store(true, Ordering::Relaxed);
                 shared.cold.ui_loading.store(false, Ordering::Relaxed);
                 shared.cold.host_call_quiescence.host_call(|| {
-                    host_static.request_callback();
+                    // SAFETY: created inside the `host_call` window, which refuses
+                    // entry once `alive_fence` is lowered; the handle never outlives the host.
+                    unsafe { host.as_static() }.request_callback();
                 });
             }
         }

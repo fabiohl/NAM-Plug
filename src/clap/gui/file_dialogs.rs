@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
+use crate::clap::gui::GuiHostBridge;
 use crate::clap::gui::dialog_state::{self, DialogSharedState, IrDialogSharedState};
 use crate::clap::plugin::lock::lock_cold;
 use crate::clap::plugin::quiescence::HostCallQuiescence;
-use clack_plugin::host::HostSharedHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Returns the thread handle so the main thread can join it on teardown.
 pub(crate) fn spawn_file_dialog(
     state: Arc<DialogSharedState>,
-    host_static: HostSharedHandle<'static>,
+    host: GuiHostBridge,
     alive_fence: Arc<AtomicBool>,
     quiescence: Arc<HostCallQuiescence>,
 ) -> std::thread::JoinHandle<()> {
@@ -39,7 +39,9 @@ pub(crate) fn spawn_file_dialog(
         },
         move || {
             crate::clap::plugin::quiescence::host_call(&quiescence, || {
-                host_static.request_callback();
+                // SAFETY: created inside the `host_call` window, which refuses
+                // entry once `alive_fence` is lowered at plugin teardown.
+                unsafe { host.as_static() }.request_callback();
             });
         },
     )
@@ -76,7 +78,7 @@ fn spawn_file_dialog_inner(
 /// after the plugin is destroyed).
 pub(crate) fn spawn_ir_file_dialog(
     state: Arc<IrDialogSharedState>,
-    host_static: HostSharedHandle<'static>,
+    host: GuiHostBridge,
     alive_fence: Arc<AtomicBool>,
     quiescence: Arc<HostCallQuiescence>,
 ) -> std::thread::JoinHandle<()> {
@@ -92,7 +94,9 @@ pub(crate) fn spawn_ir_file_dialog(
         },
         move || {
             crate::clap::plugin::quiescence::host_call(&quiescence, || {
-                host_static.request_callback();
+                // SAFETY: created inside the `host_call` window, which refuses
+                // entry once `alive_fence` is lowered at plugin teardown.
+                unsafe { host.as_static() }.request_callback();
             });
         },
     )

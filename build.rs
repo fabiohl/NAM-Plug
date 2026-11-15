@@ -44,6 +44,11 @@ fn main() {
         println!("cargo:rustc-link-arg-{kind}=-Wl,--undefined-version");
         println!("cargo:rustc-link-arg-{kind}=-Wl,--version-script={map}");
     }
+    // Retain the CLAP entry point symbol only for the cdylib plugin target, so
+    // non-CLAP binaries and test executables can dead-strip the plugin/GUI tree.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-u,clap_entry");
+    }
     println!("cargo:rerun-if-changed=.cargo/hide-libm-shadow.map");
 
     slint_build::compile("src/clap/gui/slint/main.slint").expect("slint compilation failed");

@@ -140,7 +140,7 @@ mod tests {
                 .borrow_mut()
                 .push(Box::new(SlimmableRebuild {
                     generation: stale_gen,
-                    model: make_linear_model(0.5),
+                    model: Some(make_linear_model(0.5)),
                 }))
                 .expect("slimmable push must succeed");
         }
@@ -182,7 +182,7 @@ mod tests {
                 .borrow_mut()
                 .push(Box::new(SlimmableRebuild {
                     generation: active_gen,
-                    model: make_linear_model(0.9),
+                    model: Some(make_linear_model(0.9)),
                 }))
                 .expect("slimmable push must succeed");
         }
