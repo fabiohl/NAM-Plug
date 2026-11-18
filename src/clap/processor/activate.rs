@@ -962,10 +962,17 @@ impl<'a> NamClapProcessor<'a> {
             let cab_slot = {
                 let mut cab_slot = cabsim_pair;
                 if let Some(ref mut cab) = cab_slot {
-                    cab.reset();
+                    cab.reset_and_prewarm_off_rt();
                 }
                 cab_slot
             };
+            let cab_nam_generation = (shared.cold.cab_nam_rebuild_req.load(Ordering::Acquire) >> 1)
+                .wrapping_add(1)
+                .max(1);
+            shared
+                .cold
+                .cab_nam_rebuild_req
+                .store(cab_nam_generation << 1, Ordering::Release);
 
             // Complete any outstanding split-stabilization pass of the
             // activated model, eagerly and off the audio thread: `activate()`
@@ -1219,6 +1226,9 @@ impl<'a> NamClapProcessor<'a> {
                 cab_slot,
                 cab_bypass,
                 cab_needs_reset: false,
+                cab_nam_dirty: false,
+                cab_nam_generation,
+                cab_nam_rebuild_in_flight: false,
                 cab_bypass_xfade: BypassCrossfader::new(cab_bypass),
                 cab_dry_delay,
                 recovered_commands,

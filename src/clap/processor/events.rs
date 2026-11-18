@@ -275,6 +275,9 @@ macro_rules! command_swap_parts {
                 cab_slot: &mut $s.cab_slot,
                 cab_bypass: &mut $s.cab_bypass,
                 cab_needs_reset: &mut $s.cab_needs_reset,
+                cab_nam_dirty: &mut $s.cab_nam_dirty,
+                cab_nam_generation: &mut $s.cab_nam_generation,
+                cab_nam_rebuild_in_flight: &mut $s.cab_nam_rebuild_in_flight,
                 cab_bypass_xfade: &mut $s.cab_bypass_xfade,
                 cab_dry_delay: &mut $s.cab_dry_delay,
                 max_frames_count: $s.max_frames_count,
@@ -509,6 +512,12 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     pub(super) cab_bypass: &'p mut bool,
     /// Pending cabinet reset latch when returning from steady-state bypass.
     pub(super) cab_needs_reset: &'p mut bool,
+    /// True once `CabSlotDsp::NamModel` processed at least one wet block.
+    pub(super) cab_nam_dirty: &'p mut bool,
+    /// Active cabinet generation used to discard stale `RebuildCabNam` payloads.
+    pub(super) cab_nam_generation: &'p mut u64,
+    /// Whether an off-RT `RebuildCabNam` request is currently in flight.
+    pub(super) cab_nam_rebuild_in_flight: &'p mut bool,
     /// Click-free crossfade state machine for cabinet bypass.
     pub(super) cab_bypass_xfade: &'p mut BypassCrossfader,
     /// Phase alignment delay line matching `cab_slot.latency_samples()`.
@@ -708,6 +717,9 @@ impl ClapCommandSwapHandler<'_, '_> {
             ClapParamPayload::LoadCabIr { pair } => {
                 self.cold_load_cabsim(pair, gc);
             }
+            ClapParamPayload::RebuildCabNam { generation, slot } => {
+                self.cold_rebuild_cab_nam(generation, slot, gc);
+            }
             ClapParamPayload::SetOversample { os_l, os_r } => {
                 self.cold_load_os(os_l, os_r, gc);
             }
@@ -750,6 +762,9 @@ impl ClapCommandSwapHandler<'_, '_> {
                 if let Some(old) = pair {
                     old.retire_to_gc(|item| gc.retire(item));
                 }
+            }
+            ClapParamPayload::RebuildCabNam { slot, .. } => {
+                slot.retire_to_gc(|item| gc.retire(item));
             }
             ClapParamPayload::SetOversample { os_l, os_r } => {
                 gc.retire(GcItem::Oversample(os_l));
@@ -919,7 +934,14 @@ impl ClapCommandSwapHandler<'_, '_> {
         if let Some(old_slot) = std::mem::replace(self.cab_slot, slot) {
             old_slot.retire_to_gc(|item| gc.retire(item));
         }
+        *self.cab_nam_generation = self.cab_nam_generation.wrapping_add(1);
+        self.shared
+            .cold
+            .cab_nam_rebuild_req
+            .store(*self.cab_nam_generation << 1, Ordering::Release);
         *self.cab_needs_reset = false;
+        *self.cab_nam_dirty = false;
+        *self.cab_nam_rebuild_in_flight = false;
         self.cab_dry_delay.reset();
         // Publish the cabslot latency contribution of the *installed* slot
         // (0 = no cabinet). Constant-latency bypass preserves this latency while loaded.
@@ -954,6 +976,42 @@ impl ClapCommandSwapHandler<'_, '_> {
             if let Some(tail_ext) = self.host.get_extension::<HostTail>() {
                 tail_ext.changed(self.host);
             }
+        }
+    }
+
+    /// Installs a freshly prewarmed neural cabinet slot built off-RT when its
+    /// generation matches `*self.cab_nam_generation`; discards stale deliveries
+    /// cleanly to GC without dropping heap memory on RT.
+    #[cold]
+    fn cold_rebuild_cab_nam(&mut self, generation: u64, slot: CabSlotDsp, gc: &mut GcSink<'_>) {
+        if generation != *self.cab_nam_generation
+            || !matches!(self.cab_slot, Some(CabSlotDsp::NamModel(_)))
+        {
+            self.shared
+                .cold
+                .cab_nam_stale_discarded_total
+                .fetch_add(1, Ordering::Relaxed);
+            slot.retire_to_gc(|item| gc.retire(item));
+            return;
+        }
+        let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
+        if host_rate != 0 && !slot.is_compatible_with_host(host_rate, self.max_frames_count) {
+            self.rt_status
+                .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION);
+            slot.retire_to_gc(|item| gc.retire(item));
+            *self.cab_nam_rebuild_in_flight = false;
+            return;
+        }
+        if let Some(old_slot) = self.cab_slot.replace(slot) {
+            old_slot.retire_to_gc(|item| gc.retire(item));
+        }
+        *self.cab_needs_reset = false;
+        *self.cab_nam_dirty = false;
+        *self.cab_nam_rebuild_in_flight = false;
+        // Preserve `cab_dry_delay` continuity and blend dry -> prewarmed wet cleanly.
+        *self.cab_bypass_xfade = BypassCrossfader::new(true);
+        if !*self.cab_bypass {
+            self.cab_bypass_xfade.trigger(false);
         }
     }
 
@@ -1018,11 +1076,12 @@ impl ClapCommandSwapHandler<'_, '_> {
             self.smoother_cal_out.snap_to_target();
         }
         let _ = had_model_swap;
+        let preserve_cab_reset = txn.ir.is_none() && *self.cab_needs_reset && !txn.cab_bypass;
         if let Some(ir) = txn.ir {
             self.cold_load_cabsim(ir, gc);
         }
         *self.cab_bypass = txn.cab_bypass;
-        *self.cab_needs_reset = false;
+        *self.cab_needs_reset = preserve_cab_reset;
         *self.cab_bypass_xfade = BypassCrossfader::new(txn.cab_bypass);
         self.shared
             .ui_to_rt

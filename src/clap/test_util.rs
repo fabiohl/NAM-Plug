@@ -417,3 +417,65 @@ impl MonoTestBuffers {
         }
     }
 }
+
+// ── F10 Copy & Meter Benchmark Helpers ──
+
+pub fn bench_copy_output_current(
+    out_l: &mut Option<&mut [f32]>,
+    out_r: &mut Option<&mut [f32]>,
+    buf_out_l: &mut [f32],
+    buf_out_r: &mut [f32],
+    n_out: usize,
+    output_offset: usize,
+    process_mono: bool,
+) -> (f32, f32, f32, f32) {
+    crate::clap::processor::audio_loop::copy_output_from_sub_block(
+        out_l,
+        out_r,
+        buf_out_l,
+        buf_out_r,
+        n_out,
+        output_offset,
+        process_mono,
+    )
+}
+
+pub fn bench_copy_output_two_pass_ref(
+    out_l: &mut Option<&mut [f32]>,
+    out_r: &mut Option<&mut [f32]>,
+    buf_out_l: &[f32],
+    buf_out_r: &[f32],
+    n_out: usize,
+    output_offset: usize,
+    process_mono: bool,
+) -> (f32, f32, f32, f32) {
+    crate::clap::processor::audio_loop::copy_output_from_sub_block_two_pass_ref(
+        out_l,
+        out_r,
+        buf_out_l,
+        buf_out_r,
+        n_out,
+        output_offset,
+        process_mono,
+    )
+}
+
+pub fn bench_copy_output_fused_scalar(
+    out_l: &mut Option<&mut [f32]>,
+    out_r: &mut Option<&mut [f32]>,
+    buf_out_l: &[f32],
+    buf_out_r: &[f32],
+    n_out: usize,
+    output_offset: usize,
+    process_mono: bool,
+) -> (f32, f32, f32, f32) {
+    crate::clap::processor::audio_loop::copy_output_from_sub_block_fused_scalar(
+        out_l,
+        out_r,
+        buf_out_l,
+        buf_out_r,
+        n_out,
+        output_offset,
+        process_mono,
+    )
+}

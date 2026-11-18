@@ -375,5 +375,22 @@ impl<'a> NamClapMainThread<'a> {
                 );
             }
         }
+
+        let box_overwritten = self.shared.cold.box_overflow.overwritten_total();
+        let last_box_overwritten = self.last_seen_box_overwritten.get();
+        if box_overwritten > last_box_overwritten {
+            self.last_seen_box_overwritten.set(box_overwritten);
+            let delta = box_overwritten - last_box_overwritten;
+            let msg_str = format!(
+                "NAM-Plug: RetiredBoxOverflow overwrote {delta} undrained box shell(s) (total={box_overwritten})."
+            );
+            let msg = CString::new(msg_str.as_bytes()).unwrap_or_default();
+            if let Some(log) = log_ext {
+                log.log(&shared, LogSeverity::Error, &msg);
+            }
+            log::error!(
+                "NAM-Plug: RetiredBoxOverflow overwrote {delta} undrained box shell(s) (total={box_overwritten})."
+            );
+        }
     }
 }

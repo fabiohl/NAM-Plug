@@ -12,9 +12,14 @@ readme = "README.md"
 authors = ["Fábio Henrique de Lima Silva <fhl.bsb@gmail.com>"]
 keywords = ["audio", "dsp", "nam", "neural-amp-modeler", "clap", "plugin"]
 categories = ["multimedia::audio", "multimedia"]
+# All binary targets are declared explicitly via [[bin]] below. autobins = false
+# prevents Cargo from auto-discovering every src/bin/*.rs as a crate target,
+# which would otherwise compile nam_perf_guard_test.rs (a #[cfg(test)] module
+# included by nam_perf_guard.rs) as a standalone binary.
+autobins = false
 
 [dependencies]
-NeuralAmpModeler-rs = { version = "2.1.0", default-features = false, features = [
+NeuralAmpModeler-rs = { version = "3.0.0", default-features = false, features = [
     "dual-mono",
 ] }
 clack-common = "0.2"
@@ -72,7 +77,7 @@ clap-sys = "0.5"
 slint-build = "1.18"
 
 [dev-dependencies]
-NeuralAmpModeler-rs = { version = "2.1.0", features = ["testing"] }
+NeuralAmpModeler-rs = { version = "3.0.0", features = ["testing"] }
 nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.2", features = ["clack-plugin"] }
 clap-sys = "0.5"

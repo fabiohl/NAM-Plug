@@ -32,6 +32,8 @@ pub(crate) struct RetiredBoxOverflow {
     cmd_cursor: AtomicUsize,
     slims: Box<[AtomicPtr<SlimmableRebuild>; 32]>,
     slim_cursor: AtomicUsize,
+    /// Monotonic count of undrained pointers overwritten in the overflow slots.
+    overwritten_total: AtomicUsize,
 }
 
 impl RetiredBoxOverflow {
@@ -42,35 +44,43 @@ impl RetiredBoxOverflow {
             cmd_cursor: AtomicUsize::new(0),
             slims: Box::new(std::array::from_fn(|_| AtomicPtr::new(ptr::null_mut()))),
             slim_cursor: AtomicUsize::new(0),
+            overwritten_total: AtomicUsize::new(0),
         }
     }
 
-    /// Stashes `item` into an empty atomic slot without deallocating on the RT thread.
-    /// If every overflow slot is occupied, intentionally leaks rather than freeing on RT.
+    /// Stashes `item` into the next atomic overflow slot in O(1) without deallocating
+    /// on the RT thread. If the slot already holds an undrained pointer, it is overwritten
+    /// (controlled leak) and [`Self::overwritten_total`] is incremented rather than freeing
+    /// on RT or scanning the table linearly.
     pub(crate) fn push(&self, item: RetiredBox) {
-        match item {
+        let overwritten = match item {
             RetiredBox::Command(b) => {
                 Self::store_ptr(&self.cmds[..], &self.cmd_cursor, Box::into_raw(b))
             }
             RetiredBox::Slimmable(b) => {
                 Self::store_ptr(&self.slims[..], &self.slim_cursor, Box::into_raw(b))
             }
+        };
+        if overwritten {
+            self.overwritten_total.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    fn store_ptr<T>(slots: &[AtomicPtr<T>], cursor: &AtomicUsize, raw: *mut T) {
+    /// Returns total undrained pointers overwritten in the overflow table.
+    #[inline]
+    pub(crate) fn overwritten_total(&self) -> usize {
+        self.overwritten_total.load(Ordering::Relaxed)
+    }
+
+    fn store_ptr<T>(slots: &[AtomicPtr<T>], cursor: &AtomicUsize, raw: *mut T) -> bool {
         let len = slots.len();
-        let start = cursor.fetch_add(1, Ordering::Relaxed) % len;
-        for offset in 0..len {
-            let slot = &slots[(start + offset) % len];
-            if slot
-                .compare_exchange(ptr::null_mut(), raw, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                return;
-            }
-        }
-        // Exhausted overflow slots: intentionally leak rather than freeing on RT.
+        // Relaxed safe: single RT producer updates cursor; happens-before with off-RT drain
+        // is established by the AcqRel swap on the slot itself.
+        let idx = cursor.fetch_add(1, Ordering::Relaxed) % len;
+        // O(1) bounded RT write: an undrained prior pointer is intentionally leaked rather
+        // than freeing on the audio thread or incurring an O(N) CAS scan.
+        let old = slots[idx].swap(raw, Ordering::AcqRel);
+        !old.is_null()
     }
 
     /// Reclaims and drops all queued boxes off-RT.
@@ -81,10 +91,10 @@ impl RetiredBoxOverflow {
     fn drain_slice<T>(slots: &[AtomicPtr<T>]) -> usize {
         let mut drained = 0;
         for slot in slots {
-            let raw = slot.swap(ptr::null_mut(), Ordering::Acquire);
+            let raw = slot.swap(ptr::null_mut(), Ordering::AcqRel);
             if !raw.is_null() {
                 // SAFETY: `raw` was produced via `Box::into_raw` on a matching `Box<T>`
-                // and published with `Release` in `store_ptr`; `swap(null)` transfers
+                // and published with `AcqRel` in `store_ptr`; `swap(null, AcqRel)` transfers
                 // sole ownership here for off-RT deallocation.
                 drop(unsafe { Box::from_raw(raw) });
                 drained += 1;
@@ -174,4 +184,56 @@ pub(crate) fn drain_retired_boxes(
         }
     }
     drained + overflow.drain()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_overwrite_within_slot_capacity() {
+        let overflow = RetiredBoxOverflow::new();
+        for _ in 0..256 {
+            overflow.push(RetiredBox::Command(Box::new(ClapParamPayload::CabBypass(
+                false,
+            ))));
+        }
+        for i in 0..32 {
+            overflow.push(RetiredBox::Slimmable(Box::new(SlimmableRebuild {
+                generation: i as u64,
+                model: None,
+            })));
+        }
+
+        assert_eq!(overflow.overwritten_total(), 0);
+        assert_eq!(overflow.drain(), 256 + 32);
+        assert_eq!(overflow.drain(), 0);
+        assert_eq!(overflow.overwritten_total(), 0);
+    }
+
+    #[test]
+    fn overflow_counts_command_and_slimmable_overwrites_without_drain() {
+        let overflow = RetiredBoxOverflow::new();
+        let cmd_pushes = 263usize;
+        for _ in 0..cmd_pushes {
+            overflow.push(RetiredBox::Command(Box::new(ClapParamPayload::CabBypass(
+                true,
+            ))));
+        }
+        assert_eq!(overflow.overwritten_total(), cmd_pushes - 256);
+
+        let slim_pushes = 37usize;
+        for i in 0..slim_pushes {
+            overflow.push(RetiredBox::Slimmable(Box::new(SlimmableRebuild {
+                generation: i as u64,
+                model: None,
+            })));
+        }
+
+        let expected_overwrites = (cmd_pushes - 256) + (slim_pushes - 32);
+        assert_eq!(overflow.overwritten_total(), expected_overwrites);
+        assert_eq!(overflow.drain(), 256 + 32);
+        assert_eq!(overflow.drain(), 0);
+        assert_eq!(overflow.overwritten_total(), expected_overwrites);
+    }
 }

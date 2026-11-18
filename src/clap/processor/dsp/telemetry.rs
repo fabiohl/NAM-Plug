@@ -61,7 +61,12 @@ impl<'a> NamClapProcessor<'a> {
 
             // Defense-in-depth (T-R1.2): discard anomalous elapsed times (> 1s)
             // to avoid corrupting latency histograms, overload counters, or adaptive compute.
+            // The discard is counted separately (T5.1 / F8) so a clean histogram can no
+            // longer hide clock anomalies: `dsp_overloads` stays untouched.
             if elapsed_nanos > MAX_PLAUSIBLE_ELAPSED_NS {
+                self.rt_status
+                    .elapsed_discarded_total
+                    .fetch_add(1, Ordering::Relaxed);
                 return;
             }
 

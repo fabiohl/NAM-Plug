@@ -252,6 +252,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             last_reported_latency: Cell::new(0),
             last_reported_cabsim_tail: Cell::new(0),
             last_seen_slimmable_stale: Cell::new(0),
+            last_seen_box_overwritten: Cell::new(0),
             last_seen_overloads: Cell::new(0),
             last_overload_log_instant: Cell::new(None),
             last_seen_non_finite_epoch: Cell::new(0),

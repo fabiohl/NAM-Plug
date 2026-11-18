@@ -168,9 +168,19 @@ pub struct NamClapProcessor<'a> {
     pub(crate) cab_slot: Option<CabSlotDsp>,
     /// Independent cabinet bypass state (`PARAM_CAB_BYPASS`).
     pub(crate) cab_bypass: bool,
-    /// Set while the cabinet is bypassed or cleared so re-engaging wet calls
-    /// `cab_slot.reset()` cleanly before fading back in.
+    /// Set while the cabinet is bypassed (when active state became dirty) or reset
+    /// so re-engaging wet resets `WavIr` in place or holds `NamModel` on
+    /// delayed dry until the off-RT worker delivers a freshly prewarmed slot.
     pub(crate) cab_needs_reset: bool,
+    /// True once `CabSlotDsp::NamModel` has processed at least one wet block
+    /// since installation; prevents redundant off-RT rebuilds on untouched slots.
+    pub(crate) cab_nam_dirty: bool,
+    /// Monotonic cabinet epoch incremented whenever RT requests an off-RT
+    /// neural cabinet rebuild or installs/clears a cabinet via `LoadCabIr`.
+    pub(crate) cab_nam_generation: u64,
+    /// True while RT is waiting for an off-RT `RebuildCabNam` matching
+    /// `cab_nam_generation` (prevents duplicate rebuild requests per transition).
+    pub(crate) cab_nam_rebuild_in_flight: bool,
     /// Click-free 64-sample crossfade state machine for cabinet bypass.
     pub(crate) cab_bypass_xfade: BypassCrossfader,
     /// Phase-aligns the dry cabinet-bypass signal with `cab_slot.latency_samples()`.

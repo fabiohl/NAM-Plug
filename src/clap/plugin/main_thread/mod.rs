@@ -88,6 +88,9 @@ pub struct NamClapMainThread<'a> {
     /// Last-seen value of `ColdShared::slimmable_stale_discarded_total`, used to
     /// log stale-slimmable-rebuild discards exactly once.
     pub last_seen_slimmable_stale: Cell<u32>,
+    /// Last-seen value of `ColdShared::box_overflow.overwritten_total()`, used to
+    /// emit diagnostic alerts on newly overwritten retired-box slots.
+    pub(crate) last_seen_box_overwritten: Cell<usize>,
     /// Last-seen count of `rt_status.dsp_overloads` logged to host/warnings.
     pub last_seen_overloads: Cell<u32>,
     /// Instant of the last rate-limited overload warning log emission.

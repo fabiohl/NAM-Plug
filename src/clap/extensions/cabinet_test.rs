@@ -131,3 +131,7 @@ fn ux_metadata_disambiguation_and_all_gear_tags_accepted() {
     );
     assert_eq!(CabAssetKind::detect_from_path(Path::new("a.txt")), None);
 }
+
+#[cfg(feature = "testing")]
+#[path = "cabinet_test/off_rt_rebuild.rs"]
+mod off_rt_rebuild;

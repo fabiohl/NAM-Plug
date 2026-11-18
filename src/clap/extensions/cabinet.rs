@@ -247,13 +247,14 @@ impl CabNamSlot {
         self.remaining_tail = self.tail_budget;
     }
 
-    /// Resets resampler FIFOs and L/R neural states without allocating. RT-safe.
-    #[inline]
-    pub fn reset(&mut self) {
+    /// Off-RT full reset and convergence prewarm (used only during `activate()`
+    /// when a preserved neural cabinet slot crosses deactivate/activate).
+    /// Never called from the audio thread (`process()` or `processor::reset()`).
+    pub(crate) fn reset_and_prewarm_off_rt(&mut self) {
         self.stream.reset();
-        self.model_l.prewarm_reset();
+        prewarm_model_to_completion(&mut self.model_l);
         if let Some(ref mut mr) = self.model_r {
-            mr.prewarm_reset();
+            prewarm_model_to_completion(mr);
         }
         self.remaining_tail = 0;
     }
@@ -389,15 +390,26 @@ impl CabSlotDsp {
         }
     }
 
-    /// Resets convolution/neural filter memory (used cleanly on cabinet bypass re-enable).
+    /// Resets WAV convolution FDL/FIFO state in place on the audio thread.
+    /// Does NOT touch `NamModel` — neural cabinet transitions rebuild off-RT
+    /// instead of calling `prewarm_reset()`/`prewarm_step()` on RT.
     #[inline]
-    pub fn reset(&mut self) {
+    pub fn reset_wav_ir(&mut self) {
+        if let Self::WavIr(pair) = self {
+            pair.l.reset();
+            pair.r.reset();
+        }
+    }
+
+    /// Resets the cabinet slot off the audio thread (used only in `activate()`),
+    /// completing neural stabilization before the first RT callback.
+    pub(crate) fn reset_and_prewarm_off_rt(&mut self) {
         match self {
             Self::WavIr(pair) => {
                 pair.l.reset();
                 pair.r.reset();
             }
-            Self::NamModel(nam) => nam.reset(),
+            Self::NamModel(nam) => nam.reset_and_prewarm_off_rt(),
         }
     }
 
@@ -590,6 +602,17 @@ fn compute_nam_tail_budget(model: &StaticModel, model_rate: u32, host_rate: u32)
     }
 }
 
+/// Off-RT full prewarm (`prewarm_reset` followed by complete stabilization).
+fn prewarm_model_to_completion(model: &mut StaticModel) {
+    model.prewarm_reset();
+    for _ in 0..64 {
+        if model.prewarm_complete() {
+            break;
+        }
+        let _ = model.prewarm_step(usize::MAX);
+    }
+}
+
 /// Parses, validates, prewarms, and builds a stereo/dual-mono [`CabNamSlot`] from file bytes off-RT.
 pub fn build_cab_nam_from_bytes(
     bytes: &[u8],
@@ -703,13 +726,7 @@ pub fn build_cab_nam_from_bytes(
                 .param("error", e.to_string()),
         )
     })?;
-    model_l.prewarm_reset();
-    for _ in 0..64 {
-        if model_l.prewarm_complete() {
-            break;
-        }
-        let _ = model_l.prewarm_step(usize::MAX);
-    }
+    prewarm_model_to_completion(&mut model_l);
 
     if let Some(ref mut mr) = model_r {
         mr.set_max_buffer_size(max_model_block).map_err(|e| {
@@ -719,13 +736,7 @@ pub fn build_cab_nam_from_bytes(
                     .param("error", e.to_string()),
             )
         })?;
-        mr.prewarm_reset();
-        for _ in 0..64 {
-            if mr.prewarm_complete() {
-                break;
-            }
-            let _ = mr.prewarm_step(usize::MAX);
-        }
+        prewarm_model_to_completion(mr);
     }
 
     let latency_samples = stream.latency_samples();
@@ -784,39 +795,27 @@ pub fn build_cab_nam_slot_for_host(
     .map_err(|e| e.to_string())
 }
 
-/// Rebuilds a neural [`CabSlotDsp`] from override bytes or `ColdShared::cab_nam_raw_bytes`.
-pub(crate) fn build_cab_nam_from_shared(
-    shared: &crate::clap::plugin::NamClapShared,
-    override_nam: Option<(CabAssetKind, &[u8])>,
+/// Rebuilds a neural [`CabSlotDsp`] from `ColdShared::cab_nam_raw_bytes`
+/// off-RT, returning `Ok(None)` when no neural cabinet asset is active.
+pub(crate) fn build_cab_nam_from_cold(
+    cold: &crate::clap::plugin::shared::ColdShared,
     partition_size: usize,
     host_rate: u32,
 ) -> Result<Option<CabSlotDsp>, clack_plugin::prelude::PluginError> {
     use crate::clap::plugin::errors::{self, static_plugin_error};
     use std::sync::atomic::Ordering;
 
-    let diag_path = shared
-        .cold
+    let diag_path = cold
         .ir_path
         .lock()
         .ok()
         .and_then(|g| g.clone())
         .unwrap_or_else(|| "cabinet.nam".to_string());
-    if let Some((kind, bytes)) = override_nam {
-        let (slot, _meta) = build_cab_nam_slot_for_host(
-            kind,
-            bytes,
-            Path::new(&diag_path),
-            host_rate,
-            partition_size,
-        )
-        .map_err(|e| static_plugin_error(errors::dsp_resources::CAB_NAM_BUILD_FAILED, e))?;
-        return Ok(Some(slot));
-    }
-    let kind = CabAssetKind::from_u8(shared.cold.cab_kind.load(Ordering::Relaxed));
+    let kind = CabAssetKind::from_u8(cold.cab_kind.load(Ordering::Relaxed));
     if let Some(k) = kind
         && k.is_neural()
     {
-        let raw_guard = shared.cold.cab_nam_raw_bytes.lock().map_err(|e| {
+        let raw_guard = cold.cab_nam_raw_bytes.lock().map_err(|e| {
             static_plugin_error(
                 errors::dsp_resources::CAB_NAM_STORAGE_LOCK_POISONED,
                 format_args!("{e}"),
@@ -836,6 +835,36 @@ pub(crate) fn build_cab_nam_from_shared(
         return Ok(Some(slot));
     }
     Ok(None)
+}
+
+/// Rebuilds a neural [`CabSlotDsp`] from override bytes or `ColdShared::cab_nam_raw_bytes`.
+pub(crate) fn build_cab_nam_from_shared(
+    shared: &crate::clap::plugin::NamClapShared,
+    override_nam: Option<(CabAssetKind, &[u8])>,
+    partition_size: usize,
+    host_rate: u32,
+) -> Result<Option<CabSlotDsp>, clack_plugin::prelude::PluginError> {
+    use crate::clap::plugin::errors::{self, static_plugin_error};
+
+    if let Some((kind, bytes)) = override_nam {
+        let diag_path = shared
+            .cold
+            .ir_path
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "cabinet.nam".to_string());
+        let (slot, _meta) = build_cab_nam_slot_for_host(
+            kind,
+            bytes,
+            Path::new(&diag_path),
+            host_rate,
+            partition_size,
+        )
+        .map_err(|e| static_plugin_error(errors::dsp_resources::CAB_NAM_BUILD_FAILED, e))?;
+        return Ok(Some(slot));
+    }
+    build_cab_nam_from_cold(&shared.cold, partition_size, host_rate)
 }
 
 #[cfg(test)]

@@ -200,6 +200,7 @@ mod tests {
         test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
         let base_overloads = rt_status.dsp_overloads.load(Ordering::Relaxed);
         let base_hist = rt_status.latency_hist.total_count();
+        let base_discarded = rt_status.elapsed_discarded_total.load(Ordering::Relaxed);
 
         // Inject an implausible duration into telemetry (2 seconds > 1s MAX_PLAUSIBLE_ELAPSED_NS)
         let implausible_ns = MAX_PLAUSIBLE_ELAPSED_NS + 1_000_000_000;
@@ -219,6 +220,11 @@ mod tests {
             rt_status.latency_hist.total_count(),
             base_hist,
             "implausible elapsed duration must not be recorded in latency histogram"
+        );
+        assert_eq!(
+            rt_status.elapsed_discarded_total.load(Ordering::Relaxed),
+            base_discarded + 1,
+            "implausible elapsed duration must increment only the discard counter"
         );
 
         // Hook must have been consumed

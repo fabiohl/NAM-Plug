@@ -59,6 +59,7 @@ impl<'a> NamClapMainThread<'a> {
         self.drain_gc_and_sync_flags();
         self.handle_slimmable_rebuild();
         self.handle_oversample_rebuild();
+        self.handle_cab_nam_rebuild();
         self.sync_watchdog_cadence();
         self.handle_pending_model_load();
         self.handle_pending_ir_and_clear();
@@ -245,7 +246,8 @@ impl<'a> NamClapMainThread<'a> {
     pub(crate) fn sync_watchdog_cadence(&self) {
         let rt = &self.shared.cold.rt_status;
         let pending = rt.check_flag(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
-            || rt.check_flag(spsc::RT_STATUS_NEEDS_OS_REBUILD);
+            || rt.check_flag(spsc::RT_STATUS_NEEDS_OS_REBUILD)
+            || self.shared.cold.is_cab_nam_rebuild_pending();
         let want = if pending {
             super::WATCHDOG_FAST_PERIOD_MS
         } else {
@@ -618,6 +620,95 @@ impl<'a> NamClapMainThread<'a> {
                 .cold
                 .rt_status
                 .clear_flag_release(spsc::RT_STATUS_NEEDS_OS_REBUILD);
+        }
+    }
+
+    /// Off-RT neural cabinet (`CabNamSlot`) rebuild requested by RT when
+    /// `cab_bypass` re-engages or `reset()` clears a dirty `NamModel`.
+    fn handle_cab_nam_rebuild(&self) {
+        let Some(generation) = self.shared.cold.pending_cab_nam_generation() else {
+            return;
+        };
+
+        if self.ensure_rebuild_worker() {
+            self.drain_cab_nam_rebuild(generation);
+            return;
+        }
+
+        let outcome = super::model_loader::build_cab_nam_rebuild(self.shared, generation);
+        self.push_cab_nam_outcome(generation, outcome, false);
+    }
+
+    /// Consumes a worker-built neural cabinet rebuild payload (when ready) and
+    /// pushes it onto the command ring, keeping both payload and request bit
+    /// when the ring is full for retry on the next tick.
+    fn drain_cab_nam_rebuild(&self, pending_gen: u64) {
+        let outcome = {
+            let mut slot = self
+                .rebuild_slots
+                .cab_nam
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+        self.push_cab_nam_outcome(pending_gen, outcome, true);
+    }
+
+    /// Shared push/retire handler for worker and inline `CabNamRebuildOutcome`.
+    fn push_cab_nam_outcome(
+        &self,
+        pending_gen: u64,
+        outcome: super::model_loader::CabNamRebuildOutcome,
+        retain_in_slot_on_full: bool,
+    ) {
+        match outcome {
+            super::model_loader::CabNamRebuildOutcome::Ready(built_gen, slot) => {
+                if built_gen != pending_gen {
+                    // Superseded while in flight; let worker build `pending_gen`.
+                    self.host.request_callback();
+                    return;
+                }
+                match self.cmd_producer.borrow_mut().try_push_command(
+                    crate::clap::plugin::ClapParamPayload::RebuildCabNam {
+                        generation: built_gen,
+                        slot,
+                    },
+                ) {
+                    Ok(_) => self.shared.cold.clear_cab_nam_rebuild_if_gen(built_gen),
+                    Err(err) => {
+                        let (crate::clap::plugin::command_scheduler::PushError::Full, payload) =
+                            *err;
+                        if retain_in_slot_on_full
+                            && let crate::clap::plugin::ClapParamPayload::RebuildCabNam {
+                                generation,
+                                slot,
+                            } = payload
+                        {
+                            *self
+                                .rebuild_slots
+                                .cab_nam
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(
+                                super::model_loader::CabNamRebuildOutcome::Ready(generation, slot),
+                            );
+                        }
+                        log::warn!(
+                            "NAM-Plug: Command ring full during RebuildCabNam; retaining request for retry"
+                        );
+                        self.host.request_callback();
+                    }
+                }
+            }
+            super::model_loader::CabNamRebuildOutcome::Skipped(built_gen) => {
+                self.shared.cold.clear_cab_nam_rebuild_if_gen(built_gen);
+            }
+            super::model_loader::CabNamRebuildOutcome::Failed(err) => {
+                log::warn!("NAM-Plug: off-RT neural cabinet rebuild failed: {err}");
+                self.shared.cold.clear_cab_nam_rebuild_if_gen(pending_gen);
+            }
         }
     }
 

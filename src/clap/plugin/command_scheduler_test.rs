@@ -652,6 +652,18 @@ fn structural_classification_light_vs_heavy() {
             prewarm_cost_ns: None,
         },
         ClapParamPayload::LoadCabIr { pair: None },
+        ClapParamPayload::RebuildCabNam {
+            generation: 1,
+            slot: crate::clap::extensions::cabinet::build_cab_nam_slot_for_host(
+                crate::clap::extensions::cabinet::CabAssetKind::NamModel,
+                br#"{"version":"0.6.0","architecture":"Linear","sample_rate":48000,"config":{"receptive_field":1,"bias":true},"weights":[1.0,0.0]}"#,
+                std::path::Path::new("cab.nam"),
+                48_000,
+                256,
+            )
+            .unwrap()
+            .0,
+        },
         ClapParamPayload::SetOversample {
             os_l: Box::new(
                 neural_amp_modeler_rs::dsp::oversample::OversampleEngine::new(
@@ -694,6 +706,7 @@ fn structural_classification_light_vs_heavy() {
     for kind in [
         StructuralKind::Model,
         StructuralKind::CabIr,
+        StructuralKind::CabNamRebuild,
         StructuralKind::Oversample,
     ] {
         assert!(kind.is_coalescible(), "{kind:?} must be coalescible");

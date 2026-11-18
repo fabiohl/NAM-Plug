@@ -191,6 +191,16 @@ pub enum ClapParamPayload {
         /// Pre-built cabinet slot asset (`None` = clear cabinet slot).
         pair: Option<CabSlotDsp>,
     },
+    /// Off-RT rebuilt and prewarmed neural cabinet slot (`CabNamSlot`),
+    /// pushed after RT re-engagement or processor reset without running
+    /// `prewarm_reset`/`prewarm_step` on the audio thread.
+    RebuildCabNam {
+        /// Generation counter requested by the audio thread; mismatched or
+        /// superseded deliveries are retired to GC cleanly without swapping.
+        generation: u64,
+        /// Freshly constructed and converged neural cabinet slot.
+        slot: CabSlotDsp,
+    },
     /// Oversampling factor change: carries new pre-built engines for the audio thread.
     SetOversample {
         /// Pre-built left-channel oversample engine.
@@ -225,6 +235,9 @@ pub enum StructuralKind {
     Oversample,
     /// Complete atomic state restore (model + IR + params).
     Restore,
+    /// Off-RT prewarmed neural cabinet rebuild (coalescible with itself only,
+    /// never discarding an explicit `LoadCabIr` asset swap).
+    CabNamRebuild,
 }
 
 impl StructuralKind {
@@ -252,6 +265,7 @@ impl ClapParamPayload {
             | ClapParamPayload::CabBypass(_) => None,
             ClapParamPayload::LoadModel { .. } => Some(StructuralKind::Model),
             ClapParamPayload::LoadCabIr { .. } => Some(StructuralKind::CabIr),
+            ClapParamPayload::RebuildCabNam { .. } => Some(StructuralKind::CabNamRebuild),
             ClapParamPayload::SetOversample { .. } => Some(StructuralKind::Oversample),
             ClapParamPayload::RestoreTxn(_) => Some(StructuralKind::Restore),
         }
@@ -880,6 +894,14 @@ pub struct ColdShared {
     /// because their generation was stale. Written by the
     /// audio thread (Relaxed); read by tests/housekeeping for observability.
     pub slimmable_stale_discarded_total: AtomicU32,
+    /// Packed RT request for off-RT neural cabinet rebuild:
+    /// `(generation << 1) | (pending_bit)`. Set by RT when re-engaging or
+    /// resetting an active `NamModel`; cleared via CAS on main thread after
+    /// pushing `RebuildCabNam` (or cleared on RT when `LoadCabIr` installs a new asset).
+    pub cab_nam_rebuild_req: AtomicU64,
+    /// Telemetry counter incremented when RT discards a stale `RebuildCabNam`
+    /// delivery whose generation does not match the active slot epoch.
+    pub cab_nam_stale_discarded_total: AtomicU64,
     /// Full WaveNet model weights stored for main-thread slimmable rebuild.
     /// When a WaveNet model is loaded, a clone is stored here so the main thread
     /// can create slimmed variants without touching the audio thread.
@@ -1162,6 +1184,8 @@ impl ColdShared {
             slimmable_rx: Mutex::new(Some(slimmable_rx)),
             requested_slimmable_generation: AtomicU64::new(0),
             slimmable_stale_discarded_total: AtomicU32::new(0),
+            cab_nam_rebuild_req: AtomicU64::new(0),
+            cab_nam_stale_discarded_total: AtomicU64::new(0),
             full_wavenet_model: Mutex::new(None),
             cmd_next_seq: AtomicU64::new(0),
             cmd_last_ack: AtomicU64::new(0),
@@ -1203,6 +1227,37 @@ impl ColdShared {
         self.model_generation
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1)
+    }
+
+    /// Returns `true` when the audio thread is waiting for an off-RT neural
+    /// cabinet rebuild.
+    #[inline]
+    pub fn is_cab_nam_rebuild_pending(&self) -> bool {
+        (self.cab_nam_rebuild_req.load(Ordering::Acquire) & 1) != 0
+    }
+
+    /// Returns the pending neural cabinet rebuild generation, if any.
+    #[inline]
+    pub fn pending_cab_nam_generation(&self) -> Option<u64> {
+        let word = self.cab_nam_rebuild_req.load(Ordering::Acquire);
+        if (word & 1) != 0 {
+            Some(word >> 1)
+        } else {
+            None
+        }
+    }
+
+    /// Clears the pending bit only if `cab_nam_rebuild_req` still matches
+    /// `(generation << 1) | 1`, preserving any newer RT request cleanly.
+    #[inline]
+    pub(crate) fn clear_cab_nam_rebuild_if_gen(&self, generation: u64) {
+        let expected = (generation << 1) | 1;
+        let _ = self.cab_nam_rebuild_req.compare_exchange(
+            expected,
+            generation << 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 
@@ -1599,6 +1654,13 @@ impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for GuiShare
     fn flags_seen(&self) -> u64 {
         self.cold.rt_status.flags_seen()
     }
+
+    fn extra_telemetry(&self) -> Vec<(&'static str, u64)> {
+        vec![(
+            "retired_box_overwritten",
+            self.cold.box_overflow.overwritten_total() as u64,
+        )]
+    }
 }
 
 impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for NamClapShared {
@@ -1627,6 +1689,10 @@ impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for NamClapS
 
     fn flags_seen(&self) -> u64 {
         self.gui.flags_seen()
+    }
+
+    fn extra_telemetry(&self) -> Vec<(&'static str, u64)> {
+        self.gui.extra_telemetry()
     }
 }
 

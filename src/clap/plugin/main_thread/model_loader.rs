@@ -126,6 +126,16 @@ pub(crate) enum OversampleRebuildOutcome {
     Failed,
 }
 
+/// Outcome of an off-thread neural cabinet (`CabNamSlot`) rebuild.
+pub(crate) enum CabNamRebuildOutcome {
+    /// Converged neural cabinet slot tagged with the requested generation.
+    Ready(u64, crate::clap::extensions::cabinet::CabSlotDsp),
+    /// Building the neural cabinet slot failed (error stored for diagnostics).
+    Failed(String),
+    /// No neural cabinet bytes active in `ColdShared` (nothing to rebuild).
+    Skipped(u64),
+}
+
 /// Per-kind adaptive-rebuild delivery slots shared between the worker and the
 /// main thread. Off-RT only; the audio thread never touches them.
 #[derive(Clone)]
@@ -134,6 +144,8 @@ pub(crate) struct RebuildSlots {
     pub(crate) slimmable: Arc<Mutex<Option<SlimmableRebuildOutcome>>>,
     /// Oversampling engine rebuild payload.
     pub(crate) oversample: Arc<Mutex<Option<OversampleRebuildOutcome>>>,
+    /// Neural cabinet prewarmed rebuild payload.
+    pub(crate) cab_nam: Arc<Mutex<Option<CabNamRebuildOutcome>>>,
 }
 
 impl RebuildSlots {
@@ -142,6 +154,7 @@ impl RebuildSlots {
         Self {
             slimmable: Arc::new(Mutex::new(None)),
             oversample: Arc::new(Mutex::new(None)),
+            cab_nam: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -262,6 +275,26 @@ fn build_oversample(factor_val: u32) -> OversampleRebuildOutcome {
     }
 }
 
+/// Builds a freshly prewarmed neural cabinet slot off-thread for `generation`.
+pub(crate) fn build_cab_nam_rebuild(
+    shared: &GuiSharedState,
+    generation: u64,
+) -> CabNamRebuildOutcome {
+    let raw_rate = shared.cold.sample_rate.load(Ordering::Relaxed);
+    let host_rate = if raw_rate == 0 { 48_000 } else { raw_rate };
+    let max_block = shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
+    let partition_size = if max_block == 0 { 512 } else { max_block };
+    match crate::clap::extensions::cabinet::build_cab_nam_from_cold(
+        &shared.cold,
+        partition_size,
+        host_rate,
+    ) {
+        Ok(Some(slot)) => CabNamRebuildOutcome::Ready(generation, slot),
+        Ok(None) => CabNamRebuildOutcome::Skipped(generation),
+        Err(err) => CabNamRebuildOutcome::Failed(format!("{err:?}")),
+    }
+}
+
 /// Polls the `RT_STATUS_NEEDS_*` flags, building each pending payload at most
 /// once until the corresponding flag is lowered by the main thread.
 ///
@@ -275,6 +308,7 @@ fn poll_rebuilds(
     rebuilds: &RebuildSlots,
     slimmable_built: &mut Option<(u32, u64)>,
     os_built: &mut Option<u32>,
+    cab_nam_built: &mut Option<u64>,
 ) {
     let rt = &shared.cold.rt_status;
 
@@ -317,6 +351,21 @@ fn poll_rebuilds(
     } else {
         *os_built = None;
     }
+
+    if let Some(generation) = shared.cold.pending_cab_nam_generation() {
+        if *cab_nam_built != Some(generation) {
+            let outcome = build_cab_nam_rebuild(shared, generation);
+            *rebuilds.cab_nam.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+            *cab_nam_built = Some(generation);
+            shared.cold.host_call_quiescence.host_call(|| {
+                // SAFETY: created inside the `host_call` window, which refuses
+                // entry once `alive_fence` is lowered; the handle never outlives the host.
+                unsafe { host.as_static() }.request_callback();
+            });
+        }
+    } else {
+        *cab_nam_built = None;
+    }
 }
 
 /// The worker loop: one serial `prepare_model` at a time, plus adaptive-rebuild
@@ -333,6 +382,7 @@ fn worker_main(
     let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(instance_id);
     let mut slimmable_built: Option<(u32, u64)> = None;
     let mut os_built: Option<u32> = None;
+    let mut cab_nam_built: Option<u64> = None;
 
     loop {
         let is_processing = shared.cold.is_processing.load(Ordering::Relaxed);
@@ -406,7 +456,14 @@ fn worker_main(
 
         if let Some(rebuilds) = &rebuilds {
             let poll_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                poll_rebuilds(&shared, host, rebuilds, &mut slimmable_built, &mut os_built);
+                poll_rebuilds(
+                    &shared,
+                    host,
+                    rebuilds,
+                    &mut slimmable_built,
+                    &mut os_built,
+                    &mut cab_nam_built,
+                );
             }));
             if poll_res.is_err() {
                 // Recover the publication state so the main thread clears
@@ -416,6 +473,7 @@ fn worker_main(
                 );
                 slimmable_built = None;
                 os_built = None;
+                cab_nam_built = None;
                 {
                     let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
                     *guard = Some(PreparedModelResult {

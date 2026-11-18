@@ -644,9 +644,10 @@ Dynamic-links against the compiled `.so` binary using `PluginEntry::load(&artifa
 
 ### 9.3 SIMD Segregation & Hardware Baseline (x86-64-v3)
 
-Adherence to the baseline `x86-64-v3` (AVX2/FMA/BMI2) architecture is contractual:
+Adherence to the baseline `x86-64-v3` (AVX2/FMA/BMI2) architecture is contractual across every `x86_64` build target (`x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc` via `[target.'cfg(target_arch = "x86_64")']` in [`.cargo/config.toml`](../.cargo/config.toml) and the core engine's `.cargo/config.toml`):
 
-- Compiles without enabling the engine's opt-in `avx512` feature, ensuring zero EVEX instructions in `.text`.
+- Compiles with `-Ctarget-cpu=x86-64-v3` and without enabling the engine's opt-in `avx512` feature, ensuring zero EVEX instructions in `.text`.
+- Hot-path kernels such as `sanitize_copy_peak_sum_sq` ([`audio_loop.rs`](../src/clap/processor/dsp/orchestrator/audio_loop.rs)) invoke `#[target_feature(enable = "avx2", enable = "fma")]` directly under `#[cfg(target_arch = "x86_64")]` without runtime CPUID branching.
 - Verified across compile-time feature matrices in `utils/lints.sh`.
 
 #### 9.3.1 Entry-Time CPU Feature Validation Gate
@@ -655,7 +656,7 @@ To protect legacy CPUs from crashing with `SIGILL` upon plugin load:
 
 - `NamEntry::new()` calls `check_cpu_requirements()` during `clap_entry.init` before allocating plugin resources.
 - Verifies `avx2`, `fma`, and `bmi2` via CPUID (`is_x86_feature_detected!`).
-- If features are missing, logs an error to `stderr` and returns `false` cleanly, allowing the host to handle hardware incompatibility gracefully.
+- If features are missing, logs an error to `stderr` and returns `false` cleanly, allowing the host to handle hardware incompatibility gracefully. Direct execution bypassing `clap_entry.init` (e.g., standalone/test harnesses or hosts ignoring `init() == false`) on CPUs without AVX2/FMA/BMI2 terminates with `SIGILL`.
 - Dynamic initialization sections (`.init_array`) contain only baseline `x86-64-v1` instructions, ensuring execution reaches the validation gate safely.
 
 ### 9.4 Real-Time Heap Allocation Audit

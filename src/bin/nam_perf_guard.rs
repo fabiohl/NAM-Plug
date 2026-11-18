@@ -15,7 +15,7 @@
 //! policy, governor, boost, online/isolated CPUs and IRQ isolation) so a number is
 //! always attributable to the environment that produced it, and can optionally be
 //! compared against a previous certification report (`--reference`) with a relative
-//! p50 ceiling.
+//! p99 tail ceiling and mandatory artifact identity.
 //!
 //! Exit codes:
 //!   0 — Performance certification PASSED.
@@ -24,7 +24,10 @@
 
 #![cfg(feature = "testing")]
 
+use clack_common::events::Pckn;
+use clack_extensions::audio_ports_config::PluginAudioPortsConfig;
 use clack_extensions::state::PluginState;
+use clack_host::events::event_types::ParamValueEvent;
 use clack_host::prelude::*;
 use neural_amp_modeler_rs::common::diagnostics::logger::{LoggerConfig, NamLogger};
 use neural_amp_modeler_rs::common::params::{ActivationPrecision, ProcessingParams};
@@ -37,6 +40,30 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
+
+/// Expected input amplitude for the non-timed activation probe block.
+const PROBE_INPUT_SAMPLE: f32 = 0.1;
+
+/// Maximum deviation from `PROBE_INPUT_SAMPLE` allowed on the no-model
+/// (`Passthrough_Overhead_64_samp`) scenario (accounts for `-220 dBFS` / `1e-11`
+/// denormal dither and f32 rounding).
+// Measured: Passthrough_Overhead_64_samp max_abs_diff=2.831e-7, rms_diff=2.238e-7
+const PASSTHROUGH_PROBE_MAX_DIFF: f64 = 1.0e-5;
+
+/// Minimum deviation from the no-model reference (`PROBE_INPUT_SAMPLE`)
+/// required to prove a neural model actually processed the probe block.
+// Measured: WaveNet_A1_64/128 max_abs_diff=1.150e-1, WaveNet_A2_64 max_abs_diff=1.037e-1, LSTM_64 max_abs_diff=7.786e-2 (vs passthrough 2.831e-7)
+const MODEL_PROBE_MIN_DIFF: f64 = 1.0e-2;
+
+/// Minimum deviation between cabinet-wet and cabinet-bypassed probe outputs
+/// required to prove a configured cabinet (WAV IR or NAM) actively processed audio.
+// Measured: WaveNet_A1_Stereo_CabWAV_64/128 max_abs_diff=2.433e-2, WaveNet_A1_Stereo_CabNAM_64/128 max_abs_diff=1.308e-2
+const CAB_PROBE_MIN_DIFF: f64 = 1.0e-3;
+
+const CONFIG_ID_STEREO: u32 = 1;
+const PARAM_INPUT_GAIN: u32 = 0;
+const PARAM_BYPASS: u32 = 3;
+const PARAM_CAB_BYPASS: u32 = 13;
 
 /// Certification gate fraction of the real-time block deadline budget.
 ///
@@ -207,8 +234,16 @@ struct ReferenceScenario {
 pub struct ScenarioPerfMetrics {
     pub name: String,
     pub topology: String,
+    #[serde(default)]
+    pub channels: String,
     pub sample_rate: f64,
     pub block_size: usize,
+    #[serde(default)]
+    pub oversample: String,
+    #[serde(default)]
+    pub cabinet: String,
+    #[serde(default)]
+    pub events: String,
     pub iterations: usize,
     pub p50_ns: f64,
     pub p95_ns: f64,
@@ -222,6 +257,20 @@ pub struct ScenarioPerfMetrics {
     pub deadline_margin_percent: f64,
     pub gate_headroom_percent: f64,
     pub deadline_passed: bool,
+    #[serde(default)]
+    pub process_errors: usize,
+    #[serde(default)]
+    pub status_rejected: usize,
+    #[serde(default)]
+    pub probe_passed: bool,
+    #[serde(default)]
+    pub probe_max_abs_diff: f64,
+    #[serde(default)]
+    pub probe_rms_diff: f64,
+    #[serde(default)]
+    pub cab_probe_passed: bool,
+    #[serde(default)]
+    pub cab_probe_max_abs_diff: f64,
 }
 
 fn sha256_of(path: &Path) -> Result<String, String> {
@@ -643,11 +692,20 @@ fn load_reference_check(
     })?;
     let reference: ReferenceReport = serde_json::from_slice(&bytes)
         .map_err(|e| format!("invalid reference report {}: {e}", reference_path.display()))?;
-    if let Some(reference_sha) = &reference.clap_artifact_sha256
-        && reference_sha != artifact_sha256
-    {
+    let reference_sha = reference
+        .clap_artifact_sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "reference_identity_missing: reference report {} has no clap_artifact_sha256",
+                reference_path.display()
+            )
+        })?;
+    if reference_sha != artifact_sha256 {
         return Err(format!(
-            "reference artifact SHA-256 ({reference_sha}) != current artifact ({artifact_sha256})"
+            "reference_identity_mismatch: reference artifact SHA-256 ({reference_sha}) != current artifact ({artifact_sha256})"
         ));
     }
     let reference_sha256: String = Sha256::digest(&bytes)
@@ -686,12 +744,199 @@ fn resolve_model_fixture(filename: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScenarioEventMode {
+    None,
+    GainAutomation,
+    BypassToggle,
+}
+
+impl ScenarioEventMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::GainAutomation => "automation",
+            Self::BypassToggle => "bypass",
+        }
+    }
+}
+
+fn oversample_label(factor: OversampleFactor) -> &'static str {
+    match factor {
+        OversampleFactor::Off => "Off",
+        OversampleFactor::X2 => "2x",
+        OversampleFactor::X4 => "4x",
+        _ => "unknown",
+    }
+}
+
+fn cabinet_label(cab_fixture_file: Option<&str>) -> &'static str {
+    match cab_fixture_file {
+        None => "none",
+        Some(f) if f.ends_with(".wav") => "WAV",
+        Some(_) => "NAM",
+    }
+}
+
 struct ScenarioConfig {
     name: &'static str,
     topology: &'static str,
     fixture_file: Option<&'static str>,
+    cab_fixture_file: Option<&'static str>,
+    stereo: bool,
+    oversample: OversampleFactor,
+    event_mode: ScenarioEventMode,
     block_size: usize,
     sample_rate: f64,
+}
+
+fn validate_process_result(
+    phase: &str,
+    result: Result<ProcessStatus, PluginInstanceError>,
+    process_errors: &mut usize,
+    status_rejected: &mut usize,
+) -> Result<(), String> {
+    match result {
+        Ok(ProcessStatus::Continue) => Ok(()),
+        Ok(other) => {
+            *status_rejected += 1;
+            Err(format!("status_rejected:{phase}:{other:?}"))
+        }
+        Err(err) => {
+            *process_errors += 1;
+            Err(format!("process_error:{phase}:{err:?}"))
+        }
+    }
+}
+
+fn evaluate_probe_output(
+    out_l: &[f32],
+    out_r: &[f32],
+    expects_model: bool,
+) -> Result<(f64, f64), String> {
+    let mut max_abs_diff = 0.0_f64;
+    let mut sum_sq_diff = 0.0_f64;
+    let mut sample_count = 0usize;
+
+    for (ch_name, ch) in [("L", out_l), ("R", out_r)] {
+        for (idx, &sample) in ch.iter().enumerate() {
+            if !sample.is_finite() {
+                return Err(format!(
+                    "probe_non_finite_output: channel={ch_name} sample={idx} value={sample}"
+                ));
+            }
+            let diff = (sample as f64 - PROBE_INPUT_SAMPLE as f64).abs();
+            if diff > max_abs_diff {
+                max_abs_diff = diff;
+            }
+            sum_sq_diff += diff * diff;
+            sample_count += 1;
+        }
+    }
+
+    let rms_diff = if sample_count > 0 {
+        (sum_sq_diff / sample_count as f64).sqrt()
+    } else {
+        0.0
+    };
+
+    if expects_model {
+        if max_abs_diff <= MODEL_PROBE_MIN_DIFF {
+            return Err(format!(
+                "probe_activation_failed: model output matched no-model reference \
+                 (max_abs_diff={max_abs_diff:.6e}, rms_diff={rms_diff:.6e}, threshold={MODEL_PROBE_MIN_DIFF:.6e})"
+            ));
+        }
+    } else if max_abs_diff > PASSTHROUGH_PROBE_MAX_DIFF {
+        return Err(format!(
+            "probe_passthrough_mismatch: no-model output deviated from reference \
+             (max_abs_diff={max_abs_diff:.6e}, rms_diff={rms_diff:.6e}, max_allowed={PASSTHROUGH_PROBE_MAX_DIFF:.6e})"
+        ));
+    }
+
+    Ok((max_abs_diff, rms_diff))
+}
+
+fn evaluate_cab_probe_diff(
+    wet_l: &[f32],
+    wet_r: &[f32],
+    bypassed_l: &[f32],
+    bypassed_r: &[f32],
+) -> Result<f64, String> {
+    let mut max_abs_diff = 0.0_f64;
+    for (ch_name, wet, byp) in [("L", wet_l, bypassed_l), ("R", wet_r, bypassed_r)] {
+        for (idx, (&w, &b)) in wet.iter().zip(byp.iter()).enumerate() {
+            if !b.is_finite() {
+                return Err(format!(
+                    "cab_probe_non_finite_output: channel={ch_name} sample={idx} value={b}"
+                ));
+            }
+            let diff = (w as f64 - b as f64).abs();
+            if diff > max_abs_diff {
+                max_abs_diff = diff;
+            }
+        }
+    }
+    if max_abs_diff <= CAB_PROBE_MIN_DIFF {
+        return Err(format!(
+            "cab_probe_activation_failed: cabinet-active output matched cabinet-bypassed output \
+             (max_abs_diff={max_abs_diff:.6e}, threshold={CAB_PROBE_MIN_DIFF:.6e})"
+        ));
+    }
+    Ok(max_abs_diff)
+}
+
+#[inline(always)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bundles pre-allocated CLAP host audio/event buffers across warmup, probe, and timed loops"
+)]
+fn run_process_block(
+    phase: &str,
+    processor: &mut clack_host::process::StartedPluginAudioProcessor<PerfHost>,
+    in_l: &mut [f32],
+    in_r: &mut [f32],
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+    input_ports: &mut AudioPorts,
+    output_ports: &mut AudioPorts,
+    input_events_buffer: Option<&EventBuffer>,
+    output_events_buffer: &mut EventBuffer,
+    process_errors: &mut usize,
+    status_rejected: &mut usize,
+) -> Result<std::time::Duration, String> {
+    let input_events = match input_events_buffer {
+        Some(buf) => InputEvents::from_buffer(buf),
+        None => InputEvents::empty(),
+    };
+    let mut output_events = OutputEvents::from_buffer(output_events_buffer);
+
+    let mut input_channels = [in_l, in_r];
+    let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
+        latency: 0,
+        channels: AudioPortBufferType::f32_input_only(
+            input_channels.iter_mut().map(InputChannel::constant),
+        ),
+    }]);
+
+    let output_channels = [out_l, out_r];
+    let mut output_audio = output_ports.with_output_buffers([AudioPortBuffer {
+        latency: 0,
+        channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+    }]);
+
+    let start = Instant::now();
+    let result = processor.process(
+        &input_audio,
+        &mut output_audio,
+        &input_events,
+        &mut output_events,
+        None,
+        None,
+    );
+    let elapsed = start.elapsed();
+    validate_process_result(phase, result, process_errors, status_rejected)?;
+    Ok(elapsed)
 }
 
 fn measure_scenario(
@@ -726,31 +971,67 @@ fn measure_scenario(
     )
     .map_err(|e| format!("Failed to create plugin instance: {e:?}"))?;
 
+    if config.stereo {
+        let ports_cfg = plugin_instance
+            .plugin_handle()
+            .get_extension::<PluginAudioPortsConfig>()
+            .ok_or_else(|| {
+                "audio_ports_config_missing: PluginAudioPortsConfig extension unavailable"
+                    .to_string()
+            })?;
+        let handle = plugin_instance.plugin_handle();
+        ports_cfg
+            .select(&handle, ClapId::new(CONFIG_ID_STEREO))
+            .map_err(|e| format!("audio_ports_config_select_failed: {e:?}"))?;
+    }
+
+    let expects_model = config.fixture_file.is_some();
+    let expects_cab = config.cab_fixture_file.is_some();
     let (model_path, model_hash) = if let Some(fixture) = config.fixture_file {
         let fixture_path = resolve_model_fixture(fixture)
-            .ok_or_else(|| format!("Required fixture '{fixture}' not found"))?;
+            .ok_or_else(|| format!("fixture_missing: Required fixture '{fixture}' not found"))?;
         let abs_path = std::fs::canonicalize(&fixture_path).map_err(|e| e.to_string())?;
-        let hash = sha256_of(&abs_path).ok();
-        (Some(abs_path), hash)
+        let hash =
+            sha256_of(&abs_path).map_err(|e| format!("fixture_hash_failed:{fixture}:{e}"))?;
+        (Some(abs_path), Some(hash))
+    } else {
+        (None, None)
+    };
+    let (ir_path, ir_hash) = if let Some(cab_fixture) = config.cab_fixture_file {
+        let fixture_path = resolve_model_fixture(cab_fixture).ok_or_else(|| {
+            format!("fixture_missing: Required cabinet fixture '{cab_fixture}' not found")
+        })?;
+        let abs_path = std::fs::canonicalize(&fixture_path).map_err(|e| e.to_string())?;
+        let hash =
+            sha256_of(&abs_path).map_err(|e| format!("fixture_hash_failed:{cab_fixture}:{e}"))?;
+        (Some(abs_path), Some(hash))
     } else {
         (None, None)
     };
 
     let mut params = ProcessingParams::default();
-    params.oversample = OversampleFactor::Off;
+    params.oversample = config.oversample;
     params.activation_precision = ActivationPrecision::Standard;
     params.model_path = model_path;
     params.model_hash = model_hash;
+    params.ir_path = ir_path;
+    params.ir_hash = ir_hash;
 
     let state_bytes = serde_json::to_vec(&params).map_err(|e| e.to_string())?;
-    if let Some(state_ext) = plugin_instance
+    match plugin_instance
         .plugin_handle()
         .get_extension::<PluginState>()
     {
-        let handle = plugin_instance.plugin_handle();
-        state_ext
-            .load(&handle, &mut state_bytes.as_slice())
-            .map_err(|e| format!("Failed to load state: {e:?}"))?;
+        Some(state_ext) => {
+            let handle = plugin_instance.plugin_handle();
+            state_ext
+                .load(&handle, &mut state_bytes.as_slice())
+                .map_err(|e| format!("state_load_failed: {e:?}"))?;
+        }
+        None if expects_model || expects_cab => {
+            return Err("state_extension_missing: PluginState extension unavailable".to_string());
+        }
+        None => {}
     }
 
     // 3. Activate audio processor
@@ -769,8 +1050,8 @@ fn measure_scenario(
         .map_err(|e| format!("Failed to start processing: {e:?}"))?;
 
     let n = config.block_size;
-    let mut in_l = vec![0.1f32; n];
-    let mut in_r = vec![0.1f32; n];
+    let mut in_l = vec![PROBE_INPUT_SAMPLE; n];
+    let mut in_r = vec![PROBE_INPUT_SAMPLE; n];
     let mut out_l = vec![0.0f32; n];
     let mut out_r = vec![0.0f32; n];
 
@@ -778,70 +1059,126 @@ fn measure_scenario(
     let mut output_ports = AudioPorts::with_capacity(2, 1);
     let mut output_events_buffer = EventBuffer::with_capacity(10);
 
+    let mut process_errors = 0usize;
+    let mut status_rejected = 0usize;
+
     // Warmup cycles (100 iterations)
     for _ in 0..100 {
-        let input_events = InputEvents::empty();
-        let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
-
-        let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
-        let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_input_only(
-                input_channels.iter_mut().map(InputChannel::constant),
-            ),
-        }]);
-
-        let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
-        let mut output_audio = output_ports.with_output_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
-        }]);
-
-        let _ = started_processor.process(
-            &input_audio,
-            &mut output_audio,
-            &input_events,
-            &mut output_events,
+        run_process_block(
+            "warmup",
+            &mut started_processor,
+            &mut in_l,
+            &mut in_r,
+            &mut out_l,
+            &mut out_r,
+            &mut input_ports,
+            &mut output_ports,
             None,
-            None,
-        );
+            &mut output_events_buffer,
+            &mut process_errors,
+            &mut status_rejected,
+        )?;
     }
+
+    // Activation probe block (outside timed interval): proves the loaded model
+    // actually transformed audio (or passthrough stayed bit-faithful) and that
+    // all output channels remain finite.
+    let (probe_max_abs_diff, probe_rms_diff) = {
+        out_l.fill(f32::NAN);
+        out_r.fill(f32::NAN);
+        run_process_block(
+            "probe",
+            &mut started_processor,
+            &mut in_l,
+            &mut in_r,
+            &mut out_l,
+            &mut out_r,
+            &mut input_ports,
+            &mut output_ports,
+            None,
+            &mut output_events_buffer,
+            &mut process_errors,
+            &mut status_rejected,
+        )?;
+        evaluate_probe_output(&out_l, &out_r, expects_model)?
+    };
+    let probe_passed = true;
+    let cab_wet_l = expects_cab.then(|| out_l.clone());
+    let cab_wet_r = expects_cab.then(|| out_r.clone());
+
+    let (ev_a, ev_b) = build_timed_event_buffers(config.event_mode, n);
 
     // Benchmark measurement (300 iterations, pre-allocated and prefaulted)
     const MEASUREMENT_CYCLES: usize = 300;
     let mut latencies_ns = vec![0.0_f64; MEASUREMENT_CYCLES];
 
-    for slot in &mut latencies_ns {
-        let input_events = InputEvents::empty();
-        let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
-
-        let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
-        let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_input_only(
-                input_channels.iter_mut().map(InputChannel::constant),
-            ),
-        }]);
-
-        let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
-        let mut output_audio = output_ports.with_output_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
-        }]);
-
-        let start = Instant::now();
-        let status = started_processor.process(
-            &input_audio,
-            &mut output_audio,
-            &input_events,
-            &mut output_events,
-            None,
-            None,
-        );
-        let elapsed = start.elapsed();
-        let _ = std::hint::black_box(status);
+    for (idx, slot) in latencies_ns.iter_mut().enumerate() {
+        let ev_buf = match config.event_mode {
+            ScenarioEventMode::None => None,
+            _ if idx % 2 == 0 => Some(&ev_a),
+            _ => Some(&ev_b),
+        };
+        let elapsed = run_process_block(
+            "measurement",
+            &mut started_processor,
+            &mut in_l,
+            &mut in_r,
+            &mut out_l,
+            &mut out_r,
+            &mut input_ports,
+            &mut output_ports,
+            ev_buf,
+            &mut output_events_buffer,
+            &mut process_errors,
+            &mut status_rejected,
+        )?;
         *slot = elapsed.as_nanos() as f64;
     }
+
+    let (cab_probe_passed, cab_probe_max_abs_diff) =
+        if let (Some(wet_l), Some(wet_r)) = (cab_wet_l, cab_wet_r) {
+            let mut cab_byp_ev = EventBuffer::with_capacity(2);
+            let ev = ParamValueEvent::new(0, ClapId::new(PARAM_CAB_BYPASS), Pckn::match_all(), 1.0);
+            cab_byp_ev.push(&ev);
+            let settle_blocks = 128usize.div_ceil(n).max(4);
+            for block_idx in 0..settle_blocks {
+                let ev_ref = (block_idx == 0).then_some(&cab_byp_ev);
+                run_process_block(
+                    "cab_probe_settle",
+                    &mut started_processor,
+                    &mut in_l,
+                    &mut in_r,
+                    &mut out_l,
+                    &mut out_r,
+                    &mut input_ports,
+                    &mut output_ports,
+                    ev_ref,
+                    &mut output_events_buffer,
+                    &mut process_errors,
+                    &mut status_rejected,
+                )?;
+            }
+            out_l.fill(f32::NAN);
+            out_r.fill(f32::NAN);
+            run_process_block(
+                "cab_probe",
+                &mut started_processor,
+                &mut in_l,
+                &mut in_r,
+                &mut out_l,
+                &mut out_r,
+                &mut input_ports,
+                &mut output_ports,
+                None,
+                &mut output_events_buffer,
+                &mut process_errors,
+                &mut status_rejected,
+            )?;
+            let diff = evaluate_cab_probe_diff(&wet_l, &wet_r, &out_l, &out_r)?;
+            (true, diff)
+        } else {
+            (true, 0.0)
+        };
 
     let stopped_processor = started_processor.stop_processing();
     plugin_instance.deactivate(stopped_processor);
@@ -876,13 +1213,25 @@ fn measure_scenario(
     let gate_threshold_ns = deadline_budget_ns * DEADLINE_GATE_FRACTION;
     let deadline_margin_percent = ((deadline_budget_ns - p99_ns) / deadline_budget_ns) * 100.0;
     let gate_headroom_percent = ((gate_threshold_ns - p99_ns) / gate_threshold_ns) * 100.0;
-    let deadline_passed = p99_ns < gate_threshold_ns;
+    let deadline_passed = p99_ns < gate_threshold_ns
+        && process_errors == 0
+        && status_rejected == 0
+        && probe_passed
+        && cab_probe_passed;
 
     Ok(ScenarioPerfMetrics {
         name: config.name.to_string(),
         topology: config.topology.to_string(),
+        channels: if config.stereo {
+            "stereo".to_string()
+        } else {
+            "mono".to_string()
+        },
         sample_rate: config.sample_rate,
         block_size: config.block_size,
+        oversample: oversample_label(config.oversample).to_string(),
+        cabinet: cabinet_label(config.cab_fixture_file).to_string(),
+        events: config.event_mode.label().to_string(),
         iterations: count,
         p50_ns,
         p95_ns,
@@ -896,7 +1245,64 @@ fn measure_scenario(
         deadline_margin_percent,
         gate_headroom_percent,
         deadline_passed,
+        process_errors,
+        status_rejected,
+        probe_passed,
+        probe_max_abs_diff,
+        probe_rms_diff,
+        cab_probe_passed,
+        cab_probe_max_abs_diff,
     })
+}
+
+fn build_timed_event_buffers(mode: ScenarioEventMode, n: usize) -> (EventBuffer, EventBuffer) {
+    let mut ev_a = EventBuffer::with_capacity(4);
+    let mut ev_b = EventBuffer::with_capacity(4);
+    match mode {
+        ScenarioEventMode::None => {}
+        ScenarioEventMode::GainAutomation => {
+            let mid = (n / 2) as u32;
+            ev_a.push(&ParamValueEvent::new(
+                0,
+                ClapId::new(PARAM_INPUT_GAIN),
+                Pckn::match_all(),
+                -3.0,
+            ));
+            ev_a.push(&ParamValueEvent::new(
+                mid,
+                ClapId::new(PARAM_INPUT_GAIN),
+                Pckn::match_all(),
+                3.0,
+            ));
+            ev_b.push(&ParamValueEvent::new(
+                0,
+                ClapId::new(PARAM_INPUT_GAIN),
+                Pckn::match_all(),
+                0.0,
+            ));
+            ev_b.push(&ParamValueEvent::new(
+                mid,
+                ClapId::new(PARAM_INPUT_GAIN),
+                Pckn::match_all(),
+                -1.5,
+            ));
+        }
+        ScenarioEventMode::BypassToggle => {
+            ev_a.push(&ParamValueEvent::new(
+                0,
+                ClapId::new(PARAM_BYPASS),
+                Pckn::match_all(),
+                1.0,
+            ));
+            ev_b.push(&ParamValueEvent::new(
+                0,
+                ClapId::new(PARAM_BYPASS),
+                Pckn::match_all(),
+                0.0,
+            ));
+        }
+    }
+    (ev_a, ev_b)
 }
 
 fn usage() -> ! {
@@ -1030,6 +1436,10 @@ fn main() -> ExitCode {
             name: "WaveNet_A1_64_samp",
             topology: "WaveNet A1 Standard",
             fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: false,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
             block_size: 64,
             sample_rate: 48000.0,
         },
@@ -1037,6 +1447,10 @@ fn main() -> ExitCode {
             name: "WaveNet_A1_128_samp",
             topology: "WaveNet A1 Standard",
             fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: false,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
             block_size: 128,
             sample_rate: 48000.0,
         },
@@ -1044,6 +1458,10 @@ fn main() -> ExitCode {
             name: "WaveNet_A2_64_samp",
             topology: "WaveNet A2 / Slimmable",
             fixture_file: Some("a2_example.nam"),
+            cab_fixture_file: None,
+            stereo: false,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
             block_size: 64,
             sample_rate: 48000.0,
         },
@@ -1051,6 +1469,10 @@ fn main() -> ExitCode {
             name: "LSTM_64_samp",
             topology: "LSTM 1x3",
             fixture_file: Some("lstm.nam"),
+            cab_fixture_file: None,
+            stereo: false,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
             block_size: 64,
             sample_rate: 48000.0,
         },
@@ -1058,6 +1480,153 @@ fn main() -> ExitCode {
             name: "Passthrough_Overhead_64_samp",
             topology: "CLAP Overhead (No Model)",
             fixture_file: None,
+            cab_fixture_file: None,
+            stereo: false,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 64,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "Passthrough_Overhead_128_samp",
+            topology: "CLAP Overhead (No Model)",
+            fixture_file: None,
+            cab_fixture_file: None,
+            stereo: false,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 128,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_64_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 64,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_32_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 32,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_44100_64_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: false,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 64,
+            sample_rate: 44100.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_96000_64_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: false,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 64,
+            sample_rate: 96000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_OS2x_64_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: true,
+            oversample: OversampleFactor::X2,
+            event_mode: ScenarioEventMode::None,
+            block_size: 64,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_OS4x_64_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: true,
+            oversample: OversampleFactor::X4,
+            event_mode: ScenarioEventMode::None,
+            block_size: 64,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_CabWAV_64_samp",
+            topology: "WaveNet A1 + CabSim WAV",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: Some("cabsim_ir_pgo.wav"),
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 64,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_CabWAV_128_samp",
+            topology: "WaveNet A1 + CabSim WAV",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: Some("cabsim_ir_pgo.wav"),
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 128,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_CabNAM_64_samp",
+            topology: "WaveNet A1 + Cab NAM (LSTM 1x3)",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: Some("lstm.nam"),
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 64,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_CabNAM_128_samp",
+            topology: "WaveNet A1 + Cab NAM (LSTM 1x3)",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: Some("lstm.nam"),
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::None,
+            block_size: 128,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_Automation_64_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::GainAutomation,
+            block_size: 64,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_BypassTransition_64_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::BypassToggle,
             block_size: 64,
             sample_rate: 48000.0,
         },
@@ -1093,18 +1662,28 @@ fn main() -> ExitCode {
                 if cv > 1.2 {
                     environment_stable = false;
                 }
-                if !metrics.deadline_passed {
+                if !metrics.deadline_passed
+                    || metrics.process_errors > 0
+                    || metrics.status_rejected > 0
+                    || !metrics.probe_passed
+                    || !metrics.cab_probe_passed
+                {
                     all_deadlines_passed = false;
                 }
 
                 println!(
-                    "{} [{}] p50={:.1}µs, p95={:.1}µs, p99={:.1}µs, max={:.1}µs | {:.1} ns/samp | margin={:.1}% (budget={:.1}µs) | gate(85%): {} (p99={:.1}% of budget, headroom={:.1}%)",
+                    "{} [{}] ({}, {:.0}Hz, os={}, cab={}, ev={}) p50={:.1}µs, p95={:.1}µs, p99={:.1}µs, max={:.1}µs | {:.1} ns/samp | margin={:.1}% (budget={:.1}µs) | gate(85%): {} (p99={:.1}% of budget, headroom={:.1}%) | process_errors={} status_rejected={} probe={} (max_diff={:.3e}, rms_diff={:.3e}) cab_probe={} (cab_diff={:.3e})",
                     if metrics.deadline_passed {
                         "✓"
                     } else {
                         "✗"
                     },
                     metrics.name,
+                    metrics.channels,
+                    metrics.sample_rate,
+                    metrics.oversample,
+                    metrics.cabinet,
+                    metrics.events,
                     metrics.p50_ns / 1000.0,
                     metrics.p95_ns / 1000.0,
                     metrics.p99_ns / 1000.0,
@@ -1119,6 +1698,17 @@ fn main() -> ExitCode {
                     },
                     (metrics.p99_ns / metrics.deadline_budget_ns) * 100.0,
                     metrics.gate_headroom_percent,
+                    metrics.process_errors,
+                    metrics.status_rejected,
+                    if metrics.probe_passed { "PASS" } else { "FAIL" },
+                    metrics.probe_max_abs_diff,
+                    metrics.probe_rms_diff,
+                    if metrics.cab_probe_passed {
+                        "PASS"
+                    } else {
+                        "FAIL"
+                    },
+                    metrics.cab_probe_max_abs_diff,
                 );
                 results.push(metrics);
             }
@@ -1331,134 +1921,5 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn calibrated_host() -> HostEnvironment {
-        HostEnvironment {
-            bench_core: Some(8),
-            affinity_applied: true,
-            affinity_observed_core: Some(8),
-            affinity_error: None,
-            cpus_allowed_list: "8".to_string(),
-            sched_policy: "SCHED_FIFO".to_string(),
-            governor: Some("performance".to_string()),
-            boost: Some("1".to_string()),
-            cpu_online: "0-15".to_string(),
-            cpu_isolated: "8-9".to_string(),
-            irq_isolation: "isolated".to_string(),
-            irqs_sharing_bench_core: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn calibrated_host_is_not_degraded_even_with_cpufreq_boost_enabled() {
-        let host = calibrated_host();
-        assert!(
-            host_degradation_reasons(&host).is_empty(),
-            "calibrated isolated host with SCHED_FIFO and performance governor must not degrade on boost metadata"
-        );
-    }
-
-    #[test]
-    fn host_degradation_flags_non_rt_policy_and_shared_irq() {
-        let mut host = calibrated_host();
-        host.sched_policy = "SCHED_OTHER".to_string();
-        host.irq_isolation = "shared".to_string();
-        host.irqs_sharing_bench_core = vec!["62".to_string()];
-        let reasons = host_degradation_reasons(&host);
-        assert!(
-            reasons
-                .iter()
-                .any(|r| r == "sched_policy_not_realtime:SCHED_OTHER"),
-            "expected sched_policy_not_realtime, got {reasons:?}"
-        );
-        assert!(
-            reasons.iter().any(|r| r == "irq_isolation_shared:8:1"),
-            "expected irq_isolation_shared:8:1, got {reasons:?}"
-        );
-    }
-
-    #[test]
-    fn reference_series_passes_within_noise_floor_even_if_ratio_exceeds_threshold() {
-        let measured = vec![ScenarioPerfMetrics {
-            name: "LSTM_64_samp".to_string(),
-            topology: "LSTM 1x3".to_string(),
-            sample_rate: 48000.0,
-            block_size: 64,
-            iterations: 300,
-            p50_ns: 8102.0,
-            p95_ns: 8521.0,
-            p99_ns: 13759.0, // 4.19 µs delta over reference
-            max_ns: 13759.0,
-            mean_ns: 8158.4,
-            stddev_ns: 612.0,
-            ns_per_sample: 127.5,
-            deadline_budget_ns: 1333333.3,
-            gate_threshold_ns: 1133333.3,
-            deadline_margin_percent: 98.9,
-            gate_headroom_percent: 98.7,
-            deadline_passed: true,
-        }];
-        let reference = ReferenceReport {
-            clap_artifact_sha256: Some("dummy".to_string()),
-            scenarios: vec![ReferenceScenario {
-                name: "LSTM_64_samp".to_string(),
-                p50_ns: Some(8102.0),
-                p99_ns: Some(9568.0),
-                max_ns: Some(14248.0),
-            }],
-        };
-
-        let check = evaluate_reference_series(
-            &measured, &reference, 1.25, 1.5, 25_000.0, // 25 µs noise floor
-            "ref.json", "sha",
-        )
-        .expect("evaluation should succeed");
-
-        assert_eq!(check.status, "PASS");
-        assert!(check.passed);
-        assert_eq!(check.comparisons[0].p99_passed, Some(true));
-    }
-
-    #[test]
-    fn reference_series_fails_when_both_ratio_and_noise_floor_exceeded() {
-        let measured = vec![ScenarioPerfMetrics {
-            name: "LSTM_64_samp".to_string(),
-            topology: "LSTM 1x3".to_string(),
-            sample_rate: 48000.0,
-            block_size: 64,
-            iterations: 300,
-            p50_ns: 8102.0,
-            p95_ns: 8521.0,
-            p99_ns: 60000.0, // 50.4 µs delta over reference (> 25 µs noise floor)
-            max_ns: 60000.0,
-            mean_ns: 15000.0,
-            stddev_ns: 1000.0,
-            ns_per_sample: 250.0,
-            deadline_budget_ns: 1333333.3,
-            gate_threshold_ns: 1133333.3,
-            deadline_margin_percent: 95.0,
-            gate_headroom_percent: 94.0,
-            deadline_passed: true,
-        }];
-        let reference = ReferenceReport {
-            clap_artifact_sha256: Some("dummy".to_string()),
-            scenarios: vec![ReferenceScenario {
-                name: "LSTM_64_samp".to_string(),
-                p50_ns: Some(8102.0),
-                p99_ns: Some(9568.0),
-                max_ns: Some(14248.0),
-            }],
-        };
-
-        let check = evaluate_reference_series(
-            &measured, &reference, 1.25, 1.5, 25_000.0, "ref.json", "sha",
-        )
-        .expect("evaluation should succeed");
-
-        assert_eq!(check.status, "FAIL");
-        assert!(!check.passed);
-        assert_eq!(check.comparisons[0].p99_passed, Some(false));
-    }
-}
+#[path = "nam_perf_guard_test.rs"]
+mod tests;

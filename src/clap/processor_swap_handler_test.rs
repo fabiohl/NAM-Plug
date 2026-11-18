@@ -214,13 +214,27 @@ mod tests {
             ),
         };
         let restore = make_restore(0);
+        let cab_raw = br#"{"version":"0.6.0","architecture":"Linear","sample_rate":48000,"config":{"receptive_field":1,"bias":true},"weights":[1.0,0.0]}"#;
+        let (cab_slot, _) = crate::clap::extensions::cabinet::build_cab_nam_slot_for_host(
+            crate::clap::extensions::cabinet::CabAssetKind::NamModel,
+            cab_raw,
+            std::path::Path::new("cab.nam"),
+            48_000,
+            N,
+        )
+        .expect("cab slot");
+        let rebuild_cab = ClapParamPayload::RebuildCabNam {
+            generation: 1,
+            slot: cab_slot,
+        };
 
-        let cases: [(&str, &ClapParamPayload, bool, Option<u64>); 5] = [
+        let cases: [(&str, &ClapParamPayload, bool, Option<u64>); 6] = [
             ("Params", &params, false, None),
             ("LoadModel", &clear_model, true, Some(0)),
             ("LoadCabIr", &clear_ir, true, Some(1)),
             ("SetOversample", &oversample, true, Some(2)),
             ("RestoreTxn", &restore, true, None),
+            ("RebuildCabNam", &rebuild_cab, true, Some(4)),
         ];
 
         for (name, payload, structural, key) in cases {

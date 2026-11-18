@@ -42,9 +42,10 @@ impl TestedArtifact {
     /// 2. `CARGO_TARGET_DIR` + `/release/libnam_plug.so` (cargo-managed
     ///    release build — what tests-quick.sh / build-release.sh produce).
     /// 3. `target/release/libnam_plug.so` relative to `CARGO_MANIFEST_DIR`.
-    /// 4. `target/debug/libnam_plug.so` relative to `CARGO_MANIFEST_DIR`.
-    /// 5. `target/clap/release/libnam_plug.so`.
-    /// 6. `target/clap/debug/libnam_plug.so`.
+    /// 4. `target/release-nolto/libnam_plug.so` relative to `CARGO_MANIFEST_DIR`.
+    /// 5. `target/debug/libnam_plug.so` relative to `CARGO_MANIFEST_DIR`.
+    /// 6. `target/clap/release/libnam_plug.so`.
+    /// 7. `target/clap/debug/libnam_plug.so`.
     ///
     /// # Panics
     ///
@@ -207,23 +208,22 @@ pub fn resolve_plugin_artifact_path() -> PathBuf {
 
     // Handle CARGO_TARGET_DIR separately (it may point to any directory)
     if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
-        let release_path = PathBuf::from(&target_dir).join("release/libnam_plug.so");
-        if release_path.exists() {
-            eprintln!(
-                "Using CARGO_TARGET_DIR artifact: {}",
-                release_path.display()
-            );
-            return release_path;
-        }
-        let debug_path = PathBuf::from(&target_dir).join("debug/libnam_plug.so");
-        if debug_path.exists() {
-            eprintln!("Using CARGO_TARGET_DIR artifact: {}", debug_path.display());
-            return debug_path;
+        for sub in [
+            "release/libnam_plug.so",
+            "release-nolto/libnam_plug.so",
+            "debug/libnam_plug.so",
+        ] {
+            let p = PathBuf::from(&target_dir).join(sub);
+            if p.exists() {
+                eprintln!("Using CARGO_TARGET_DIR artifact: {}", p.display());
+                return p;
+            }
         }
     }
 
     let candidates: &[(&str, &str)] = &[
         ("target/release", "libnam_plug.so"),
+        ("target/release-nolto", "libnam_plug.so"),
         ("target/debug", "libnam_plug.so"),
         ("target/release/deps", "libnam_plug.so"),
         ("target/debug/deps", "libnam_plug.so"),

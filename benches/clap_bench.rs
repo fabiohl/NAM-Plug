@@ -1858,7 +1858,8 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
 criterion_group! {
     name = clap_benches;
     config = Criterion::default().sample_size(30).noise_threshold(0.05);
-    targets = bench_clap_infrastructure,
+    targets = bench_f10_copy_and_meter,
+        bench_clap_infrastructure,
         bench_clap_inference,
         bench_worstcase_small_blocks,
         bench_worstcase_dry_delay,
@@ -1964,6 +1965,182 @@ fn bench_evidence_inference_e2e_blocksize(c: &mut Criterion) {
         }
     }
     group.finish();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. F10 Copy & Meter Fusion Evaluation (S6 / T6.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Compares the current two-pass `copy_output_from_sub_block` against fused
+/// candidates (scalar and AVX2, plus mono mirror) in isolation, and measures the
+/// end-to-end `process()` path on Passthrough and lightweight LSTM across mono
+/// and stereo for block sizes 32, 64, and 128.
+fn bench_f10_copy_and_meter(c: &mut Criterion) {
+    const BLOCK_SIZES: &[usize] = &[32, 64, 128];
+
+    // ── 6.1 Isolated copy + sanitize + peak + sum_sq microbenchmark ──
+    {
+        let mut group = c.benchmark_group("CLAP_F10_CopyAndMeter_Isolated");
+        for &process_mono in &[true, false] {
+            let topo = if process_mono { "mono" } else { "stereo" };
+            for &block_size in BLOCK_SIZES {
+                let sine = generate_sine_440hz(block_size);
+                let mut buf_out_l = sine.clone();
+                let mut buf_out_r: Vec<f32> = sine.iter().map(|&s| -s * 0.7).collect();
+                let mut host_out_l = vec![0.0f32; block_size];
+                let mut host_out_r = vec![0.0f32; block_size];
+
+                group.throughput(Throughput::Elements(block_size as u64));
+
+                group.bench_with_input(
+                    BenchmarkId::new(format!("two_pass_ref_{topo}"), format!("{block_size}_samp")),
+                    &block_size,
+                    |b, &bs| {
+                        b.iter(|| {
+                            let mut ol = Some(host_out_l.as_mut_slice());
+                            let mut or = Some(host_out_r.as_mut_slice());
+                            let res = nam_plug::clap::test_util::bench_copy_output_two_pass_ref(
+                                &mut ol,
+                                &mut or,
+                                &buf_out_l,
+                                &buf_out_r,
+                                bs,
+                                0,
+                                process_mono,
+                            );
+                            std::hint::black_box(res);
+                        });
+                    },
+                );
+
+                group.bench_with_input(
+                    BenchmarkId::new(format!("fused_scalar_{topo}"), format!("{block_size}_samp")),
+                    &block_size,
+                    |b, &bs| {
+                        b.iter(|| {
+                            let mut ol = Some(host_out_l.as_mut_slice());
+                            let mut or = Some(host_out_r.as_mut_slice());
+                            let res = nam_plug::clap::test_util::bench_copy_output_fused_scalar(
+                                &mut ol,
+                                &mut or,
+                                &buf_out_l,
+                                &buf_out_r,
+                                bs,
+                                0,
+                                process_mono,
+                            );
+                            std::hint::black_box(res);
+                        });
+                    },
+                );
+
+                group.bench_with_input(
+                    BenchmarkId::new(
+                        format!("fused_avx2_current_{topo}"),
+                        format!("{block_size}_samp"),
+                    ),
+                    &block_size,
+                    |b, &bs| {
+                        b.iter(|| {
+                            let mut ol = Some(host_out_l.as_mut_slice());
+                            let mut or = Some(host_out_r.as_mut_slice());
+                            let res = nam_plug::clap::test_util::bench_copy_output_current(
+                                &mut ol,
+                                &mut or,
+                                &mut buf_out_l,
+                                &mut buf_out_r,
+                                bs,
+                                0,
+                                process_mono,
+                            );
+                            std::hint::black_box(res);
+                        });
+                    },
+                );
+            }
+        }
+        group.finish();
+    }
+
+    // ── 6.2 End-to-end Passthrough and light model (LSTM), mono & stereo ──
+    {
+        let lstm_path = common::model_path("lstm.nam");
+        assert!(
+            lstm_path.exists(),
+            "Mandatory fixture 'lstm.nam' missing at {}",
+            lstm_path.display()
+        );
+        let mut group = c.benchmark_group("CLAP_F10_CopyAndMeter_E2E");
+        for (model_label, model_opt) in [("Passthrough", None), ("LSTM", Some(&lstm_path))] {
+            for (topo_label, is_mono) in [("Mono", true), ("Stereo", false)] {
+                let port_cfg = if is_mono {
+                    nam_plug::clap::plugin::shared::CONFIG_ID_MONO
+                } else {
+                    nam_plug::clap::plugin::shared::CONFIG_ID_STEREO
+                };
+                for &block_size in BLOCK_SIZES {
+                    let mut params = ProcessingParams::default();
+                    if let Some(model_file) = model_opt {
+                        params.model_path = Some(model_file.to_path_buf());
+                        params.model_hash = asset_hash(model_file);
+                    }
+                    let (mut plugin_instance, stopped_processor) =
+                        create_and_activate_bench_plugin_with_config(
+                            48000.0,
+                            block_size,
+                            &params,
+                            None,
+                            Some(port_cfg),
+                        );
+                    let mut started_processor = stopped_processor
+                        .start_processing()
+                        .expect("Failed to start processing");
+
+                    let sine = generate_sine_440hz(block_size);
+                    let mut in_l = sine.clone();
+                    let mut in_r = if is_mono {
+                        sine
+                    } else {
+                        sine.iter().map(|&s| -s * 0.7).collect()
+                    };
+                    let mut out_l = vec![0.0f32; block_size];
+                    let mut out_r = vec![0.0f32; block_size];
+                    let mut input_ports = AudioPorts::with_capacity(2, 1);
+                    let mut output_ports = AudioPorts::with_capacity(2, 1);
+                    let mut output_events_buffer = EventBuffer::with_capacity(10);
+                    let empty_events = EventBuffer::new();
+
+                    group.throughput(Throughput::Elements(block_size as u64));
+                    group.bench_with_input(
+                        BenchmarkId::new(
+                            format!("{model_label}_{topo_label}"),
+                            format!("{block_size}_samp"),
+                        ),
+                        &block_size,
+                        |b, &bs| {
+                            run_process_bench(
+                                b,
+                                &mut started_processor,
+                                &mut in_l,
+                                &mut in_r,
+                                &mut out_l,
+                                &mut out_r,
+                                &mut input_ports,
+                                &mut output_ports,
+                                &mut output_events_buffer,
+                                &empty_events,
+                                bs,
+                            );
+                        },
+                    );
+
+                    let stopped_processor = started_processor.stop_processing();
+                    plugin_instance.deactivate(stopped_processor);
+                }
+            }
+        }
+        group.finish();
+    }
 }
 
 criterion_main!(clap_benches);

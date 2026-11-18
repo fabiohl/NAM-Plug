@@ -198,9 +198,13 @@ if should_run "catch-all"; then
     catch_rc=0
     # Build outside the execution timeout; every #[ignore] suite has a dedicated phase.
     # Uses `release-nolto` (`opt-level = 3`, `lto = false`) so ~25 test binaries link without ThinLTO bottleneck.
-    timeout --kill-after=30 1200 cargo test --locked --profile release-nolto --features testing --no-run --lib --bins --tests > "$plog" 2>&1 || catch_rc=$?
+    # Build matching `cdylib` (`--lib`) in the same profile/features for ABI-coupled `tests/clap.rs` suites.
+    timeout --kill-after=30 1200 cargo build --locked --profile release-nolto --features testing --lib > "$plog" 2>&1 || catch_rc=$?
     if [ "$catch_rc" -eq 0 ]; then
-        if ! timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-300}" cargo test --locked --profile release-nolto --features testing --no-fail-fast --lib --bins --tests 2>&1 | tee -a "$plog"; then
+        timeout --kill-after=30 1200 cargo test --locked --profile release-nolto --features testing --no-run --lib --bins --tests >> "$plog" 2>&1 || catch_rc=$?
+    fi
+    if [ "$catch_rc" -eq 0 ]; then
+        if ! CLAP_PLUGIN_UNDER_TEST="$CARGO_TARGET_DIR/release-nolto/libnam_plug.so" timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-300}" cargo test --locked --profile release-nolto --features testing --no-fail-fast --lib --bins --tests 2>&1 | tee -a "$plog"; then
             catch_rc=1
         fi
     fi
@@ -266,13 +270,18 @@ if should_run "artifact"; then
             clap_parity_multi_sr::test_clap_parity_multi_rate
             clap_parity_multi_sr::test_clap_parity_oversample
         )
-        for atest in "${ARTIFACT_TESTS[@]}"; do
-            art_cases=$((art_cases + $(subcase_count "$atest")))
-            run_named "artifact" "$atest" timeout --kill-after=30 "$art_to" \
-                cargo test --locked --features testing --release --test clap "$atest" \
-                -- --ignored --exact --nocapture \
-                || art_rc=1
-        done
+        # Pre-compile `--test clap` outside the per-test execution timeout
+        # (cold `--release` ThinLTO builds exceed the 400s run budget).
+        timeout --kill-after=30 1200 cargo test --locked --features testing --release --no-run --test clap >> "$plog" 2>&1 || art_rc=1
+        if [ "$art_rc" -eq 0 ]; then
+            for atest in "${ARTIFACT_TESTS[@]}"; do
+                art_cases=$((art_cases + $(subcase_count "$atest")))
+                run_named "artifact" "$atest" timeout --kill-after=30 "$art_to" \
+                    cargo test --locked --features testing --release --test clap "$atest" \
+                    -- --ignored --exact --nocapture \
+                    || art_rc=1
+            done
+        fi
 
         # clap-validator if installed
         if [ "$art_rc" -eq 0 ]; then

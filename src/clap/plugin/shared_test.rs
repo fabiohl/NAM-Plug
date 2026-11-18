@@ -579,3 +579,28 @@ fn test_gui_events_no_orphan_end_on_retry() {
     assert_eq!(rest[0].kind, EvKind::Value);
     assert_eq!(rest[1].kind, EvKind::End);
 }
+
+#[test]
+fn test_diagnostic_bundle_exposes_retired_box_overwritten_total() {
+    use crate::clap::plugin::retired_box::RetiredBox;
+    use crate::clap::plugin::shared::ClapParamPayload;
+    use neural_amp_modeler_rs::common::diagnostics::{AudioMetadata, DiagnosticBundle};
+
+    let shared = make_test_shared();
+    for _ in 0..259 {
+        shared
+            .cold
+            .box_overflow
+            .push(RetiredBox::Command(Box::new(ClapParamPayload::CabBypass(
+                false,
+            ))));
+    }
+
+    let meta = AudioMetadata::new(2, "ClapTestHost");
+    let rendered = DiagnosticBundle::capture_with_runtime(&shared, &meta).render();
+    assert!(
+        rendered.contains("telemetry.retired_box_overwritten=3"),
+        "DiagnosticBundle must expose retired_box_overwritten:\n{rendered}"
+    );
+    assert_eq!(shared.cold.box_overflow.drain(), 256);
+}

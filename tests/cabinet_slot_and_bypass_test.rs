@@ -303,13 +303,54 @@ where
     stopped.start_processing().expect("start_processing")
 }
 
+#[cfg(feature = "heap-audit")]
 fn process_blocks_impl<H: HostHandlers>(
     proc: &mut StartedPluginAudioProcessor<H>,
     in_l: &[f32],
     in_r: &[f32],
     block_size: usize,
     audit_rt: bool,
+    per_block_events: impl FnMut(usize, &mut EventBuffer),
+) -> (Vec<f32>, Vec<f32>) {
+    process_blocks_impl_with_post(
+        proc,
+        in_l,
+        in_r,
+        block_size,
+        audit_rt,
+        per_block_events,
+        |_, _, _| {},
+    )
+}
+
+#[cfg(not(feature = "heap-audit"))]
+fn process_blocks_impl<H: HostHandlers>(
+    proc: &mut StartedPluginAudioProcessor<H>,
+    in_l: &[f32],
+    in_r: &[f32],
+    block_size: usize,
+    audit_rt: bool,
+    per_block_events: impl FnMut(usize, &mut EventBuffer),
+) -> (Vec<f32>, Vec<f32>) {
+    process_blocks_impl_with_post(
+        proc,
+        in_l,
+        in_r,
+        block_size,
+        audit_rt,
+        per_block_events,
+        |_, _, _| {},
+    )
+}
+
+fn process_blocks_impl_with_post<H: HostHandlers>(
+    proc: &mut StartedPluginAudioProcessor<H>,
+    in_l: &[f32],
+    in_r: &[f32],
+    block_size: usize,
+    audit_rt: bool,
     mut per_block_events: impl FnMut(usize, &mut EventBuffer),
+    mut on_after_block: impl FnMut(usize, &[f32], &[f32]),
 ) -> (Vec<f32>, Vec<f32>) {
     assert_eq!(in_l.len(), in_r.len());
     let mut out_l = Vec::with_capacity(in_l.len());
@@ -396,11 +437,20 @@ fn process_blocks_impl<H: HostHandlers>(
 
         out_l.extend_from_slice(&blk_out_l[..n]);
         out_r.extend_from_slice(&blk_out_r[..n]);
+        on_after_block(block_idx, &blk_out_l[..n], &blk_out_r[..n]);
         offset += n;
         block_idx += 1;
     }
 
     (out_l, out_r)
+}
+
+#[cfg(feature = "heap-audit")]
+fn pump_off_rt_cab_nam_rebuild(instance: &mut PluginInstance<TestHost>) {
+    for _ in 0..25 {
+        instance.call_on_main_thread_callback();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }
 
 fn process_blocks<H: HostHandlers>(
@@ -411,17 +461,6 @@ fn process_blocks<H: HostHandlers>(
     per_block_events: impl FnMut(usize, &mut EventBuffer),
 ) -> (Vec<f32>, Vec<f32>) {
     process_blocks_impl(proc, in_l, in_r, block_size, false, per_block_events)
-}
-
-#[cfg(feature = "heap-audit")]
-fn process_blocks_audited<H: HostHandlers>(
-    proc: &mut StartedPluginAudioProcessor<H>,
-    in_l: &[f32],
-    in_r: &[f32],
-    block_size: usize,
-    per_block_events: impl FnMut(usize, &mut EventBuffer),
-) -> (Vec<f32>, Vec<f32>) {
-    process_blocks_impl(proc, in_l, in_r, block_size, true, per_block_events)
 }
 
 #[cfg(feature = "heap-audit")]
@@ -700,17 +739,29 @@ fn t08_3_cab_bypass_constant_latency_phase_crossfade_and_heap_audit() {
         .map(|i| 0.4 * (2.0 * std::f32::consts::PI * 220.0 * (i as f32) / 48_000.0).sin())
         .collect();
 
-    let (out_l, out_r) = process_blocks_audited(&mut proc, &signal, &signal, BLOCK, |blk, ev| {
-        if blk == 1 {
-            push_bool_param(ev, PARAM_CAB_BYPASS, true);
-        } else if blk == 3 {
-            push_bool_param(ev, PARAM_CAB_BYPASS, false);
-        } else if blk == 4 {
-            push_u32_param(ev, PARAM_OUTPUT_MODE, 0);
-        } else if blk == 5 {
-            push_bool_param(ev, PARAM_BYPASS, true);
-        }
-    });
+    let (out_l, out_r) = process_blocks_impl_with_post(
+        &mut proc,
+        &signal,
+        &signal,
+        BLOCK,
+        true,
+        |blk, ev| {
+            if blk == 1 {
+                push_bool_param(ev, PARAM_CAB_BYPASS, true);
+            } else if blk == 3 {
+                push_bool_param(ev, PARAM_CAB_BYPASS, false);
+            } else if blk == 4 {
+                push_u32_param(ev, PARAM_OUTPUT_MODE, 0);
+            } else if blk == 5 {
+                push_bool_param(ev, PARAM_BYPASS, true);
+            }
+        },
+        |blk, _blk_l, _blk_r| {
+            if blk == 3 {
+                pump_off_rt_cab_nam_rebuild(&mut instance);
+            }
+        },
+    );
 
     assert!((out_l[50] - 0.5 * signal[50]).abs() < 1e-4);
     assert!((out_r[50] - 0.5 * signal[50]).abs() < 1e-4);
@@ -718,10 +769,22 @@ fn t08_3_cab_bypass_constant_latency_phase_crossfade_and_heap_audit() {
     let b2 = BLOCK * 2 + 32;
     assert!((out_l[b2] - signal[b2]).abs() < 1e-4);
 
-    let b4 = BLOCK * 4 + 32;
+    // Block 3 issued `PARAM_CAB_BYPASS = false` while the off-RT rebuild had not
+    // yet delivered: output must stay strictly on delayed dry with zero wet leak.
+    let b3 = BLOCK * 3 + 32;
+    assert!(
+        (out_l[b3] - signal[b3]).abs() < 1e-4,
+        "must stay on delayed dry during off-RT cab rebuild: got {}, expected {}",
+        out_l[b3],
+        signal[b3]
+    );
+
+    // After `pump_off_rt_cab_nam_rebuild` + block 4's 64-sample dry->wet fade,
+    // steady wet output matches the 0.5x linear cab response.
+    let b4 = BLOCK * 4 + 96;
     assert!((out_l[b4] - 0.5 * signal[b4]).abs() < 1e-4);
 
-    for w_start in [BLOCK - 1, BLOCK * 3 - 1] {
+    for w_start in [BLOCK - 1, BLOCK * 4 - 1] {
         for i in w_start..(w_start + 80).min(total - 1) {
             let step = (out_l[i + 1] - out_l[i]).abs();
             assert!(

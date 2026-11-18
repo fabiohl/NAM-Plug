@@ -23,6 +23,8 @@
 mod activate;
 mod deactivated;
 mod dsp;
+#[cfg(any(test, feature = "testing"))]
+pub(crate) use dsp::orchestrator::audio_loop;
 mod events;
 mod ftz;
 mod gc;
@@ -616,12 +618,33 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             self.os_l.reset();
             self.os_r.reset();
 
-            // 5. Cabinet slot (WAV IR convolution or neural NAM model): clears
-            //    filter/recurrent memory and FIFOs in place while preserving the asset.
-            if let Some(cab) = &mut self.cab_slot {
-                cab.reset();
+            // 5. Cabinet slot (WAV IR convolution or neural NAM model): WAV IRs
+            //    clear FDL/FIFO memory synchronously in place, whereas neural
+            //    NAM slots never run `prewarm_reset`/`prewarm_step` in RT —
+            //    if dirty, RT latches `cab_needs_reset` and requests a fresh
+            //    off-RT converged slot while holding delayed dry.
+            match &mut self.cab_slot {
+                Some(cab @ crate::clap::extensions::cabinet::CabSlotDsp::WavIr(_)) => {
+                    cab.reset_wav_ir();
+                    self.cab_needs_reset = false;
+                }
+                Some(crate::clap::extensions::cabinet::CabSlotDsp::NamModel(_))
+                    if self.cab_nam_dirty =>
+                {
+                    self.cab_needs_reset = true;
+                    if !self.cab_bypass && !self.cab_nam_rebuild_in_flight {
+                        self.cab_nam_generation = self.cab_nam_generation.wrapping_add(1);
+                        self.shared
+                            .cold
+                            .cab_nam_rebuild_req
+                            .store((self.cab_nam_generation << 1) | 1, Ordering::Release);
+                        self.cab_nam_rebuild_in_flight = true;
+                    }
+                }
+                Some(crate::clap::extensions::cabinet::CabSlotDsp::NamModel(_)) | None => {
+                    self.cab_needs_reset = false;
+                }
             }
-            self.cab_needs_reset = false;
             self.cab_bypass_xfade = BypassCrossfader::new(self.cab_bypass);
             self.cab_dry_delay.reset();
 
