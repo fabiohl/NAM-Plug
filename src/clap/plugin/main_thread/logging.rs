@@ -185,12 +185,19 @@ impl<'a> NamClapMainThread<'a> {
             log::error!("NAM-Plug: GC overflow buffer corrupted! Forced leak to avoid UB.");
         }
 
-        if self
+        // Rising-edge detection only: the RT thread keeps this flag set while
+        // no model is active, so consuming it here (check_and_clear) would let
+        // the RT thread set it again and flood the log at every host tick.
+        // The flag is left intact for the RT thread to own/clear on model
+        // install or bypass; the main thread only logs the `false -> true`
+        // transition (F-PLUG-02).
+        let model_load_failed = self
             .shared
             .cold
             .rt_status
-            .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED)
-        {
+            .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
+        let was_failed = self.last_seen_model_load_failed.replace(model_load_failed);
+        if model_load_failed && !was_failed {
             let msg = CString::new("NAM-Plug: Critical failure! No active model for processing.")
                 .unwrap_or_default();
             if let Some(log) = log_ext {

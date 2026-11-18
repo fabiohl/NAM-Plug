@@ -9,9 +9,10 @@
 //!
 //! Architecture metadata (`gear_type`, `gear_make`, `gear_model`) is treated strictly as
 //! display/hint metadata — compatible 1-in/1-out models are never rejected based on tags.
-//! Conversely, WaveNet models carrying an unadjudicated post-stack `head` (`config.head`
-//! non-null object) and multi-channel (`in_channels != 1` or `num_output_channels != 1`)
-//! models are rejected fail-closed in the cabinet slot without affecting the amp slot.
+//! WaveNet post-stack `config.head` is supported via the engine 3.0.0 canonical
+//! `PostStackHead` builder; multi-channel (`in_channels != 1` or
+//! `num_output_channels != 1`) models are rejected fail-closed in the cabinet slot
+//! without affecting the amp slot.
 //!
 //! Cabinet neural models run at unity gain without applying amp-slot calibration
 //! (`input_level_dbu`, `output_level_dbu`, `loudness`) or WAV `IrLevelPolicy`.
@@ -19,14 +20,12 @@
 use neural_amp_modeler_rs::common::diagnostics::{NamDiagnostic, NamErrorCode, SystemSnapshot};
 use neural_amp_modeler_rs::common::spsc::GcItem;
 use neural_amp_modeler_rs::dsp::cabsim::adapter::CabSimPair;
+use neural_amp_modeler_rs::dsp::cabsim::{compute_nam_tail_budget, validate_single_channel_model};
 use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
 use neural_amp_modeler_rs::dsp::resampling::{MAX_STREAM_BLOCK, StreamingResampleBuffer};
-use neural_amp_modeler_rs::loader::nam_json::{NamConfig, NamModelData, parse_nam_json};
-use neural_amp_modeler_rs::loader::namb::parse_namb_typed;
 use neural_amp_modeler_rs::loader::{LoadOptions, load_and_build_model_from_bytes_named};
 use neural_amp_modeler_rs::models::{NamModel, StaticModel};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::path::Path;
 
 /// Supported file formats for the single cabinet slot.
@@ -472,136 +471,6 @@ pub fn disambiguated_cab_label(path: &Path) -> String {
     file_name
 }
 
-fn value_has_wavenet_post_stack_head(arch: Option<&str>, cfg: Option<&Value>) -> bool {
-    let Some(cfg) = cfg else {
-        return false;
-    };
-    if arch == Some("WaveNet")
-        && let Some(head) = cfg.get("head")
-        && !head.is_null()
-    {
-        return true;
-    }
-    if let Some(cond) = cfg.get("condition_dsp")
-        && !cond.is_null()
-    {
-        let target = cond.get("model").unwrap_or(cond);
-        let sub_arch = target.get("architecture").and_then(Value::as_str);
-        if value_has_wavenet_post_stack_head(sub_arch, target.get("config")) {
-            return true;
-        }
-    }
-    if arch == Some("Sequential")
-        && let Some(models) = cfg.get("models").and_then(Value::as_array)
-    {
-        for entry in models {
-            let target = entry.get("model").unwrap_or(entry);
-            let sub_arch = target.get("architecture").and_then(Value::as_str);
-            if value_has_wavenet_post_stack_head(sub_arch, target.get("config")) {
-                return true;
-            }
-        }
-    }
-    if arch == Some("SlimmableContainer")
-        && let Some(submodels) = cfg.get("submodels").and_then(Value::as_array)
-    {
-        for entry in submodels {
-            let target = entry.get("model").unwrap_or(entry);
-            let sub_arch = target.get("architecture").and_then(Value::as_str);
-            if value_has_wavenet_post_stack_head(sub_arch, target.get("config")) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn nam_config_has_wavenet_post_stack_head(arch: &str, cfg: &NamConfig) -> bool {
-    if arch == "WaveNet" && cfg.head.as_ref().is_some_and(|head| !head.is_null()) {
-        return true;
-    }
-    if let Some(ref cond) = cfg.condition_dsp
-        && !cond.is_null()
-    {
-        let target = cond.get("model").unwrap_or(cond);
-        let sub_arch = target.get("architecture").and_then(Value::as_str);
-        if value_has_wavenet_post_stack_head(sub_arch, target.get("config")) {
-            return true;
-        }
-    }
-    if arch == "Sequential"
-        && let Some(ref models) = cfg.models
-    {
-        for entry in models {
-            let target = entry.get("model").unwrap_or(entry);
-            let sub_arch = target.get("architecture").and_then(Value::as_str);
-            if value_has_wavenet_post_stack_head(sub_arch, target.get("config")) {
-                return true;
-            }
-        }
-    }
-    if arch == "SlimmableContainer"
-        && let Some(ref submodels) = cfg.submodels
-    {
-        for entry in submodels {
-            let target = entry.get("model").unwrap_or(entry);
-            let sub_arch = target.get("architecture").and_then(Value::as_str);
-            if value_has_wavenet_post_stack_head(sub_arch, target.get("config")) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Fail-closed guardrail for the cabinet slot: rejects WaveNet post-stack `head`
-/// configurations (deferred from S08 to S09) anywhere in the model tree without
-/// affecting amp-slot validation.
-pub fn validate_cab_nam_data(
-    data: &NamModelData,
-    sys: &SystemSnapshot,
-) -> Result<(), Box<NamDiagnostic>> {
-    if nam_config_has_wavenet_post_stack_head(&data.architecture, &data.config) {
-        return Err(Box::new(
-            NamDiagnostic::new(NamErrorCode::NamJsonUnsupportedTopology, sys)
-                .message("Cabinet NAM WaveNet post-stack head (`config.head`) is not supported")
-                .hint("Use a standard 1-in/1-out WaveNet/LSTM/Linear/Sequential model without `config.head`."),
-        ));
-    }
-    Ok(())
-}
-
-/// Checks recursively that `model` and all container submodels strictly satisfy `1 in -> 1 out`.
-pub fn validate_single_channel_model(model: &StaticModel) -> Result<(), (usize, usize)> {
-    let in_ch = model.in_channels();
-    let out_ch = model.num_output_channels();
-    if in_ch != 1 || out_ch != 1 {
-        return Err((in_ch, out_ch));
-    }
-    if let StaticModel::Container(container) = model {
-        for (_threshold, sub) in container.submodels() {
-            validate_single_channel_model(sub)?;
-        }
-    }
-    Ok(())
-}
-
-fn compute_nam_tail_budget(model: &StaticModel, model_rate: u32, host_rate: u32) -> usize {
-    let scaled_rf = if model_rate > 0 && host_rate > 0 {
-        ((model.receptive_field() as u64 * u64::from(host_rate)).div_ceil(u64::from(model_rate)))
-            as usize
-    } else {
-        model.receptive_field()
-    };
-    if model.is_lstm() {
-        // LSTM models have IIR memory; provide ~100 ms ring-out capped sensibly.
-        let iir_tail = (host_rate as usize / 10).clamp(2048, 24_000);
-        scaled_rf.max(iir_tail)
-    } else {
-        scaled_rf.max(128)
-    }
-}
-
 /// Off-RT full prewarm (`prewarm_reset` followed by complete stabilization).
 fn prewarm_model_to_completion(model: &mut StaticModel) {
     model.prewarm_reset();
@@ -623,45 +492,12 @@ pub fn build_cab_nam_from_bytes(
     dual_mono: bool,
     sys: &SystemSnapshot,
 ) -> Result<(CabNamSlot, CabNamMeta), Box<NamDiagnostic>> {
-    let parsed_data = match kind {
-        CabAssetKind::NamModel => {
-            let text = std::str::from_utf8(bytes).map_err(|e| {
-                Box::new(
-                    NamDiagnostic::new(NamErrorCode::NamJsonParseError, sys)
-                        .message(format!(
-                            "Cabinet .nam file is not valid UTF-8: {path_for_diag:?}"
-                        ))
-                        .param("error", e.to_string()),
-                )
-            })?;
-            parse_nam_json(text).map_err(|e| {
-                Box::new(
-                    NamDiagnostic::new(NamErrorCode::NamJsonParseError, sys)
-                        .message(format!(
-                            "Failed to parse cabinet .nam JSON: {path_for_diag:?}"
-                        ))
-                        .param("error", e.to_string()),
-                )
-            })?
-        }
-        CabAssetKind::NambModel => parse_namb_typed(bytes).map_err(|e| {
-            Box::new(
-                NamDiagnostic::new(NamErrorCode::NambInvalidMagic, sys)
-                    .message(format!(
-                        "Failed to parse cabinet .namb binary: {path_for_diag:?}"
-                    ))
-                    .param("error", e.to_string()),
-            )
-        })?,
-        CabAssetKind::WavIr => {
-            return Err(Box::new(
-                NamDiagnostic::new(NamErrorCode::IrLoadFailed, sys)
-                    .message("Internal error: build_cab_nam_from_bytes called for WAV IR"),
-            ));
-        }
-    };
-
-    validate_cab_nam_data(&parsed_data, sys)?;
+    if kind == CabAssetKind::WavIr {
+        return Err(Box::new(
+            NamDiagnostic::new(NamErrorCode::IrLoadFailed, sys)
+                .message("Internal error: build_cab_nam_from_bytes called for WAV IR"),
+        ));
+    }
 
     let source_label = path_for_diag.to_string_lossy();
     let loaded = load_and_build_model_from_bytes_named(

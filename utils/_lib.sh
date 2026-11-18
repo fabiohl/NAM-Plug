@@ -22,7 +22,7 @@ emit() {
   fi
 }
 phase() { PHASE_NAME="$1"; emit "PHASE: $1"; }
-gap()   { GAPS+=("$1"); emit "PHASE: ${PHASE_NAME:-$1} GAP $1"; }
+gap()   { local m; for m in "${GAPS[@]}"; do [ "$m" = "$1" ] && return 0; done; GAPS+=("$1"); emit "PHASE: ${PHASE_NAME:-$1} GAP $1"; }
 
 # lib_init — ÚNICO ponto que cria target/logs e trunca summary.txt. Depois do help.
 # NAM_RUN_ID pré-exportado (CI/topo) trunca summary.txt quando .summary-run difere;
@@ -52,7 +52,7 @@ usage_fail() {
 # run_step <fase> <comando…> — Classe A: captura PIPESTATUS[0] e status do tee.
 run_step() {
   local name=$1; shift; PHASE_NAME=$name; phase "$name"
-  local log="$LOG_DIR/${SCRIPT_NAME}-$name.log" rc trc pst
+  local log="$LOG_DIR/${SCRIPT_NAME}-$name.log" rc trc pst; CUR_LOG="$log"
   set +e; ( set -e; "$@" ) 2>&1 | tee "$log"; pst=("${PIPESTATUS[@]}"); set -e; rc=${pst[0]}; trc=${pst[1]}
   if [ "$rc" -ne 0 ]; then
     FAILS+=("$name"); emit "PHASE: $name FAIL rc=$rc log=$log"; finish || true; exit 1

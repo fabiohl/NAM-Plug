@@ -398,3 +398,134 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
         errors_after_new
     );
 }
+
+// F-PLUG-02: the "No active model" error must be emitted only on the rising
+// edge of RT_STATUS_MODEL_LOAD_FAILED, never on every timer tick.
+#[test]
+fn test_no_active_model_logs_only_on_rising_edge_not_every_poll() {
+    let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    use crate::clap::host_harness::{self, HostEvent};
+    use clack_extensions::log::LogSeverity;
+    use clack_extensions::timer::TimerId;
+
+    let (_entry, _host_info, mut instance, host_state) =
+        host_harness::make_test_plugin_with_harness();
+    let shared = unsafe { &*test_util::extract_shared(&mut instance) };
+
+    let count_no_active_model = |host_state: &crate::clap::host_harness::CompleteHostState| {
+        host_state
+            .snapshot()
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    HostEvent::PluginLog {
+                        severity: LogSeverity::Error,
+                        message,
+                    } if message.contains("No active model for processing")
+                )
+            })
+            .count()
+    };
+
+    host_harness::fire_timer(&mut instance, TimerId(1));
+    let baseline = count_no_active_model(&host_state);
+
+    // Rising edge: RT reports no model; the main thread logs exactly once.
+    shared.cold.rt_status.set_flag(RT_STATUS_MODEL_LOAD_FAILED);
+    host_harness::fire_timer(&mut instance, TimerId(1));
+    let after_edge = count_no_active_model(&host_state);
+    assert!(
+        after_edge > baseline,
+        "rising edge of RT_STATUS_MODEL_LOAD_FAILED must emit the error log"
+    );
+
+    // Flag remains set (RT-owned): subsequent polls must not re-log.
+    for _ in 0..10 {
+        host_harness::fire_timer(&mut instance, TimerId(1));
+    }
+    assert_eq!(
+        count_no_active_model(&host_state),
+        after_edge,
+        "ten timer ticks with the flag still set must not flood the log buffer"
+    );
+    assert!(
+        shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_MODEL_LOAD_FAILED),
+        "the main thread must not clear the RT-owned failure flag"
+    );
+
+    // Falling edge then a new rising edge logs exactly once more.
+    shared
+        .cold
+        .rt_status
+        .clear_flag(RT_STATUS_MODEL_LOAD_FAILED);
+    host_harness::fire_timer(&mut instance, TimerId(1));
+    assert_eq!(
+        count_no_active_model(&host_state),
+        after_edge,
+        "falling edge must not emit a new error log"
+    );
+    shared.cold.rt_status.set_flag(RT_STATUS_MODEL_LOAD_FAILED);
+    host_harness::fire_timer(&mut instance, TimerId(1));
+    let edge_delta = after_edge - baseline;
+    assert_eq!(
+        count_no_active_model(&host_state),
+        after_edge + edge_delta,
+        "a new rising edge must emit the same single logical error as the first edge"
+    );
+}
+
+// F-DIAG-01: a successful load must publish the process-global ACTIVE_MODEL_*
+// telemetry consumed by the crash report.
+#[test]
+fn test_successful_load_publishes_active_model_telemetry() {
+    let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    use crate::clap::host_harness::{self, extract_plugin_main_thread};
+    use clack_host::prelude::PluginAudioConfiguration;
+
+    let (_entry, _host_info, mut instance, state) = host_harness::make_test_plugin_with_harness();
+    let config = PluginAudioConfiguration {
+        sample_rate: 48000.0,
+        min_frames_count: 256,
+        max_frames_count: 256,
+    };
+    let stopped = instance
+        .activate(
+            |_, _| host_harness::make_harness_audio_processor(&state),
+            config,
+        )
+        .expect("activate");
+
+    let mt_ptr = extract_plugin_main_thread(&mut instance);
+    let mt = unsafe { &*mt_ptr };
+    let model = crate::clap::test_util::model_path("lstm.nam");
+    mt.load_model(&model).expect("load model");
+
+    let name = neural_amp_modeler_rs::common::diagnostics::ACTIVE_MODEL_NAME
+        .try_read()
+        .expect("active model name must not be locked")
+        .clone();
+    assert!(
+        name.contains("lstm.nam"),
+        "ACTIVE_MODEL_NAME must reflect the loaded model, got {name:?}"
+    );
+    assert!(
+        neural_amp_modeler_rs::common::diagnostics::ACTIVE_MODEL_INFO
+            .try_read()
+            .expect("active model info must not be locked")
+            .is_some(),
+        "ACTIVE_MODEL_INFO must be populated after a successful load"
+    );
+    assert_eq!(
+        neural_amp_modeler_rs::common::diagnostics::ACTIVE_SAMPLE_RATE.load(Ordering::Relaxed),
+        48000,
+        "ACTIVE_SAMPLE_RATE must reflect the host rate after activate()"
+    );
+
+    instance.deactivate(stopped);
+}

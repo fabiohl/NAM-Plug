@@ -101,6 +101,9 @@ pub struct NamClapMainThread<'a> {
     pub(crate) non_finite_hold_until: Cell<Option<std::time::Instant>>,
     /// Last-seen alert bits to emit host logs only on 0 -> 1 transitions.
     pub(crate) last_seen_alert_bits: Cell<u32>,
+    /// Last-seen `RT_STATUS_MODEL_LOAD_FAILED` state, used for rising-edge
+    /// logging only (F-PLUG-02).
+    pub(crate) last_seen_model_load_failed: Cell<bool>,
     /// Slint window handle for GUI lifecycle control.
     pub slint_window: RefCell<Option<slint::Weak<crate::clap::gui::MainWindow>>>,
     /// Persistent per-instance GUI worker thread (owns the Slint platform and
@@ -289,7 +292,7 @@ impl<'a> NamClapMainThread<'a> {
 
         // Construct the resampler HERE with the real host sample rate
         // now that activate() has been called.
-        let new_resampler = match NamResampler::new_simple(sample_rate, model_rate) {
+        let new_resampler = match NamResampler::new_simple_typed(sample_rate, model_rate) {
             Ok(r) => Box::new(r),
             Err(e) => {
                 restore.pending = Some(PendingModel {

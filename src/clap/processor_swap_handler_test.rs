@@ -156,7 +156,7 @@ mod tests {
             model_l: None,
             model_r: None,
             new_resampler: Box::new(
-                NamResampler::new_simple(48_000, 48_000).expect("bypass resampler"),
+                NamResampler::new_simple_typed(48_000, 48_000).expect("bypass resampler"),
             ),
             new_stream: Box::new(
                 StreamingResampleBuffer::new(48_000, 48_000, N).expect("stream adapter"),

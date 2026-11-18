@@ -79,6 +79,13 @@ pub(crate) enum GuiWorkerJob {
         job: GuiWindowJob,
         reply: mpsc::Sender<Result<slint::Weak<MainWindow>, &'static str>>,
     },
+    /// Test-only probe that panics inside the worker loop, exercising the
+    /// outer containment barrier (F-PLUG-01).
+    #[cfg(test)]
+    PanicProbe,
+    /// Test-only liveness probe: replies once the worker loop processes it.
+    #[cfg(test)]
+    LivenessProbe { reply: mpsc::Sender<()> },
 }
 
 /// Persistent GUI worker for one plugin instance.
@@ -184,16 +191,45 @@ fn worker_main(
     host: crate::clap::gui::GuiHostBridge,
 ) {
     while let Ok(job) = rx.recv() {
-        match job {
-            GuiWorkerJob::WarmUp { force_x11 } => {
-                warm_up_backend(force_x11);
-            }
-            GuiWorkerJob::OpenWindow { job, reply } => {
-                run_window_generation(job, reply, Arc::clone(&shared_arc), host);
-            }
+        // Last-resort barrier (F-PLUG-01): an individual generation must never
+        // terminate the persistent `nam-slint-gui` thread, otherwise every
+        // later `open_window` fails with "the GUI worker is shutting down".
+        let contained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process_worker_job(job, Arc::clone(&shared_arc), host);
+        }));
+        if contained.is_err() {
+            log::warn!("NAM-Plug: contained GUI backend panic in worker dispatch");
         }
     }
     log::debug!("NAM-Plug: persistent GUI worker exiting");
+}
+
+/// Processes a single worker job, logging (never propagating) contained panics
+/// to the caller loop.
+fn process_worker_job(
+    job: GuiWorkerJob,
+    shared_arc: Arc<GuiSharedState>,
+    host: crate::clap::gui::GuiHostBridge,
+) {
+    match job {
+        GuiWorkerJob::WarmUp { force_x11 } => {
+            warm_up_backend(force_x11);
+        }
+        GuiWorkerJob::OpenWindow { job, reply } => {
+            run_window_generation(job, reply, shared_arc, host);
+        }
+        #[cfg(test)]
+        GuiWorkerJob::PanicProbe => {
+            let _suppress =
+                neural_amp_modeler_rs::common::panic_hook::suppress_panic_report_on_current_thread(
+                );
+            panic!("test panic inside the GUI worker loop");
+        }
+        #[cfg(test)]
+        GuiWorkerJob::LivenessProbe { reply } => {
+            let _ = reply.send(());
+        }
+    }
 }
 
 /// Initializes the Slint/winit platform on the worker thread **without**
@@ -291,13 +327,23 @@ fn run_window_generation(
         &job.backend_text,
     );
 
-    if let Err(e) = window.show() {
-        log::error!("NAM-Plug: failed to show Slint window: {e}");
-    }
+    // Backend event loop + X11 teardown are third-party code that can panic
+    // on a host-destroyed parent window (winit `BadWindow`). Contain both so a
+    // late backend panic never unwinds the persistent worker (F-PLUG-01).
+    let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _suppress =
+            neural_amp_modeler_rs::common::panic_hook::suppress_panic_report_on_current_thread();
+        if let Err(e) = window.show() {
+            log::error!("NAM-Plug: failed to show Slint window: {e}");
+        }
 
-    // Run the event loop until `quit_event_loop()` (host hide/destroy) — the
-    // platform persists on this thread for the next generation.
-    let _ = slint::run_event_loop();
+        // Run the event loop until `quit_event_loop()` (host hide/destroy) — the
+        // platform persists on this thread for the next generation.
+        let _ = slint::run_event_loop();
+    }));
+    if loop_result.is_err() {
+        log::warn!("NAM-Plug: contained GUI backend panic during window event loop");
+    }
 
     // Release the window in the right order so the X11 child is really
     // destroyed before the next generation:
@@ -307,14 +353,76 @@ fn run_window_generation(
     //  3. winit only *queues* `XDestroyWindow` on window drop, and the
     //     persistent worker keeps the connection alive — so one drained loop
     //     iteration flushes the destroy to the server.
-    drop(_view_model);
-    let _ = window.window().hide();
-    drop(window);
-    if slint::invoke_from_event_loop(|| {
-        let _ = slint::quit_event_loop();
-    })
-    .is_ok()
-    {
-        let _ = slint::run_event_loop();
+    //
+    // The suppression guard avoids a false `crash-*.txt` for this known
+    // winit X11 `BadWindow` teardown panic; it is still reported via
+    // `log::warn!` in the instance's LogBuffer.
+    let teardown_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _suppress =
+            neural_amp_modeler_rs::common::panic_hook::suppress_panic_report_on_current_thread();
+        drop(_view_model);
+        let _ = window.window().hide();
+        drop(window);
+        if slint::invoke_from_event_loop(|| {
+            let _ = slint::quit_event_loop();
+        })
+        .is_ok()
+        {
+            let _ = slint::run_event_loop();
+        }
+    }));
+    if teardown_result.is_err() {
+        log::warn!("NAM-Plug: contained GUI backend panic during X11 teardown");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_host_bridge() -> (clap_sys::host::clap_host, crate::clap::gui::GuiHostBridge) {
+        let mut mock_host = clap_sys::host::clap_host {
+            clap_version: clap_sys::version::CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"Test Host".as_ptr(),
+            vendor: std::ptr::null(),
+            url: std::ptr::null(),
+            version: std::ptr::null(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        let raw = std::ptr::NonNull::new(&mut mock_host).unwrap();
+        // SAFETY: `raw` points to the live mock `clap_host` owned by the caller
+        // for the duration of the test.
+        let shared_handle =
+            unsafe { clack_plugin::host::HostAudioProcessorHandle::from_raw(raw).shared() };
+        let bridge = crate::clap::gui::GuiHostBridge::new(&shared_handle);
+        (mock_host, bridge)
+    }
+
+    #[test]
+    fn test_gui_worker_contains_generation_panic_and_stays_alive() {
+        let (_mock_host, bridge) = mock_host_bridge();
+        let worker = GuiWorker::spawn(GuiSharedState::new_test(), bridge)
+            .expect("test GUI worker must spawn");
+
+        worker
+            .tx
+            .send(GuiWorkerJob::PanicProbe)
+            .expect("panic probe must be queued");
+        let (reply, rx) = mpsc::channel();
+        worker
+            .tx
+            .send(GuiWorkerJob::LivenessProbe { reply })
+            .expect("liveness probe must be queued");
+
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("GUI worker must survive a contained job panic and stay responsive");
+
+        if let Some(handle) = worker.shutdown() {
+            handle.join().expect("GUI worker must shut down cleanly");
+        }
     }
 }

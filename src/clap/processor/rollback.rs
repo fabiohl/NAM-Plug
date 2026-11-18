@@ -315,7 +315,7 @@ mod tests {
             generation,
             model_l: None,
             model_r: None,
-            new_resampler: Box::new(NamResampler::new_simple(48000, rate).unwrap()),
+            new_resampler: Box::new(NamResampler::new_simple_typed(48000, rate).unwrap()),
             new_stream: build_stream_adapter(48000, rate, 256).unwrap(),
             model_rate: rate,
             input_mult_adj: 1.0,
@@ -386,7 +386,7 @@ mod tests {
                 generation: 5,
                 model_l: None,
                 model_r: None,
-                new_resampler: Box::new(NamResampler::new_simple(48000, 48000).unwrap()),
+                new_resampler: Box::new(NamResampler::new_simple_typed(48000, 48000).unwrap()),
                 new_stream: crate::clap::plugin::shared::build_stream_adapter(48000, 48000, 256)
                     .unwrap(),
                 model_rate: 48000,

@@ -16,8 +16,10 @@ pub(crate) mod commit;
 pub(crate) mod validate;
 
 pub(crate) use commit::publish_restore;
+#[cfg(any(test, feature = "testing"))]
+pub(crate) use validate::compute_file_hash;
 pub(crate) use validate::{
-    compute_bytes_hash, compute_file_hash, is_valid_sha256_hex, read_ir_file_bytes,
+    compute_bytes_hash, is_valid_sha256_hex, read_ir_file_bytes, read_model_file_bytes,
 };
 
 #[cfg(test)]

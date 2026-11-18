@@ -232,7 +232,8 @@ impl DefaultPluginFactory for NamClapPlugin {
             .unwrap_or_else(|| String::from("unknown"));
         let negotiated_clap = host.clap_version();
         neural_amp_modeler_rs::common::diagnostics::set_host_library_version(format!(
-            "{host_name} {host_version} (CLAP {negotiated_clap})"
+            "nam-plug {} / {host_name} {host_version} (CLAP {negotiated_clap})",
+            env!("CARGO_PKG_VERSION")
         ));
 
         #[cfg_attr(test, allow(unused_mut, clippy::allow_attributes))]
@@ -258,6 +259,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             last_seen_non_finite_epoch: Cell::new(0),
             non_finite_hold_until: Cell::new(None),
             last_seen_alert_bits: Cell::new(0),
+            last_seen_model_load_failed: Cell::new(false),
             slint_window: RefCell::new(None),
             gui_worker: RefCell::new(None),
             dialog_handle: RefCell::new(None),

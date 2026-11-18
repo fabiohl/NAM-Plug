@@ -15,9 +15,9 @@ use neural_amp_modeler_rs::common::params::ProcessingParams;
 use neural_amp_modeler_rs::dsp::cabsim::loader::CabSimIr;
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
-use neural_amp_modeler_rs::loader::load_and_build_model;
 use neural_amp_modeler_rs::models::NamModel;
 use neural_amp_modeler_rs::models::StaticModel;
+#[cfg(any(test, feature = "testing"))]
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -187,6 +187,10 @@ pub(crate) fn validate_and_build_with_cab(
 pub(crate) const MAX_FILE_HASH_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Computes the SHA-256 hex digest of a file's raw bytes in streaming chunks.
+///
+/// Retained for tests/diagnostics; production model loads hash the single
+/// in-memory read via [`compute_bytes_hash`] (F-PLUG-03).
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn compute_file_hash(path: &Path) -> Result<String, PluginError> {
     use std::io::Read;
 
@@ -294,37 +298,20 @@ pub(crate) fn canonical_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Builds a model pair + resampler from a filesystem path, **without** any
-/// side-effects on the main-thread state.
-pub(crate) fn build_model_resources(
+/// Builds a model pair + resampler from already-read, hash-verified bytes
+/// (anti-TOCTOU single-read path).
+pub(crate) fn build_model_resources_from_bytes(
+    bytes: &[u8],
+    model_hash: String,
     path: &Path,
     host_rate: u32,
     buffer_size: u32,
     sys: &neural_amp_modeler_rs::common::diagnostics::SystemSnapshot,
 ) -> Result<ModelResources, Box<NamDiagnostic>> {
-    let meta_before = std::fs::metadata(path).map_err(|e| {
-        Box::new(
-            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
-                .message(format!(
-                    "Failed to read metadata before loading model: {:?}",
-                    path
-                ))
-                .param("error", e.to_string()),
-        )
-    })?;
-    let len_before = meta_before.len();
-    let mtime_before = meta_before.modified().ok();
-
-    let model_hash = compute_file_hash(path).map_err(|e| {
-        Box::new(
-            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
-                .message(format!("Failed to hash model file: {:?}", path))
-                .param("error", e.to_string()),
-        )
-    })?;
-
-    let model_pair = load_and_build_model(
-        path,
+    let path_label = path.to_string_lossy();
+    let model_pair = neural_amp_modeler_rs::loader::load_and_build_model_from_bytes_named(
+        bytes,
+        path_label.as_ref(),
         sys,
         true,
         neural_amp_modeler_rs::loader::LoadOptions::default(),
@@ -336,24 +323,6 @@ pub(crate) fn build_model_resources(
                 .param("error", e.to_string()),
         )
     })?;
-
-    let meta_after = std::fs::metadata(path).map_err(|e| {
-        Box::new(
-            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
-                .message(format!(
-                    "Failed to read metadata after loading model: {:?}",
-                    path
-                ))
-                .param("error", e.to_string()),
-        )
-    })?;
-    if meta_after.len() != len_before || meta_after.modified().ok() != mtime_before {
-        return Err(Box::new(
-            NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
-                .message(format!("Model file was modified during load: {:?}", path))
-                .hint("arquivo modificado durante a carga"),
-        ));
-    }
 
     if model_pair.model_l.is_none() {
         return Err(Box::new(
@@ -408,9 +377,9 @@ pub(crate) fn build_model_resources(
     }
 
     let new_resampler = Box::new(
-        NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
+        NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
             Box::new(
-                NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                NamDiagnostic::new(e, sys)
                     .message("Failed to build resampler")
                     .param("error", e.to_string()),
             )
@@ -530,11 +499,11 @@ pub(crate) fn validate_model_full(
         // Mandatory asset identity: an asset is only adopted with a valid
         // SHA-256 digest that is verified in this same restore cycle. A missing,
         // malformed or divergent hash rejects this path — never a silent accept.
-        let hash_valid = match loaded_params.model_hash.as_deref() {
-            Some(expected) if is_valid_sha256_hex(expected) => match compute_file_hash(path) {
-                Ok(actual) => {
+        let verified = match loaded_params.model_hash.as_deref() {
+            Some(expected) if is_valid_sha256_hex(expected) => match read_model_file_bytes(path) {
+                Ok((bytes, actual)) => {
                     if actual.eq_ignore_ascii_case(expected) {
-                        true
+                        Some((bytes, actual))
                     } else {
                         log::warn!(
                             "NAM-Plug: Model file at original path {:?} has hash mismatch (expected {}, got {}); attempting fallback",
@@ -542,12 +511,12 @@ pub(crate) fn validate_model_full(
                             expected,
                             actual
                         );
-                        false
+                        None
                     }
                 }
                 Err(e) => {
-                    log::warn!("NAM-Plug: Failed to hash model file at {:?}: {}", path, e);
-                    false
+                    log::warn!("NAM-Plug: Failed to read model file at {:?}: {}", path, e);
+                    None
                 }
             },
             Some(malformed) => {
@@ -555,7 +524,7 @@ pub(crate) fn validate_model_full(
                     "NAM-Plug: State restore rejected — model_hash is malformed ({} chars, expected 64 hex): {malformed:?}",
                     malformed.len()
                 );
-                false
+                None
             }
             None => {
                 log::error!(
@@ -563,13 +532,20 @@ pub(crate) fn validate_model_full(
                      Re-load the model explicitly via the GUI to migrate this project.",
                     path
                 );
-                false
+                None
             }
         };
 
-        if hash_valid {
-            let resources = build_model_resources(path, host_rate, buffer_size, sys)
-                .map_err(|e| PluginError::Error(e))?;
+        if let Some((bytes, actual_hash)) = verified {
+            let resources = build_model_resources_from_bytes(
+                &bytes,
+                actual_hash,
+                path,
+                host_rate,
+                buffer_size,
+                sys,
+            )
+            .map_err(|e| PluginError::Error(e))?;
             let basename = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -663,10 +639,17 @@ pub(crate) fn validate_model_from_basename(
             continue;
         };
 
-        match compute_file_hash(&candidate) {
-            Ok(actual) if actual.eq_ignore_ascii_case(expected_hash) => {
-                let resources = build_model_resources(&candidate, host_rate, buffer_size, sys)
-                    .map_err(|e| PluginError::Error(e))?;
+        match read_model_file_bytes(&candidate) {
+            Ok((bytes, actual)) if actual.eq_ignore_ascii_case(expected_hash) => {
+                let resources = build_model_resources_from_bytes(
+                    &bytes,
+                    actual,
+                    &candidate,
+                    host_rate,
+                    buffer_size,
+                    sys,
+                )
+                .map_err(|e| PluginError::Error(e))?;
                 let basename_from_path = candidate
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -682,7 +665,7 @@ pub(crate) fn validate_model_from_basename(
                     hash,
                 ));
             }
-            Ok(actual) => {
+            Ok((_, actual)) => {
                 log::debug!(
                     "NAM-Plug: Skipping {candidate:?} — hash mismatch (expected {expected_hash}, got {actual})"
                 );
@@ -690,7 +673,7 @@ pub(crate) fn validate_model_from_basename(
             }
             Err(e) => {
                 log::warn!(
-                    "NAM-Plug: Skipping {candidate:?} — failed to hash candidate ({e}); refusing unverified adoption"
+                    "NAM-Plug: Skipping {candidate:?} — failed to read/hash candidate ({e}); refusing unverified adoption"
                 );
                 continue;
             }
@@ -723,6 +706,17 @@ pub(crate) fn compute_bytes_hash(bytes: &[u8]) -> String {
         digest.push(HEX[(b & 0x0f) as usize] as char);
     }
     digest
+}
+
+/// Reads a model file exactly once (regular file, bounded by
+/// [`MAX_FILE_HASH_SIZE`]) and returns its bytes plus SHA-256 digest.
+///
+/// Reusing this buffer for hashing and model construction eliminates the
+/// double/triple disk read and the TOCTOU window between them (F-PLUG-03).
+pub(crate) fn read_model_file_bytes(path: &Path) -> Result<(Vec<u8>, String), PluginError> {
+    let bytes = read_ir_file_bytes(path)?;
+    let hash = compute_bytes_hash(&bytes);
+    Ok((bytes, hash))
 }
 
 /// Reads a file into a byte buffer bounded by [`MAX_FILE_HASH_SIZE`].

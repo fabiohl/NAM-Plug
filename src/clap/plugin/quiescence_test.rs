@@ -32,8 +32,14 @@ fn test_quiescence_rejects_new_dispatches_once_closed() {
 
     let handle = thread::spawn(move || coord_clone.quiesce(Duration::from_millis(50)));
 
-    // Give the quiesce thread a moment to set active = false
-    thread::sleep(Duration::from_millis(5));
+    // Wait (yielding, not sleeping) until the quiesce thread has closed the
+    // gate. A fixed sleep is not deterministic under Miri's scheduler.
+    for _ in 0..10_000 {
+        if !coord.is_active() {
+            break;
+        }
+        thread::yield_now();
+    }
     assert!(!coord.is_active());
     // New dispatch must be rejected immediately
     assert!(coord.enter().is_none());

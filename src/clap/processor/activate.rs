@@ -345,7 +345,7 @@ impl<'a> NamClapProcessor<'a> {
                         None
                     } else {
                         Some(Box::new(
-                            NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
+                            NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
                                 static_plugin_error(
                                     errors::dsp_resources::RESAMPLER_BUILD_FAILED,
                                     format_args!("{e:?}"),
@@ -409,7 +409,7 @@ impl<'a> NamClapProcessor<'a> {
                     (res, stream, cab, os)
                 } else {
                     let res = Some(Box::new(
-                        NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
+                        NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
                             static_plugin_error(
                                 errors::dsp_resources::RESAMPLER_BUILD_FAILED,
                                 format_args!("{e:?}"),
@@ -489,12 +489,13 @@ impl<'a> NamClapProcessor<'a> {
                         host_buffer
                     );
                     let model_rate = m.new_stream.model_rate();
-                    let new_res = NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
-                        static_plugin_error(
-                            errors::dsp_resources::RESAMPLER_BUILD_FAILED,
-                            format_args!("{e:?}"),
-                        )
-                    })?;
+                    let new_res =
+                        NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
+                            static_plugin_error(
+                                errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                                format_args!("{e:?}"),
+                            )
+                        })?;
                     let new_stream = crate::clap::plugin::build_stream_adapter(
                         host_rate,
                         model_rate,
@@ -580,12 +581,13 @@ impl<'a> NamClapProcessor<'a> {
                         host_buffer
                     );
                     let model_rate = m.new_stream.model_rate();
-                    let new_res = NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
-                        static_plugin_error(
-                            errors::dsp_resources::RESAMPLER_BUILD_FAILED,
-                            format_args!("{e:?}"),
-                        )
-                    })?;
+                    let new_res =
+                        NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
+                            static_plugin_error(
+                                errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                                format_args!("{e:?}"),
+                            )
+                        })?;
                     let new_stream = crate::clap::plugin::build_stream_adapter(
                         host_rate,
                         model_rate,
@@ -1153,6 +1155,8 @@ impl<'a> NamClapProcessor<'a> {
                 .current_latency
                 .store(initial_latency, Ordering::Relaxed);
             shared.cold.sample_rate.store(host_rate, Ordering::Relaxed);
+            neural_amp_modeler_rs::common::diagnostics::ACTIVE_SAMPLE_RATE
+                .store(host_rate, Ordering::Relaxed);
             shared
                 .cold
                 .buffer_size

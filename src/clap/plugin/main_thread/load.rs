@@ -13,7 +13,6 @@ use neural_amp_modeler_rs::common::diagnostics::{
 };
 use neural_amp_modeler_rs::dsp::resampler::NamResampler;
 use neural_amp_modeler_rs::dsp::resampling::StreamingResampleBuffer;
-use neural_amp_modeler_rs::loader::load_and_build_model;
 use neural_amp_modeler_rs::models::slimmable::clone_wavenet_for_slimmable_storage;
 use neural_amp_modeler_rs::models::{NamModel, StaticModel};
 use std::path::{Path, PathBuf};
@@ -146,8 +145,23 @@ impl<'a> NamClapMainThread<'a> {
         let len_before = meta_before.len();
         let mtime_before = meta_before.modified().ok();
 
-        let model_pair = load_and_build_model(
-            path,
+        // F-PLUG-03: single in-memory read (bounded, regular file) reused for
+        // both hashing and model construction — no second full-file I/O.
+        let (bytes, model_hash) =
+            crate::clap::extensions::state_transaction::read_model_file_bytes(path).map_err(
+                |e| {
+                    Box::new(
+                        NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                            .message(format!("Failed to read model file ({path:?}): {e}"))
+                            .hint("Assets are adopted only with a verified SHA-256 digest."),
+                    )
+                },
+            )?;
+
+        let path_label = path.to_string_lossy();
+        let model_pair = neural_amp_modeler_rs::loader::load_and_build_model_from_bytes_named(
+            &bytes,
+            path_label.as_ref(),
             sys,
             true,
             neural_amp_modeler_rs::loader::LoadOptions::default(),
@@ -179,25 +193,13 @@ impl<'a> NamClapMainThread<'a> {
             );
         }
 
-        // Compute content hash for portable asset identity. The GUI load is the
-        // explicit user override path — but the asset is only adopted when its
-        // digest can actually be computed, so persisted state always carries a
-        // valid `model_hash`.
-        let model_hash = crate::clap::extensions::state_transaction::compute_file_hash(path)
-            .map_err(|e| {
-                Box::new(
-                    NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
-                        .message(format!("Failed to compute model SHA-256 ({path:?}): {e}"))
-                        .hint("Assets are adopted only with a verified SHA-256 digest."),
-                )
-            })?;
-
-        // TOCTOU mitigation: verify the file was not modified while loading or hashing.
+        // TOCTOU mitigation (test-only mutation hook): verify the path was not
+        // modified while the verified bytes were being built.
         let meta_after = std::fs::metadata(path).map_err(|e| {
             Box::new(
                 NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
                     .message(format!(
-                        "Failed to read metadata after hashing model: {:?}",
+                        "Failed to read metadata after loading model: {:?}",
                         path
                     ))
                     .param("error", e.to_string()),
@@ -262,9 +264,9 @@ impl<'a> NamClapMainThread<'a> {
 
         if buffer_size > 0 {
             new_resampler = Some(Box::new(
-                NamResampler::new_simple(host_rate, model_rate).map_err(|e| {
+                NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
                     Box::new(
-                        NamDiagnostic::new(NamErrorCode::ModelBuildFailed, sys)
+                        NamDiagnostic::new(e, sys)
                             .message("Failed to build polyphase resampler for model")
                             .param("error", e.to_string()),
                     )
@@ -364,6 +366,28 @@ impl<'a> NamClapMainThread<'a> {
     /// because the model is retained, never ahead of it (F-RB-02). All
     /// `RefCell` borrows are released before the host calls below.
     fn finish_commit_ui(&self, path: &Path, metadata: NamModelMetadata, model_info: ModelInfo) {
+        let basename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Publish the process-global crash telemetry (F-DIAG-01) using
+        // `try_write` so this main-thread path never blocks on a panic report.
+        if let Ok(mut active_name) =
+            neural_amp_modeler_rs::common::diagnostics::ACTIVE_MODEL_NAME.try_write()
+        {
+            active_name.clear();
+            active_name.push_str(&basename);
+        }
+        if let Ok(mut active_info) =
+            neural_amp_modeler_rs::common::diagnostics::ACTIVE_MODEL_INFO.try_write()
+        {
+            *active_info = Some(model_info.clone());
+        }
+        neural_amp_modeler_rs::common::diagnostics::ACTIVE_SAMPLE_RATE
+            .store(metadata.sample_rate, Ordering::Relaxed);
+
         *lock_cold(&self.shared.cold.ui_model_metadata, "ui_model_metadata") = Some(metadata);
         *lock_cold(&self.shared.cold.ui_model_info, "ui_model_info") = Some(model_info);
 
@@ -372,11 +396,6 @@ impl<'a> NamClapMainThread<'a> {
             .model_load_counter
             .fetch_add(1, Ordering::Relaxed);
 
-        let basename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
         *lock_cold(&self.shared.cold.ui_model_name, "ui_model_name") = basename;
 
         if let Some(params_ext) = self
@@ -484,16 +503,19 @@ impl<'a> NamClapMainThread<'a> {
                 current_buffer_size,
             );
 
-            let adapted_resampler = match NamResampler::new_simple(current_host_rate, model_rate) {
-                Ok(r) => Box::new(r),
-                Err(e) => {
-                    self.note_commit_failure(
-                        &path,
-                        &format!("failed to build polyphase resampler for the active epoch: {e:?}"),
-                    );
-                    return;
-                }
-            };
+            let adapted_resampler =
+                match NamResampler::new_simple_typed(current_host_rate, model_rate) {
+                    Ok(r) => Box::new(r),
+                    Err(e) => {
+                        self.note_commit_failure(
+                            &path,
+                            &format!(
+                                "failed to build polyphase resampler for the active epoch: {e:?}"
+                            ),
+                        );
+                        return;
+                    }
+                };
 
             let adapted_stream = match crate::clap::plugin::build_stream_adapter(
                 current_host_rate,
@@ -950,15 +972,29 @@ impl<'a> NamClapMainThread<'a> {
             .model_sample_rate
             .store(0, Ordering::Relaxed);
 
+        // Clear the process-global crash telemetry for the now-empty slot.
+        if let Ok(mut active_name) =
+            neural_amp_modeler_rs::common::diagnostics::ACTIVE_MODEL_NAME.try_write()
+        {
+            active_name.clear();
+        }
+        if let Ok(mut active_info) =
+            neural_amp_modeler_rs::common::diagnostics::ACTIVE_MODEL_INFO.try_write()
+        {
+            *active_info = None;
+        }
+        neural_amp_modeler_rs::common::diagnostics::ACTIVE_SAMPLE_RATE.store(0, Ordering::Relaxed);
+
         if buffer_size > 0 {
-            let new_resampler =
-                Box::new(NamResampler::new_simple(host_rate, host_rate).map_err(|e| {
+            let new_resampler = Box::new(
+                NamResampler::new_simple_typed(host_rate, host_rate).map_err(|e| {
                     Box::new(
-                        NamDiagnostic::new(NamErrorCode::ModelBuildFailed, &self.sys)
+                        NamDiagnostic::new(e, &self.sys)
                             .message("Failed to build dummy resampler for clear")
                             .param("error", e.to_string()),
                     )
-                })?);
+                })?,
+            );
 
             let new_stream =
                 crate::clap::plugin::build_stream_adapter(host_rate, host_rate, buffer_size)

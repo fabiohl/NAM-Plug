@@ -13,7 +13,7 @@ fn make_model_resources(mult_adj: f32) -> ModelResources {
     ModelResources {
         model_l: None,
         model_r: None,
-        new_resampler: Box::new(NamResampler::new_simple(48000, 48000).unwrap()),
+        new_resampler: Box::new(NamResampler::new_simple_typed(48000, 48000).unwrap()),
         new_stream: crate::clap::plugin::build_stream_adapter(48000, 48000, 64).unwrap(),
         input_mult_adj: mult_adj,
         output_mult_adj: mult_adj,
