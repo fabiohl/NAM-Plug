@@ -52,9 +52,7 @@ use crate::clap::gui::GuiHostBridge;
 use crate::clap::plugin::GuiSharedState;
 use crate::clap::plugin::shared::{ModelRequestOrigin, SlimmableRebuild};
 use neural_amp_modeler_rs::common::diagnostics::{NamDiagnostic, SystemSnapshot};
-use neural_amp_modeler_rs::common::spsc::{
-    RT_STATUS_NEEDS_OS_REBUILD, RT_STATUS_NEEDS_SLIMMABLE_REBUILD,
-};
+use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_OS_REBUILD;
 use neural_amp_modeler_rs::dsp::oversample::{OversampleEngine, OversampleFactor};
 use neural_amp_modeler_rs::dsp::pipeline::MAX_RESAMP_BUF;
 use neural_amp_modeler_rs::models::slimmable::slice_wavenet_model;
@@ -107,14 +105,17 @@ pub(crate) struct PreparedModelResult {
 pub(crate) type ModelResultSlot = Arc<Mutex<Option<PreparedModelResult>>>;
 
 /// Outcome of an off-thread WaveNet slimmable rebuild.
+///
+/// Every variant carries the request identity it was built for, so the main
+/// thread only acknowledges the request whose result it actually consumed.
 pub(crate) enum SlimmableRebuildOutcome {
     /// Built and ready to be pushed onto the slimmable SPSC.
-    Ready(Box<SlimmableRebuild>),
+    Ready(u64, Box<SlimmableRebuild>),
     /// `slice_wavenet_model` failed (`RT_STATUS_SLIMMABLE_SLICE_FAILED`).
-    Failed,
+    Failed(u64),
     /// Nothing to rebuild (target `< 4` channels, or no WaveNet installed):
     /// the request flag is simply cleared.
-    Skipped,
+    Skipped(u64),
 }
 
 /// Outcome of an off-thread oversampling engine rebuild.
@@ -228,13 +229,15 @@ impl ModelLoader {
 /// `slice` → `prewarm` → `set_max_buffer_size`, boxed end-to-end. Returns
 /// [`SlimmableRebuildOutcome::Skipped`] for the degenerate cases the inline path
 /// resolves by merely clearing the flag.
-fn build_slimmable(
+pub(super) fn build_slimmable(
     shared: &GuiSharedState,
+    request_id: u64,
     target_ch: u32,
     generation: u64,
+    dual: bool,
 ) -> SlimmableRebuildOutcome {
     if target_ch < 4 {
-        return SlimmableRebuildOutcome::Skipped;
+        return SlimmableRebuildOutcome::Skipped(request_id);
     }
     let buffer_size = shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
     let storage = shared
@@ -243,23 +246,42 @@ fn build_slimmable(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let Some(model) = storage.as_ref() else {
-        return SlimmableRebuildOutcome::Skipped;
+        return SlimmableRebuildOutcome::Skipped(request_id);
     };
     let StaticModel::WavenetDyn(w) = model.as_ref() else {
-        return SlimmableRebuildOutcome::Skipped;
+        return SlimmableRebuildOutcome::Skipped(request_id);
+    };
+    let prepare = |mut slimmed: neural_amp_modeler_rs::models::wavenet::WaveNetModelDyn| {
+        slimmed.prewarm();
+        if buffer_size > 0 {
+            let _ = slimmed.set_max_buffer_size(buffer_size);
+        }
+        Box::new(StaticModel::WavenetDyn(Box::new(slimmed)))
     };
     match slice_wavenet_model(w, target_ch as usize) {
-        Ok(mut slimmed) => {
-            slimmed.prewarm();
-            if buffer_size > 0 {
-                let _ = slimmed.set_max_buffer_size(buffer_size);
-            }
-            SlimmableRebuildOutcome::Ready(Box::new(SlimmableRebuild {
-                generation,
-                model: Some(Box::new(StaticModel::WavenetDyn(Box::new(slimmed)))),
-            }))
+        Ok(slimmed) => {
+            // A dual-mono request needs an independent R slice; both are
+            // allocated and prewarmed here, off-RT, so the install stays
+            // allocation-free.
+            let model_r = if dual {
+                match slice_wavenet_model(w, target_ch as usize) {
+                    Ok(right) => Some(prepare(right)),
+                    Err(_) => return SlimmableRebuildOutcome::Failed(request_id),
+                }
+            } else {
+                None
+            };
+            SlimmableRebuildOutcome::Ready(
+                request_id,
+                Box::new(SlimmableRebuild {
+                    request_id,
+                    generation,
+                    model: Some(prepare(slimmed)),
+                    model_r,
+                }),
+            )
         }
-        Err(_) => SlimmableRebuildOutcome::Failed,
+        Err(_) => SlimmableRebuildOutcome::Failed(request_id),
     }
 }
 
@@ -298,39 +320,37 @@ pub(crate) fn build_cab_nam_rebuild(
 /// Polls the `RT_STATUS_NEEDS_*` flags, building each pending payload at most
 /// once until the corresponding flag is lowered by the main thread.
 ///
-/// `slimmable_built`/`os_built` remember the request identity already published
-/// (channel+generation / factor), so a payload still awaiting consumption is not
-/// rebuilt every poll; a *distinct* request supersedes it immediately. Once the
-/// flag is observed clear, the memory is reset so the next request rebuilds.
+/// `slimmable_built` remembers the request identity already published, so a
+/// payload still awaiting consumption is not rebuilt every poll; a *distinct*
+/// request supersedes it immediately. The identity (not the flag) is the
+/// authority: a request published between a worker capture and the main-thread
+/// acknowledgment is never silently dropped.
 fn poll_rebuilds(
     shared: &GuiSharedState,
     host: GuiHostBridge,
     rebuilds: &RebuildSlots,
-    slimmable_built: &mut Option<(u32, u64)>,
+    slimmable_built: &mut Option<u64>,
     os_built: &mut Option<u32>,
     cab_nam_built: &mut Option<u64>,
 ) {
     let rt = &shared.cold.rt_status;
 
-    if rt.check_flag_acquire(RT_STATUS_NEEDS_SLIMMABLE_REBUILD) {
-        let target_ch = rt.requested_slimmable_ch.load(Ordering::Relaxed);
-        let generation = shared
-            .cold
-            .requested_slimmable_generation
-            .load(Ordering::Relaxed);
-        let identity = (target_ch, generation);
-        if *slimmable_built != Some(identity) {
-            let outcome = build_slimmable(shared, target_ch, generation);
-            *rebuilds.slimmable.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
-            *slimmable_built = Some(identity);
-            shared.cold.host_call_quiescence.host_call(|| {
-                // SAFETY: created inside the `host_call` window, which refuses
-                // entry once `alive_fence` is lowered; the handle never outlives the host.
-                unsafe { host.as_static() }.request_callback();
-            });
+    match shared.cold.snapshot_slimmable_request() {
+        Some((request_id, target_ch, generation, dual)) => {
+            if *slimmable_built != Some(request_id) {
+                let outcome = build_slimmable(shared, request_id, target_ch, generation, dual);
+                *rebuilds.slimmable.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+                *slimmable_built = Some(request_id);
+                shared.cold.host_call_quiescence.host_call(|| {
+                    // SAFETY: created inside the `host_call` window, which refuses
+                    // entry once `alive_fence` is lowered; the handle never outlives the host.
+                    unsafe { host.as_static() }.request_callback();
+                });
+            }
         }
-    } else {
-        *slimmable_built = None;
+        None => {
+            *slimmable_built = None;
+        }
     }
 
     if rt.check_flag_acquire(RT_STATUS_NEEDS_OS_REBUILD) {
@@ -380,7 +400,7 @@ fn worker_main(
     rebuilds: Option<RebuildSlots>,
 ) {
     let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(instance_id);
-    let mut slimmable_built: Option<(u32, u64)> = None;
+    let mut slimmable_built: Option<u64> = None;
     let mut os_built: Option<u32> = None;
     let mut cab_nam_built: Option<u64> = None;
 
@@ -508,4 +528,31 @@ fn worker_main(
         }
     }
     log::debug!("NAM-Plug: model loader worker exiting");
+}
+
+/// Test-only polling memory for the adaptive rebuild state machine, allowing a
+/// test to run one worker poll deterministically on the test thread instead of
+/// racing the real worker thread.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestRebuildPollState {
+    slimmable_built: Option<u64>,
+    os_built: Option<u32>,
+    cab_nam_built: Option<u64>,
+}
+
+#[cfg(test)]
+impl<'a> super::NamClapMainThread<'a> {
+    /// Runs exactly one adaptive-rebuild worker poll on the calling thread.
+    pub(crate) fn test_poll_rebuilds_once(&self, mem: &mut TestRebuildPollState) {
+        let host_shared = self.host.shared();
+        poll_rebuilds(
+            self.shared,
+            crate::clap::gui::GuiHostBridge::new(&host_shared),
+            &self.rebuild_slots,
+            &mut mem.slimmable_built,
+            &mut mem.os_built,
+            &mut mem.cab_nam_built,
+        );
+    }
 }

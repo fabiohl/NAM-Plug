@@ -568,6 +568,13 @@ impl<'a> NamClapMainThread<'a> {
         if let (Some(new_resampler), Some(new_stream)) = (new_resampler, new_stream) {
             // Explicit user load supersedes any pending staged restore.
             *self.staged_restore.borrow_mut() = None;
+            // Attach the canonical RT status instance off-RT so the audio-thread
+            // install only performs a pointer-identity no-op.
+            crate::clap::plugin::shared::preinject_rt_status(
+                &self.shared.cold.rt_status,
+                &mut model_l,
+                &mut model_r,
+            );
 
             // Strict Restart Policy: a model swap only changes the physical
             // latency when the streaming adapter's latency changes (i.e. the

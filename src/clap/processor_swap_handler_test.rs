@@ -417,11 +417,13 @@ mod tests {
         }
     }
 
-    /// Acknowledgment gaplessness under deferral with mixed traffic: light
-    /// scalars install inline (consuming their slots), the restore parks
-    /// (rolling back its slot until resolved), and the ack stays monotonic —
-    /// `3` after the first drain (the parked transaction's slot is excluded)
-    /// and `4` once it resolves, never skipping a sequence number.
+    /// Acknowledgment gaplessness under deferral with mixed traffic: the
+    /// light Params #1 and the IR install inline, the restore parks behind
+    /// them (rolling back its slot until resolved), and the ring keeps
+    /// Params #4 queued because it is causally after the parked restore.
+    /// The ack therefore covers only the resolved prefix — `2` after the
+    /// first drain and `4` once the restore resolves and #4 installs — never
+    /// skipping a sequence number.
     #[test]
     fn test_drain_ack_gapless_under_deferral() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
@@ -453,20 +455,27 @@ mod tests {
         proc.gate_dirty = false;
         run_drain(proc);
 
-        // Params #1 + IR (installed) + Params #2 (inline) = 3 slots consumed;
-        // the parked restore's slot is rolled back, so the ack excludes it.
-        assert_eq!(shared.cold.cmd_last_ack.load(Ordering::Acquire), 3);
+        // Params #1 and the IR install (one structural apply), consuming
+        // exactly 2 slots. The restore's pop is rolled back into its parked
+        // slot, and Params #4 stays queued behind it: FIFO is not bypassed.
+        assert_eq!(shared.cold.cmd_last_ack.load(Ordering::Acquire), 2);
+        assert!(!mt.cmd_producer.borrow().is_acked(3));
         assert!(
             proc.cmd_drain.has_deferred(),
             "the restore parks behind the IR"
         );
         assert_eq!(
-            proc.params.gate_threshold_db, -50.0,
-            "the last Params snapshot (inline install) wins"
+            proc.cmd_drain.ring_occupied(),
+            1,
+            "Params #4 remains queued behind the parked restore"
+        );
+        assert_eq!(
+            proc.params.gate_threshold_db, -70.0,
+            "Params #4 must not overtake the parked restore"
         );
         assert!(
-            proc.gate_dirty,
-            "gate coefficient change must invalidate cached gate params"
+            !proc.gate_dirty,
+            "no gate change is applied while Params #4 is still queued"
         );
         assert_ne!(
             shared.cold.last_applied_generation.load(Ordering::Relaxed),
@@ -476,6 +485,8 @@ mod tests {
 
         run_drain(proc);
 
+        // Phase 0 resolves the restore (sequence 3) before Params #4 is
+        // popped and applied (sequence 4); the later snapshot wins.
         assert_eq!(
             shared.cold.last_applied_generation.load(Ordering::Relaxed),
             77,
@@ -486,6 +497,16 @@ mod tests {
             4,
             "ack catches up gaplessly once the parked slot resolves"
         );
+        assert!(mt.cmd_producer.borrow().is_acked(3));
+        assert_eq!(
+            proc.params.gate_threshold_db, -50.0,
+            "Params #4 installs after the restore and wins"
+        );
+        assert!(
+            proc.gate_dirty,
+            "gate coefficient change must invalidate cached gate params"
+        );
+        assert!(!proc.cmd_drain.has_deferred());
         assert_eq!(proc.cmd_drain.ring_occupied(), 0);
         assert_eq!(mt.cmd_producer.borrow().last_acked_seq(), 4);
     }
@@ -580,13 +601,11 @@ mod tests {
             shared.cold.last_applied_generation.load(Ordering::Relaxed),
             5
         );
-        // Engine protocol: light scalars install inline and never wait for a
-        // parked structural head, so the `Params(-80)` snapshot (seq 4) was
-        // consumed in drain 1 while the restore transaction (seq 3) parked;
-        // when the parked transaction resolves in drain 2 its own (older)
-        // full snapshot lands last and wins — an accepted scalar-ahead
-        // inversion of the scheduler, not an ack/sequencing defect.
-        assert_eq!(proc.params.gate_threshold_db, -70.0);
+        // Engine protocol preserves FIFO behind a parked structural head:
+        // `Params(-80)` (seq 4) stays queued while the restore transaction
+        // (seq 3) is parked in drain 1; in drain 2 the restore resolves first
+        // (`-70`) and `Params(-80)` drains after it and wins.
+        assert_eq!(proc.params.gate_threshold_db, -80.0);
         assert_eq!(
             shared.rt_to_ui.cabsim_tail_samples.load(Ordering::Relaxed),
             1024,

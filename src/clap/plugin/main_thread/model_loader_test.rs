@@ -358,19 +358,7 @@ fn test_adaptive_rebuild_worker_services_slimmable_flag() {
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
-    shared
-        .cold
-        .rt_status
-        .requested_slimmable_ch
-        .store(8, Ordering::Relaxed);
-    shared
-        .cold
-        .requested_slimmable_generation
-        .store(0, Ordering::Relaxed);
-    shared
-        .cold
-        .rt_status
-        .set_flag_release(RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+    shared.cold.publish_slimmable_request(8, 0, false);
 
     let deadline = Instant::now() + Duration::from_secs(2);
     while shared
@@ -548,21 +536,8 @@ fn test_adaptive_worker_polling_reduces_idle_wakeups_by_at_least_10x_and_preserv
     );
 
     // 5. Test flag->swap latency during active processing: must remain < 60 ms
-    shared
-        .cold
-        .rt_status
-        .requested_slimmable_ch
-        .store(8, Ordering::Relaxed);
-    shared
-        .cold
-        .requested_slimmable_generation
-        .store(0, Ordering::Relaxed);
-
     let t0 = Instant::now();
-    shared
-        .cold
-        .rt_status
-        .set_flag_release(neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+    shared.cold.publish_slimmable_request(8, 0, false);
 
     let deadline = Instant::now() + Duration::from_millis(200);
     while shared
@@ -633,8 +608,9 @@ fn test_model_loader_worker_panic_contained_and_recovers() {
         "Panic hook must have executed"
     );
 
-    // Poll main thread until error is reported
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Poll main thread until error is reported (generous bound: the suite runs
+    // many parallel tests, so the worker→main handshake may be scheduled late).
+    let deadline = Instant::now() + Duration::from_secs(20);
     while !shared.cold.ui_load_error.load(Ordering::Relaxed) && Instant::now() < deadline {
         instance.call_on_main_thread_callback();
         std::thread::sleep(Duration::from_millis(10));
@@ -783,4 +759,233 @@ fn test_async_load_interleaved_with_audio_renegotiation_adapts_to_current_config
     );
 
     let _ = std::fs::remove_file(&model_file);
+}
+
+// ── T4.1: deterministic A→B interleavings of the slimmable request protocol ──
+
+/// Installs a real dynamically slimmable WaveNet into the cold storage so the
+/// worker builds a `Ready` payload (target 4 fits the fixture's 7/4 arrays).
+fn install_dyn_wavenet(shared: &crate::clap::plugin::NamClapShared) {
+    use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
+    use neural_amp_modeler_rs::loader::LoadOptions;
+    use neural_amp_modeler_rs::loader::build::load_and_build_model;
+
+    let path = test_util::model_path("wavenet_dyn_free.nam");
+    let sys = SystemSnapshot::capture();
+    let pair = load_and_build_model(&path, &sys, false, LoadOptions::default())
+        .expect("wavenet_dyn_free.nam must load");
+    let model = pair.model_l.expect("fixture must build a model");
+    assert!(matches!(
+        model.as_ref(),
+        neural_amp_modeler_rs::models::StaticModel::WavenetDyn(_)
+    ));
+    *shared
+        .cold
+        .full_wavenet_model
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(model);
+    shared.cold.buffer_size.store(0, Ordering::Relaxed);
+}
+
+/// Worker captures A; RT publishes B; the main thread finalizes A. A's result
+/// must not acknowledge (erase) B: B stays pending, is rebuilt next, and only
+/// then is the request cleared. This is the F-13 lost-wakeup interleaving.
+#[test]
+fn test_slimmable_result_a_does_not_erase_newer_request_b() {
+    use super::model_loader::TestRebuildPollState;
+    use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD;
+
+    let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
+    install_dyn_wavenet(shared);
+
+    let mut mem = TestRebuildPollState::default();
+    let generation = 7;
+
+    // Worker captures A.
+    let a = shared.cold.publish_slimmable_request(4, generation, false);
+    mt.test_poll_rebuilds_once(&mut mem);
+    assert_eq!(shared.cold.pending_slimmable_request(), a);
+
+    // RT publishes B while A's result is still in the delivery slot.
+    let b = shared.cold.publish_slimmable_request(4, generation, false);
+    assert_ne!(a, b, "each request must carry a distinct identity");
+    assert!(
+        shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
+    );
+
+    // Main finalizes A. B must remain pending.
+    mt.test_drain_slimmable_once();
+    assert_eq!(
+        shared.cold.pending_slimmable_request(),
+        b,
+        "finalizing A must not acknowledge the newer request B"
+    );
+    assert!(
+        shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_NEEDS_SLIMMABLE_REBUILD),
+        "the needs-rebuild flag must stay raised while B is pending"
+    );
+
+    // Worker rebuilds B, then the request is acknowledged.
+    mt.test_poll_rebuilds_once(&mut mem);
+    mt.test_drain_slimmable_once();
+    assert_eq!(shared.cold.pending_slimmable_request(), 0);
+    assert!(
+        !shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
+    );
+}
+
+/// Both the `Skipped` and `Failed` completions acknowledge only their own
+/// request; an older failure cannot set the slice-failed flag over a newer
+/// pending request.
+#[test]
+fn test_slimmable_skip_and_failure_are_identity_scoped() {
+    use super::model_loader::{SlimmableRebuildOutcome, TestRebuildPollState};
+    use neural_amp_modeler_rs::common::spsc::{
+        RT_STATUS_NEEDS_SLIMMABLE_REBUILD, RT_STATUS_SLIMMABLE_SLICE_FAILED,
+    };
+
+    let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
+    let mut mem = TestRebuildPollState::default();
+
+    // Skipped path: target < 4 short-circuits before touching the model.
+    let _a = shared.cold.publish_slimmable_request(2, 1, false);
+    mt.test_poll_rebuilds_once(&mut mem);
+    let b = shared.cold.publish_slimmable_request(3, 1, false);
+    mt.test_drain_slimmable_once();
+    assert_eq!(shared.cold.pending_slimmable_request(), b);
+    assert!(
+        shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
+    );
+    mt.test_poll_rebuilds_once(&mut mem);
+    mt.test_drain_slimmable_once();
+    assert_eq!(shared.cold.pending_slimmable_request(), 0);
+
+    // Failed path: inject the outcome directly to exercise the completion
+    // decision without fabricating an unsliceable fixture.
+    let c = shared.cold.publish_slimmable_request(8, 2, false);
+    *mt.rebuild_slots
+        .slimmable
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(SlimmableRebuildOutcome::Failed(c));
+    let d = shared.cold.publish_slimmable_request(8, 2, false);
+    mt.test_drain_slimmable_once();
+    assert_eq!(
+        shared.cold.pending_slimmable_request(),
+        d,
+        "a failure of C must not acknowledge D"
+    );
+    assert!(
+        !shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_SLIMMABLE_SLICE_FAILED),
+        "a stale failure must not raise the slice-failed flag for D"
+    );
+
+    *mt.rebuild_slots
+        .slimmable
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(SlimmableRebuildOutcome::Failed(d));
+    mt.test_drain_slimmable_once();
+    assert_eq!(shared.cold.pending_slimmable_request(), 0);
+    assert!(
+        shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_SLIMMABLE_SLICE_FAILED)
+    );
+}
+
+/// A full slimmable ring retains both the payload and the request identity; the
+/// request resolves only after a slot frees up.
+#[test]
+fn test_slimmable_full_ring_retains_request_identity() {
+    use super::model_loader::TestRebuildPollState;
+    use crate::clap::plugin::SlimmableRebuild;
+    use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD;
+
+    let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
+    install_dyn_wavenet(shared);
+
+    // Fill the 4-slot ring.
+    for _ in 0..4 {
+        mt.slimmable_tx
+            .borrow_mut()
+            .push(Box::new(SlimmableRebuild {
+                request_id: 0,
+                model_r: None,
+                generation: 0,
+                model: None,
+            }))
+            .expect("ring must have room for the four fillers");
+    }
+
+    let mut mem = TestRebuildPollState::default();
+    let id = shared.cold.publish_slimmable_request(4, 3, false);
+    mt.test_poll_rebuilds_once(&mut mem);
+    mt.test_drain_slimmable_once();
+
+    assert_eq!(
+        shared.cold.pending_slimmable_request(),
+        id,
+        "a full ring must retain the pending request"
+    );
+    assert!(
+        shared
+            .cold
+            .rt_status
+            .check_flag(RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
+    );
+
+    // Free one slot and retry: the retained payload is pushed and acknowledged.
+    {
+        let mut rx_slot = shared.cold.slimmable_rx.lock().unwrap();
+        let rx = rx_slot
+            .as_mut()
+            .expect("inactive harness keeps the consumer");
+        rx.pop().expect("a filler must be popped");
+    }
+    mt.test_drain_slimmable_once();
+    assert_eq!(shared.cold.pending_slimmable_request(), 0);
+}
+
+/// A generation change (new model) keeps the newer request pending even when an
+/// older rebuild of the same model geometry is finalized in between.
+#[test]
+fn test_slimmable_generation_change_keeps_newer_request() {
+    use super::model_loader::TestRebuildPollState;
+
+    let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
+    install_dyn_wavenet(shared);
+
+    let mut mem = TestRebuildPollState::default();
+    let a = shared.cold.publish_slimmable_request(4, 10, false);
+    mt.test_poll_rebuilds_once(&mut mem);
+    let b = shared.cold.publish_slimmable_request(4, 11, false);
+    assert_ne!(a, b);
+    mt.test_drain_slimmable_once();
+    assert_eq!(shared.cold.pending_slimmable_request(), b);
+    mt.test_poll_rebuilds_once(&mut mem);
+    mt.test_drain_slimmable_once();
+    assert_eq!(shared.cold.pending_slimmable_request(), 0);
 }

@@ -7,15 +7,13 @@ use super::NamClapMainThread;
 use crate::clap::gui::dialog_state;
 use crate::clap::plugin::shared::{
     MAX_PENDING_MODEL_REQUESTS, ModelRequestOrigin, PendingModelRequest, PresetLocationOrigin,
-    SlimmableRebuild, StagedSwap, UI_ALERT_CABSIM_CONTRACT, UI_ALERT_DEGRADE_MINIMAL,
-    UI_ALERT_DEGRADE_REDUCED, UI_ALERT_HOST_CONTRACT, UI_ALERT_NON_FINITE_INPUT, UI_ALERT_POISONED,
+    StagedSwap, UI_ALERT_CABSIM_CONTRACT, UI_ALERT_DEGRADE_MINIMAL, UI_ALERT_DEGRADE_REDUCED,
+    UI_ALERT_HOST_CONTRACT, UI_ALERT_NON_FINITE_INPUT, UI_ALERT_POISONED,
     UI_ALERT_RESAMPLER_FAILED,
 };
 use clack_extensions::preset_discovery::prelude::*;
 use clack_plugin::host::HostMainThreadHandle;
 use neural_amp_modeler_rs::common::spsc::{self, GcItem, drain_gc_channels};
-use neural_amp_modeler_rs::models::slimmable::slice_wavenet_model;
-use neural_amp_modeler_rs::models::{NamModel, StaticModel};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -245,7 +243,8 @@ impl<'a> NamClapMainThread<'a> {
     /// CPU is unchanged.
     pub(crate) fn sync_watchdog_cadence(&self) {
         let rt = &self.shared.cold.rt_status;
-        let pending = rt.check_flag(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
+        let pending = self.shared.cold.pending_slimmable_request() != 0
+            || rt.check_flag(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
             || rt.check_flag(spsc::RT_STATUS_NEEDS_OS_REBUILD)
             || self.shared.cold.is_cab_nam_rebuild_pending();
         let want = if pending {
@@ -295,12 +294,7 @@ impl<'a> NamClapMainThread<'a> {
     /// longer waits for the 250 ms watchdog. If the worker is unavailable (sync
     /// rollback or spawn failure) the historical inline path runs instead.
     fn handle_slimmable_rebuild(&self) {
-        if !self
-            .shared
-            .cold
-            .rt_status
-            .check_flag_acquire(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
-        {
+        if self.shared.cold.pending_slimmable_request() == 0 {
             return;
         }
 
@@ -313,9 +307,10 @@ impl<'a> NamClapMainThread<'a> {
     }
 
     /// Consumes a worker-built slimmable payload (when ready), pushes it onto the
-    /// SPSC and clears the flag on success. A full ring retains **both** the
-    /// payload and the flag so the next tick retries — preserving the legacy
-    /// fail-closed semantics.
+    /// SPSC and acknowledges the exact request it was built for. A full ring
+    /// retains **both** the payload and the request identity so the next tick
+    /// retries. A result whose identity is no longer current (a newer request B
+    /// arrived while A was building) is delivered but never acknowledges B.
     fn drain_slimmable_rebuild(&self) {
         let outcome = {
             let mut slot = self
@@ -331,144 +326,88 @@ impl<'a> NamClapMainThread<'a> {
         };
 
         match outcome {
-            super::model_loader::SlimmableRebuildOutcome::Ready(boxed) => {
+            super::model_loader::SlimmableRebuildOutcome::Ready(request_id, boxed) => {
                 match self.slimmable_tx.borrow_mut().push(boxed) {
-                    Ok(()) => self
-                        .shared
-                        .cold
-                        .rt_status
-                        .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD),
+                    Ok(()) => {
+                        self.shared.cold.complete_slimmable_request(request_id);
+                    }
                     Err(rtrb::PushError::Full(retained)) => {
-                        // Keep the payload and the flag so the FSM retries on
-                        // the next cycle instead of silently dropping the
-                        // slimmed model and locking quality.
+                        // Keep the payload and the request so the next cycle
+                        // retries instead of silently dropping the slimmed
+                        // model and locking quality.
                         *self
                             .rebuild_slots
                             .slimmable
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = Some(
-                            super::model_loader::SlimmableRebuildOutcome::Ready(retained),
-                        );
+                            .unwrap_or_else(|e| e.into_inner()) =
+                            Some(super::model_loader::SlimmableRebuildOutcome::Ready(
+                                request_id, retained,
+                            ));
                         log::warn!("NAM-Plug: slimmable channel full — rebuild will retry");
                         self.host.request_callback();
                     }
                 }
             }
-            super::model_loader::SlimmableRebuildOutcome::Failed => {
-                self.shared
-                    .cold
-                    .rt_status
-                    .set_flag(spsc::RT_STATUS_SLIMMABLE_SLICE_FAILED);
-                self.shared
-                    .cold
-                    .rt_status
-                    .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+            super::model_loader::SlimmableRebuildOutcome::Failed(request_id) => {
+                // Surface the failure only if it belongs to the newest request;
+                // a failure of a superseded request must not mask request B.
+                if self.shared.cold.complete_slimmable_request(request_id) {
+                    self.shared
+                        .cold
+                        .rt_status
+                        .set_flag(spsc::RT_STATUS_SLIMMABLE_SLICE_FAILED);
+                }
             }
-            super::model_loader::SlimmableRebuildOutcome::Skipped => {
-                // target_ch < 4 or no WaveNet: no-op, clear so the FSM does not
-                // retry.
-                self.shared
-                    .cold
-                    .rt_status
-                    .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+            super::model_loader::SlimmableRebuildOutcome::Skipped(request_id) => {
+                // target_ch < 4 or no WaveNet: no-op for this request only.
+                self.shared.cold.complete_slimmable_request(request_id);
             }
         }
     }
 
     /// WaveNet slimmable rebuild: main thread performs all allocation,
     /// prewarm, and mmap outside the audio-thread callback.
+    ///
+    /// Used only when the loader worker is unavailable (synchronous rollback
+    /// mode or spawn failure). Reuses the worker builder and the same
+    /// identity-based acknowledgment.
     fn handle_slimmable_rebuild_inline(&self) {
-        if !self
-            .shared
-            .cold
-            .rt_status
-            .check_flag_acquire(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD)
-        {
+        let Some((request_id, target_ch, generation, dual)) =
+            self.shared.cold.snapshot_slimmable_request()
+        else {
             return;
-        }
+        };
 
-        let target_ch = self
-            .shared
-            .cold
-            .rt_status
-            .requested_slimmable_ch
-            .load(Ordering::Relaxed) as usize;
-        let generation = self
-            .shared
-            .cold
-            .requested_slimmable_generation
-            .load(Ordering::Relaxed);
-        let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
-
-        if target_ch >= 4 {
-            let new_model = {
-                let storage = self
-                    .shared
-                    .cold
-                    .full_wavenet_model
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                storage.as_ref().and_then(|m| {
-                    if let StaticModel::WavenetDyn(w) = m.as_ref() {
-                        match slice_wavenet_model(w, target_ch) {
-                            Ok(mut slimmed) => {
-                                slimmed.prewarm();
-                                if buffer_size > 0 {
-                                    let _ = slimmed.set_max_buffer_size(buffer_size);
-                                }
-                                Some(Box::new(StaticModel::WavenetDyn(Box::new(slimmed))))
-                            }
-                            Err(_) => {
-                                self.shared
-                                    .cold
-                                    .rt_status
-                                    .set_flag(spsc::RT_STATUS_SLIMMABLE_SLICE_FAILED);
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                })
-            };
-
-            if let Some(model) = new_model {
-                // The producer borrow ends before `request_callback()` below
-                // (Err arm), so no borrow is held across the host call.
-                match self
-                    .slimmable_tx
-                    .borrow_mut()
-                    .push(Box::new(SlimmableRebuild {
-                        generation,
-                        model: Some(model),
-                    })) {
+        match super::model_loader::build_slimmable(
+            self.shared,
+            request_id,
+            target_ch,
+            generation,
+            dual,
+        ) {
+            super::model_loader::SlimmableRebuildOutcome::Ready(request_id, boxed) => {
+                match self.slimmable_tx.borrow_mut().push(boxed) {
                     Ok(()) => {
-                        self.shared
-                            .cold
-                            .rt_status
-                            .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+                        self.shared.cold.complete_slimmable_request(request_id);
                     }
                     Err(rtrb::PushError::Full(_)) => {
-                        // Keep NEEDS_SLIMMABLE_REBUILD so the FSM
-                        // retries on the next cycle instead of silently
-                        // dropping the slimmed model and locking quality.
+                        // Keep the request so the next cycle retries.
                         log::warn!("NAM-Plug: slimmable channel full — rebuild will retry");
                         self.host.request_callback();
                     }
                 }
-            } else {
-                self.shared
-                    .cold
-                    .rt_status
-                    .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
             }
-        } else {
-            // target_ch < 4: no slimmable rebuild needed — clear the flag
-            // so the FSM does not retry a no-op.
-            self.shared
-                .cold
-                .rt_status
-                .clear_flag_release(spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD);
+            super::model_loader::SlimmableRebuildOutcome::Failed(request_id) => {
+                if self.shared.cold.complete_slimmable_request(request_id) {
+                    self.shared
+                        .cold
+                        .rt_status
+                        .set_flag(spsc::RT_STATUS_SLIMMABLE_SLICE_FAILED);
+                }
+            }
+            super::model_loader::SlimmableRebuildOutcome::Skipped(request_id) => {
+                self.shared.cold.complete_slimmable_request(request_id);
+            }
         }
     }
 
@@ -1641,5 +1580,13 @@ fn notify_preset_error(
             msg_ref,
         );
         log::error!("Host notified: preset load failed (os_error={os_error})");
+    }
+}
+
+#[cfg(test)]
+impl<'a> NamClapMainThread<'a> {
+    /// Runs exactly one main-thread slimmable drain on the calling thread.
+    pub(crate) fn test_drain_slimmable_once(&self) {
+        self.drain_slimmable_rebuild();
     }
 }

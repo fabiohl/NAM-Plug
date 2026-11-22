@@ -590,6 +590,7 @@ Model loading is divided into two phases:
 2. **Commit Phase (Main Thread):** The completed result is swapped atomically on the main thread and pushed to the audio thread via SPSC command queues.
 
 - **Adaptive Structural Rebuild Offload:** The model loader also offloads allocation-heavy tasks for the audio thread, including WaveNet slimmable slices and oversampling engine rebuilds. The main thread's housekeeping watchdog accelerates from 250 ms to 50 ms while a rebuild is pending.
+- **Slimmable Request Identity:** Each slimmable request carries a monotonic identity plus its channel/generation snapshot. The worker tags the rebuilt payload with that identity and the main thread acknowledges it with a CAS: a result built for request A can never clear the flag of a newer request B published while A was in flight. A model swap cancels the pending request and re-arms or clears the adaptive registration, so the FSM never publishes channel widths derived from a model that is no longer loaded.
 
 ### 7.5 GUI Lifecycle State Machine
 

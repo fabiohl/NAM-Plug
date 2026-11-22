@@ -7,18 +7,6 @@
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -o pipefail
 
-PARANOID_ORIG=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)
-restore_paranoid() {
-    local cur
-    cur=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)
-    if [ "$cur" != "$PARANOID_ORIG" ]; then
-        sudo -n sysctl -q -w kernel.perf_event_paranoid="$PARANOID_ORIG" 2>/dev/null || true
-    fi
-}
-trap restore_paranoid EXIT
-if [ "$PARANOID_ORIG" -gt 1 ]; then
-    sudo -n sysctl -q -w kernel.perf_event_paranoid=1 2>/dev/null || true
-fi
 cd "$(dirname "$0")/.."
 . utils/_lib.sh
 
@@ -77,6 +65,19 @@ if [ "$USE_ARTIFACT" = "1" ]; then
         usage_fail "tests-long.sh: --artifact especificado mas $ARTIFACT_PATH não existe"
     fi
     ARTIFACT_SHA256=$(sha256sum "$ARTIFACT_PATH" | cut -d' ' -f1)
+fi
+
+PARANOID_ORIG=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)
+restore_paranoid() {
+    local cur
+    cur=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)
+    if [ "$cur" != "$PARANOID_ORIG" ]; then
+        sudo -n sysctl -q -w kernel.perf_event_paranoid="$PARANOID_ORIG" 2>/dev/null || true
+    fi
+}
+trap restore_paranoid EXIT
+if [ "$PARANOID_ORIG" -gt 1 ]; then
+    sudo -n sysctl -q -w kernel.perf_event_paranoid=1 2>/dev/null || true
 fi
 
 # Reuse the build run id so the independent build/long/certify processes

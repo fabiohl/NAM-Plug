@@ -1709,6 +1709,8 @@ mod tests {
             .slimmable_tx
             .borrow_mut()
             .push(Box::new(SlimmableRebuild {
+                request_id: 0,
+                model_r: None,
                 generation: active_gen.wrapping_sub(1),
                 model: Some(make_linear(0.2)),
             }))
@@ -1725,11 +1727,15 @@ mod tests {
             let mt = unsafe { &*main_thread_ptr };
             let mut tx = mt.slimmable_tx.borrow_mut();
             tx.push(Box::new(SlimmableRebuild {
+                request_id: 0,
+                model_r: None,
                 generation: active_gen,
                 model: Some(make_linear(0.3)),
             }))
             .expect("slimmable burst 1");
             tx.push(Box::new(SlimmableRebuild {
+                request_id: 0,
+                model_r: None,
                 generation: active_gen,
                 model: Some(make_linear(0.4)),
             }))
@@ -1744,6 +1750,367 @@ mod tests {
 
         drop(_audit_guard);
         unsafe { &*main_thread_ptr }.housekeeping();
+        let stopped = started_processor.stop_processing();
+        plugin_instance.deactivate(stopped);
+    }
+
+    /// Exact heap counters for one audio callback, measured with a tracking
+    /// guard that wraps only `started.process()` — the port/event wrapper
+    /// construction happens outside the window, exactly like the host-side
+    /// plumbing a DAW runs around the callback.
+    #[cfg(feature = "heap-audit")]
+    #[derive(Default, Debug)]
+    struct CallbackAllocs {
+        alloc: usize,
+        realloc: usize,
+        dealloc: usize,
+    }
+
+    #[cfg(feature = "heap-audit")]
+    impl CallbackAllocs {
+        fn total(&self) -> usize {
+            self.alloc + self.realloc + self.dealloc
+        }
+    }
+
+    #[cfg(feature = "heap-audit")]
+    fn process_block_counted(
+        started: &mut StartedPluginAudioProcessor<TestHost>,
+        bufs: &mut StereoTestBuffers,
+    ) -> (ProcessStatus, CallbackAllocs) {
+        use neural_amp_modeler_rs::common::alloc_audit::{
+            TrackingGuard, get_alloc_count, get_dealloc_count, get_realloc_count,
+        };
+
+        let mut input_channels = [bufs.in_l.as_mut_slice(), bufs.in_r.as_mut_slice()];
+        let input_audio = bufs.input_ports.with_input_buffers([AudioPortBuffer {
+            latency: 0,
+            channels: AudioPortBufferType::f32_input_only(
+                input_channels.iter_mut().map(InputChannel::constant),
+            ),
+        }]);
+
+        let output_channels = [bufs.out_l.as_mut_slice(), bufs.out_r.as_mut_slice()];
+        let mut output_audio = bufs.output_ports.with_output_buffers([AudioPortBuffer {
+            latency: 0,
+            channels: AudioPortBufferType::f32_output_only(output_channels.into_iter()),
+        }]);
+
+        let mut output_events = OutputEvents::from_buffer(&mut bufs.output_events_buffer);
+        let events = InputEvents::empty();
+
+        let guard = TrackingGuard::new();
+        let status = started
+            .process(
+                &input_audio,
+                &mut output_audio,
+                &events,
+                &mut output_events,
+                None,
+                None,
+            )
+            .expect("process failed in counted heap audit block");
+        let counts = CallbackAllocs {
+            alloc: get_alloc_count(),
+            realloc: get_realloc_count(),
+            dealloc: get_dealloc_count(),
+        };
+        drop(guard);
+        (status, counts)
+    }
+
+    /// Steady-state gate: a slimmable dynamic WaveNet must keep the audio
+    /// thread at exactly zero heap events on every callback.
+    ///
+    /// Fixture provenance: `slimmable_wavenet.nam` is copied verbatim from the
+    /// distributed (Apache-2.0) engine test fixtures
+    /// (`tests/fixtures/models/slimmable_wavenet.nam`), with
+    /// `allowed_channels = [1, 2, 3]`; it resolves to `StaticModel::WavenetDyn`
+    /// with `is_slimmable_capable() == true` (asserted below).
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_slimmable_wavenet_steady_state_zero_alloc() {
+        use crate::clap::plugin::ClapParamPayload;
+        use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
+        use neural_amp_modeler_rs::loader::LoadOptions;
+        use neural_amp_modeler_rs::loader::build::load_and_build_model;
+        use neural_amp_modeler_rs::models::StaticModel;
+
+        const BLOCK: usize = 512;
+        const AUDITED_BLOCKS: usize = 256;
+
+        // The process-wide panic-injection hook is shared by every audio-hook
+        // test; serialize against the modules that arm it so a sibling test's
+        // injected panic can never land in this sustained audited window.
+        let _hook_guard = crate::clap::processor::processor_poisoning_test::TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let model_path = crate::clap::test_util::model_path("slimmable_wavenet.nam");
+        assert!(
+            model_path.exists(),
+            "slimmable_wavenet.nam fixture missing — the slimmable gate requires the dynamic fixture"
+        );
+
+        // Fixture contract: only the dynamic engine exposes the slimmable
+        // rebuild path the audio thread must serve allocation-free.
+        {
+            let sys = SystemSnapshot::capture();
+            let pair = load_and_build_model(&model_path, &sys, false, LoadOptions::default())
+                .expect("slimmable_wavenet.nam must load");
+            let model = pair.model_l.expect("fixture must build a left model");
+            assert!(
+                matches!(model.as_ref(), StaticModel::WavenetDyn(_)),
+                "slimmable_wavenet.nam must resolve to StaticModel::WavenetDyn"
+            );
+            assert!(
+                model.is_slimmable_capable(),
+                "slimmable_wavenet.nam must report slimmable capability"
+            );
+        }
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let params = test_util::make_default_params(Some(model_path));
+        test_util::load_plugin_state(&mut plugin_instance, &params);
+        plugin_instance.call_on_main_thread_callback();
+
+        let stopped_processor = plugin_instance
+            .activate(
+                |_, _| (),
+                PluginAudioConfiguration {
+                    sample_rate: 48000.0,
+                    min_frames_count: BLOCK as u32,
+                    max_frames_count: BLOCK as u32,
+                },
+            )
+            .unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+        let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.05, 0.05);
+
+        // Warm-up: drain the deferred LoadModel and let the FSM settle in the
+        // steady state before the audited window.
+        for _ in 0..8 {
+            process_block(&mut started_processor, &mut bufs);
+        }
+        assert!(
+            shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
+            "model_load_counter must be > 0 — the audit must run real slimmable inference"
+        );
+
+        let mut total = CallbackAllocs::default();
+        for block in 0..AUDITED_BLOCKS {
+            let (status, counts) = process_block_counted(&mut started_processor, &mut bufs);
+            total.alloc += counts.alloc;
+            total.realloc += counts.realloc;
+            total.dealloc += counts.dealloc;
+            assert_eq!(
+                counts.total(),
+                0,
+                "slimmable steady state block {block}: alloc={} realloc={} dealloc={}",
+                counts.alloc,
+                counts.realloc,
+                counts.dealloc
+            );
+            assert!(
+                matches!(status, ProcessStatus::Continue),
+                "slimmable steady state block {block}: expected Continue, got {status:?}"
+            );
+        }
+        assert_eq!(
+            total.total(),
+            0,
+            "slimmable steady state over {AUDITED_BLOCKS} blocks: alloc={} realloc={} dealloc={}",
+            total.alloc,
+            total.realloc,
+            total.dealloc
+        );
+
+        // FSM/override transitions must stay allocation-free too: apply a mode
+        // or slim-override change off-window (the push allocates on the main
+        // thread, as production does) and audit the callback that applies it.
+        use neural_amp_modeler_rs::common::params::{
+            AdaptiveComputeMode, RtProcessingParams, SlimOverride,
+        };
+        let transitions = [
+            (AdaptiveComputeMode::Conservative, SlimOverride::ForceLite),
+            (AdaptiveComputeMode::Aggressive, SlimOverride::ForceFull),
+            (AdaptiveComputeMode::Off, SlimOverride::Auto),
+        ];
+        for (mode, slim_override) in transitions {
+            let mt = unsafe { &*main_thread_ptr(&mut plugin_instance) };
+            mt.cmd_producer
+                .borrow_mut()
+                .push_command(ClapParamPayload::Params(
+                    RtProcessingParams::default()
+                        .with_adaptive_compute(mode)
+                        .with_slim_override(slim_override),
+                ))
+                .expect("mode/override Params push must succeed");
+            let (status, counts) = process_block_counted(&mut started_processor, &mut bufs);
+            assert_eq!(
+                counts.total(),
+                0,
+                "mode={mode:?} override={slim_override:?} callback: alloc={} realloc={} dealloc={}",
+                counts.alloc,
+                counts.realloc,
+                counts.dealloc
+            );
+            assert!(
+                matches!(status, ProcessStatus::Continue),
+                "mode={mode:?} override={slim_override:?} callback: expected Continue, got {status:?}"
+            );
+        }
+
+        let stopped = started_processor.stop_processing();
+        plugin_instance.deactivate(stopped);
+    }
+
+    /// Install gate: swapping in a dynamic WaveNet while the audited window is
+    /// armed must not allocate or free on the audio thread.
+    ///
+    /// Fixture provenance: `wavenet_dyn_free.nam` is copied verbatim from the
+    /// distributed (Apache-2.0) engine test fixtures. It is a free-shape
+    /// dynamic WaveNet (`CH=7/4`) without slimmable metadata, so the audited
+    /// callback exercises the `set_wavenet_full_ch` install registration in
+    /// isolation from the per-block slimmable request path.
+    #[cfg(feature = "heap-audit")]
+    #[test]
+    fn test_heap_audit_dynamic_wavenet_install_zero_alloc() {
+        use crate::clap::plugin::{ClapParamPayload, LoadModelPayload};
+        use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
+        use neural_amp_modeler_rs::dsp::resampler::NamResampler;
+        use neural_amp_modeler_rs::loader::LoadOptions;
+        use neural_amp_modeler_rs::loader::build::load_and_build_model;
+        use neural_amp_modeler_rs::models::NamModel;
+        use neural_amp_modeler_rs::models::StaticModel;
+
+        const BLOCK: usize = 512;
+        const HOST_RATE: u32 = 48000;
+
+        let _hook_guard = crate::clap::processor::processor_poisoning_test::TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let base_path = crate::clap::test_util::model_path("wavenet_a1_standard.nam");
+        let dyn_path = crate::clap::test_util::model_path("wavenet_dyn_free.nam");
+        assert!(
+            base_path.exists(),
+            "wavenet_a1_standard.nam fixture missing — required as the pre-swap model"
+        );
+        assert!(
+            dyn_path.exists(),
+            "wavenet_dyn_free.nam fixture missing — the dynamic install gate requires it"
+        );
+
+        let sys = SystemSnapshot::capture();
+        let pair = load_and_build_model(&dyn_path, &sys, false, LoadOptions::default())
+            .expect("wavenet_dyn_free.nam must load");
+        let mut model_l = pair
+            .model_l
+            .expect("dynamic fixture must build a left model");
+        assert!(
+            matches!(model_l.as_ref(), StaticModel::WavenetDyn(_)),
+            "wavenet_dyn_free.nam must resolve to StaticModel::WavenetDyn"
+        );
+        model_l
+            .set_max_buffer_size(BLOCK)
+            .expect("dynamic model pre-size failed");
+        let new_resampler = Box::new(
+            NamResampler::new_simple_typed(HOST_RATE, pair.sample_rate).expect("resampler"),
+        );
+        let new_stream =
+            crate::clap::plugin::build_stream_adapter(HOST_RATE, pair.sample_rate, BLOCK)
+                .expect("streaming adapter");
+        let payload = LoadModelPayload {
+            generation: 0,
+            model_l: Some(model_l),
+            model_r: None,
+            new_resampler,
+            new_stream,
+            model_rate: pair.sample_rate,
+            input_mult_adj: pair.input_mult_adj,
+            output_mult_adj: pair.output_mult_adj,
+            cal_meta: crate::clap::extensions::calibration::ModelCalibrationMeta {
+                has_model: true,
+                loudness: None,
+                input_level_dbu: None,
+                output_level_dbu: None,
+            },
+            prewarm_cost_ns: None,
+        };
+
+        let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        let params = test_util::make_default_params(Some(base_path));
+        test_util::load_plugin_state(&mut plugin_instance, &params);
+        plugin_instance.call_on_main_thread_callback();
+
+        let stopped_processor = plugin_instance
+            .activate(
+                |_, _| (),
+                PluginAudioConfiguration {
+                    sample_rate: 48000.0,
+                    min_frames_count: BLOCK as u32,
+                    max_frames_count: BLOCK as u32,
+                },
+            )
+            .unwrap();
+        let mut started_processor = stopped_processor.start_processing().unwrap();
+        let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+        let mut bufs = StereoTestBuffers::new(BLOCK, 0.05, 0.05);
+
+        for _ in 0..8 {
+            process_block(&mut started_processor, &mut bufs);
+        }
+
+        {
+            let mt = unsafe { &*main_thread_ptr };
+            mt.cmd_producer
+                .borrow_mut()
+                .push_command(ClapParamPayload::LoadModel {
+                    generation: payload.generation,
+                    model_l: payload.model_l,
+                    model_r: payload.model_r,
+                    new_resampler: payload.new_resampler,
+                    new_stream: payload.new_stream,
+                    model_rate: payload.model_rate,
+                    input_mult_adj: payload.input_mult_adj,
+                    output_mult_adj: payload.output_mult_adj,
+                    cal_meta: payload.cal_meta,
+                    prewarm_cost_ns: payload.prewarm_cost_ns,
+                })
+                .expect("dynamic LoadModel push must succeed");
+        }
+
+        let (status, counts) = process_block_counted(&mut started_processor, &mut bufs);
+        assert_eq!(
+            counts.total(),
+            0,
+            "dynamic install callback: alloc={} realloc={} dealloc={}",
+            counts.alloc,
+            counts.realloc,
+            counts.dealloc
+        );
+        assert!(
+            matches!(status, ProcessStatus::Continue),
+            "dynamic install callback: expected Continue, got {status:?}"
+        );
+
+        // Prove a real install: the replaced model is retired through the GC.
+        {
+            let mt = unsafe { &*main_thread_ptr };
+            let mut retired_models = 0usize;
+            while let Ok(item) = mt.gc_rx.borrow_mut().pop() {
+                if matches!(item, neural_amp_modeler_rs::common::spsc::GcItem::Model(_)) {
+                    retired_models += 1;
+                }
+            }
+            assert!(
+                retired_models > 0,
+                "the dynamic install must retire the replaced model through the GC"
+            );
+        }
+
         let stopped = started_processor.stop_processing();
         plugin_instance.deactivate(stopped);
     }

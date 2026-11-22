@@ -200,6 +200,8 @@ mod tests {
         }
         for i in 0..32 {
             overflow.push(RetiredBox::Slimmable(Box::new(SlimmableRebuild {
+                request_id: 0,
+                model_r: None,
                 generation: i as u64,
                 model: None,
             })));
@@ -225,6 +227,8 @@ mod tests {
         let slim_pushes = 37usize;
         for i in 0..slim_pushes {
             overflow.push(RetiredBox::Slimmable(Box::new(SlimmableRebuild {
+                request_id: 0,
+                model_r: None,
                 generation: i as u64,
                 model: None,
             })));

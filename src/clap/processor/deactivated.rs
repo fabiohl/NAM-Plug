@@ -91,6 +91,22 @@ pub(crate) fn deactivate<'a>(
         }
         drop(parked);
 
+        // Commands recovered from a failed activation that no callback replayed
+        // are older than anything staged since. Return them to cold storage
+        // ahead of it so the next activation replays them instead of dropping
+        // payloads whose ring sequence was already resolved.
+        {
+            let pending = processor.recovered_commands;
+            let mut staged = processor
+                .shared
+                .cold
+                .recovered_commands
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let newer = std::mem::replace(&mut *staged, pending);
+            staged.extend(newer);
+        }
+
         let mut param_rx_guard = processor
             .shared
             .cold

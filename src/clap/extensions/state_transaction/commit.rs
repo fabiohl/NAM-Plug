@@ -217,7 +217,7 @@ pub(crate) fn build_restore_package(
         Some(resources) => {
             let ModelResources {
                 mut model_l,
-                model_r,
+                mut model_r,
                 new_resampler,
                 new_stream,
                 input_mult_adj,
@@ -241,6 +241,11 @@ pub(crate) fn build_restore_package(
             } else {
                 None
             };
+            crate::clap::plugin::shared::preinject_rt_status(
+                &cold.rt_status,
+                &mut model_l,
+                &mut model_r,
+            );
             Some(LoadModelPayload {
                 generation: cold.allocate_model_generation(),
                 model_l,

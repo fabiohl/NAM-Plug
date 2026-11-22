@@ -39,9 +39,21 @@ impl<'a> NamClapProcessor<'a> {
     pub(super) fn process_events(&mut self, output: &mut OutputEvents) {
         self.shared.write_gui_events(output);
 
+        // One shared structural budget per callback covers the replay of
+        // commands recovered from a failed activation and both ring drains.
+        let mut budget = SwapBudget::new(CMD_SWAP_TUNABLES.swaps_per_callback);
+
+        // Test-only probe window: replay + both drains — the canonical
+        // per-callback drain path measured by the latency certification gate
+        // (`processor_drain_latency_test.rs`). The replay is included so the
+        // measurement covers all command work, not only the ring tail.
+        #[cfg(all(test, target_arch = "x86_64", feature = "heap-audit"))]
+        let drain_probe_t0 = neural_amp_modeler_rs::common::tsc::rdtsc_nanos();
         // 0a. Replay commands recovered from a failed activation, in their
-        //     original ring order, before any newer ring command.
-        self.replay_recovered_commands();
+        //     original order, under the same budget as the ring. While any
+        //     recovered command is pending, the command ring stays closed so
+        //     no newer ring command can overtake it.
+        let replay_pending = self.replay_recovered_commands(&mut budget);
 
         // 0. Drain parking lot: re-try items parked during previous swaps
         //    when the GC SPSC channel was full.
@@ -49,20 +61,12 @@ impl<'a> NamClapProcessor<'a> {
         self.drain_box_parking_lot();
 
         // 1. Structural-swap drains — engine scheduler
-        //    (`neural_amp_modeler_rs::common::spsc::swap`). One shared
+        //    (`neural_amp_modeler_rs::common::spsc::swap`). The shared
         //    `SwapBudget` covers both rings (commands first, slimmable
         //    second) so at most one structural apply lands per callback.
         //    The `*_swap_parts!` macros expand to disjoint field borrows:
         //    drain, handler and GC sink must be borrowed simultaneously.
-        // Test-only probe window: budget construction + both drains — the
-        // canonical per-callback drain path measured by the latency
-        // certification gate (`processor_drain_latency_test.rs`). Compiled
-        // out of every non-test build; two serialized TSC reads (~15 ns
-        // each, calibrated) are included in the reported samples.
-        #[cfg(all(test, target_arch = "x86_64", feature = "heap-audit"))]
-        let drain_probe_t0 = neural_amp_modeler_rs::common::tsc::rdtsc_nanos();
-        let mut budget = SwapBudget::new(CMD_SWAP_TUNABLES.swaps_per_callback);
-        {
+        if !replay_pending {
             let (mut handler, mut gc) = command_swap_parts!(self);
             self.cmd_drain.drain(&mut handler, &mut budget, &mut gc);
         }
@@ -175,19 +179,44 @@ impl<'a> NamClapProcessor<'a> {
     }
 
     /// Applies the commands staged by [`ActivateRollbackGuard`] after a failed
-    /// activation. The queue was moved into the processor by `activate()`, so
-    /// popping via `pop_front()` keeps the queue's buffer alive until `deactivate()`
-    /// drops it off-RT — zero locks, zero heap allocations, and zero deallocations
-    /// on the audio thread.
+    /// activation, in their original order, under the callback's shared
+    /// structural budget. Light payloads apply freely; a structural payload
+    /// that finds the budget spent stays queued for the next callback, and the
+    /// caller keeps the command ring closed until the queue is empty.
+    ///
+    /// The queue was moved into the processor by `activate()`, so popping via
+    /// `pop_front()` keeps the queue's buffer alive until `deactivate()` drops
+    /// it off-RT — zero locks, zero heap allocations, and zero deallocations
+    /// on the audio thread. Returns `true` while commands remain pending.
     #[cold]
-    fn replay_recovered_commands(&mut self) {
+    fn replay_recovered_commands(&mut self, budget: &mut SwapBudget) -> bool {
         if self.recovered_commands.is_empty() {
-            return;
+            return false;
         }
         let (mut handler, mut gc) = command_swap_parts!(self);
-        while let Some(payload) = self.recovered_commands.pop_front() {
+        // The total replayed per callback is bounded by the same pop window as
+        // the normal ring drain. Structural payloads additionally consume the
+        // shared structural budget; light commands can no longer replay an
+        // unbounded backlog in a single callback, and the ring stays closed
+        // until the staged prefix fully drains (T7.5).
+        let mut applied = 0usize;
+        while let Some(payload) = self.recovered_commands.front() {
+            if applied >= CMD_SWAP_TUNABLES.pops_per_callback {
+                return true;
+            }
+            if handler.is_structural(payload) {
+                if !budget.can_apply() {
+                    return true;
+                }
+                budget.consume();
+            }
+            let Some(payload) = self.recovered_commands.pop_front() else {
+                break;
+            };
+            applied += 1;
             handler.install(payload, &mut gc);
         }
+        false
     }
 
     /// Checks if the adaptive FSM demands a WaveNet channel count change
@@ -201,19 +230,13 @@ impl<'a> NamClapProcessor<'a> {
     /// the main thread tags the rebuilt delivery with the exact generation the
     /// audio thread was running when it asked for the rebuild.
     fn signal_slimmable_rebuild(&mut self) {
-        let Some(targets) = self.adaptive_compute.take_slimmable_rebuild() else {
+        let Some(target_ch) = self.adaptive_compute.take_slimmable_ch_rebuild() else {
             return;
         };
-        let target_ch = targets.first().copied().unwrap_or(0);
-        self.rt_status
-            .requested_slimmable_ch
-            .store(target_ch as u32, Ordering::Relaxed);
-        self.shared
-            .cold
-            .requested_slimmable_generation
-            .store(self.model_generation, Ordering::Relaxed);
-        self.rt_status.set_flag_release(
-            neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD,
+        self.shared.cold.publish_slimmable_request(
+            target_ch as u32,
+            self.model_generation,
+            self.model_r.is_some(),
         );
     }
 
@@ -339,6 +362,7 @@ macro_rules! slimmable_swap_parts {
         (
             $crate::clap::processor::events::SlimmableSwapHandler {
                 model_l: &mut $s.model_l,
+                model_r: &mut $s.model_r,
                 model_generation: &$s.model_generation,
                 shared: $s.shared,
                 box_gc: $crate::clap::plugin::retired_box::RetiredBoxSink {
@@ -380,6 +404,8 @@ pub(crate) use slimmable_swap_parts;
 pub(crate) struct SlimmableSwapHandler<'p, 'a> {
     /// Active neural model (mono/primary chain), if any.
     pub(super) model_l: &'p mut Option<Box<StaticModel>>,
+    /// Active neural model for the dual-mono R channel, if any.
+    pub(super) model_r: &'p mut Option<Box<StaticModel>>,
     /// Generation of the active model (slimmable staleness anchor, read-only:
     /// a rebuild never re-stamps the identity it was sliced from).
     pub(super) model_generation: &'p u64,
@@ -387,6 +413,19 @@ pub(crate) struct SlimmableSwapHandler<'p, 'a> {
     pub(super) shared: &'a NamClapShared,
     /// Off-RT sink returning consumed `Box<SlimmableRebuild>` envelopes.
     pub(super) box_gc: RetiredBoxSink<'p>,
+}
+
+impl SlimmableSwapHandler<'_, '_> {
+    /// Resolves the request if the producer has not already acknowledged it at
+    /// enqueue. The enqueue path normally clears the pending identity first; in
+    /// that case the CAS would spuriously re-raise the flag, so only an exact
+    /// still-pending match is acknowledged here.
+    #[inline]
+    fn ack_if_still_pending(&self, request_id: u64) {
+        if self.shared.cold.pending_slimmable_request() == request_id && request_id != 0 {
+            self.shared.cold.complete_slimmable_request(request_id);
+        }
+    }
 }
 
 impl RtSwapHandler for SlimmableSwapHandler<'_, '_> {
@@ -419,35 +458,77 @@ impl RtSwapHandler for SlimmableSwapHandler<'_, '_> {
         Some(payload.generation)
     }
 
-    /// Installs the rebuilt model, retiring the replaced model to the GC.
+    /// Installs the rebuilt model, retiring the replaced model(s) to the GC.
+    ///
+    /// Before touching the DSP state it re-validates the delivery's request
+    /// identity against the newest published request. A same-generation result
+    /// from an older request A is retired to the GC instead of installing over
+    /// the newer request B, so B remains the last valid request (T7.2). When
+    /// the matching delivery is installed, its request is acknowledged here —
+    /// enqueue alone is not proof of application when a newer request can still
+    /// supersede the queued payload.
+    ///
     /// The active generation anchor is left untouched: the delivery was
     /// verified to match it, and a rebuild never re-stamps the model identity.
     /// Adaptive tracking is also untouched — it was already advanced by
-    /// `take_slimmable_rebuild` at request time, and the full-channel
+    /// `take_slimmable_ch_rebuild` at request time, and the full-channel
     /// reference must survive the install.
     #[cold]
     fn install(&mut self, mut payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
+        let request_id = payload.request_id;
+        let latest = self.shared.cold.latest_slimmable_request();
         let model = payload.model.take();
+        let model_r = payload.model_r.take();
         self.box_gc.retire(RetiredBox::Slimmable(payload));
+        if latest != 0 && request_id != latest {
+            // Superseded by a newer request: never touch the active DSP state.
+            self.shared
+                .cold
+                .slimmable_stale_discarded_total
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(model) = model {
+                gc.retire(GcItem::Model(model));
+            }
+            if let Some(model_r) = model_r {
+                gc.retire(GcItem::Model(model_r));
+            }
+            return;
+        }
         if let Some(model) = model
             && let Some(old) = self.model_l.replace(model)
         {
             gc.retire(GcItem::Model(old));
         }
+        if let Some(model_r) = model_r {
+            if self.model_r.is_some() {
+                if let Some(old) = self.model_r.replace(model_r) {
+                    gc.retire(GcItem::Model(old));
+                }
+            } else {
+                // The payload carried an R slice but the host is not in
+                // dual-mono: retire the unused slice off-RT instead of leaking.
+                gc.retire(GcItem::Model(model_r));
+            }
+        }
+        self.ack_if_still_pending(request_id);
     }
 
     /// Discards a stale or superseded delivery straight to the GC without
-    /// touching the active DSP state. Only generation-mismatched (stale)
-    /// discards bump the monotonic `slimmable_stale_discarded_total`
-    /// telemetry counter; same-generation supersession (latest-wins
-    /// coalescing) is already covered by the engine's
-    /// `RT_STATUS_STRUCTURAL_SUPERSEDED` telemetry.
+    /// touching the active DSP state. Generation-mismatched (stale) discards
+    /// and deliveries from an older request bump the monotonic
+    /// `slimmable_stale_discarded_total` telemetry counter; same-generation
+    /// supersession (latest-wins coalescing) is already covered by the engine's
+    /// `RT_STATUS_STRUCTURAL_SUPERSEDED` telemetry. A discarded delivery of the
+    /// newest request resolves that request; an older one never does.
     #[cold]
     fn discard(&mut self, mut payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
         let generation = payload.generation;
+        let request_id = payload.request_id;
+        let latest = self.shared.cold.latest_slimmable_request();
         let model = payload.model.take();
+        let model_r = payload.model_r.take();
         self.box_gc.retire(RetiredBox::Slimmable(payload));
-        if generation != *self.model_generation {
+        if generation != *self.model_generation || (latest != 0 && request_id != latest) {
             self.shared
                 .cold
                 .slimmable_stale_discarded_total
@@ -456,6 +537,10 @@ impl RtSwapHandler for SlimmableSwapHandler<'_, '_> {
         if let Some(model) = model {
             gc.retire(GcItem::Model(model));
         }
+        if let Some(model_r) = model_r {
+            gc.retire(GcItem::Model(model_r));
+        }
+        self.ack_if_still_pending(request_id);
     }
 }
 
@@ -831,14 +916,14 @@ impl ClapCommandSwapHandler<'_, '_> {
         // falls back to the per-family table in the prewarm policy.
         *self.prewarm_cost_ns_per_sample = prewarm_cost_ns;
         if let Some(model) = self.model_l.as_mut() {
-            model.inject_rt_status(std::sync::Arc::clone(&self.shared.cold.rt_status));
+            model.inject_rt_status_rt(&self.shared.cold.rt_status);
             // Buffer sizing is guaranteed on the main thread before SPSC delivery
             // (load.rs when buffer_size > 0, or flush_pending_model() in activate/housekeeping
             // when buffer_size was 0). set_max_buffer_size is NEVER called here anymore.
             // The heap-audit CI lane catches any regression.
         }
         if let Some(model) = self.model_r.as_mut() {
-            model.inject_rt_status(std::sync::Arc::clone(&self.shared.cold.rt_status));
+            model.inject_rt_status_rt(&self.shared.cold.rt_status);
         }
 
         let old_resampler = std::mem::replace(self.resampler, new_resampler);
@@ -876,11 +961,27 @@ impl ClapCommandSwapHandler<'_, '_> {
         self.smoother_cal_out.set_target(effective_out_adj);
         self.smoother_cal_out.snap_to_target();
 
-        if let Some(model) = self.model_l.as_ref()
-            && let StaticModel::WavenetDyn(w) = model.as_ref()
-        {
-            self.adaptive_compute
-                .set_wavenet_full_ch(w.ch, model.is_slimmable_capable());
+        // A model swap invalidates any pending slimmable request: it was
+        // derived from the previous model and must never be applied to the new
+        // one. The request identity makes the cancellation race-free with the
+        // loader worker (a late result can only acknowledge its own identity).
+        self.shared.cold.cancel_slimmable_request();
+
+        // Re-arm the adaptive FSM registration for the installed model. Only a
+        // dynamically slimmable WaveNet carries a channel topology; every other
+        // model (LSTM, fixed preset WaveNet, container, or no model) forgets the
+        // previous registration so the FSM cannot publish requests derived from
+        // a model that is no longer loaded (F-07/D2). The clear is RT-safe: it
+        // keeps the metadata buffers for the next off-RT registration instead of
+        // freeing them on the audio thread.
+        match self.model_l.as_ref() {
+            Some(model) if matches!(model.as_ref(), StaticModel::WavenetDyn(_)) => {
+                if let StaticModel::WavenetDyn(w) = model.as_ref() {
+                    self.adaptive_compute
+                        .set_wavenet_full_ch_rt(w.ch(), model.is_slimmable_capable());
+                }
+            }
+            _ => self.adaptive_compute.clear_wavenet_registration_rt(),
         }
 
         self.recompute_effective_latency();

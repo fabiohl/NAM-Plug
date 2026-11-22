@@ -1085,8 +1085,17 @@ fn cmd_build_status(args: &[String]) {
     if let Some(rid) = &receipt.provenance.run_id {
         println!("BUILD_RUN_ID: {rid}");
     }
+    let (_, non_fallback_gaps) = compute_build_status(
+        &receipt.gaps,
+        &receipt.optimizations.bolt_proof,
+        receipt.strict_mode,
+    );
     for gap in &receipt.gaps {
-        println!("GAP: {gap}");
+        if non_fallback_gaps.contains(gap) {
+            println!("GAP: {gap}");
+        } else {
+            println!("FALLBACK_GAP: {gap}");
+        }
     }
     exit(0);
 }

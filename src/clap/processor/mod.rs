@@ -74,6 +74,12 @@ pub(crate) static TEST_TELEMETRY_STALL_NS: std::sync::atomic::AtomicU64 =
 pub(crate) static TEST_TELEMETRY_STALL_TARGET_INSTANCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Serializes test modules that share the process-wide telemetry stall hooks:
+/// a stall armed for one instance must never be re-targeted or consumed by a
+/// concurrently running test.
+#[cfg(test)]
+pub(crate) static TEST_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Test-only hook to inject a panic inside the `reset()` audio processor method.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) static TEST_RESET_PANIC_INJECTION: std::sync::atomic::AtomicBool =
@@ -798,6 +804,10 @@ mod processor_drain_latency_test;
 #[cfg(test)]
 #[path = "../processor_swap_handler_test.rs"]
 mod processor_swap_handler_test;
+
+#[cfg(test)]
+#[path = "../processor_recovered_replay_test.rs"]
+mod processor_recovered_replay_test;
 
 #[cfg(test)]
 #[path = "../processor_latency_policy_test.rs"]

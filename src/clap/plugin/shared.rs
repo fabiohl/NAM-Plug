@@ -29,7 +29,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::atomic::{
-    AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+    AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
 };
 use std::sync::{Arc, Mutex};
 
@@ -313,6 +313,26 @@ pub struct LoadModelPayload {
     /// the engine's [`measure_cost_ns_per_sample`](neural_amp_modeler_rs::models::NamModel::measure_cost_ns_per_sample)
     /// (U-02 / F-PR-10). `None` selects the conservative per-family prewarm table.
     pub prewarm_cost_ns: Option<f32>,
+}
+
+/// Pre-injects the canonical `RtStatusFlags` instance into both channel models
+/// before the payload leaves the main thread.
+///
+/// The loaders build models with no status attached, so the audio-thread
+/// install would otherwise have to adopt the `Arc` (one atomic increment) and
+/// would silently refuse a foreign instance. Pre-injecting the canonical
+/// instance off-RT keeps the later RT hand-off a pure `ptr_eq` no-op.
+pub(crate) fn preinject_rt_status(
+    status: &Arc<RtStatusFlags>,
+    model_l: &mut Option<Box<StaticModel>>,
+    model_r: &mut Option<Box<StaticModel>>,
+) {
+    if let Some(model) = model_l.as_mut() {
+        model.inject_rt_status(Arc::clone(status));
+    }
+    if let Some(model) = model_r.as_mut() {
+        model.inject_rt_status(Arc::clone(status));
+    }
 }
 
 /// A latency-affecting resource swap staged to land only on the next host
@@ -890,6 +910,30 @@ pub struct ColdShared {
     /// `RT_STATUS_NEEDS_SLIMMABLE_REBUILD` Release flag), read by the main
     /// thread (after Acquire on the flag) to tag the rebuilt delivery.
     pub requested_slimmable_generation: AtomicU64,
+    /// Whether the request targets both channels (dual-mono). Written by the
+    /// audio thread inside the request seqlock window.
+    pub requested_slimmable_dual: AtomicBool,
+    /// Seqlock counter for the request snapshot. The audio thread is the only
+    /// writer: it publishes an odd value before storing the payload fields and
+    /// an even value (Release) after. The off-RT reader validates the counter
+    /// around its loads, so it can never combine request A's identity with B's
+    /// channel/generation (T7.1). No lock and no unbounded wait on RT.
+    pub slimmable_request_seq: AtomicU64,
+    /// Monotonic allocator for slimmable request identities. Written only by
+    /// the audio thread; the value `0` is skipped so it stays reserved as the
+    /// "no pending request" sentinel.
+    pub slimmable_request_counter: AtomicU64,
+    /// Identity of the slimmable request currently owned by the main thread
+    /// (`0` = none). The audio thread publishes it after the channel/generation
+    /// snapshot; the main thread clears it with a CAS only after the result it
+    /// consumed matches, so a rebuild of request A cannot acknowledge (and
+    /// silently erase) a newer request B. See `complete_slimmable_request`.
+    pub slimmable_request_id: AtomicU64,
+    /// Newest request identity ever published (`0` = none / cancelled). Unlike
+    /// [`Self::slimmable_request_id`] it is *not* cleared when the result is
+    /// delivered, so the RT install path can reject a payload from an older
+    /// request even after the newest result was already enqueued (T7.2).
+    pub latest_slimmable_request_id: AtomicU64,
     /// Telemetry: total slimmable rebuilds discarded by the audio thread
     /// because their generation was stale. Written by the
     /// audio thread (Relaxed); read by tests/housekeeping for observability.
@@ -1029,13 +1073,21 @@ pub struct PendingModel {
 /// (produced from a model that was swapped out in the meantime) is discarded
 /// straight to the GC without touching the active DSP state.
 pub struct SlimmableRebuild {
+    /// Identity of the request whose slice this payload carries. The audio
+    /// thread installs it only while it is still the newest published request,
+    /// so a result superseded by B can never overwrite B (F-13/T7.2).
+    pub request_id: u64,
     /// Monotonic generation of the active model at the time the rebuild was
     /// requested (echoed from the audio-thread request payload).
     pub generation: u64,
-    /// The rebuilt (sliced + prewarmed + resized) model, boxed for RT-safe
-    /// swap and GC disposal (`Option` lets the RT handler move it out without
-    /// unboxing and dropping the `SlimmableRebuild` envelope on RT).
+    /// The rebuilt (sliced + prewarmed + resized) model for the primary
+    /// channel, boxed for RT-safe swap and GC disposal (`Option` lets the RT
+    /// handler move it out without unboxing and dropping the
+    /// `SlimmableRebuild` envelope on RT).
     pub model: Option<Box<StaticModel>>,
+    /// The rebuilt model for the secondary (dual-mono) channel. `None` for a
+    /// mono request; the RT handler replaces `model_r` only when present.
+    pub model_r: Option<Box<StaticModel>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1168,156 @@ pub const CONFIG_ID_MONO: u32 = 0;
 pub const CONFIG_ID_STEREO: u32 = 1;
 
 impl ColdShared {
+    /// Publishes a new slimmable rebuild request from the audio thread.
+    ///
+    /// Allocates a fresh identity, then publishes the channel/generation/dual
+    /// snapshot inside a seqlock write window: the audio thread bumps
+    /// [`Self::slimmable_request_seq`] to odd, stores the payload fields, the
+    /// identity and the newest-request marker, then bumps the sequence to even
+    /// (Release). The needs-rebuild flag is raised last (Release). No
+    /// allocation, no locks, bounded work; the audio thread is the only writer.
+    pub(crate) fn publish_slimmable_request(
+        &self,
+        target_ch: u32,
+        generation: u64,
+        dual: bool,
+    ) -> u64 {
+        let counter = self
+            .slimmable_request_counter
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let id = if counter == 0 {
+            self.slimmable_request_counter
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1)
+        } else {
+            counter
+        };
+        self.slimmable_request_seq.fetch_add(1, Ordering::AcqRel);
+        self.rt_status
+            .requested_slimmable_ch
+            .store(target_ch, Ordering::Relaxed);
+        self.requested_slimmable_generation
+            .store(generation, Ordering::Relaxed);
+        self.requested_slimmable_dual.store(dual, Ordering::Relaxed);
+        self.slimmable_request_id.store(id, Ordering::Relaxed);
+        self.latest_slimmable_request_id
+            .store(id, Ordering::Release);
+        self.slimmable_request_seq.fetch_add(1, Ordering::Release);
+        self.rt_status.set_flag_release(
+            neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD,
+        );
+        id
+    }
+
+    /// Reads a consistent `(identity, channel, generation, dual)` snapshot of
+    /// the pending request, or `None` when no request is outstanding or the
+    /// seqlock window could not be validated within the bounded retries.
+    ///
+    /// The seqlock validates the counter before and after the payload loads, so
+    /// the reader can never observe A's identity together with B's fields. The
+    /// retry count is fixed (off-RT), never a spin on the audio thread.
+    pub(crate) fn snapshot_slimmable_request(&self) -> Option<(u64, u32, u64, bool)> {
+        self.snapshot_slimmable_request_with(|| {})
+    }
+
+    /// Shared seqlock reader; `between_loads` exists only so tests can force a
+    /// writer to begin publishing after the reader has sampled the payload.
+    fn snapshot_slimmable_request_with<F: FnOnce()>(
+        &self,
+        between_loads: F,
+    ) -> Option<(u64, u32, u64, bool)> {
+        let mut seq = self.slimmable_request_seq.load(Ordering::Acquire);
+        let mut hook = Some(between_loads);
+        for _ in 0..8 {
+            if seq & 1 != 0 {
+                seq = self.slimmable_request_seq.load(Ordering::Acquire);
+                continue;
+            }
+            let id = self.slimmable_request_id.load(Ordering::Relaxed);
+            let ch = self
+                .rt_status
+                .requested_slimmable_ch
+                .load(Ordering::Relaxed);
+            let generation = self.requested_slimmable_generation.load(Ordering::Relaxed);
+            let dual = self.requested_slimmable_dual.load(Ordering::Relaxed);
+            if let Some(hook) = hook.take() {
+                hook();
+            }
+            fence(Ordering::Acquire);
+            let after = self.slimmable_request_seq.load(Ordering::Acquire);
+            if after == seq {
+                if id == 0 {
+                    return None;
+                }
+                return Some((id, ch, generation, dual));
+            }
+            seq = after;
+        }
+        None
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_slimmable_request_with_test_hook<F: FnOnce()>(
+        &self,
+        hook: F,
+    ) -> Option<(u64, u32, u64, bool)> {
+        self.snapshot_slimmable_request_with(hook)
+    }
+
+    /// Returns the pending request identity (`0` = none).
+    #[inline(always)]
+    pub(crate) fn pending_slimmable_request(&self) -> u64 {
+        self.slimmable_request_id.load(Ordering::Acquire)
+    }
+
+    /// Acknowledges the request `id` after its result was consumed.
+    ///
+    /// The CAS is the single handshake: it succeeds only while `id` is still
+    /// the newest pending request, so a result for A never erases a newer B. On
+    /// failure the needs-rebuild flag is re-raised to keep the pending request
+    /// visible. `latest_slimmable_request_id` is intentionally left untouched:
+    /// the install path needs it to reject older deliveries still in flight.
+    /// Returns `true` when `id` was the current request.
+    pub(crate) fn complete_slimmable_request(&self, id: u64) -> bool {
+        self.rt_status.clear_flag_release(
+            neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD,
+        );
+        if self
+            .slimmable_request_id
+            .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            true
+        } else {
+            self.rt_status.set_flag_release(
+                neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD,
+            );
+            false
+        }
+    }
+
+    /// Returns the newest published request identity (`0` = none/cancelled).
+    #[inline(always)]
+    pub(crate) fn latest_slimmable_request(&self) -> u64 {
+        self.latest_slimmable_request_id.load(Ordering::Acquire)
+    }
+
+    /// Cancels any pending slimmable request (model swap / teardown).
+    ///
+    /// The cancellation is published through the same seqlock window so a
+    /// concurrent off-RT snapshot sees either the previous coherent request or
+    /// the cancelled state, never a half-cleared payload.
+    pub(crate) fn cancel_slimmable_request(&self) {
+        self.slimmable_request_seq.fetch_add(1, Ordering::AcqRel);
+        self.slimmable_request_id.store(0, Ordering::Relaxed);
+        self.latest_slimmable_request_id.store(0, Ordering::Release);
+        self.slimmable_request_seq.fetch_add(1, Ordering::Release);
+        self.rt_status.clear_flag_release(
+            neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD,
+        );
+    }
+
     /// Creates a new `ColdShared` instance with default production/test fields and pre-allocated SPSC channels.
     pub fn new(instance_id: u64) -> Self {
         let (param_tx, param_rx) = RingBuffer::new(CMD_QUEUE_CAPACITY);
@@ -1183,6 +1385,11 @@ impl ColdShared {
             slimmable_tx: Mutex::new(Some(slimmable_tx)),
             slimmable_rx: Mutex::new(Some(slimmable_rx)),
             requested_slimmable_generation: AtomicU64::new(0),
+            requested_slimmable_dual: AtomicBool::new(false),
+            slimmable_request_seq: AtomicU64::new(0),
+            slimmable_request_counter: AtomicU64::new(0),
+            slimmable_request_id: AtomicU64::new(0),
+            latest_slimmable_request_id: AtomicU64::new(0),
             slimmable_stale_discarded_total: AtomicU32::new(0),
             cab_nam_rebuild_req: AtomicU64::new(0),
             cab_nam_stale_discarded_total: AtomicU64::new(0),

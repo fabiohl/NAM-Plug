@@ -136,14 +136,15 @@ impl Drop for ActivateRollbackGuard<'_> {
             // and generation) for `flush_pending_model()`.
             let mut newest_model: Option<PendingModel> = None;
             let mut drained: u64 = 0;
+            // Commands staged by earlier rollbacks precede every command drained
+            // now: the ring is append-only, so anything it still holds was
+            // pushed after the staged prefix and is pushed behind it.
             let mut staged = self
                 .shared
                 .cold
                 .recovered_commands
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            // Recovered commands are older than anything already staged.
-            let newer = std::mem::take(&mut *staged);
             while let Ok(boxed_payload) = rx.pop() {
                 drained += 1;
                 if !matches!(*boxed_payload, ClapParamPayload::LoadModel { .. }) {
@@ -182,7 +183,6 @@ impl Drop for ActivateRollbackGuard<'_> {
                     }
                 }
             }
-            staged.extend(newer);
             drop(staged);
 
             if let Some(candidate) = newest_model {

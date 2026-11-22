@@ -399,6 +399,12 @@ impl<'a> NamClapMainThread<'a> {
             None
         };
 
+        crate::clap::plugin::shared::preinject_rt_status(
+            &self.shared.cold.rt_status,
+            &mut model_l,
+            &mut model_r,
+        );
+
         let push_result =
             self.cmd_producer
                 .borrow_mut()

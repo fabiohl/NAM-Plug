@@ -65,7 +65,20 @@ BEGIN {
     patterns[24] = "std::mem::take"
     patterns[25] = "RecoveredCommands::"
     patterns[26] = "drop_in_place"
-    N = 26
+    # Engine APIs that build or free `Vec`s on the caller's thread. The RT
+    # path must use their scalar/in-place `_rt` counterparts; the legacy names
+    # are kept public for off-RT and future migrations, so flagging the call
+    # sites here is what keeps the hot path honest (textual analysis cannot
+    # follow the transitive allocation, which is why the dynamic heap-audit
+    # remains the authoritative gate).
+    patterns[27] = "take_slimmable_rebuild"
+    patterns[28] = "peek_slimmable_rebuild"
+    patterns[29] = "confirm_slimmable_rebuild"
+    patterns[30] = "wavenet_slimmable_targets"
+    patterns[31] = "set_wavenet_full_ch\\("
+    patterns[32] = "set_wavenet_slimmable_info"
+    patterns[33] = "inject_rt_status\\("
+    N = 33
     matches = ""
 }
 

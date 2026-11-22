@@ -11,6 +11,47 @@ pub(crate) fn make_test_shared() -> NamClapShared {
 }
 
 #[test]
+fn test_slimmable_snapshot_never_combines_request_a_id_with_request_b_fields() {
+    let shared = make_test_shared();
+    let a = shared.cold.publish_slimmable_request(4, 7, false);
+    assert_eq!(
+        shared.cold.snapshot_slimmable_request(),
+        Some((a, 4, 7, false))
+    );
+
+    // Force a writer to begin publishing B after the reader sampled A's
+    // identity/payload but before it validates the seqlock counter. The reader
+    // must reject the snapshot instead of returning A with B's fields.
+    let cold = &shared.cold;
+    let result = cold.snapshot_slimmable_request_with_test_hook(|| {
+        cold.slimmable_request_seq.fetch_add(1, Ordering::AcqRel);
+        cold.rt_status
+            .requested_slimmable_ch
+            .store(8, Ordering::Relaxed);
+        cold.requested_slimmable_generation
+            .store(9, Ordering::Relaxed);
+    });
+    assert!(
+        result.is_none(),
+        "a mid-write snapshot must not combine A's identity with B's fields: {result:?}"
+    );
+}
+
+#[test]
+fn test_slimmable_latest_request_survives_acknowledgement() {
+    let shared = make_test_shared();
+    let a = shared.cold.publish_slimmable_request(4, 7, false);
+    assert_eq!(shared.cold.latest_slimmable_request(), a);
+    assert!(shared.cold.complete_slimmable_request(a));
+    assert_eq!(shared.cold.pending_slimmable_request(), 0);
+    assert_eq!(
+        shared.cold.latest_slimmable_request(),
+        a,
+        "the install guard needs the newest identity after the enqueue ack"
+    );
+}
+
+#[test]
 fn test_production_vs_test_defaults() {
     let prod = GuiSharedState::new(42);
     let test = GuiSharedState::new_test();
@@ -603,4 +644,46 @@ fn test_diagnostic_bundle_exposes_retired_box_overwritten_total() {
         "DiagnosticBundle must expose retired_box_overwritten:\n{rendered}"
     );
     assert_eq!(shared.cold.box_overflow.drain(), 256);
+}
+
+#[test]
+fn test_preinject_rt_status_attaches_canonical_instance() {
+    use crate::clap::plugin::shared::preinject_rt_status;
+    use neural_amp_modeler_rs::common::spsc::RtStatusFlags;
+    use neural_amp_modeler_rs::models::StaticModel;
+    use neural_amp_modeler_rs::models::a2::WaveNetA2;
+    use std::sync::Arc;
+
+    let shared = make_test_shared();
+    let status = &shared.cold.rt_status;
+    let mut model_l = Some(Box::new(StaticModel::WavenetA2Lite(Box::new(
+        WaveNetA2::<3>::new().unwrap(),
+    ))));
+    let mut model_r = Some(Box::new(StaticModel::WavenetA2Full(Box::new(
+        WaveNetA2::<8>::new().unwrap(),
+    ))));
+
+    preinject_rt_status(status, &mut model_l, &mut model_r);
+
+    assert!(
+        model_l
+            .as_ref()
+            .is_some_and(|model| model.rt_status_ptr_eq(status)),
+        "left channel must store the canonical instance"
+    );
+    assert!(
+        model_r
+            .as_ref()
+            .is_some_and(|model| model.rt_status_ptr_eq(status)),
+        "right channel must store the canonical instance"
+    );
+
+    // A foreign instance is never reported as attached.
+    let foreign = Arc::new(RtStatusFlags::new());
+    assert!(
+        !model_l
+            .as_ref()
+            .is_some_and(|model| model.rt_status_ptr_eq(&foreign)),
+        "a foreign instance must not match"
+    );
 }

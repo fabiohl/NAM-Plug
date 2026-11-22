@@ -36,7 +36,7 @@ mod tests {
     /// the shared one-shot `TEST_TELEMETRY_STALL_NS` hook: a stall armed by
     /// one test must never leak into another test's blocks (the hook is a
     /// process-wide static consumed by whichever block runs next).
-    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::clap::processor::TEST_TELEMETRY_MUTEX as TEST_MUTEX;
 
     const BLOCK: usize = 64;
     const SAMPLE_RATE: f64 = 48000.0;

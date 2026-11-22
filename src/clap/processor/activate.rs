@@ -1223,6 +1223,31 @@ impl<'a> NamClapProcessor<'a> {
                     .unwrap_or_else(|e| e.into_inner()),
             );
 
+            // Reactivation can reuse a model preserved from the previous
+            // activation without emitting a fresh model install, so the
+            // adaptive FSM must be re-registered here as well; otherwise the
+            // preserved slimmable WaveNet would never publish rebuild requests
+            // (T7.3).
+            let mut adaptive_compute = AdaptiveCompute::new(
+                neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Conservative,
+            );
+            match model_l.as_ref() {
+                Some(model)
+                    if matches!(
+                        model.as_ref(),
+                        neural_amp_modeler_rs::models::StaticModel::WavenetDyn(_)
+                    ) =>
+                {
+                    if let neural_amp_modeler_rs::models::StaticModel::WavenetDyn(w) =
+                        model.as_ref()
+                    {
+                        adaptive_compute
+                            .set_wavenet_full_ch_rt(w.ch(), model.is_slimmable_capable());
+                    }
+                }
+                _ => adaptive_compute.clear_wavenet_registration_rt(),
+            }
+
             Ok(NamClapProcessor {
                 model_l,
                 model_r,
@@ -1270,9 +1295,7 @@ impl<'a> NamClapProcessor<'a> {
                 bypass_xfade: BypassCrossfader::new(params.bypass),
                 dry_delay,
                 rt_status: Arc::clone(&shared.cold.rt_status),
-                adaptive_compute: AdaptiveCompute::new(
-                    neural_amp_modeler_rs::common::params::AdaptiveComputeMode::Conservative,
-                ),
+                adaptive_compute,
                 shared,
                 smoother_in,
                 smoother_out,

@@ -49,8 +49,8 @@ cargo test --locked --features testing,heap-audit --test cabinet_slot_and_bypass
 if [ "$rc_heap" -ne 0 ]; then
   capture_fail "$CUR_LOG"
 fi
-# Measured: 10 passed (processor_heap_audit_test) + 1 passed (cabinet zero-alloc)
-[ "$rc_heap" -eq 0 ] && assert_ran_tests "$CUR_LOG" 11 || { FAILS+=(heap-audit); emit "PHASE: heap-audit FAIL rc=$rc_heap log=$CUR_LOG"; finish || exit 1; exit 1; }
+# Measured: 14 passed (processor_heap_audit_test) + 1 passed (cabinet zero-alloc)
+[ "$rc_heap" -eq 0 ] && assert_ran_tests "$CUR_LOG" 13 || { FAILS+=(heap-audit); emit "PHASE: heap-audit FAIL rc=$rc_heap log=$CUR_LOG"; finish || exit 1; exit 1; }
 emit "PHASE: heap-audit PASS log=$CUR_LOG"
 
 finish || exit 1
