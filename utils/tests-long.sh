@@ -41,7 +41,7 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --strict) STRICT=1; shift ;;
+        --strict) STRICT=1; export NAM_RT_STRICT=1; shift ;;
         --only) [ $# -ge 2 ] || usage_fail "tests-long.sh: --only requer argumento"; ONLY_PHASES=",$2,"; shift 2 ;;
         --artifact) USE_ARTIFACT=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -205,7 +205,9 @@ if should_run "catch-all"; then
         timeout --kill-after=30 1200 cargo test --locked --profile release-nolto --features testing --no-run --lib --bins --tests >> "$plog" 2>&1 || catch_rc=$?
     fi
     if [ "$catch_rc" -eq 0 ]; then
-        if ! CLAP_PLUGIN_UNDER_TEST="$CARGO_TARGET_DIR/release-nolto/libnam_plug.so" timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-300}" cargo test --locked --profile release-nolto --features testing --no-fail-fast --lib --bins --tests 2>&1 | tee -a "$plog"; then
+        catch_xvfb=()
+        [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xvfb-run >/dev/null 2>&1 && catch_xvfb=(xvfb-run -a --server-args="-screen 0 1280x800x24")
+        if ! env CLAP_PLUGIN_UNDER_TEST="$CARGO_TARGET_DIR/release-nolto/libnam_plug.so" "${catch_xvfb[@]}" timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-300}" cargo test --locked --profile release-nolto --features testing --no-fail-fast --lib --bins --tests 2>&1 | tee -a "$plog"; then
             catch_rc=1
         fi
     fi
@@ -254,7 +256,6 @@ if should_run "artifact"; then
             done
         fi
         oracle_ok=0; [ -n "$render_bin" ] && [ -f "$render_bin" ] && [ -x "$render_bin" ] && oracle_ok=1
-        [ "$STRICT" = "1" ] && export NAM_RT_STRICT=1
         if [ "$oracle_ok" = 1 ]; then
             export NAM_CORE_RENDER_BIN="$render_bin"
             [ "$STRICT" = "1" ] && export NAM_REQUIRE_CPP_ORACLE=1
@@ -309,27 +310,30 @@ if should_run "perf"; then
     t_start=$SECONDS; phase "perf"
     plog="$LOG_DIR/long-perf.log"; : > "$plog"
     if [ "$USE_ARTIFACT" = "1" ]; then
+        perf_rc=0
+        PERF_GUARD_BIN="$CARGO_TARGET_DIR/release/nam_perf_guard"
+        timeout --kill-after=30 600 cargo build --locked --release --features testing --bin nam_perf_guard >> "$plog" 2>&1 || perf_rc=1
         # Certification requires a paired reference series for the same artifact SHA-256.
         perf_reference="$LOG_DIR/perf-reference.json"
-        if ! grep -q "\"$ARTIFACT_SHA256\"" "$perf_reference" 2>/dev/null; then
+        if [ "$perf_rc" -eq 0 ] && [ -x "$PERF_GUARD_BIN" ] && ! grep -q "\"$ARTIFACT_SHA256\"" "$perf_reference" 2>/dev/null; then
             if grep -q "\"$ARTIFACT_SHA256\"" "$LOG_DIR/perf-certification-report.json" 2>/dev/null; then
                 cp -f "$LOG_DIR/perf-certification-report.json" "$perf_reference"
                 emit "PHASE: perf reference=previous_report"
             else
                 emit "PHASE: perf reference=bootstrap"
-                timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-120}" cargo run --locked --release --features testing \
-                    --bin nam_perf_guard -- certify --clap "$ARTIFACT_PATH" \
-                    --out "$perf_reference" >> "$plog" 2>&1 || true
+                timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-120}" "$PERF_GUARD_BIN" \
+                    certify --clap "$ARTIFACT_PATH" --out "$perf_reference" >> "$plog" 2>&1 || true
             fi
         fi
-        if ! grep -q "\"$ARTIFACT_SHA256\"" "$perf_reference" 2>/dev/null; then
+        if [ "$perf_rc" -ne 0 ] || [ ! -x "$PERF_GUARD_BIN" ]; then
+            close_phase "phase4" "perf" 1 "$plog" $(( (SECONDS - t_start) * 1000 )) 0 true "" 0
+        elif ! grep -q "\"$ARTIFACT_SHA256\"" "$perf_reference" 2>/dev/null; then
             gap "perf:reference_missing"
             append_receipt "phase4" "perf" "SKIP_CAPABILITY" "$plog" 0 0 false "perf:reference_missing"
         else
             # timeout: pior comando ~30s (nam_perf_guard certify); 2x p100 ≈ 120s
-            perf_rc=0
-            if ! timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-120}" cargo run --locked --release --features testing \
-                --bin nam_perf_guard -- certify --clap "$ARTIFACT_PATH" --reference "$perf_reference" \
+            if ! timeout --kill-after=30 "${NAM_PHASE_TIMEOUT_S:-120}" "$PERF_GUARD_BIN" \
+                certify --clap "$ARTIFACT_PATH" --reference "$perf_reference" \
                 --out "$LOG_DIR/perf-certification-report.json" 2>&1 | tee -a "$plog"; then
                 perf_rc=1
             fi
@@ -360,37 +364,43 @@ if should_run "gui"; then
             clap::processor::processor_gui_test::tests::gui_x11_headless_clipboard_works
             clap::processor::processor_gui_test::tests::gui_x11_headless_floating_window_lifecycle
         )
-        for gt in "${GUI_TESTS[@]}"; do
-            LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe NAM_GUI_DEDICATED_X11=1 NAM_GUI_TIMEOUT_MS="${NAM_GUI_TIMEOUT_MS:-15000}" \
-                run_named "gui" "$gt" timeout --kill-after=30 "$gui_to" xvfb-run -a --server-args="-screen 0 1280x800x24" \
-                cargo test --locked --features testing,gui-x11 --profile release-nolto --lib "$gt" -- --ignored --exact \
-                && gui_passed=$((gui_passed + 1)) || gui_rc=1
-        done
+        timeout --kill-after=30 600 cargo test --locked --features testing,gui-x11 --profile release-nolto --lib --no-run >> "$plog" 2>&1 || gui_rc=1
+        if [ "$gui_rc" -eq 0 ]; then
+            for gt in "${GUI_TESTS[@]}"; do
+                LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe NAM_GUI_DEDICATED_X11=1 NAM_GUI_TIMEOUT_MS="${NAM_GUI_TIMEOUT_MS:-15000}" \
+                    run_named "gui" "$gt" timeout --kill-after=30 "$gui_to" xvfb-run -a --server-args="-screen 0 1280x800x24" \
+                    cargo test --locked --features testing,gui-x11 --profile release-nolto --lib "$gt" -- --ignored --exact \
+                    && gui_passed=$((gui_passed + 1)) || gui_rc=1
+            done
+        fi
         close_phase "phase2" "gui" "$gui_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$gui_passed" false
     fi
 else
     skip_phase "phase2" "gui"
 fi
+# run_feature_test <prefix> <label> <rc_var> <timeout_s> <cargo args...>
+run_feature_test() {
+    local prefix=$1 label=$2 rc_var=$3 to=$4; shift 4
+    local tname="$2" sublog rc=0
+    [ "$1" = "--test" ] && tname="$2-$3"
+    sublog="$LOG_DIR/long-${prefix}-${tname##*::}.log"
+    echo "--- Running ${label}: $* ---" >> "$plog"
+    if ! timeout --kill-after=30 "$to" cargo test --locked --features testing,heap-audit --profile release-nolto "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"; then
+        rc=1
+    fi
+    if [ "$rc" -ne 0 ] || ! ran_tests "$sublog"; then
+        printf -v "$rc_var" 1
+        return 1
+    fi
+    return 0
+}
 # ── Fase heap-audit (determinística; hospedada) ──────────────────────────────
 if should_run "heap-audit"; then
     t_start=$SECONDS; phase "heap-audit"
     plog="$LOG_DIR/long-heap-audit.log"; : > "$plog"
     # timeout: pior comando ~215s (build heap-audit + soak); 2x p100 ≈ 500s
     heap_rc=0; heap_cases=0; heap_to=${NAM_PHASE_TIMEOUT_S:-500}
-    run_heap_test() {
-        local tname="$2" sublog rc=0
-        [ "$1" = "--test" ] && tname="$2-$3"
-        sublog="$LOG_DIR/long-heap-${tname##*::}.log"
-        echo "--- Running heap/RT test: $* ---" >> "$plog"
-        if ! timeout --kill-after=30 "$heap_to" cargo test --locked --features testing,heap-audit --profile release-nolto "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"; then
-            rc=1
-        fi
-        if [ "$rc" -ne 0 ] || ! ran_tests "$sublog"; then
-            heap_rc=1
-            return 1
-        fi
-        return 0
-    }
+    run_heap_test() { run_feature_test heap "heap/RT test" heap_rc "$heap_to" "$@"; }
 
     if run_heap_test --lib test_gc_stress_1000_swaps -- --ignored; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --lib test_gc_drain_on_destroy_no_leak -- --ignored; then heap_cases=$((heap_cases + 1)); fi
@@ -411,20 +421,7 @@ if should_run "rt-heap"; then
     t_start=$SECONDS; phase "rt-heap"
     plog="$LOG_DIR/long-rt-heap.log"; : > "$plog"
     rt_rc=0; rt_cases=0; rt_to=${NAM_PHASE_TIMEOUT_S:-500}
-    run_rt_heap_test() {
-        local tname="$2" sublog rc=0
-        [ "$1" = "--test" ] && tname="$2-$3"
-        sublog="$LOG_DIR/long-rt-heap-${tname##*::}.log"
-        echo "--- Running RT timing test: $* ---" >> "$plog"
-        if ! timeout --kill-after=30 "$rt_to" cargo test --locked --features testing,heap-audit --profile release-nolto "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"; then
-            rc=1
-        fi
-        if [ "$rc" -ne 0 ] || ! ran_tests "$sublog"; then
-            rt_rc=1
-            return 1
-        fi
-        return 0
-    }
+    run_rt_heap_test() { run_feature_test rt-heap "RT timing test" rt_rc "$rt_to" "$@"; }
 
     if run_rt_heap_test --lib test_structural_burst_p99_within_contract -- --ignored --test-threads=1; then rt_cases=$((rt_cases + 1)); fi
     if run_rt_heap_test --lib processor_drain_latency_test -- --ignored --test-threads=1; then rt_cases=$((rt_cases + 2)); fi
@@ -462,7 +459,7 @@ else
     else
         FAILS+=("receipt-summary"); emit "PHASE: receipt-summary FAIL"
     fi
-    if [ "$RECEIPT_READY" = "1" ]; then
+    if [ "$RECEIPT_READY" = "1" ] && [ ${#FAILS[@]} -eq 0 ]; then
         if mv -f "$RECEIPT" "$RECEIPT_FINAL"; then
             emit "PHASE: receipt-publish PASS log=$RECEIPT_FINAL"
         else

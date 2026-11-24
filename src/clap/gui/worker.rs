@@ -50,12 +50,11 @@ use std::time::Duration;
 
 /// Bounded wait for the backend to confirm window creation.
 ///
-/// Kept at 2 s: F-UX-05 permits lowering it to ~500 ms only once T5.2's
-/// operator-side measurement confirms the pre-warmed p95 main-thread block is
-/// comfortably below the 50 ms criterion documented in `docs/testing.md`. With
-/// the platform pre-warmed (`warm_up`), this timeout is a safety net, not the
-/// expected wait.
-const OPEN_WINDOW_TIMEOUT: Duration = Duration::from_secs(2);
+/// Kept at 5 s as a bounded safety net so cold software OpenGL (`llvmpipe`)
+/// initialization under Xvfb does not prematurely fail `open_window()`, while
+/// pre-warmed hosts (`warm_up`) still stay well below the 50 ms criterion
+/// documented in `docs/testing.md`.
+const OPEN_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Job sent from the host main thread to the persistent GUI worker.
 pub(crate) struct GuiWindowJob {

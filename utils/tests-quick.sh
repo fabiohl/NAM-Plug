@@ -34,6 +34,8 @@ if [ "$rc_tests" -eq 0 ]; then
 fi
 if [ "$rc_tests" -ne 0 ]; then
   capture_fail "$CUR_LOG"
+else
+  rm -f "${CUR_LOG%.log}-fail.log"
 fi
 emit "$(awk '/test result: / { p+=$4; f+=$6; i+=$8 } END { printf "PHASE: tests-summary passed=%d failed=%d ignored=%d", p, f, i }' "$CUR_LOG")"
 # Measured: x86=534 passed (local, engine 07428b4); aarch64=527 expected (526 + split); threshold=400
@@ -48,6 +50,8 @@ cargo test --locked --features testing,heap-audit --test cabinet_slot_and_bypass
 [ "$rc_heap" -ne 0 ] || rc_heap=$rc_cab
 if [ "$rc_heap" -ne 0 ]; then
   capture_fail "$CUR_LOG"
+else
+  rm -f "${CUR_LOG%.log}-fail.log"
 fi
 # Measured: 14 passed (processor_heap_audit_test) + 1 passed (cabinet zero-alloc)
 [ "$rc_heap" -eq 0 ] && assert_ran_tests "$CUR_LOG" 13 || { FAILS+=(heap-audit); emit "PHASE: heap-audit FAIL rc=$rc_heap log=$CUR_LOG"; finish || exit 1; exit 1; }

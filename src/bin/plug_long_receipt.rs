@@ -75,6 +75,7 @@ fn main() {
         "certify" => cmd_certify(&args[1..]),
         "verify-release" => cmd_verify_release(&args[1..]),
         "flatpak-path" => cmd_flatpak_path(&args[1..]),
+        "flatpak-compat-path" => cmd_flatpak_compat_path(&args[1..]),
         "pgo-check" => cmd_pgo_check(&args[1..]),
         "ceremony-proof" => cmd_ceremony_proof(&args[1..]),
         "-h" | "--help" => {
@@ -678,6 +679,28 @@ fn cmd_flatpak_path(args: &[String]) {
     }
 }
 
+fn cmd_flatpak_compat_path(args: &[String]) {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => die_usage("flatpak-compat-path", &e),
+    };
+    let release = flags
+        .get("release-receipt")
+        .cloned()
+        .unwrap_or_else(|| "target/dist/release-receipt.json".to_string());
+    match nam_plug::receipt::release::declared_flatpak_compat_path(Path::new(&release)) {
+        Ok(Some(path)) => {
+            println!("{path}");
+            exit(0);
+        }
+        Ok(None) => exit(3),
+        Err(e) => {
+            eprintln!("flatpak-compat-path: cannot read {release}: {e}");
+            exit(1);
+        }
+    }
+}
+
 fn cmd_certify(args: &[String]) {
     let flags = match parse_flags(args) {
         Ok(f) => f,
@@ -853,6 +876,7 @@ fn cmd_build_receipt(args: &[String]) {
     let codegen_csv_post = flags.get("codegen-csv-post").cloned();
     let tarball_path = flags.get("tarball-path").cloned();
     let flatpak_path = flags.get("flatpak-path").cloned();
+    let flatpak_compat_path = flags.get("flatpak-compat-path").cloned();
     let installed_path = flags.get("installed-path").cloned();
     let strict = flags.contains_key("strict");
     let run_id = flags
@@ -892,6 +916,9 @@ fn cmd_build_receipt(args: &[String]) {
         .as_ref()
         .and_then(|p| hash_file(Path::new(p)).ok());
     let flatpak_sha256 = flatpak_path
+        .as_ref()
+        .and_then(|p| hash_file(Path::new(p)).ok());
+    let flatpak_compat_sha256 = flatpak_compat_path
         .as_ref()
         .and_then(|p| hash_file(Path::new(p)).ok());
     let installed_sha256 = installed_path
@@ -1005,6 +1032,8 @@ fn cmd_build_receipt(args: &[String]) {
             tarball_sha256,
             flatpak_path,
             flatpak_sha256,
+            flatpak_compat_path,
+            flatpak_compat_sha256,
             installed_path,
             installed_sha256,
         },
@@ -1027,7 +1056,7 @@ fn cmd_build_receipt(args: &[String]) {
         eprintln!("BUILD_RECEIPT: FAIL rc=1 log={out}");
         exit(1);
     } else {
-        println!("BUILD_RECEIPT: PASS log={out} sha256={artifact_sha256}");
+        println!("BUILD_RECEIPT: {status} log={out} sha256={artifact_sha256}");
         exit(0);
     }
 }

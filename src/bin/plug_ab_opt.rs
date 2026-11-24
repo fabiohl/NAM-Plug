@@ -29,7 +29,8 @@ use nam_plug::receipt::ab_opt::{
 use serde_json::{Map, Value};
 
 const USAGE: &str = "usage: plug_ab_opt compare --dir <dir> --out <file> --runs <N> \
-    [--bolt-applied 0|1] [--bolt-cause <text>]";
+    [--bolt-applied 0|1] [--bolt-cause <text>]\n       \
+    plug_ab_opt pick-core [--bench-core <N>]";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -39,12 +40,101 @@ fn main() {
     };
     match action {
         "compare" => compare(&args[1..]),
+        "pick-core" => pick_core(&args[1..]),
         "-h" | "--help" => {
             println!("{USAGE}");
             exit(0);
         }
         _ => {
             eprintln!("{USAGE}");
+            exit(2);
+        }
+    }
+}
+
+fn parse_cpu_list(spec: &str) -> Vec<usize> {
+    let mut cpus = Vec::new();
+    for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some((lo, hi)) = part.split_once('-') {
+            if let (Ok(a), Ok(b)) = (lo.trim().parse::<usize>(), hi.trim().parse::<usize>())
+                && a <= b
+            {
+                cpus.extend(a..=b);
+            }
+        } else if let Ok(c) = part.parse::<usize>() {
+            cpus.push(c);
+        }
+    }
+    cpus
+}
+
+fn is_cpu_online(cpu: usize) -> bool {
+    let online = std::path::Path::new("/sys/devices/system/cpu").join(format!("cpu{cpu}/online"));
+    match fs::read_to_string(online) {
+        Ok(value) => value.trim() == "1",
+        Err(_) => std::path::Path::new("/sys/devices/system/cpu")
+            .join(format!("cpu{cpu}"))
+            .is_dir(),
+    }
+}
+
+fn permitted_cpus() -> Vec<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `cpu_set_t` is zero-initialized before being passed to `sched_getaffinity`.
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `pid = 0` queries the calling thread into the stack-allocated `cpu_set_t`.
+        let rc =
+            unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
+        if rc != 0 {
+            return Vec::new();
+        }
+        let mut cpus = Vec::new();
+        for cpu in 0..libc::CPU_SETSIZE as usize {
+            // SAFETY: `cpu < CPU_SETSIZE`.
+            if unsafe { libc::CPU_ISSET(cpu, &set) } {
+                cpus.push(cpu);
+            }
+        }
+        cpus
+    }
+    #[cfg(not(target_os = "linux"))]
+    Vec::new()
+}
+
+fn pick_core(args: &[String]) {
+    let explicit = args
+        .windows(2)
+        .find(|w| w[0] == "--bench-core")
+        .map(|w| w[1].clone())
+        .or_else(|| env::var("NAM_BENCH_CORE").ok());
+
+    let resolved = if let Some(raw) = explicit
+        .as_deref()
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty() && *raw != "auto")
+    {
+        raw.parse::<u32>()
+            .ok()
+            .filter(|&cpu| is_cpu_online(cpu as usize))
+    } else {
+        let isolated = fs::read_to_string("/sys/devices/system/cpu/isolated")
+            .map(|list| parse_cpu_list(&list))
+            .unwrap_or_default();
+        isolated
+            .into_iter()
+            .find(|&cpu| is_cpu_online(cpu))
+            .or_else(|| permitted_cpus().into_iter().find(|&cpu| is_cpu_online(cpu)))
+            .map(|cpu| cpu as u32)
+    };
+
+    match resolved {
+        Some(core) => {
+            println!("{core}");
+            exit(0);
+        }
+        None => {
+            eprintln!("GAP: no isolated or permitted bench core");
             exit(2);
         }
     }

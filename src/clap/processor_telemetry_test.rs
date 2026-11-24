@@ -81,12 +81,12 @@ mod tests {
             0,
             "no block processed yet"
         );
-        let base_overloads = rt_status.dsp_overloads.load(Ordering::Relaxed);
         let base_hist = rt_status.latency_hist.total_count();
 
         let mut bufs = StereoTestBuffers::new(BLOCK, 0.1, 0.2);
         // Warm the ports' internal view state outside the audited window.
         test_util::process_stereo_block_prealloc(&mut started, &mut bufs, None);
+        let warm_overloads = rt_status.dsp_overloads.load(Ordering::Relaxed);
         let warm_hist = rt_status.latency_hist.total_count();
         assert_eq!(
             warm_hist,
@@ -105,7 +105,7 @@ mod tests {
 
         assert_eq!(
             rt_status.dsp_overloads.load(Ordering::Relaxed),
-            base_overloads + 1,
+            warm_overloads + 1,
             "exactly the one stalled block (phase 7, invisible to 1-in-16) must be counted"
         );
         // 1 warm + 16 loop blocks, all observed.

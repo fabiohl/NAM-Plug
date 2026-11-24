@@ -155,19 +155,27 @@ pub fn median_pmu(runs: &[Value], key: &str) -> Option<u64> {
     if runs.is_empty() {
         return None;
     }
-    let available = runs.iter().all(|run| {
-        run.get("pmu_availability")
-            .and_then(|a| a.get(key))
-            .and_then(Value::as_str)
-            == Some("ok")
-    });
-    if !available {
-        return None;
-    }
-    let mut values: Vec<u64> = runs
+    let has_pmu_schema = runs
         .iter()
-        .filter_map(|run| run.get("pmu")?.get(key)?.as_u64())
-        .collect();
+        .all(|run| run.get("pmu").is_some() && run.get("pmu_availability").is_some());
+    let mut values: Vec<u64> = if has_pmu_schema {
+        let available = runs.iter().all(|run| {
+            run.get("pmu_availability")
+                .and_then(|a| a.get(key))
+                .and_then(Value::as_str)
+                == Some("ok")
+        });
+        if !available {
+            return None;
+        }
+        runs.iter()
+            .filter_map(|run| run.get("pmu")?.get(key)?.as_u64())
+            .collect()
+    } else {
+        runs.iter()
+            .filter_map(|run| run.get("pmc")?.get(key)?.as_u64())
+            .collect()
+    };
     if values.len() != runs.len() {
         return None;
     }

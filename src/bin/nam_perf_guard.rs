@@ -105,7 +105,7 @@ pub struct PerfCertificationReport {
     pub environment_stable: bool,
     /// Whether the host was less isolated than the certification policy expects
     /// (no `isolcpus`/`nohz_full`, shared IRQ affinity, non-RT scheduling,
-    /// non-performance governor, boost enabled, or an unpinned affinity mask).
+    /// non-performance governor, or an unpinned affinity mask).
     ///
     /// A degraded host does not by itself fail the deadline gate: the measured
     /// p99 is still valid evidence for *this* host. It is recorded separately so
@@ -617,9 +617,11 @@ fn evaluate_reference_series(
         let (p99_ratio, p99_passed) = match ref_p99 {
             Some(rp) => {
                 let r = m.p99_ns / rp;
-                worst_p99_ratio = Some(worst_p99_ratio.map_or(r, |w| w.max(r)));
                 let delta_ns = m.p99_ns - rp;
                 let passed = r <= p99_ratio_max || delta_ns <= p99_noise_floor_ns;
+                if delta_ns > p99_noise_floor_ns {
+                    worst_p99_ratio = Some(worst_p99_ratio.map_or(r, |w| w.max(r)));
+                }
                 if !passed {
                     p99_failures.push((m.name.clone(), r));
                 }
@@ -644,6 +646,13 @@ fn evaluate_reference_series(
             max_ratio,
             p99_passed,
         });
+    }
+
+    if worst_p99_ratio.is_none() {
+        worst_p99_ratio = comparisons
+            .iter()
+            .filter_map(|c| c.p99_ratio)
+            .reduce(f64::max);
     }
 
     let (status, passed, inconclusive_reason) = if !missing_p99_scenarios.is_empty() {
@@ -1062,8 +1071,8 @@ fn measure_scenario(
     let mut process_errors = 0usize;
     let mut status_rejected = 0usize;
 
-    // Warmup cycles (100 iterations)
-    for _ in 0..100 {
+    // Warmup cycles (400 iterations to settle branch predictors, caches, and P-state)
+    for _ in 0..400 {
         run_process_block(
             "warmup",
             &mut started_processor,
@@ -1108,8 +1117,8 @@ fn measure_scenario(
 
     let (ev_a, ev_b) = build_timed_event_buffers(config.event_mode, n);
 
-    // Benchmark measurement (300 iterations, pre-allocated and prefaulted)
-    const MEASUREMENT_CYCLES: usize = 300;
+    // Benchmark measurement (1000 iterations, pre-allocated and prefaulted)
+    const MEASUREMENT_CYCLES: usize = 1000;
     let mut latencies_ns = vec![0.0_f64; MEASUREMENT_CYCLES];
 
     for (idx, slot) in latencies_ns.iter_mut().enumerate() {

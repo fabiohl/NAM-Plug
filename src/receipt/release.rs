@@ -96,6 +96,10 @@ pub struct ReleaseArtifacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flatpak_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flatpak_compat_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flatpak_compat_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_sha256: Option<String>,
@@ -195,16 +199,26 @@ pub fn verify_release_receipt(
             "build and long audit run_id do not reconcile with the release receipt".to_string(),
         ),
     }
-    if let (Some(path), Some(expected)) = (
-        receipt.artifacts.flatpak_path.as_deref(),
-        receipt.artifacts.flatpak_sha256.as_deref(),
-    ) {
-        match hash_file(path) {
-            Ok(sha) if sha == expected => {}
-            Ok(sha) => problems.push(format!(
-                "flatpak SHA-256 mismatch at {path}: disk ({sha}) != release receipt ({expected})"
-            )),
-            Err(e) => problems.push(format!("cannot hash flatpak at {path}: {e}")),
+    for (label, path_opt, expected_opt) in [
+        (
+            "flatpak",
+            receipt.artifacts.flatpak_path.as_deref(),
+            receipt.artifacts.flatpak_sha256.as_deref(),
+        ),
+        (
+            "flatpak compat",
+            receipt.artifacts.flatpak_compat_path.as_deref(),
+            receipt.artifacts.flatpak_compat_sha256.as_deref(),
+        ),
+    ] {
+        if let (Some(path), Some(expected)) = (path_opt, expected_opt) {
+            match hash_file(path) {
+                Ok(sha) if sha == expected => {}
+                Ok(sha) => problems.push(format!(
+                    "{label} SHA-256 mismatch at {path}: disk ({sha}) != release receipt ({expected})"
+                )),
+                Err(e) => problems.push(format!("cannot hash {label} at {path}: {e}")),
+            }
         }
     }
 
@@ -220,6 +234,13 @@ pub fn declared_flatpak_path(release_path: &Path) -> Result<Option<String>, Stri
     let content = fs::read_to_string(release_path).map_err(|e| e.to_string())?;
     let receipt: ReleaseReceipt = serde_json::from_str(&content).map_err(|e| e.to_string())?;
     Ok(receipt.artifacts.flatpak_path)
+}
+
+/// Compatibility-branch Flatpak bundle path declared by a release receipt; `None` when absent.
+pub fn declared_flatpak_compat_path(release_path: &Path) -> Result<Option<String>, String> {
+    let content = fs::read_to_string(release_path).map_err(|e| e.to_string())?;
+    let receipt: ReleaseReceipt = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(receipt.artifacts.flatpak_compat_path)
 }
 
 /// Evaluates release certification against canonical artifact, build receipt, and long audit receipt.
@@ -300,14 +321,12 @@ pub fn evaluate_certification(
                         }
                         // Check gaps
                         for g in &br.gaps {
-                            if g == "bolt_not_proven"
+                            if (g == "bolt_not_proven" || g == "bolt_not_applied")
                                 && (is_proven_pgo_only || is_proven_plain_only)
                             {
                                 continue;
                             }
-                            if (g == "pgo_not_applied" || g == "bolt_not_applied")
-                                && is_proven_plain_only
-                            {
+                            if g == "pgo_not_applied" && is_proven_plain_only {
                                 continue;
                             }
                             gaps.push(format!("build:{g}"));
@@ -567,6 +586,8 @@ pub fn evaluate_certification(
                 tarball_sha256: br.artifacts.tarball_sha256,
                 flatpak_path: br.artifacts.flatpak_path,
                 flatpak_sha256: br.artifacts.flatpak_sha256,
+                flatpak_compat_path: br.artifacts.flatpak_compat_path,
+                flatpak_compat_sha256: br.artifacts.flatpak_compat_sha256,
                 installed_path: br.artifacts.installed_path,
                 installed_sha256: br.artifacts.installed_sha256,
             };
@@ -587,6 +608,8 @@ pub fn evaluate_certification(
                 tarball_sha256: None,
                 flatpak_path: None,
                 flatpak_sha256: None,
+                flatpak_compat_path: None,
+                flatpak_compat_sha256: None,
                 installed_path: None,
                 installed_sha256: None,
             };

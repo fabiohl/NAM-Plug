@@ -33,18 +33,18 @@ phase_clippy() {
 run_step clippy phase_clippy
 # Cross-checks target-specific cfg branches (N-26). Native aarch64 already ran clippy in phase_clippy;
 # x86_64 hosts only emit .rmeta with PKG_CONFIG_ALLOW_CROSS=1 for pkg-config metadata discovery.
-PHASE_NAME=cross_aarch64_check
+PHASE_NAME=cross_target_check
 HOST_ARCH="$(rustc -vV | sed -n 's/^host: //p')"
 if [ "$HOST_ARCH" = aarch64-unknown-linux-gnu ]; then
   if rustup target list --installed | grep -qx x86_64-unknown-linux-gnu; then
-    run_step cross_aarch64_check env PKG_CONFIG_ALLOW_CROSS=1 cargo clippy --locked --lib --target x86_64-unknown-linux-gnu -- -D warnings
+    run_step cross_target_check env PKG_CONFIG_ALLOW_CROSS=1 cargo clippy --locked --lib --target x86_64-unknown-linux-gnu -- -D warnings
   else
-    gap "cross_aarch64_check:native-host-x86-target-not-installed"
+    gap "cross_target_check:native-host-x86-target-not-installed"
   fi
 elif ! rustup target list --installed | grep -qx aarch64-unknown-linux-gnu; then
-  gap "cross_aarch64_check:target-not-installed"
+  gap "cross_target_check:target-not-installed"
 else
-  run_step cross_aarch64_check env PKG_CONFIG_ALLOW_CROSS=1 cargo clippy --locked --lib --target aarch64-unknown-linux-gnu -- -D warnings
+  run_step cross_target_check env PKG_CONFIG_ALLOW_CROSS=1 cargo clippy --locked --lib --target aarch64-unknown-linux-gnu -- -D warnings
 fi
 
 phase_doc() {

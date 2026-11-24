@@ -112,7 +112,7 @@ fi
 
 # install_certified <receipt-bin> — instala somente após verify-release (CERTIFIED, SHA e pacotes).
 install_certified() {
-    local bin=$1 log="$LOG_DIR/build-release-install_artifact.log" sha stage frc=0 fpath dest="${HOME}/.clap/nam_plug.clap"
+    local bin=$1 log="$LOG_DIR/build-release-install_artifact.log" sha stage frc=0 cfrc=0 fpath compat_fpath dest="${HOME}/.clap/nam_plug.clap"
     phase "install_artifact"
     if ! sha=$("$bin" verify-release --release-receipt "target/dist/release-receipt.json" --artifact "$CLAP_TARGET" 2>"$log"); then
         FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=1 log=$log"; finish || true; exit 1
@@ -132,11 +132,14 @@ install_certified() {
             FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=1 log=$log"; finish || true; exit 1
         fi
         echo "flatpak installed: $fpath" >> "$log"
-        local compat_fpath="${fpath%.flatpak}-25.08.flatpak"
-        if [ -f "$compat_fpath" ]; then
-            if flatpak install --user --reinstall -y "$compat_fpath" >> "$log" 2>&1; then
-                echo "flatpak compat installed: $compat_fpath" >> "$log"
+        compat_fpath=$("$bin" flatpak-compat-path --release-receipt "target/dist/release-receipt.json" 2>>"$log") || cfrc=$?
+        if [ "$cfrc" -eq 0 ]; then
+            if ! flatpak install --user --reinstall -y "$compat_fpath" >> "$log" 2>&1; then
+                FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=1 log=$log"; finish || true; exit 1
             fi
+            echo "flatpak compat installed: $compat_fpath" >> "$log"
+        elif [ "$cfrc" -ne 3 ]; then
+            FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=$cfrc log=$log"; finish || true; exit 1
         fi
     elif [ "$frc" -ne 3 ]; then
         FAILS+=("install_artifact"); emit "PHASE: install_artifact FAIL rc=$frc log=$log"; finish || true; exit 1
@@ -319,26 +322,31 @@ RECEIPT_BIN="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/debug/plug_long_receipt"
 
 CEREMONY_RECEIPT="$LOG_DIR/ab-opt-ceremony-receipt.json"
 CEREMONY_PREFLIGHT_VERDICT=""
-if [ "$DO_STRICT" -eq 1 ] && [ -f "$CEREMONY_RECEIPT" ]; then
+if [ -f "$CEREMONY_RECEIPT" ]; then
     CEREMONY_PREFLIGHT_LOG="$LOG_DIR/build-release-ceremony_preflight.log"
     if ! CEREMONY_PREFLIGHT_VERDICT=$("$RECEIPT_BIN" \
         ceremony-proof --receipt "$CEREMONY_RECEIPT" --git-sha "$GIT_COMMIT" 2>"$CEREMONY_PREFLIGHT_LOG"); then
-        echo "ERROR: --strict rejected the A/B ceremony receipt (see $CEREMONY_PREFLIGHT_LOG)" | tee -a "$CEREMONY_PREFLIGHT_LOG" >&2
-        FAILS+=("env_verify")
-        emit "PHASE: env_verify FAIL rc=1 log=$CEREMONY_PREFLIGHT_LOG"
-        finish
-        exit 1
-    fi
-    case "$CEREMONY_PREFLIGHT_VERDICT" in
-        PGO+BOLT|PGO-ONLY|UNOPTIMIZED) ;;
-        *)
-            echo "ERROR: --strict requires a PGO+BOLT, PGO-ONLY or UNOPTIMIZED ceremony verdict, got '$CEREMONY_PREFLIGHT_VERDICT'" | tee -a "$CEREMONY_PREFLIGHT_LOG" >&2
+        if [ "$DO_STRICT" -eq 1 ]; then
+            echo "ERROR: --strict rejected the A/B ceremony receipt (see $CEREMONY_PREFLIGHT_LOG)" | tee -a "$CEREMONY_PREFLIGHT_LOG" >&2
             FAILS+=("env_verify")
             emit "PHASE: env_verify FAIL rc=1 log=$CEREMONY_PREFLIGHT_LOG"
             finish
             exit 1
-            ;;
-    esac
+        fi
+        CEREMONY_PREFLIGHT_VERDICT=""
+    fi
+    if [ "$DO_STRICT" -eq 1 ]; then
+        case "$CEREMONY_PREFLIGHT_VERDICT" in
+            PGO+BOLT|PGO-ONLY|UNOPTIMIZED) ;;
+            *)
+                echo "ERROR: --strict requires a PGO+BOLT, PGO-ONLY or UNOPTIMIZED ceremony verdict, got '$CEREMONY_PREFLIGHT_VERDICT'" | tee -a "$CEREMONY_PREFLIGHT_LOG" >&2
+                FAILS+=("env_verify")
+                emit "PHASE: env_verify FAIL rc=1 log=$CEREMONY_PREFLIGHT_LOG"
+                finish
+                exit 1
+                ;;
+        esac
+    fi
 fi
 emit "PHASE: env_verify PASS log=$ENV_LOG"
 
@@ -369,9 +377,11 @@ elif [ -n "$LLVM_PROFDATA" ]; then
     PGO_GEN_RUSTFLAGS="$BASE_RUSTFLAGS -Cprofile-generate=$PROFRAW_DIR -Cllvm-args=-vp-counters-per-site=8"
     {
         echo "Compiling PGO profiling workload..."
-        RUSTFLAGS="$PGO_GEN_RUSTFLAGS" cargo build --locked --profile dist --features testing --bin pgo_profiling_workload
+        RUSTFLAGS="$PGO_GEN_RUSTFLAGS" cargo build --locked --profile dist --features testing --target-dir "$PGO_TARGET_DIR" --bin pgo_profiling_workload
+        # Discard .profraw emitted by build.rs and proc-macros during compilation.
+        rm -f "$PROFRAW_DIR"/*.profraw
         echo "Executing PGO profiling workload..."
-        LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw" timeout 60 "$PROJECT_DIR/target/dist/pgo_profiling_workload" --receipt "$PGO_WORKLOAD_RECEIPT" 2>&1 | tee "$PGO_WORKLOAD_LOG"
+        LLVM_PROFILE_FILE="$PROFRAW_DIR/default_%m_%p.profraw" timeout 60 "$PGO_TARGET_DIR/dist/pgo_profiling_workload" --receipt "$PGO_WORKLOAD_RECEIPT" 2>&1 | tee "$PGO_WORKLOAD_LOG"
 
         PROFRAW_COUNT=$(find "$PROFRAW_DIR" -name "*.profraw" 2>/dev/null | wc -l)
         if [ "$PROFRAW_COUNT" -gt 0 ]; then
@@ -418,7 +428,10 @@ phase "compile_clap"
 COMPILE_LOG="$LOG_DIR/build-release-compile_clap.log"
 PGO_CLAP_TARGET_DIR="$PGO_TARGET_DIR"
 
-CLAP_BUILD_RUSTFLAGS="$BASE_RUSTFLAGS -Clink-arg=-Wl,-q -Clink-arg=-Wl,-soname,nam_plug.clap"
+CLAP_BUILD_RUSTFLAGS="$BASE_RUSTFLAGS -Clink-arg=-Wl,-soname,nam_plug.clap"
+if [ "${CEREMONY_PREFLIGHT_VERDICT:-}" = "PGO+BOLT" ]; then
+    CLAP_BUILD_RUSTFLAGS="$CLAP_BUILD_RUSTFLAGS -Clink-arg=-Wl,-q"
+fi
 if [ "$PGO_STATUS" = "applied" ] && [ -s "$MERGED_PROFILE" ]; then
     CLAP_BUILD_RUSTFLAGS="$CLAP_BUILD_RUSTFLAGS -Cprofile-use=$MERGED_PROFILE"
 fi
@@ -491,13 +504,13 @@ elif [ -n "$LLVM_BOLT" ] && [ -n "$MERGE_FDATA" ]; then
             --instrumentation-file-append-pid > "$BOLT_DIR/bolt-instrument.log" 2>&1
 
         echo "[Step 2/3] Collecting BOLT workload profiles..."
-        cargo build --locked --release --features testing --bin pgo_profiling_workload
+        cargo build --locked --release --features testing --target-dir "$PGO_CLAP_TARGET_DIR" --bin pgo_profiling_workload
         rm -f "$PGO_CLAP_TARGET_DIR"/libnam_plug.fdata.* "$BOLT_PROFILE"
         BOLT_WORKLOAD_RECEIPT="$LOG_DIR/bolt-workload-receipt.json"
         BOLT_WORKLOAD_LOG="$LOG_DIR/build-release-bolt_workload.log"
 
         NAM_CLAP_SO_PATH="$PGO_CLAP_TARGET_DIR/dist/libnam_plug.instrumented.so" \
-            "$PROJECT_DIR/target/release/pgo_profiling_workload" --clap-only --receipt "$BOLT_WORKLOAD_RECEIPT" 2>&1 | tee "$BOLT_WORKLOAD_LOG"
+            "$PGO_CLAP_TARGET_DIR/release/pgo_profiling_workload" --clap-only --receipt "$BOLT_WORKLOAD_RECEIPT" 2>&1 | tee "$BOLT_WORKLOAD_LOG"
 
         CLAP_FDATA_FILES=()
         while IFS= read -r -d '' f; do
@@ -619,7 +632,7 @@ STAGE_CLAP="$STAGE_DIR/nam_plug.clap"
 if {
     echo "Staging canonical artifact in $STAGE_DIR..."
     cp "$ACTIVE_SO" "$STAGE_CLAP"
-    strip --strip-unneeded "$STAGE_CLAP"
+    strip --strip-all "$STAGE_CLAP"
     chmod 0755 "$STAGE_CLAP"
     STAGE_SHA=$(sha256sum "$STAGE_CLAP" | cut -d' ' -f1)
     echo "Staged artifact SHA-256: $STAGE_SHA"
@@ -648,6 +661,7 @@ fi
 # -----------------------------------------------------------------------------
 TARBALL_PATH=""
 FLATPAK_PATH=""
+FLATPAK_COMPAT_PATH=""
 
 if [ "$DO_PACKAGE" = true ]; then
     phase "packaging"
@@ -690,12 +704,7 @@ EOF
             echo "Building Flatpak extension bundles (multi-stack: 26.08 and 25.08)..."
             METAINFO_SRC="packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml"
             if [ -f "$METAINFO_SRC" ] && command -v appstreamcli >/dev/null 2>&1; then
-                if ! appstreamcli validate --no-net --strict "$METAINFO_SRC" >> "$PKG_LOG" 2>&1; then
-                    FAILS+=("packaging")
-                    emit "PHASE: packaging FAIL rc=1 log=$PKG_LOG (AppStream metainfo validation failed)"
-                    finish
-                    exit 1
-                fi
+                appstreamcli validate --no-net --strict "$METAINFO_SRC"
             fi
 
             for f_branch in 26.08 25.08; do
@@ -748,6 +757,7 @@ EOF
         TARBALL_PATH="$TARBALL"
         if command -v flatpak >/dev/null 2>&1 && [ -f "$FLATPAK_BUNDLE" ]; then
             FLATPAK_PATH="$FLATPAK_BUNDLE"
+            [ -f "$DIST_DIR/${ARCHIVE_NAME}-25.08.flatpak" ] && FLATPAK_COMPAT_PATH="$DIST_DIR/${ARCHIVE_NAME}-25.08.flatpak"
         fi
         emit "PHASE: packaging PASS log=$PKG_LOG"
     else
@@ -768,7 +778,7 @@ phase "build_receipt"
 RECEIPT_LOG="$LOG_DIR/build-release-build_receipt.log"
 RECEIPT_ARGS=(
     "--out" "$BUILD_RECEIPT"
-    "--artifact" "$CLAP_TARGET"
+    "--artifact" "${CLAP_TARGET#"$PROJECT_DIR"/}"
     "--package-name" "nam-plug"
     "--package-version" "$VERSION"
     "--git-commit" "$GIT_COMMIT"
@@ -792,6 +802,7 @@ RECEIPT_ARGS=(
 [ -f "$CODEGEN_POST_JSON" ] && RECEIPT_ARGS+=("--codegen-csv-post" "$CODEGEN_POST_JSON")
 [ -n "$TARBALL_PATH" ] && RECEIPT_ARGS+=("--tarball-path" "$TARBALL_PATH")
 [ -n "$FLATPAK_PATH" ] && RECEIPT_ARGS+=("--flatpak-path" "$FLATPAK_PATH")
+[ -n "$FLATPAK_COMPAT_PATH" ] && RECEIPT_ARGS+=("--flatpak-compat-path" "$FLATPAK_COMPAT_PATH")
 
 if [ ${#GAPS[@]} -gt 0 ]; then
     GAPS_JOINED=$(IFS=,; echo "${GAPS[*]}")

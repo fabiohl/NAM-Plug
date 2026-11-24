@@ -19,7 +19,7 @@ categories = ["multimedia::audio", "multimedia"]
 autobins = false
 
 [dependencies]
-NeuralAmpModeler-rs = { version = "3.0.0", default-features = false, features = [
+NeuralAmpModeler-rs = { version = "4.0.0", default-features = false, features = [
     "dual-mono",
 ] }
 clack-common = "0.2"
@@ -39,7 +39,6 @@ clack-extensions = { version = "0.2", features = [
     "track-info",
     "remote-controls",
     "param-indication",
-    "clack-host",
     "preset-discovery",
     "render",
     "state-context",
@@ -77,7 +76,7 @@ clap-sys = "0.5"
 slint-build = "1.19"
 
 [dev-dependencies]
-NeuralAmpModeler-rs = { version = "3.0.0", features = ["testing"] }
+NeuralAmpModeler-rs = { version = "4.0.0", features = ["testing"] }
 nam-plug = { path = ".", features = ["testing"] }
 clack-host = { version = "0.2", features = ["clack-plugin"] }
 clap-sys = "0.5"
@@ -124,7 +123,7 @@ required-features = ["testing"]
 
 [features]
 default = ["dual-mono"]
-testing = ["NeuralAmpModeler-rs/testing", "dep:clack-host"]
+testing = ["NeuralAmpModeler-rs/testing", "dep:clack-host", "clack-extensions/clack-host"]
 dual-mono = ["NeuralAmpModeler-rs/dual-mono"]
 heap-audit = ["NeuralAmpModeler-rs/heap-audit"]
 # Display-server lifecycle tests. Off by default so the catch-all long phase
@@ -182,6 +181,3 @@ allow_attributes = "warn"
 [package.metadata.docs.rs]
 features = ["testing"]
 rustdoc-args = ["--cfg", "docsrs"]
-
-[patch.crates-io]
-NeuralAmpModeler-rs = { path = "../NeuralAmpModeler-rs" }

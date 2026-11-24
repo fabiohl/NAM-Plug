@@ -113,6 +113,10 @@ pub struct BuildArtifacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flatpak_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flatpak_compat_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flatpak_compat_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_sha256: Option<String>,

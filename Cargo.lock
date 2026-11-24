@@ -4,7 +4,9 @@ version = 4
 
 [[package]]
 name = "NeuralAmpModeler-rs"
-version = "3.0.0"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "935819560cd6db599e2bb1e7d588a72c611a4d04c8931cf50743776967736535"
 dependencies = [
  "anyhow",
  "libc",

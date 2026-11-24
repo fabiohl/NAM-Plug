@@ -89,8 +89,9 @@ const PERF_TYPE_HARDWARE: u32 = 0;
 const PERF_TYPE_HW_CACHE: u32 = 3;
 const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
 const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
-const PERF_COUNT_HW_CACHE_ITLB: u64 = 8;
-const PERF_COUNT_HW_CACHE_ICACHE: u64 = 5;
+// Linux <linux/perf_event.h> enum perf_hw_cache_id: L1I=1, ITLB=4, BPU=5.
+const PERF_COUNT_HW_CACHE_ITLB: u64 = 4;
+const PERF_COUNT_HW_CACHE_ICACHE: u64 = 1;
 const PERF_COUNT_HW_CACHE_OP_READ: u64 = 0;
 const PERF_COUNT_HW_CACHE_RESULT_MISS: u64 = 1;
 const NR_PERF_EVENT_OPEN: libc::c_long = 298;
@@ -431,7 +432,7 @@ fn run_measured_clap(
     warmup_blocks: u64,
     measured_blocks: u64,
     clap_so_path: Option<&Path>,
-    pmcs: Option<&mut PmcSet>,
+    mut pmcs: Option<&mut PmcSet>,
 ) -> Result<(Vec<u64>, u64), String> {
     let (_entry, _host, mut plugin_instance) = match clap_so_path {
         Some(path) => test_util::make_test_plugin_dynamic(path),
@@ -496,7 +497,7 @@ fn run_measured_clap(
         );
     }
 
-    if let Some(p) = pmcs {
+    if let Some(p) = pmcs.as_deref_mut() {
         p.enable();
     }
 
@@ -533,6 +534,10 @@ fn run_measured_clap(
         black_box(out_l[0]);
         cycles.push(t1.saturating_sub(t0));
         total_frames += n as u64;
+    }
+
+    if let Some(p) = pmcs {
+        p.disable();
     }
 
     Ok((cycles, total_frames))
@@ -777,7 +782,6 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            pmcs.disable();
             let counts = pmcs.counts();
             let st = Stats::of(cycles);
             let to_ns = |c: u64| c * 1000 / freq;
@@ -815,22 +819,23 @@ fn main() -> ExitCode {
                 ),
             ];
 
-            let mut pmc_obj = Vec::new();
+            let mut pmu_obj = Vec::new();
+            let mut pmu_avail_obj = Vec::new();
             for (name, res) in counts {
                 match res {
-                    Ok(val) => pmc_obj.push(kv(name, JsonValue::Int(val))),
+                    Ok(val) => {
+                        pmu_obj.push(kv(name, JsonValue::Int(val)));
+                        pmu_avail_obj.push(kv(name, JsonValue::Str("ok".into())));
+                    }
                     Err(cause) => {
-                        pmc_obj.push(kv(
-                            name,
-                            JsonValue::Obj(vec![
-                                kv("status", JsonValue::Str("unavailable".into())),
-                                kv("cause", JsonValue::Str(cause)),
-                            ]),
-                        ));
+                        pmu_obj.push(kv(name, JsonValue::Int(0)));
+                        pmu_avail_obj
+                            .push(kv(name, JsonValue::Str(format!("unavailable: {cause}"))));
                     }
                 }
             }
-            run_obj.push(kv("pmc", JsonValue::Obj(pmc_obj)));
+            run_obj.push(kv("pmu", JsonValue::Obj(pmu_obj)));
+            run_obj.push(kv("pmu_availability", JsonValue::Obj(pmu_avail_obj)));
             jsonl_lines.push(JsonValue::Obj(run_obj));
 
             let line = format!(

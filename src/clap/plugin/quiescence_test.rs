@@ -259,6 +259,8 @@ fn test_host_call_guard_decrements_on_panic() {
     let fence = Arc::new(AtomicBool::new(true));
     let coordinator = Arc::new(HostCallQuiescence::new(Arc::clone(&fence)));
 
+    let _suppress =
+        neural_amp_modeler_rs::common::panic_hook::suppress_panic_report_on_current_thread();
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         coordinator.host_call(|| {
             panic!("deliberate panic inside host_call");

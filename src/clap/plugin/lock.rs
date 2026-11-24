@@ -40,6 +40,8 @@ mod tests {
     #[test]
     fn recovers_poisoned_mutex_and_preserves_value() {
         let m = Mutex::new(41u32);
+        let _suppress =
+            neural_amp_modeler_rs::common::panic_hook::suppress_panic_report_on_current_thread();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut guard = m.lock().unwrap();
             *guard = 42;
