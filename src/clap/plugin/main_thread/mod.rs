@@ -102,13 +102,13 @@ pub struct NamClapMainThread<'a> {
     /// Last-seen alert bits to emit host logs only on 0 -> 1 transitions.
     pub(crate) last_seen_alert_bits: Cell<u32>,
     /// Last-seen `RT_STATUS_MODEL_LOAD_FAILED` state, used for rising-edge
-    /// logging only (F-PLUG-02).
+    /// logging only.
     pub(crate) last_seen_model_load_failed: Cell<bool>,
     /// Slint window handle for GUI lifecycle control.
     pub slint_window: RefCell<Option<slint::Weak<crate::clap::gui::MainWindow>>>,
     /// Persistent per-instance GUI worker thread (owns the Slint platform and
     /// event loop for the instance lifetime; survives `gui.destroy()` so
-    /// repeated create/destroy cycles keep working — Slint 1.18 pins the
+    /// repeated create/destroy cycles keep working — Slint 1.19 pins the
     /// platform to the thread that first initialized it).
     pub(crate) gui_worker: RefCell<Option<crate::clap::gui::worker::GuiWorker>>,
     /// Handle for the model file-dialog background thread (if active). Joined during teardown.

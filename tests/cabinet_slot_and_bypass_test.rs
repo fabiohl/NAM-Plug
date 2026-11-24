@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! End-to-end integration tests for S08 — Single Cabinet Slot (WAV / NAM / NAMB) & Cab Bypass.
+//! End-to-end integration tests for Single Cabinet Slot (WAV / NAM / NAMB) & Cab Bypass.
 //!
 //! Covers:
 //! 1. Single exclusive slot accepting `.wav`, `.nam` (Linear, Sequential, LSTM), and `.namb`.

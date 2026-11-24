@@ -40,7 +40,7 @@ impl<'a> NamClapProcessor<'a> {
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             let raw_elapsed = 0;
 
-            // Test-only synthetic stall injection (T-P1.3.2, one-shot):
+            // Test-only synthetic stall injection (one-shot):
             // clamps the measurement up to at least the injected value so a
             // test can force exactly one over-budget block through the real
             // `process()` path without sleeping on the audio thread. `#[cfg]`
@@ -59,9 +59,9 @@ impl<'a> NamClapProcessor<'a> {
             #[cfg(not(any(test, feature = "testing")))]
             let elapsed_nanos = raw_elapsed;
 
-            // Defense-in-depth (T-R1.2): discard anomalous elapsed times (> 1s)
+            // Defense-in-depth: discard anomalous elapsed times (> 1s)
             // to avoid corrupting latency histograms, overload counters, or adaptive compute.
-            // The discard is counted separately (T5.1 / F8) so a clean histogram can no
+            // The discard is counted separately so a clean histogram can no
             // longer hide clock anomalies: `dsp_overloads` stays untouched.
             if elapsed_nanos > MAX_PLAUSIBLE_ELAPSED_NS {
                 self.rt_status
@@ -83,7 +83,7 @@ impl<'a> NamClapProcessor<'a> {
                     self.update_telemetry_cadence_cold(last_n_samples, sample_rate);
                 }
 
-                // EWMA tau ≈ 250ms of elapsed/budget (T-R2.1) without hot-path division.
+                // EWMA tau ≈ 250ms of elapsed/budget without hot-path division.
                 let instant_permille =
                     (elapsed_nanos as f32 * self.cached_inv_budget_permille).min(1000.0);
                 self.dsp_load_ewma +=

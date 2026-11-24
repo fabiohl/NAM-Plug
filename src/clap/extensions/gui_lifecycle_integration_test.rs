@@ -181,7 +181,7 @@ fn gui_x11_lifecycle_embedded_set_parent_honest() {
         );
     }
 
-    let display_set = std::env::var_os("DISPLAY").is_some();
+    let display_set = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
     let handle = plugin_instance.plugin_handle();
     if display_set {
         let xdg_session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
@@ -584,7 +584,7 @@ fn gui_x11_lifecycle_hide_after_show_with_real_window() {
 ///
 /// - the Slint window is a native X11 child of the host (XEmbed ancestry);
 /// - teardown destroys the child (no orphans — verified via `query_tree`);
-/// - the T4.8.2 contract (fixed 600×275, no resize, scale accepted) holds.
+/// - the fixed window geometry contract (no resize, scale accepted) holds.
 ///
 /// Run against a dedicated display server:
 ///
@@ -592,9 +592,9 @@ fn gui_x11_lifecycle_hide_after_show_with_real_window() {
 /// Xvfb :99 -screen 0 1280x800x24 &; DISPLAY=:99 cargo test --features testing -- --ignored gui_x11_embedded
 /// ```
 ///
-/// Keep this the only test matching `gui_embedded`: Slint 1.18 allows one
+/// Keep this the only test matching `gui_embedded`: Slint 1.19 allows one
 /// platform per process, so a second display test in the same process could
-/// not create windows (see `docs/architecture.md` §7.7).
+/// not create windows (see `docs/architecture.md` §7.6).
 #[cfg(feature = "gui-x11")]
 #[test]
 #[ignore = "requires a dedicated X11 display server (Xvfb/Xephyr) and mutates process env"]

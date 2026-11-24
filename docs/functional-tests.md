@@ -30,8 +30,8 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 
 *Objective: Run these 5 actions immediately after building to verify core plugin stability.*
 
-- [ ] **T1.1 Load Model & CabSim IR:** Click `[LOAD .NAM]` in the **AMP MODEL** card → select a valid `.nam` model → Click `[LOAD IR]` in the **CABINET IR** card → select a valid `.wav` IR.
-  *Expected:* Both load asynchronously without host UI freeze or audio dropouts. Amp modeling and IR convolution become audible immediately. Active model name and IR filename update in Zone 1.
+- [ ] **T1.1 Load Model & Cabinet Asset:** Click `[LOAD .NAM]` in the **AMP MODEL** card → select a valid `.nam` model → Click `[LOAD CAB]` in the **CABINET** card → select a valid `.wav` IR (or 1×1 `.nam`/`.namb` neural cabinet).
+  *Expected:* Both load asynchronously without host UI freeze or audio dropouts. Amp modeling and cabinet processing become audible immediately. Active model name and cabinet filename update in Zone 1.
 - [ ] **T1.2 Knobs & Double-Click Reset:** Drag **INPUT** knob to +6.0 dB, drag **GATE** to −50.0 dB → Double-click **INPUT**.
   *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to default 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to default −90.0 dB (off by default); double-clicking **OUTPUT** resets to default −3.0 dB.
 - [ ] **T1.3 Bypass & VU Meter Layout:** Insert plugin in DAW configured as Mono (Config 0, default: 1 centered meter bar), then instantiate on a Stereo track via `audio-ports-config` (Config 1: 2 meter bars L/R) → Toggle **BYPASS** (toggle switch).
@@ -52,9 +52,9 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 - [ ] **2A.1 SPSC Non-Blocking Load:** Load a different `.nam` model while playing an audio track.
   *Expected:* DAW UI remains 100% responsive. Audio engine swaps models seamlessly without stopping playback or causing XRUNs in `pw-top`. Dropped model allocations are safely collected off-RT via SPSC GC.
 - [ ] **2A.2 Invalid File Robustness:** Select a corrupted or 0-byte `.nam` / `.wav` file in the file picker.
-  *Expected:* Red error state (`"Load failed"` / `"IR load failed"`) displays on the respective card in Zone 1. The previous valid model/IR remains active; plugin never crashes or silences audio.
-- [ ] **2A.3 CabSim IR Management:** With an IR loaded, click the `[✕]` clear button on the CABINET IR card.
-  *Expected:* IR display reverts to `"No IR loaded"`, audio transitions cleanly back to post-model output without cab simulation, and the `[✕]` clear button disappears.
+  *Expected:* Red error state (`"Load failed"` / `"Cabinet load failed"`) displays on the respective card in Zone 1. The previous valid model/cabinet remains active; plugin never crashes or silences audio.
+- [ ] **2A.3 Cabinet Slot Management:** With a cabinet loaded, click the `[✕]` clear button on the **CABINET** card.
+  *Expected:* Cabinet display reverts to `"No cabinet loaded"`, audio transitions cleanly back to post-model output without cabinet simulation, and the `[✕]` clear button disappears.
 - [ ] **2A.4 Oversampling & Activation Engine Modes:** Switch Oversampling from `"Off"` to `"2×"` to `"4×"`, and Activation Precision from `"Standard"` to `"Fast"`.
   *Expected:* Resampler adjusts seamlessly; reported latency in status bar updates dynamically to reflect filter delay (`0 spl` @ Off, `32 spl` @ 2×, `96 spl` @ 4×); zero audio dropouts.
 - [ ] **2A.5 Slimmable A2 Container & Adaptive Compute:** Load a slimmable container model → change host parameter `"Slim Override"` from `"Auto"` to `"Force Lite"` to `"Force Full"` (or adjust `"Adaptive Compute"` mode).

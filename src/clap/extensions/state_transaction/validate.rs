@@ -786,14 +786,14 @@ pub(crate) fn load_cabsim_from_verified_bytes(
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    // GAP(A-01, D7a): the frozen published engine exposes only
+    // GAP-IR-INMEMORY-DECODE: the pinned engine exposes only
     // `CabSimIr::load(&Path, ..)`; it cannot decode a WAV from an in-memory
     // slice. The verified bytes therefore have to be staged to a private temp
     // file and re-opened by the engine. Identity is still coherent because the
     // exact verified buffer is written (never the source path again) and the
     // file is created exclusively (`create_new`), so no symlink or pre-existing
-    // file can substitute different content. Escalated to the PO: removing the
-    // temp round-trip requires a new engine API (`CabSimIr::load_from_bytes`).
+    // file can substitute different content. Removing the temp round-trip
+    // requires an upstream `CabSimIr::load_from_bytes` API.
     static IR_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let pid = std::process::id();
 

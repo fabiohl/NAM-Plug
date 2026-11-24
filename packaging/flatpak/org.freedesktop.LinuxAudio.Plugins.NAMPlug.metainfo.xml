@@ -29,9 +29,9 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
     <p>Key highlights:</p>
     <ul>
       <li>Comprehensive neural architectures: WaveNet (A1/A2), LSTM, ConvNet, Linear FIR/FFT, and Sequential models.</li>
-      <li>Integrated speaker cabinet Impulse Response (.wav) loader with ultra-low latency UPOLS FFT partition convolution.</li>
+      <li>Integrated exclusive speaker cabinet slot supporting .wav impulse responses (UPOLS FFT convolution) or 1-in/1-out .nam/.namb neural cabinet models with independent bypass.</li>
       <li>Native Minimum-Phase Polyphase Sinc Resampler (256 phases × 64 taps) seamlessly adapting 48 kHz models to 44.1, 96, and 192 kHz.</li>
-      <li>Hardware-accelerated Slint 1.18 GUI with native X11 XEmbed embedding into host plugin panels and Wayland/X11 floating windows.</li>
+      <li>Hardware-accelerated Slint 1.19 GUI with native X11 XEmbed embedding into host plugin panels and Wayland/X11 floating windows.</li>
       <li>Live (zero added latency, adaptive compute) and HQ/Offline modes with 2×/4× polyphase anti-aliasing oversampling.</li>
       <li>Hard real-time audio thread determinism: zero heap allocations, zero mutex locks, and a 3-tier lock-free GC cascade.</li>
       <li>IEC 60268-10 PPM adaptive mono/stereo VU metering, sample-accurate parameter automation, and dynamic Plugin Delay Compensation (PDC).</li>

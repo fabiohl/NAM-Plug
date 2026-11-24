@@ -80,7 +80,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             neural_amp_modeler_rs::common::panic_hook::install_panic_hook("clap");
         });
 
-        // Initialize and calibrate hardware TSC on a background thread once per process (T-P4.2.3, T-R1.1).
+        // Initialize and calibrate hardware TSC on a background thread once per process.
         // Non-blocking for the host: during the 60ms calibration window, initial audio blocks
         // fall back safely to Instant::now(). The calibration routine anchors the TSC baseline
         // to Instant::now() before publishing the multiplier, ensuring continuous and monotonic
@@ -285,7 +285,7 @@ impl DefaultPluginFactory for NamClapPlugin {
             latency_restart_requested_for: Cell::new(None),
         };
 
-        // Register periodic main-thread watchdog timer (F-NP-R1).
+        // Register periodic main-thread watchdog timer.
         // A 250ms period guarantees RT poison recovery <= 250ms, latency/PDC sync,
         // and Tier 1 GC ring drain (32 slots) 4x/second without RT thread involvement.
         if let Some(timer_ext) = main_thread

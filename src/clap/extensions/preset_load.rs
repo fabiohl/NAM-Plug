@@ -142,7 +142,7 @@ impl PluginPresetLoadImpl for NamClapMainThread<'_> {
             });
         }
 
-        // F-UX-06: `ui_loading` is raised only while `housekeeping()` is inside
+        // `ui_loading` is raised only while `housekeeping()` is inside
         // `load_model`, not at enqueue time.
         self.host.shared().request_callback();
 

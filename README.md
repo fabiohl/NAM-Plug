@@ -5,7 +5,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 # NAM-Plug
 
-![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.99%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![Version](https://img.shields.io/badge/Version-1.1.0-informational.svg) ![GUI](https://img.shields.io/badge/GUI-Slint%201.18%20%7C%20FemtoVG%20%7C%20X11%20Embedded%20%2F%20Floating-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg) ![Parity](https://img.shields.io/badge/Parity-Dual--Oracle%20%3E136dB%20SNR-success.svg)
+![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.99%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![Version](https://img.shields.io/badge/Version-1.2.0-informational.svg) ![GUI](https://img.shields.io/badge/GUI-Slint%201.19%20%7C%20FemtoVG%20%7C%20X11%20Embedded%20%2F%20Floating-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg) ![Parity](https://img.shields.io/badge/Parity-Dual--Oracle%20%3E136dB%20SNR-success.svg)
 
 **NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs (Bitwig Studio, REAPER, Studio One, etc.).
 
@@ -61,7 +61,7 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 | **Cabinet IR Convolution**     | Uniform-Partitioned Overlap-Save (UPOLS) FFT convolution engine (.wav)                          | Ultra-low-overhead speaker cabinet simulation ($1.3\text{ µs}$ for 512-sample IRs)                                     |
 | **Anti-Aliasing Oversampling** | Half-band polyphase FIR filters (`Off`, `2x`, `4x`, >100 dB stopband)                           | Eliminates non-linear high-frequency foldover/aliasing in high-gain models                                             |
 | **Activation Precision**       | `Standard` (exact Taylor minimax) vs `Fast` (Padé polynomial approximations)                    | User-selectable balance between floating-point precision (+89.5 dB SNR) and CPU cycles                                 |
-| **Graphical User Interface**   | Slint 1.18 declarative UI (FemtoVG/OpenGL via `winit`)                                          | Native X11 XEmbed host panel embedding, X11/Wayland floating fallback (Wayland floating experimental), 60 FPS metering |
+| **Graphical User Interface**   | Slint 1.19 declarative UI (FemtoVG/OpenGL via `winit`)                                          | Native X11 XEmbed host panel embedding, X11/Wayland floating fallback (Wayland floating experimental), 60 FPS metering |
 | **Denormal Armor**             | Symmetric −220 dBFS dither injection + hardware MXCSR FTZ/DAZ                                   | Eliminates 10–100× CPU microcode penalties during digital silence with zero net DC drift                               |
 | **Bypass Crossfader**          | 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with branchless FMA loop & phase compensation | Smooth, pop-free transitions with zero phase cancellation                                                              |
 | **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`                           | Instant host Plugin Delay Compensation with 0 per-block audio thread overhead                                          |
@@ -215,7 +215,7 @@ NAM-Plug features a dual-stage input and output metering system designed for pre
 
 ---
 
-## 🎛️ DSP Design Boundaries & Deliberate Architectural Decisions (P06)
+## 🎛️ DSP Design Boundaries & Deliberate Architectural Decisions
 
 To maintain uncompromising real-time determinism, pristine modularity, and zero-allocation execution, certain features from legacy guitar plugins are omitted by deliberate engineering design:
 
@@ -253,29 +253,29 @@ sudo apt update && sudo apt install -y build-essential pkg-config cmake libgl1-m
 NAM-Plug supports a **dual-stack** packaging architecture targeting both `26.08` and `25.08` runtime branches simultaneously:
 
 ```bash
-# Para DAWs modernas no runtime 26.08 (ex.: Fender Studio Pro 8):
-flatpak install --user --reinstall target/dist/nam-plug-1.1.0-linux-x86_64.flatpak
+# For modern DAWs on runtime 26.08 (e.g., Fender Studio Pro 8):
+flatpak install --user --reinstall target/dist/nam-plug-1.2.0-linux-x86_64.flatpak
 
-# Para DAWs estáveis no runtime 25.08 (ex.: Bitwig Studio, REAPER):
-flatpak install --user --reinstall target/dist/nam-plug-1.1.0-linux-x86_64-25.08.flatpak
+# For stable DAWs on runtime 25.08 (e.g., Bitwig Studio, REAPER):
+flatpak install --user --reinstall target/dist/nam-plug-1.2.0-linux-x86_64-25.08.flatpak
 ```
 
-Ambos os ramos podem coexistir lado a lado no sistema sem conflitos:
+Both branches can coexist side by side without conflicts:
 
 ```bash
 flatpak list --runtime | grep NAMPlug
 ```
 
-As DAWs montam automaticamente o ramo correspondente em `/app/extensions/Plugins/clap/nam_plug.clap` na inicialização — sem furos ou permissões manuais de sandbox.
+Compatible DAWs automatically mount the matching branch at `/app/extensions/Plugins/clap/nam_plug.clap` on startup — no manual filesystem permissions or sandbox holes required.
 
-Para inspecionar os arquivos instalados por ramo:
+To inspect the installed files per branch:
 
 ```bash
 ls -la ~/.local/share/flatpak/runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/26.08/active/files/clap/
 ls -la ~/.local/share/flatpak/runtime/org.freedesktop.LinuxAudio.Plugins.NAMPlug/x86_64/25.08/active/files/clap/
 ```
 
-Para desinstalar:
+To uninstall:
 
 ```bash
 flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
@@ -287,8 +287,8 @@ flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 > **Host Memory Management:**
 > On systems with constrained RAM, configure `CARGO_BUILD_JOBS` in your host shell profile (e.g. `~/.bashrc`) to prevent memory exhaustion during parallel codegen.
 
-> [!IMPORTANT]
-> **Engine checkout required:** NAM-Plug consumes `NeuralAmpModeler-rs` from the sibling path `../NeuralAmpModeler-rs` at the commit recorded in `variables.env` (`ENGINE_COMMIT`) through `[patch.crates-io]`. The published crates.io release (currently `2.0.0`) is not the source used by this build. Clone the engine next to this repository and check out the pinned commit first:
+> [!NOTE]
+> **Engine Dependency & Optional C++ Parity Checkout:** NAM-Plug consumes `NeuralAmpModeler-rs` (`4.0.0`) directly from crates.io via `Cargo.toml`. No sibling checkout is needed to build or run `cargo test --features testing`. When running full C++ NAMCore parity tests (`utils/tests-long.sh`) without an external `NAM_CORE_RENDER_BIN`, clone the engine next to this repository at the commit pinned in `variables.env` (`ENGINE_COMMIT`):
 >
 > ```bash
 > git clone https://github.com/fabiohl/NeuralAmpModeler-rs ../NeuralAmpModeler-rs

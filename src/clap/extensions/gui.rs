@@ -80,6 +80,10 @@ fn spawn_reaper(name: &'static str, handle: std::thread::JoinHandle<()>) {
 /// window union). Fallback: the rwh-0.6 `HasWindowHandle` impl behind
 /// clack's `raw-window-handle_06` feature, used when the host reports a
 /// custom API whose payload is still an X11 id.
+fn has_non_empty_env(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
 fn extract_parent_x11_id(window: &Window<'_, '_>) -> Option<u32> {
     if let Some(handle) = window.as_x11_handle() {
         return u32::try_from(handle).ok();
@@ -102,13 +106,13 @@ impl<'a> NamClapMainThread<'a> {
     /// shutting down the persistent GUI worker thread.
     ///
     /// Idempotent — safe to call when no window is open. The worker keeps its
-    /// Slint platform alive so the next `spawn_gui` reuses it (Slint 1.18
+    /// Slint platform alive so the next `spawn_gui` reuses it (Slint 1.19
     /// pins the platform to the thread that initialized it).
     ///
     /// The `quit_event_loop` is guarded by the presence of the window handle:
     /// Slint has a single process-wide event-loop proxy, so an unconditional
     /// quit from an instance that never owned a running loop — including one
-    /// that only pre-warmed the platform from `create()` (F-UX-05) — would
+    /// that only pre-warmed the platform from `create()` — would
     /// leave a pending quit for the *next* `run_event_loop` (closing the next
     /// window immediately) or tear down a *different* instance's loop
     /// (observable in parallel tests). A window handle exists only while a
@@ -216,7 +220,7 @@ impl<'a> NamClapMainThread<'a> {
     }
 
     /// Starts the persistent GUI worker (if absent) and pre-warms the Slint
-    /// platform on its thread **without a window** (F-UX-05 / T5.1).
+    /// platform on its thread **without a window**.
     ///
     /// Called from `create()` so the winit/GL backend startup overlaps the rest
     /// of the host's GUI negotiation instead of blocking the host main thread
@@ -255,7 +259,7 @@ impl<'a> NamClapMainThread<'a> {
     ///
     /// All window generations run on the instance's persistent GUI worker
     /// thread (`gui::worker::GuiWorker`), which owns the Slint platform and
-    /// event loop for the instance lifetime — required by Slint 1.18 (the
+    /// event loop for the instance lifetime — required by Slint 1.19 (the
     /// platform is pinned to the initializing thread) and by the XEmbed hook,
     /// which is installed once on that thread and applied to every generation.
     fn spawn_gui(
@@ -418,9 +422,9 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// The detection reads an environment variable once on the main thread; it is
     /// strictly off-RT and safe to call here.
     fn get_preferred_api(&self) -> Option<GuiConfiguration<'_>> {
-        // Detect Wayland session: WAYLAND_DISPLAY being set is the canonical indicator.
-        // This is off-RT (main thread only) so std::env::var is acceptable.
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        // Detect Wayland session: non-empty WAYLAND_DISPLAY is the canonical indicator.
+        // This is off-RT (main thread only) so std::env::var_os is acceptable.
+        if has_non_empty_env("WAYLAND_DISPLAY") {
             log::debug!("GUI API negotiation: Wayland session detected via WAYLAND_DISPLAY");
             return Some(GuiConfiguration {
                 api_type: GuiApiType::WAYLAND,
@@ -452,7 +456,7 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
         // negotiation here keeps the host honest.
         if !configuration.is_floating
             && configuration.api_type == GuiApiType::X11
-            && std::env::var_os("DISPLAY").is_none()
+            && !has_non_empty_env("DISPLAY")
         {
             log::warn!(
                 "GUI create: X11 embedded rejected — no X11 display server \
@@ -479,9 +483,9 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
             self.discard_pending_gui_close();
             self.gui_lifecycle.set(GuiLifecycle::Hidden);
         }
-        // F-UX-05 / T5.1: pre-warm the Slint/winit platform while the host
-        // finishes the GUI negotiation, so the first set_parent/set_transient
-        // and show do not pay backend startup on the host main thread.
+        // Pre-warm the Slint/winit platform while the host finishes the GUI
+        // negotiation, so the first set_parent/set_transient and show do not
+        // pay backend startup on the host main thread.
         self.prewarm_gui_platform(configuration.api_type == GuiApiType::X11);
         Ok(())
     }
@@ -489,11 +493,11 @@ impl<'a> PluginGuiImpl for NamClapMainThread<'a> {
     /// Frees the resources allocated for the graphical interface.
     ///
     /// Closes the current window but keeps the persistent GUI worker alive:
-    /// the host may call `create`/`set_parent` again (Slint 1.18 requires the
+    /// the host may call `create`/`set_parent` again (Slint 1.19 requires the
     /// platform to live on the thread that initialized it, so re-creation
     /// must reuse this instance's worker).
     ///
-    /// The telemetry timer (F-UX-08) dies with the window generation: the
+    /// The telemetry timer dies with the window generation: the
     /// worker drops its `SlintViewModel` — and with it the `slint::Timer` —
     /// as soon as the event loop quit is processed.
     fn destroy(&self) {

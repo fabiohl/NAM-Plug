@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Integration and characterization tests for Cabinet IR Level Policy (S03).
+//! Integration and characterization tests for Cabinet IR Level Policy.
 //!
 //! Verifies:
-//! 1. T03.1 Characterization: unit impulse and WAVs with peaks 0.25, 0.5, 1.0, 2.0 (clipping),
+//! 1. Characterization: unit impulse and WAVs with peaks 0.25, 0.5, 1.0, 2.0 (clipping),
 //!    and 0.0 (silent) across 44.1 / 48 / 96 kHz, plus long IRs (> 8192 samples) and cross-rate
 //!    resampling, compared against an independent f64 direct convolution oracle with latency
 //!    compensation.
-//! 2. T03.2 Policy & State Compatibility: `PeakNormalized` (default, including legacy states
+//! 2. Policy & State Compatibility: `PeakNormalized` (default, including legacy states
 //!    missing `ir_level_policy`), `Preserved` (1:1 non-destructive), and `LegacyNamPlugin`
 //!    (`10^(-18/20) * 48000 / fs`).
 //! 3. Non-destructive raw storage: switching policy or host rate re-derives from original WAV

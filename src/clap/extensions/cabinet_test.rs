@@ -42,7 +42,7 @@ fn accepts_valid_wavenet_post_stack_head_in_cabinet_slot() {
         true,
         &sys,
     )
-    .expect("engine 3.0.0 must build a valid WaveNet 1x1 model with config.head in the cab slot");
+    .expect("engine must build a valid WaveNet 1x1 model with config.head in the cab slot");
 
     let inp = [0.2f32, -0.4, 0.8, 0.0];
     let mut out_l = [0.0f32; 4];

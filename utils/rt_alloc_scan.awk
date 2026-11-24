@@ -29,7 +29,7 @@
 # conservative: any new heap-allocation API on the audio thread must be
 # added to the pattern list below.
 #
-# Scope note (T5.2): this is the SOURCE-level half of the zero-alloc contract.
+# Scope note: this is the SOURCE-level half of the zero-alloc contract.
 # The BINARY-level half (alloc/div/TLS gates on the compiled artifact) is the
 # unified disassembly filter `utils/dsp-hotpath-filter.py` driven by
 # `utils/codegen-profile.json` and invoked from `verify_rt_codegen.sh`; the two

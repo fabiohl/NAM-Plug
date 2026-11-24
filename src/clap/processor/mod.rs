@@ -52,18 +52,13 @@ pub(crate) use state::{CMD_SWAP_TUNABLES, SLIMMABLE_SWAP_TUNABLES};
 pub(crate) static DRAIN_PROBE_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-/// Test-only hook to inject a panic inside the `process()` audio callback.
-#[cfg(any(test, feature = "testing"))]
-pub(crate) static TEST_PANIC_INJECTION: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Test-only hook to inject a synthetic stalled block into telemetry
-/// (T-P1.3.2): when non-zero, `process_telemetry` clamps the measured
-/// `elapsed_nanos` up to at least this value (`elapsed.max(stall)`) and then
-/// resets the hook to zero (one-shot). Lets tests inject exactly one
-/// over-budget block deterministically through the real `process()` path
-/// without sleeping on the audio thread. `#[cfg]`-gated: absent from every
-/// non-test build, zero cost in production.
+/// Test-only hook to inject a synthetic stalled block into telemetry:
+/// when non-zero, `process_telemetry` clamps the measured `elapsed_nanos` up
+/// to at least this value (`elapsed.max(stall)`) and then resets the hook to
+/// zero (one-shot). Lets tests inject exactly one over-budget block
+/// deterministically through the real `process()` path without sleeping on the
+/// audio thread. `#[cfg]`-gated: absent from every non-test build, zero cost in
+/// production.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) static TEST_TELEMETRY_STALL_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -79,11 +74,6 @@ pub(crate) static TEST_TELEMETRY_STALL_TARGET_INSTANCE: std::sync::atomic::Atomi
 /// concurrently running test.
 #[cfg(test)]
 pub(crate) static TEST_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Test-only hook to inject a panic inside the `reset()` audio processor method.
-#[cfg(any(test, feature = "testing"))]
-pub(crate) static TEST_RESET_PANIC_INJECTION: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// Maximum plausible duration for an audio callback measurement or prewarm step (1 second).
 ///
@@ -147,7 +137,7 @@ pub(crate) fn panic_to_error(panic_info: Box<dyn std::any::Any + Send>) -> Plugi
 ///
 /// Used for deterministic O(1) silence on processor failure / poisoning without allocations.
 /// Directly targets output ports to eliminate buffer-pairing sample type mismatches
-/// and handles both f32 and f64 host audio ports defensively in depth (F-NP-R4).
+/// and handles both f32 and f64 host audio ports defensively in depth.
 #[inline(always)]
 fn silence_audio_ports(audio: &mut Audio) {
     for mut port_pair in audio {
@@ -293,7 +283,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 self.apply_rt_thread_setup();
             }));
             if let Err(err) = result {
-                // Processor poisoning containment (F-NP-02): latch poisoned state and signal to main
+                // Processor poisoning containment: latch poisoned state and signal to main
                 // thread via atomic status flag.
                 self.poisoned = true;
                 self.rt_status
@@ -325,7 +315,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         mut audio: Audio,
         events: Events,
     ) -> Result<ProcessStatus, PluginError> {
-        // Processor poisoning containment (F-NP-02): Fast O(1) containment path if processor is poisoned.
+        // Processor poisoning containment: Fast O(1) containment path if processor is poisoned.
         // Zero allocations, zero I/O, zero log calls on the RT hot-path.
         if self.poisoned {
             silence_audio_ports(&mut audio);
@@ -344,7 +334,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         // Isolate panics in this instance's audio callback.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             #[cfg(any(test, feature = "testing"))]
-            if TEST_PANIC_INJECTION.swap(false, Ordering::Relaxed) {
+            if self
+                .shared
+                .cold
+                .test_panic_injection
+                .swap(false, Ordering::Relaxed)
+            {
                 panic!("Test injected audio processing panic");
             }
 
@@ -366,13 +361,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                 self.apply_rt_thread_setup();
             }
 
-            // Per-block telemetry (T-P1.3.2): every block is measured.
-            // The T-P1.3.1 measurement (núcleo isolado, 2026-10-01) priced the
-            // full cost (par rdtsc + stores Relaxed + histograma + orçamento +
-            // FSM) at ~90-105 ciclos ≈ 0,004% de um bloco de 64 @48 kHz — mais
-            // de 10× abaixo do limiar de 0,05%. Amostrar 1/16 perderia 15 de
-            // cada 16 estouros de deadline e enviesaria o histograma p99 e o
-            // FSM adaptativo; medir todo bloco não precisa de decimação.
+            // Per-block telemetry: every block is measured.
+            // On an isolated core, the full cost (rdtsc pair + Relaxed stores +
+            // histogram + budget + FSM) was measured at ~90-105 cycles (~0.004%
+            // of a 64-sample @ 48 kHz block), well below 0.05%. Sampling 1/16
+            // would miss 15 of every 16 deadline overruns and skew p99/adaptive
+            // compute, so every block is measured without decimation.
             //
             // NOTE (Architecture): rdtsc_nanos() is backed by serialized cycle counters:
             // RDTSC on x86_64, and CNTVCT_EL0 generic timer on aarch64.
@@ -437,10 +431,10 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                             let _ = model_r.prewarm_step(step);
                         }
                         // Refine the per-sample cost estimate from the real
-                        // drain elapsed time (U-02 / F-PR-10). A step that
-                        // overran half the callback period folds in the worst
-                        // observed cost immediately so the next callback's
-                        // budget shrinks before it can breach the deadline.
+                        // drain elapsed time. A step that overran half the
+                        // callback period folds in the worst observed cost
+                        // immediately so the next callback's budget shrinks
+                        // before it can breach the deadline.
                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                         {
                             if !self.prewarm_static {
@@ -493,14 +487,14 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
                             let _ = TEST_PREWARM_ELAPSED_NS.swap(0, Ordering::Relaxed);
                         }
                     } else {
-                        // Budget is zero for this callback (D-15 / S08.5).
+                        // Budget is zero for this callback.
                         // Track consecutive starvation; do NOT force a sample if that would break deadline.
                         self.prewarm_zero_budget_count =
                             self.prewarm_zero_budget_count.saturating_add(1);
                         // Emit request_callback() and update starvation telemetry strictly on the limit
                         // transition (== LIMIT) rather than on every subsequent callback, preventing a
                         // callback storm while zero budget persists. Do NOT assert HOST_CONTRACT_VIOLATION
-                        // for an internal budget constraint (S08.5).
+                        // for an internal budget constraint.
                         if self.prewarm_zero_budget_count
                             == prewarm_policy::PREWARM_ZERO_BUDGET_STARVATION_LIMIT
                         {
@@ -538,7 +532,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         match result {
             Ok(r) => r,
             Err(err) => {
-                // Processor poisoning containment (F-NP-02): Latch poisoned state and signal to main thread via atomic status flag.
+                // Processor poisoning containment: Latch poisoned state and signal to main thread via atomic status flag.
                 self.poisoned = true;
                 self.rt_status
                     .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
@@ -566,7 +560,12 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
         // is deallocated or recreated on the audio thread.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             #[cfg(any(test, feature = "testing"))]
-            if TEST_RESET_PANIC_INJECTION.swap(false, Ordering::Relaxed) {
+            if self
+                .shared
+                .cold
+                .test_reset_panic_injection
+                .swap(false, Ordering::Relaxed)
+            {
                 panic!("Test injected reset panic");
             }
 

@@ -5,7 +5,7 @@
 //!
 //! Allows the host to activate and deactivate audio ports (port 0) and signals
 //! buffer sample size capability. NAM-Plug exclusively processes 32-bit float (`f32`)
-//! audio buffers, rejecting `SampleSize::Float64` per CLAP specification (D-13).
+//! audio buffers, rejecting `SampleSize::Float64` per CLAP specification.
 
 use crate::clap::plugin::NamClapMainThread;
 use crate::clap::processor::NamClapProcessor;
@@ -40,7 +40,7 @@ impl PluginAudioPortsActivationSetImpl for NamClapMainThread<'_> {
             return false;
         }
         if sample_size == SampleSize::Float64 {
-            // NAM-Plug only processes 32-bit float buffers; reject Float64 (D-13).
+            // NAM-Plug only processes 32-bit float buffers; reject Float64.
             return false;
         }
         if is_input {
@@ -74,7 +74,7 @@ impl PluginAudioPortsActivationSetImpl for NamClapProcessor<'_> {
             return false;
         }
         if sample_size == SampleSize::Float64 {
-            // NAM-Plug only processes 32-bit float buffers; reject Float64 (D-13).
+            // NAM-Plug only processes 32-bit float buffers; reject Float64.
             return false;
         }
         if is_input {

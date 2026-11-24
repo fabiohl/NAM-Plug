@@ -40,7 +40,7 @@ fn test_flag_set_and_clear_mechanism() {
 }
 
 // Mutex to synchronize tests inspecting or mutating the global NamLogger / LogBuffer state
-static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+use crate::clap::test_util::TEST_LOGGER_MUTEX as TEST_MUTEX;
 
 // Verify flag-to-log messages reach LogBuffer
 #[test]

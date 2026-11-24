@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Per-instance asynchronous model loader worker (F-UX-01) and
-//! adaptive-rebuild offload (F-UX-02).
+//! Per-instance asynchronous model loader worker and adaptive-rebuild offload.
 //!
 //! The heavy, side-effect-free half of a model load
-//! ([`NmClapMainThread::prepare_model`](super::NamClapMainThread::prepare_model))
+//! ([`NamClapMainThread::prepare_model`](super::NamClapMainThread::prepare_model))
 //! runs on a dedicated **non-RT** thread (normal scheduling priority, never
 //! `SCHED_FIFO`) so the CLAP main thread — and therefore `housekeeping()` — is
 //! never blocked by file I/O, hashing or model construction. The short commit
 //! ([`commit_prepared_model`](super::NamClapMainThread::commit_prepared_model))
 //! stays on the main thread.
 //!
-//! # Adaptive rebuild offload (F-UX-02)
+//! # Adaptive rebuild offload
 //!
 //! The same worker also builds the two allocation-heavy structural refreshes
 //! requested by the audio thread — the WaveNet *slimmable* slice (`slice` +
@@ -68,7 +67,7 @@ use std::time::Duration;
 pub(crate) const REBUILD_POLL_INTERVAL_ACTIVE: Duration = Duration::from_millis(10);
 
 /// Poll window while the worker is idle and the plugin is NOT processing audio (250 ms):
-/// disarmed in `stop_processing()`, reduces background thread wakeups by 25x while idle/deactivated (F-RA-06).
+/// disarmed in `stop_processing()`, reduces background thread wakeups by 25x while idle/deactivated.
 pub(crate) const REBUILD_POLL_INTERVAL_IDLE: Duration = Duration::from_millis(250);
 
 /// One model load dispatched to the loader worker.

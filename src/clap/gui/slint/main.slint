@@ -83,9 +83,8 @@ export component MainWindow inherits Window {
     in-out property <string> latency_text: "0 spl (0.0 ms)";
     in-out property <string> channels_text: "Stereo";
     // "—" is the honest placeholder until a real per-block DSP-load metric is
-    // wired (Finding F6 / T3.6.3): the preview binary and the design-time
-    // default previously showed a hard-coded "1.4% DSP" that never reflected
-    // the actually loaded model or host block size.
+    // wired: the preview binary and the design-time default previously showed
+    // a hard-coded "1.4% DSP" that never reflected the loaded model or block size.
     in-out property <string> dsp_load_text: "—";
     in-out property <bool> xrun_active: false;
     in-out property <string> oversample_text: "1x (Off)";
@@ -122,7 +121,7 @@ export component MainWindow inherits Window {
     callback input_calibration_level_changed(float);
     callback output_mode_changed(int);
     // Lifecycle bridge: invoked by the CLAP gui show()/hide() paths so the
-    // 60 Hz telemetry timer can be suspended with the window (F-UX-08).
+    // 60 Hz telemetry timer can be suspended with the window.
     callback set_telemetry_active(bool);
 
     VerticalLayout {

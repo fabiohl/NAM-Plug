@@ -350,9 +350,9 @@ fn test_slint_view_model_full_lifecycle() {
     assert!(!window.get_has_ir(), "has_ir on window must be false");
     assert_eq!(window.get_ir_name(), "No cabinet loaded");
 
-    // Select Model Clicked Trigger (F-UX-06): the dialog is open, but no load
-    // has started — `ui_dialog_open` and `ui_loading` are separate states and
-    // the spinner only follows the latter.
+    // Select Model Clicked Trigger: the dialog is open, but no load has started —
+    // `ui_dialog_open` and `ui_loading` are separate states and the spinner only
+    // follows the latter.
     window.invoke_load_model_clicked();
     assert!(
         shared.cold.ui_dialog_open.load(Ordering::Relaxed),
@@ -367,7 +367,7 @@ fn test_slint_view_model_full_lifecycle() {
         "dialog_state.active must be true"
     );
 
-    // Spinner transitions (F-UX-06): `dialog_open → loading → idle`.
+    // Spinner transitions: `dialog_open → loading → idle`.
     vm.tick_telemetry();
     assert!(
         !window.get_model_loading(),
@@ -390,7 +390,7 @@ fn test_slint_view_model_full_lifecycle() {
     shared.cold.ui_dialog_open.store(false, Ordering::Relaxed);
     shared.cold.ui_loading.store(false, Ordering::Relaxed);
 
-    // ── Phase 6: Model Architecture Badge Live Update (Finding F6) ───────
+    // ── Phase 6: Model Architecture Badge Live Update ────────────────────
     // Mirrors the `ui_model_name` diff pattern: loading a model must update
     // `model_arch` on the next tick, and clearing it must revert to the
     // "No model loaded" placeholder — never a stale architecture string.
@@ -412,10 +412,10 @@ fn test_slint_view_model_full_lifecycle() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// T2.1 — Status-bar string cache (F-UX-08)
+// Status-bar string cache
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Test wrapper around `StatusTextSink` (F-UX-08): records every `set_*_text`
+/// Test wrapper around `StatusTextSink`: records every `set_*_text`
 /// publication so the cache can be held to "no publication without a change".
 #[derive(Default)]
 struct CountingStatusSink {

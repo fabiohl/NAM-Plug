@@ -253,6 +253,11 @@ pub fn load_plugin_state(instance: &mut PluginInstance<TestHost>, params: &Proce
 
 // ── Logger verification helpers ──
 
+/// Serializes unit tests in `--lib` that mutate `log::max_level` / `NamLogger`
+/// or assert on the bounded process-global `LogBuffer` (256 slots), preventing
+/// concurrent log-flooding tests from evicting or filtering assertions.
+pub static TEST_LOGGER_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Snapshots the global `LogBuffer` and asserts it contains a message
 /// matching `expected`. Returns the full snapshot for further inspection.
 pub fn assert_log_buffer_contains(expected: &str) {

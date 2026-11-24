@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
-//! Host log and host call quiescence coordinators ensuring strict memory safety (zero UAF)
-//! (D-16 / S08.3 / E-11 / SP-06 / F-PLUG-02).
+//! Host log and host call quiescence coordinators ensuring strict memory safety (zero UAF).
 //!
 //! Under the CLAP specification, the DAW host owns the `clap_host` instance. If `destroy`
 //! finishes and the host deallocates its host handle or instance data while a foreign thread
 //! is mid-call in `host_log.log()` or `request_callback()`, an immediate Use-After-Free (UAF) occurs.
 //!
-//! # Architecture and Safety Trade-Off (S08.3 / GAP-HOST-LOG-TEARDOWN-BOUND)
+//! # Architecture and Safety Trade-Off (`GAP-HOST-LOG-TEARDOWN-BOUND`)
 //!
 //! Memory safety strictly takes precedence over bounded teardown:
 //! 1. Immediate rejection: As soon as quiescence begins, any subsequent dispatch attempts
@@ -246,7 +245,7 @@ impl Drop for QuiescenceGuard<'_> {
     }
 }
 
-/// Coordinator for external host call quiescence from detachable threads (SP-06 / F-PLUG-02).
+/// Coordinator for external host call quiescence from detachable threads.
 ///
 /// Under the CLAP specification, the DAW host owns the `clap_host` pointer and can deallocate
 /// it or free plugin resources once `destroy()` returns. Any background thread
@@ -300,7 +299,7 @@ impl HostCallQuiescence {
     }
 
     /// Quiesces the coordinator, rejecting future calls and waiting for in-flight calls
-    /// to finish (SP-06 / F-PLUG-02 / GAP-HOST-LOG-TEARDOWN-BOUND).
+    /// to finish (GAP-HOST-LOG-TEARDOWN-BOUND).
     pub fn quiesce(&self, grace_period: Duration) -> QuiescenceOutcome {
         quiesce_state(
             &self.state,

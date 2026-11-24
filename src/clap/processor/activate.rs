@@ -165,6 +165,92 @@ fn build_cab_slot_from_cold_storage(
     )
 }
 
+fn adapt_staged_model_for_host_config(
+    m: &mut crate::clap::plugin::shared::LoadModelPayload,
+    host_rate: u32,
+    host_buffer: u32,
+    kind_label: &str,
+) -> Result<(), PluginError> {
+    if m.new_stream.host_rate() == host_rate && m.new_stream.max_block() == host_buffer as usize {
+        return Ok(());
+    }
+    log::info!(
+        "NAM-Plug: adapting {kind_label} for new audio config \
+         (staged: {} Hz/{} frames -> host: {} Hz/{} frames)",
+        m.new_stream.host_rate(),
+        m.new_stream.max_block(),
+        host_rate,
+        host_buffer
+    );
+    let model_rate = m.new_stream.model_rate();
+    let new_res = NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
+        static_plugin_error(
+            errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+            format_args!("{e:?}"),
+        )
+    })?;
+    let new_stream =
+        crate::clap::plugin::build_stream_adapter(host_rate, model_rate, host_buffer as usize)
+            .map_err(|e| {
+                static_plugin_error(
+                    errors::dsp_resources::STREAM_BUILD_FAILED,
+                    format_args!("{e:?}"),
+                )
+            })?;
+    if let Some(ref mut model) = m.model_l {
+        model
+            .set_max_buffer_size(host_buffer as usize)
+            .map_err(|e| {
+                static_plugin_error(
+                    errors::activation::MODEL_RESIZE_FAILED,
+                    format_args!("{e:?}"),
+                )
+            })?;
+        m.prewarm_cost_ns = if prewarm_policy::ADAPTIVE_COST_ENABLED {
+            let measure_frames =
+                prewarm_policy::PREWARM_MEASURE_FRAMES.min((host_buffer as usize).max(1));
+            Some(model.measure_cost_ns_per_sample(measure_frames))
+        } else {
+            None
+        };
+    }
+    if let Some(ref mut model) = m.model_r {
+        model
+            .set_max_buffer_size(host_buffer as usize)
+            .map_err(|e| {
+                static_plugin_error(
+                    errors::activation::MODEL_RESIZE_FAILED,
+                    format_args!("{e:?}"),
+                )
+            })?;
+    }
+    *m.new_resampler = new_res;
+    m.new_stream = new_stream;
+    Ok(())
+}
+
+fn drain_model_prewarm_off_rt(
+    model: &mut Option<Box<neural_amp_modeler_rs::models::StaticModel>>,
+    label: &str,
+) {
+    let Some(model) = model else {
+        return;
+    };
+    for _ in 0..64 {
+        if model.prewarm_complete() {
+            break;
+        }
+        model.prewarm_step(usize::MAX);
+    }
+    debug_assert!(
+        model.prewarm_complete(),
+        "{label} stabilization pass must complete in activate()"
+    );
+    if !model.prewarm_complete() {
+        log::warn!("NAM-Plug: {label} stabilization pass did not complete during activate()");
+    }
+}
+
 impl<'a> NamClapProcessor<'a> {
     /// Activates the real-time audio processor.
     ///
@@ -226,62 +312,43 @@ impl<'a> NamClapProcessor<'a> {
             rollback.slimmable_rx = Some(slimmable_rx);
 
             // 2. Intermediate buffer pre-allocation (Disjoint Stages)
+            let alloc_buf = |cap: usize, stage: &str| {
+                AlignedVec::new(cap, 0.0f32).map_err(|e| buffer_prealloc_error(stage, e))
+            };
             let buf_capacity = (audio_config.max_frames_count as usize)
                 .max(MAX_RESAMP_BUF)
                 .max(1024)
                 * 2;
-            let buf_host_l = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("host", e))?;
-            let buf_host_r = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("host", e))?;
-            let buf_mid_l = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("mid", e))?;
-            let buf_mid_r = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("mid", e))?;
-            let buf_out_l = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("output", e))?;
-            let buf_out_r = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("output", e))?;
+            let buf_host_l = alloc_buf(buf_capacity, "host")?;
+            let buf_host_r = alloc_buf(buf_capacity, "host")?;
+            let buf_mid_l = alloc_buf(buf_capacity, "mid")?;
+            let buf_mid_r = alloc_buf(buf_capacity, "mid")?;
+            let buf_out_l = alloc_buf(buf_capacity, "output")?;
+            let buf_out_r = alloc_buf(buf_capacity, "output")?;
 
             // 2b. Oversample buffer pre-allocation (MAX_RESAMP_BUF * 4 for X4)
             let os_capacity = MAX_RESAMP_BUF * 4;
-            let buf_os_in_l = AlignedVec::new(os_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("oversample input", e))?;
-            let buf_os_in_r = AlignedVec::new(os_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("oversample input", e))?;
-            let buf_os_model_l = AlignedVec::new(os_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("oversample model", e))?;
-            let buf_os_model_r = AlignedVec::new(os_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("oversample model", e))?;
+            let buf_os_in_l = alloc_buf(os_capacity, "oversample input")?;
+            let buf_os_in_r = alloc_buf(os_capacity, "oversample input")?;
+            let buf_os_model_l = alloc_buf(os_capacity, "oversample model")?;
+            let buf_os_model_r = alloc_buf(os_capacity, "oversample model")?;
 
             // 2c. Bypass crossfade dry storage (one sub-block of input samples, max_frames_count).
             let xfade_capacity = audio_config.max_frames_count as usize;
-            let buf_xfade_dry_l = AlignedVec::new(xfade_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("bypass xfade dry", e))?;
-            let buf_xfade_dry_r = AlignedVec::new(xfade_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("bypass xfade dry", e))?;
+            let buf_xfade_dry_l = alloc_buf(xfade_capacity, "bypass xfade dry")?;
+            let buf_xfade_dry_r = alloc_buf(xfade_capacity, "bypass xfade dry")?;
 
-            // 2d. WaveNet crossfade scratch buffers (0.5.0 run_inference): used
-            // as the second-pass output when processing is chunked, so it must
-            // not alias any accumulated output buffer. MAX_RESAMP_BUF each.
-            let buf_xfd_scratch_l = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("crossfade scratch", e))?;
-            let buf_xfd_scratch_r = AlignedVec::new(MAX_RESAMP_BUF, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("crossfade scratch", e))?;
+            // 2d. WaveNet crossfade scratch buffers (MAX_RESAMP_BUF each).
+            let buf_xfd_scratch_l = alloc_buf(MAX_RESAMP_BUF, "crossfade scratch")?;
+            let buf_xfd_scratch_r = alloc_buf(MAX_RESAMP_BUF, "crossfade scratch")?;
 
             // 2e. Cabinet bypass & neural cabinet scratch buffers (zero RT alloc).
-            let buf_cab_dry_l = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("cab dry delay", e))?;
-            let buf_cab_dry_r = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("cab dry delay", e))?;
-            let buf_cab_nam_in_l = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("cab nam input", e))?;
-            let buf_cab_nam_in_r = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("cab nam input", e))?;
-            let buf_cab_zero_l = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("cab zero input", e))?;
-            let buf_cab_zero_r = AlignedVec::new(buf_capacity, 0.0f32)
-                .map_err(|e| buffer_prealloc_error("cab zero input", e))?;
+            let buf_cab_dry_l = alloc_buf(buf_capacity, "cab dry delay")?;
+            let buf_cab_dry_r = alloc_buf(buf_capacity, "cab dry delay")?;
+            let buf_cab_nam_in_l = alloc_buf(buf_capacity, "cab nam input")?;
+            let buf_cab_nam_in_r = alloc_buf(buf_capacity, "cab nam input")?;
+            let buf_cab_zero_l = alloc_buf(buf_capacity, "cab zero input")?;
+            let buf_cab_zero_r = alloc_buf(buf_capacity, "cab zero input")?;
 
             // 3. DSP component initialization
             let model_rate = shared.cold.model_sample_rate.load(Ordering::Relaxed);
@@ -321,182 +388,41 @@ impl<'a> NamClapProcessor<'a> {
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
 
-            let (new_resampler, new_stream, new_cabsim, new_os) =
+            let (rate_matches, stream_matches, cab_matches, os_matches) =
                 if let Some(ref deact) = rollback.deactivated {
                     let rate_matches = deact.sample_rate == host_rate;
                     let buf_matches = deact.buffer_size == host_buffer;
                     let os_matches = deact.os_factor == os_factor;
-                    // The cab-sim adapter is block-agnostic (`process_block`
-                    // chunks arbitrary host blocks against the fixed partition
-                    // internally), so a buffer-size renegotiation no longer
-                    // invalidates it: only the sample rate does (the IR was
-                    // resampled to the host rate at build time). Quantum
-                    // changes reuse the adapter — keeping its partition (and
-                    // the latency the host already received) instead of paying
-                    // a full FFT rebuild per buffer-size change.
                     let cab_matches = deact.cab_slot.as_ref().is_some_and(|c| {
                         c.is_compatible_with_host(host_rate, host_buffer as usize)
                     });
-                    // The streaming adapter's FIFO capacities are sized by the
-                    // worst-case host block, so it also needs `buf_matches`.
-                    let stream_matches = rate_matches && buf_matches;
-
-                    let res = if rate_matches {
-                        None
-                    } else {
-                        Some(Box::new(
-                            NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
-                                static_plugin_error(
-                                    errors::dsp_resources::RESAMPLER_BUILD_FAILED,
-                                    format_args!("{e:?}"),
-                                )
-                            })?,
-                        ))
-                    };
-
-                    let stream = if stream_matches {
-                        None
-                    } else {
-                        Some(
-                            crate::clap::plugin::build_stream_adapter(
-                                host_rate,
-                                model_rate,
-                                host_buffer as usize,
-                            )
-                            .map_err(|e| {
-                                static_plugin_error(
-                                    errors::dsp_resources::STREAM_BUILD_FAILED,
-                                    format_args!("{e:?}"),
-                                )
-                            })?,
-                        )
-                    };
-
-                    let cab = if cab_matches {
-                        None
-                    } else {
-                        Some(build_cab_slot_from_cold_storage(
-                            shared,
-                            None,
-                            None,
-                            audio_config.max_frames_count as usize,
-                            host_rate,
-                        )?)
-                    };
-
-                    let os = if os_matches {
-                        None
-                    } else {
-                        let os_l = Box::new(
-                            OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(|e| {
-                                static_plugin_error(
-                                    errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
-                                    format_args!("(L) engine: {e:?}"),
-                                )
-                            })?,
-                        );
-                        let os_r = Box::new(
-                            OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(|e| {
-                                static_plugin_error(
-                                    errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
-                                    format_args!("(R) engine: {e:?}"),
-                                )
-                            })?,
-                        );
-                        Some((os_l, os_r))
-                    };
-
-                    (res, stream, cab, os)
+                    (
+                        rate_matches,
+                        rate_matches && buf_matches,
+                        cab_matches,
+                        os_matches,
+                    )
                 } else {
-                    let res = Some(Box::new(
-                        NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
-                            static_plugin_error(
-                                errors::dsp_resources::RESAMPLER_BUILD_FAILED,
-                                format_args!("{e:?}"),
-                            )
-                        })?,
-                    ));
-
-                    let stream = Some(
-                        crate::clap::plugin::build_stream_adapter(
-                            host_rate,
-                            model_rate,
-                            host_buffer as usize,
-                        )
-                        .map_err(|e| {
-                            static_plugin_error(
-                                errors::dsp_resources::STREAM_BUILD_FAILED,
-                                format_args!("{e:?}"),
-                            )
-                        })?,
-                    );
-
-                    let cab = Some(build_cab_slot_from_cold_storage(
-                        shared,
-                        None,
-                        None,
-                        audio_config.max_frames_count as usize,
-                        host_rate,
-                    )?);
-
-                    let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
-                        |e| {
-                            static_plugin_error(
-                                errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
-                                format_args!("(L) engine: {e:?}"),
-                            )
-                        },
-                    )?);
-                    let os_r = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
-                        |e| {
-                            static_plugin_error(
-                                errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
-                                format_args!("(R) engine: {e:?}"),
-                            )
-                        },
-                    )?);
-
-                    (res, stream, cab, Some((os_l, os_r)))
+                    (false, false, false, false)
                 };
 
-            // Consume any latency-affecting restore or swap staged for this
-            // restart cycle. All fallible stages above already succeeded, so
-            // staged items are never stranded by a failure between here and
-            // `Self` construction. The staged resources were fully built off-RT
-            // by the main thread; they take precedence over preserved
-            // (`DeactivatedDspState`) ones, and superseded preserved resources
-            // drop here on the main thread.
-            let mut staged_guard = StagedItemsRollbackGuard {
-                main_thread,
-                staged_restore: main_thread.staged_restore.borrow_mut().take(),
-                staged_swap: main_thread.staged_swap.borrow_mut().take(),
-                disarmed: false,
+            let new_resampler = if rate_matches {
+                None
+            } else {
+                Some(Box::new(
+                    NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
+                        static_plugin_error(
+                            errors::dsp_resources::RESAMPLER_BUILD_FAILED,
+                            format_args!("{e:?}"),
+                        )
+                    })?,
+                ))
             };
-
-            // Adapt staged_restore for any host audio configuration changes
-            // (e.g. sample rate or buffer size renegotiated upon restart).
-            if let Some(ref mut r) = staged_guard.staged_restore {
-                if let Some(ref mut m) = r.txn.model
-                    && (m.new_stream.host_rate() != host_rate
-                        || m.new_stream.max_block() != host_buffer as usize)
-                {
-                    log::info!(
-                        "NAM-Plug: adapting staged restore model for new audio config \
-                     (staged: {} Hz/{} frames -> host: {} Hz/{} frames)",
-                        m.new_stream.host_rate(),
-                        m.new_stream.max_block(),
-                        host_rate,
-                        host_buffer
-                    );
-                    let model_rate = m.new_stream.model_rate();
-                    let new_res =
-                        NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
-                            static_plugin_error(
-                                errors::dsp_resources::RESAMPLER_BUILD_FAILED,
-                                format_args!("{e:?}"),
-                            )
-                        })?;
-                    let new_stream = crate::clap::plugin::build_stream_adapter(
+            let new_stream = if stream_matches {
+                None
+            } else {
+                Some(
+                    crate::clap::plugin::build_stream_adapter(
                         host_rate,
                         model_rate,
                         host_buffer as usize,
@@ -506,39 +432,62 @@ impl<'a> NamClapProcessor<'a> {
                             errors::dsp_resources::STREAM_BUILD_FAILED,
                             format_args!("{e:?}"),
                         )
-                    })?;
-                    if let Some(ref mut model) = m.model_l {
-                        model
-                            .set_max_buffer_size(host_buffer as usize)
-                            .map_err(|e| {
-                                static_plugin_error(
-                                    errors::activation::MODEL_RESIZE_FAILED,
-                                    format_args!("{e:?}"),
-                                )
-                            })?;
-                        let prewarm_cost_ns =
-                            if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
-                                let measure_frames =
-                                    crate::clap::processor::prewarm_policy::PREWARM_MEASURE_FRAMES
-                                        .min((host_buffer as usize).max(1));
-                                Some(model.measure_cost_ns_per_sample(measure_frames))
-                            } else {
-                                None
-                            };
-                        m.prewarm_cost_ns = prewarm_cost_ns;
-                    }
-                    if let Some(ref mut model) = m.model_r {
-                        model
-                            .set_max_buffer_size(host_buffer as usize)
-                            .map_err(|e| {
-                                static_plugin_error(
-                                    errors::activation::MODEL_RESIZE_FAILED,
-                                    format_args!("{e:?}"),
-                                )
-                            })?;
-                    }
-                    *m.new_resampler = new_res;
-                    m.new_stream = new_stream;
+                    })?,
+                )
+            };
+            let new_cabsim = if cab_matches {
+                None
+            } else {
+                Some(build_cab_slot_from_cold_storage(
+                    shared,
+                    None,
+                    None,
+                    audio_config.max_frames_count as usize,
+                    host_rate,
+                )?)
+            };
+            let new_os = if os_matches {
+                None
+            } else {
+                let os_l = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
+                    |e| {
+                        static_plugin_error(
+                            errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
+                            format_args!("(L) engine: {e:?}"),
+                        )
+                    },
+                )?);
+                let os_r = Box::new(OversampleEngine::new(os_factor, MAX_RESAMP_BUF).map_err(
+                    |e| {
+                        static_plugin_error(
+                            errors::dsp_resources::OVERSAMPLER_BUILD_FAILED,
+                            format_args!("(R) engine: {e:?}"),
+                        )
+                    },
+                )?);
+                Some((os_l, os_r))
+            };
+
+            // Consume any latency-affecting restore or swap staged for this
+            // restart cycle. All fallible stages above already succeeded, so
+            // staged items are never stranded by a failure between here and
+            // `Self` construction.
+            let mut staged_guard = StagedItemsRollbackGuard {
+                main_thread,
+                staged_restore: main_thread.staged_restore.borrow_mut().take(),
+                staged_swap: main_thread.staged_swap.borrow_mut().take(),
+                disarmed: false,
+            };
+
+            // Adapt staged_restore for any host audio configuration changes.
+            if let Some(ref mut r) = staged_guard.staged_restore {
+                if let Some(ref mut m) = r.txn.model {
+                    adapt_staged_model_for_host_config(
+                        m,
+                        host_rate,
+                        host_buffer,
+                        "staged restore model",
+                    )?;
                 }
 
                 if let Some(Some(ref mut cab_slot)) = r.txn.ir
@@ -566,71 +515,15 @@ impl<'a> NamClapProcessor<'a> {
                 }
             }
 
-            // Adapt staged_swap for any host configuration changes
+            // Adapt staged_swap for any host configuration changes.
             if let Some(ref mut s) = staged_guard.staged_swap {
-                if let Some(ref mut m) = s.model
-                    && (m.new_stream.host_rate() != host_rate
-                        || m.new_stream.max_block() != host_buffer as usize)
-                {
-                    log::info!(
-                        "NAM-Plug: adapting staged model swap for new audio config \
-                     (staged: {} Hz/{} frames -> host: {} Hz/{} frames)",
-                        m.new_stream.host_rate(),
-                        m.new_stream.max_block(),
+                if let Some(ref mut m) = s.model {
+                    adapt_staged_model_for_host_config(
+                        m,
                         host_rate,
-                        host_buffer
-                    );
-                    let model_rate = m.new_stream.model_rate();
-                    let new_res =
-                        NamResampler::new_simple_typed(host_rate, model_rate).map_err(|e| {
-                            static_plugin_error(
-                                errors::dsp_resources::RESAMPLER_BUILD_FAILED,
-                                format_args!("{e:?}"),
-                            )
-                        })?;
-                    let new_stream = crate::clap::plugin::build_stream_adapter(
-                        host_rate,
-                        model_rate,
-                        host_buffer as usize,
-                    )
-                    .map_err(|e| {
-                        static_plugin_error(
-                            errors::dsp_resources::STREAM_BUILD_FAILED,
-                            format_args!("{e:?}"),
-                        )
-                    })?;
-                    if let Some(ref mut model) = m.model_l {
-                        model
-                            .set_max_buffer_size(host_buffer as usize)
-                            .map_err(|e| {
-                                static_plugin_error(
-                                    errors::activation::MODEL_RESIZE_FAILED,
-                                    format_args!("{e:?}"),
-                                )
-                            })?;
-                        let prewarm_cost_ns =
-                            if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
-                                let measure_frames =
-                                    crate::clap::processor::prewarm_policy::PREWARM_MEASURE_FRAMES
-                                        .min((host_buffer as usize).max(1));
-                                Some(model.measure_cost_ns_per_sample(measure_frames))
-                            } else {
-                                None
-                            };
-                        m.prewarm_cost_ns = prewarm_cost_ns;
-                    }
-                    if let Some(ref mut model) = m.model_r {
-                        model
-                            .set_max_buffer_size(host_buffer as usize)
-                            .map_err(|e| {
-                                static_plugin_error(
-                                    errors::activation::MODEL_RESIZE_FAILED,
-                                    format_args!("{e:?}"),
-                                )
-                            })?;
-                    }
-                    *m.new_resampler = new_res;
-                    m.new_stream = new_stream;
+                        host_buffer,
+                        "staged model swap",
+                    )?;
                 }
 
                 if let Some(Some(ref mut cab_slot)) = s.ir
@@ -990,40 +883,8 @@ impl<'a> NamClapProcessor<'a> {
             // slimmable rebuild) reports complete immediately: the check
             // alone is the whole cost. The bounded round cap only guards a
             // hypothetical non-converging family against an unbounded loop.
-            if let Some(model) = &mut model_l {
-                for _ in 0..64 {
-                    if model.prewarm_complete() {
-                        break;
-                    }
-                    model.prewarm_step(usize::MAX);
-                }
-                debug_assert!(
-                    model.prewarm_complete(),
-                    "model stabilization pass must complete in activate()"
-                );
-                if !model.prewarm_complete() {
-                    log::warn!(
-                        "NAM-Plug: model stabilization pass did not complete during activate()"
-                    );
-                }
-            }
-            if let Some(model) = &mut model_r {
-                for _ in 0..64 {
-                    if model.prewarm_complete() {
-                        break;
-                    }
-                    model.prewarm_step(usize::MAX);
-                }
-                debug_assert!(
-                    model.prewarm_complete(),
-                    "model_r stabilization pass must complete in activate()"
-                );
-                if !model.prewarm_complete() {
-                    log::warn!(
-                        "NAM-Plug: model_r stabilization pass did not complete during activate()"
-                    );
-                }
-            }
+            drain_model_prewarm_off_rt(&mut model_l, "model");
+            drain_model_prewarm_off_rt(&mut model_r, "model_r");
             if let Some(ref mut model) = model_l {
                 model.inject_rt_status(Arc::clone(&shared.cold.rt_status));
             }
@@ -1034,13 +895,13 @@ impl<'a> NamClapProcessor<'a> {
             let silence_hyst = DynamicHysteresis::new();
             let mono_hyst = DynamicHysteresis::new();
 
-            // Adaptive prewarm seed (U-02 / F-PR-10): measure the installed
-            // model's per-sample inference cost here, off the audio thread
-            // (allocations allowed) so the first amortization window after
-            // activation is sized from real hardware instead of the conservative
-            // family table. The frozen-table latch is set in debug builds (the
-            // measured cost there is not release-representative). Continuous model
-            // swaps update this scalar from the load payload.
+            // Adaptive prewarm seed: measure the installed model's per-sample
+            // inference cost here, off the audio thread (allocations allowed),
+            // so the first amortization window after activation is sized from
+            // real hardware instead of the conservative family table. The
+            // frozen-table latch is set in debug builds (the measured cost there
+            // is not release-representative). Continuous model swaps update
+            // this scalar from the load payload.
             let prewarm_static = !prewarm_policy::ADAPTIVE_COST_ENABLED;
             let prewarm_cost_ns_per_sample = if prewarm_static {
                 None

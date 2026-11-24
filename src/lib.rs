@@ -10,11 +10,11 @@
 //!
 //! - **[`clap`]**: Core plugin entry point, descriptor, extensions (Params, State, GUI, Latency, Preset Discovery), factory wrappers, host harness, and DSP processor implementations.
 //! - **Real-Time Safety (RT-Safety)**: Processing loops in [`clap::processor`] isolate all heap allocations and dynamic drops from the audio thread, communicating with the DAW host and GUI thread via SPSC lock-free channels and atomic status bitmasks.
-//! - **GUI Infrastructure**: Integrated Slint 1.18-based control panel with direct atomic telemetry and non-blocking model/IR loading.
+//! - **GUI Infrastructure**: Integrated Slint 1.19-based control panel with direct atomic telemetry and non-blocking model/IR loading.
 
 // Non-test production code must not rely on `unwrap`/`expect`: every fallible
 // path returns a typed error, and RT-adjacent invariants are handled with
-// explicit `let ... else`/`debug_assert!` instead of panics (F-PR-13). Modules
+// explicit `let ... else`/`debug_assert!` instead of panics. Modules
 // compiled only for the `testing` feature are test support, not production.
 #![cfg_attr(
     not(any(test, feature = "testing")),

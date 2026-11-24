@@ -625,7 +625,7 @@ fn t04_live_clap_automation_mode_switch_and_state_migration() {
         );
     }
 
-    // Pre-S07 v2 state missing `gate_mode` must default safely to GateMode::Silence (0.0).
+    // Legacy v2 state missing `gate_mode` must default safely to GateMode::Silence (0.0).
     let v2_legacy = serde_json::to_vec(&serde_json::json!({
         "version": 2,
         "params": ProcessingParams::default(),
@@ -642,7 +642,7 @@ fn t04_live_clap_automation_mode_switch_and_state_migration() {
         let mut cursor = Cursor::new(&v2_legacy);
         state_ext
             .load(&handle2, &mut cursor)
-            .expect("load pre-S07 v2");
+            .expect("load legacy v2");
     }
     let params_ext = instance2
         .plugin_handle()
@@ -652,7 +652,7 @@ fn t04_live_clap_automation_mode_switch_and_state_migration() {
     assert_eq!(
         params_ext.get_value(&handle2, ClapId::new(PARAM_GATE_MODE)),
         Some(0.0),
-        "pre-S07 v2 payload without gate_mode must default to Silence (0.0)"
+        "legacy v2 payload without gate_mode must default to Silence (0.0)"
     );
 }
 

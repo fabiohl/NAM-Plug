@@ -229,7 +229,7 @@ pub(crate) fn build_restore_package(
                 model_info: _,
                 model_hash: _,
             } = resources;
-            // Off-RT cost calibration for the restored model (U-02 / F-PR-10).
+            // Off-RT cost calibration for the restored model.
             // Cap the block at the negotiated quantum so it never exceeds the
             // model's `max_buffer_size` (composed models truncate the block).
             let prewarm_cost_ns = if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {

@@ -3,7 +3,7 @@
 
 //! Persistent per-instance GUI worker thread.
 //!
-//! Slint 1.18 pins the platform — and with it the winit event loop and the
+//! Slint 1.19 pins the platform — and with it the winit event loop and the
 //! X11 XEmbed hook — to the **thread that first initializes it**. A
 //! per-generation "spawn a thread per window" model therefore breaks the very
 //! first `destroy()` + re-open cycle of a real window: the new thread has no
@@ -20,7 +20,7 @@
 //! # Lifetime protocol
 //!
 //! - [`GuiWorker::spawn`] starts the thread (eagerly, from `gui.create()`, so
-//!   the platform can be pre-warmed before the first window — F-UX-05).
+//!   the platform can be pre-warmed before the first window).
 //! - [`GuiWorker::warm_up`] asks the worker to initialize the Slint/winit
 //!   platform **without creating a window** (fire-and-forget), moving backend
 //!   startup off the host main thread's critical path.
@@ -33,11 +33,11 @@
 //!   as its current work ends) and returns the join handle so the caller can
 //!   bounded-join it and fall back to the `nam-gui-reaper` thread.
 //!
-//! Multi-instance note: Slint 1.18 allows a single platform per process, so a
+//! Multi-instance note: Slint 1.19 allows a single platform per process, so a
 //! second instance opening a GUI while a first instance's worker is alive
 //! fails that instance's `set_parent`/`set_transient` cleanly (honest error,
 //! host falls back / reports). This is a documented Slint constraint, not a
-//! teardown bug; see `docs/architecture.md` §7.7.
+//! teardown bug; see `docs/architecture.md` §7.6.
 
 use crate::clap::gui::MainWindow;
 use crate::clap::gui::x11_embed;
@@ -376,52 +376,5 @@ fn run_window_generation(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mock_host_bridge() -> (clap_sys::host::clap_host, crate::clap::gui::GuiHostBridge) {
-        let mut mock_host = clap_sys::host::clap_host {
-            clap_version: clap_sys::version::CLAP_VERSION,
-            host_data: std::ptr::null_mut(),
-            name: c"Test Host".as_ptr(),
-            vendor: std::ptr::null(),
-            url: std::ptr::null(),
-            version: std::ptr::null(),
-            get_extension: None,
-            request_restart: None,
-            request_process: None,
-            request_callback: None,
-        };
-        let raw = std::ptr::NonNull::new(&mut mock_host).unwrap();
-        // SAFETY: `raw` points to the live mock `clap_host` owned by the caller
-        // for the duration of the test.
-        let shared_handle =
-            unsafe { clack_plugin::host::HostAudioProcessorHandle::from_raw(raw).shared() };
-        let bridge = crate::clap::gui::GuiHostBridge::new(&shared_handle);
-        (mock_host, bridge)
-    }
-
-    #[test]
-    fn test_gui_worker_contains_generation_panic_and_stays_alive() {
-        let (_mock_host, bridge) = mock_host_bridge();
-        let worker = GuiWorker::spawn(GuiSharedState::new_test(), bridge)
-            .expect("test GUI worker must spawn");
-
-        worker
-            .tx
-            .send(GuiWorkerJob::PanicProbe)
-            .expect("panic probe must be queued");
-        let (reply, rx) = mpsc::channel();
-        worker
-            .tx
-            .send(GuiWorkerJob::LivenessProbe { reply })
-            .expect("liveness probe must be queued");
-
-        rx.recv_timeout(Duration::from_secs(10))
-            .expect("GUI worker must survive a contained job panic and stay responsive");
-
-        if let Some(handle) = worker.shutdown() {
-            handle.join().expect("GUI worker must shut down cleanly");
-        }
-    }
-}
+#[path = "worker_test.rs"]
+mod tests;

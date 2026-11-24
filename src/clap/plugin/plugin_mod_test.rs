@@ -273,6 +273,9 @@ fn test_per_instance_hugepage_synced() {
 fn test_gui_event_backpressure_warning_emitted() {
     use crate::clap::test_util;
 
+    let _log_guard = test_util::TEST_LOGGER_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 

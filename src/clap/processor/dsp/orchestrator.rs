@@ -32,8 +32,7 @@ use std::sync::atomic::Ordering;
 /// drops a partial automation envelope in release without a flag.
 const MAX_SCHEDULED_EVENTS: usize = 4096;
 
-/// Minimum sub-block length retained when fusing gain-only event boundaries
-/// (F-UX-03).
+/// Minimum sub-block length retained when fusing gain-only event boundaries.
 ///
 /// Gain parameters (`PARAM_INPUT_GAIN`/`PARAM_OUTPUT_GAIN`, value or
 /// modulation) are already continuously smoothed by [`ParamSmoother`], so a
@@ -94,7 +93,7 @@ impl<'a> NamClapProcessor<'a> {
         // in `process_dry_contained_block` — this function is not reached
         // while the non-converged model is outstanding.
         //
-        // Non-finite containment (F-UX-04): a non-finite input sample poisons the model. The
+        // Non-finite containment: a non-finite input sample poisons the model. The
         // engine's input stage raises `RT_STATUS_NON_FINITE_INPUT_DETECTED`
         // (and sanitizes only its own slices — never the downstream scratch
         // buffers); the containment here restores the model to the
@@ -215,12 +214,6 @@ impl<'a> NamClapProcessor<'a> {
                         .active_channel_count
                         .store(channel_count, Ordering::Relaxed);
                 }
-                let is_stereo_config = self
-                    .shared
-                    .cold
-                    .selected_port_config
-                    .load(Ordering::Relaxed)
-                    == crate::clap::plugin::CONFIG_ID_STEREO;
                 #[cfg(feature = "dual-mono")]
                 {
                     self.process_mono = !has_r_input;
@@ -230,38 +223,7 @@ impl<'a> NamClapProcessor<'a> {
                     let _ = has_r_input;
                     self.process_mono = true;
                 }
-                if self
-                    .shared
-                    .ui_to_rt
-                    .host_r_deactivated
-                    .load(Ordering::Acquire)
-                {
-                    self.process_mono = true;
-                }
-                if !self.process_mono {
-                    self.cached_gate_params.mono_epsilon =
-                        if is_stereo_config { -1.0 } else { 1e-4 };
-                } else {
-                    self.cached_gate_params.mono_epsilon = 1e-4;
-                }
-
-                self.refresh_gate_config();
-
-                let model_load_fail = self.model_l.is_none() && !self.params.bypass;
-                let current_fail_flag = self
-                    .rt_status
-                    .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
-                if model_load_fail != current_fail_flag {
-                    if model_load_fail {
-                        self.rt_status.set_flag(
-                            neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED,
-                        );
-                    } else {
-                        self.rt_status.clear_flag(
-                            neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED,
-                        );
-                    }
-                }
+                self.configure_channel_gate_and_model_flag();
 
                 let mut metrics = BlockMetricsAccumulator::default();
                 let mut last_gate_state = GateState::Open;
@@ -356,25 +318,7 @@ impl<'a> NamClapProcessor<'a> {
                 continue;
             };
 
-            let is_stereo_config = self
-                .shared
-                .cold
-                .selected_port_config
-                .load(Ordering::Relaxed)
-                == crate::clap::plugin::CONFIG_ID_STEREO;
-            if self
-                .shared
-                .ui_to_rt
-                .host_r_deactivated
-                .load(Ordering::Acquire)
-            {
-                self.process_mono = true;
-            }
-            if !self.process_mono {
-                self.cached_gate_params.mono_epsilon = if is_stereo_config { -1.0 } else { 1e-4 };
-            } else {
-                self.cached_gate_params.mono_epsilon = 1e-4;
-            }
+            self.configure_channel_gate_and_model_flag();
 
             if !port_input_active {
                 self.buf_host_l[..n_samples].fill(0.0);
@@ -385,23 +329,6 @@ impl<'a> NamClapProcessor<'a> {
             } else {
                 (None, None)
             };
-
-            self.refresh_gate_config();
-
-            let model_load_fail = self.model_l.is_none() && !self.params.bypass;
-            let current_fail_flag = self
-                .rt_status
-                .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
-            if model_load_fail != current_fail_flag {
-                if model_load_fail {
-                    self.rt_status
-                        .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
-                } else {
-                    self.rt_status.clear_flag(
-                        neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED,
-                    );
-                }
-            }
 
             let mut metrics = BlockMetricsAccumulator::default();
             let mut last_gate_state = GateState::Open;
@@ -505,6 +432,44 @@ impl<'a> NamClapProcessor<'a> {
         }
 
         Ok(ProcessStatus::Continue)
+    }
+
+    #[inline(always)]
+    fn configure_channel_gate_and_model_flag(&mut self) {
+        let is_stereo_config = self
+            .shared
+            .cold
+            .selected_port_config
+            .load(Ordering::Relaxed)
+            == crate::clap::plugin::CONFIG_ID_STEREO;
+        if self
+            .shared
+            .ui_to_rt
+            .host_r_deactivated
+            .load(Ordering::Acquire)
+        {
+            self.process_mono = true;
+        }
+        self.cached_gate_params.mono_epsilon = if !self.process_mono && is_stereo_config {
+            -1.0
+        } else {
+            1e-4
+        };
+        self.refresh_gate_config();
+
+        let model_load_fail = self.model_l.is_none() && !self.params.bypass;
+        let current_fail_flag = self
+            .rt_status
+            .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
+        if model_load_fail != current_fail_flag {
+            if model_load_fail {
+                self.rt_status
+                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
+            } else {
+                self.rt_status
+                    .clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
+            }
+        }
     }
 
     #[inline(always)]
@@ -1182,39 +1147,7 @@ impl<'a> NamClapProcessor<'a> {
                         None
                     };
 
-                    self.dry_delay.process_block(
-                        &self.buf_host_l[..slice_len],
-                        &self.buf_host_r[..slice_len],
-                        &mut self.buf_xfade_dry_l[..slice_len],
-                        &mut self.buf_xfade_dry_r[..slice_len],
-                        slice_len,
-                        self.process_mono,
-                    );
-                    let (in_peak_l, in_sum_sq_l) =
-                        audio_loop::compute_peak_and_sum_sq(&self.buf_host_l[..slice_len]);
-                    let (in_peak_r, in_sum_sq_r) = if self.process_mono {
-                        (in_peak_l, in_sum_sq_l)
-                    } else {
-                        audio_loop::compute_peak_and_sum_sq(&self.buf_host_r[..slice_len])
-                    };
-                    let (sub_peak_l, sub_peak_r, sub_sum_sq_l, sub_sum_sq_r) =
-                        audio_loop::copy_delayed_dry_to_output(
-                            &mut out_l,
-                            &mut out_r,
-                            &mut self.buf_xfade_dry_l[..slice_len],
-                            &mut self.buf_xfade_dry_r[..slice_len],
-                            0,
-                            self.process_mono,
-                        );
-                    metrics.in_peak_l = metrics.in_peak_l.max(in_peak_l);
-                    metrics.in_peak_r = metrics.in_peak_r.max(in_peak_r);
-                    metrics.in_sum_sq_l += in_sum_sq_l;
-                    metrics.in_sum_sq_r += in_sum_sq_r;
-                    metrics.out_peak_l = metrics.out_peak_l.max(sub_peak_l);
-                    metrics.out_peak_r = metrics.out_peak_r.max(sub_peak_r);
-                    metrics.out_sum_sq_l += sub_sum_sq_l;
-                    metrics.out_sum_sq_r += sub_sum_sq_r;
-                    metrics.total_samples += slice_len;
+                    self.run_dry_containment_slice(&mut out_l, &mut out_r, slice_len, &mut metrics);
 
                     slice_start += slice_len;
                 }
@@ -1253,43 +1186,7 @@ impl<'a> NamClapProcessor<'a> {
                 (None, None)
             };
 
-            // Dry leg: feed the ring with the staged host input and publish
-            // the delayed dry (single fused sanitize/peak pass). The ring
-            // keeps absorbing the host input so its latency history stays
-            // intact for the wet path's return.
-            self.dry_delay.process_block(
-                &self.buf_host_l[..n_samples],
-                &self.buf_host_r[..n_samples],
-                &mut self.buf_xfade_dry_l[..n_samples],
-                &mut self.buf_xfade_dry_r[..n_samples],
-                n_samples,
-                self.process_mono,
-            );
-            let (in_peak_l, in_sum_sq_l) =
-                audio_loop::compute_peak_and_sum_sq(&self.buf_host_l[..n_samples]);
-            let (in_peak_r, in_sum_sq_r) = if self.process_mono {
-                (in_peak_l, in_sum_sq_l)
-            } else {
-                audio_loop::compute_peak_and_sum_sq(&self.buf_host_r[..n_samples])
-            };
-            let (sub_peak_l, sub_peak_r, sub_sum_sq_l, sub_sum_sq_r) =
-                audio_loop::copy_delayed_dry_to_output(
-                    &mut out_l,
-                    &mut out_r,
-                    &mut self.buf_xfade_dry_l[..n_samples],
-                    &mut self.buf_xfade_dry_r[..n_samples],
-                    0,
-                    self.process_mono,
-                );
-            metrics.in_peak_l = metrics.in_peak_l.max(in_peak_l);
-            metrics.in_peak_r = metrics.in_peak_r.max(in_peak_r);
-            metrics.in_sum_sq_l += in_sum_sq_l;
-            metrics.in_sum_sq_r += in_sum_sq_r;
-            metrics.out_peak_l = metrics.out_peak_l.max(sub_peak_l);
-            metrics.out_peak_r = metrics.out_peak_r.max(sub_peak_r);
-            metrics.out_sum_sq_l += sub_sum_sq_l;
-            metrics.out_sum_sq_r += sub_sum_sq_r;
-            metrics.total_samples += n_samples;
+            self.run_dry_containment_slice(&mut out_l, &mut out_r, n_samples, &mut metrics);
         }
 
         // Bypass-leg telemetry projection: gate reported open, no FSM
@@ -1318,6 +1215,50 @@ impl<'a> NamClapProcessor<'a> {
         self.process_telemetry(start_nanos);
 
         Ok(ProcessStatus::Continue)
+    }
+
+    #[cold]
+    #[inline(always)]
+    fn run_dry_containment_slice(
+        &mut self,
+        out_l: &mut Option<&mut [f32]>,
+        out_r: &mut Option<&mut [f32]>,
+        n_samples: usize,
+        metrics: &mut BlockMetricsAccumulator,
+    ) {
+        self.dry_delay.process_block(
+            &self.buf_host_l[..n_samples],
+            &self.buf_host_r[..n_samples],
+            &mut self.buf_xfade_dry_l[..n_samples],
+            &mut self.buf_xfade_dry_r[..n_samples],
+            n_samples,
+            self.process_mono,
+        );
+        let (in_peak_l, in_sum_sq_l) =
+            audio_loop::compute_peak_and_sum_sq(&self.buf_host_l[..n_samples]);
+        let (in_peak_r, in_sum_sq_r) = if self.process_mono {
+            (in_peak_l, in_sum_sq_l)
+        } else {
+            audio_loop::compute_peak_and_sum_sq(&self.buf_host_r[..n_samples])
+        };
+        let (sub_peak_l, sub_peak_r, sub_sum_sq_l, sub_sum_sq_r) =
+            audio_loop::copy_delayed_dry_to_output(
+                out_l,
+                out_r,
+                &mut self.buf_xfade_dry_l[..n_samples],
+                &mut self.buf_xfade_dry_r[..n_samples],
+                0,
+                self.process_mono,
+            );
+        metrics.in_peak_l = metrics.in_peak_l.max(in_peak_l);
+        metrics.in_peak_r = metrics.in_peak_r.max(in_peak_r);
+        metrics.in_sum_sq_l += in_sum_sq_l;
+        metrics.in_sum_sq_r += in_sum_sq_r;
+        metrics.out_peak_l = metrics.out_peak_l.max(sub_peak_l);
+        metrics.out_peak_r = metrics.out_peak_r.max(sub_peak_r);
+        metrics.out_sum_sq_l += sub_sum_sq_l;
+        metrics.out_sum_sq_r += sub_sum_sq_r;
+        metrics.total_samples += n_samples;
     }
 
     #[inline]

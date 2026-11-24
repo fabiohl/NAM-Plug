@@ -9,7 +9,7 @@
 //!
 //! Architecture metadata (`gear_type`, `gear_make`, `gear_model`) is treated strictly as
 //! display/hint metadata — compatible 1-in/1-out models are never rejected based on tags.
-//! WaveNet post-stack `config.head` is supported via the engine 3.0.0 canonical
+//! WaveNet post-stack `config.head` is supported via the engine's canonical
 //! `PostStackHead` builder; multi-channel (`in_channels != 1` or
 //! `num_output_channels != 1`) models are rejected fail-closed in the cabinet slot
 //! without affecting the amp slot.

@@ -218,9 +218,11 @@ mod tests {
 
         let _test_guard = crate::clap::processor::processor_poisoning_test::TEST_MUTEX
             .lock()
-            .unwrap();
+            .unwrap_or_else(|e| e.into_inner());
         ensure_isolated_crash_dir();
         let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
+        let shared_ptr = test_util::extract_shared(&mut instance);
+        let shared = unsafe { &*shared_ptr };
         let stopped = instance
             .activate(|_, _| (), audio_config_64())
             .expect("activate");
@@ -233,7 +235,10 @@ mod tests {
         let cleared = host_before & !MXCSR_DAZ_FTZ;
         write_mxcsr(cleared);
 
-        super::super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+        shared
+            .cold
+            .test_panic_injection
+            .store(true, Ordering::Relaxed);
         let res = process_one(&mut started, &mut bufs);
         assert!(res.is_err(), "injected panic must surface as Err");
         assert_eq!(
@@ -241,9 +246,6 @@ mod tests {
             cleared,
             "MXCSR must be restored even when the DSP panics"
         );
-
-        let shared_ptr = test_util::extract_shared(&mut instance);
-        let shared = unsafe { &*shared_ptr };
         assert!(
             shared
                 .cold

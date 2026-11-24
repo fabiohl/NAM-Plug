@@ -27,7 +27,7 @@ impl<'a> NamClapMainThread<'a> {
         let log_ext = self.host.get_extension::<HostLog>();
         let shared = self.host.shared();
 
-        // Standardized alert transition logs to host (T-R3.3).
+        // Standardized alert transition logs to host.
         // Emits only on 0 -> 1 transitions to prevent flooding.
         let current_alerts = self.shared.cold.ui_alert_bits.load(Ordering::Acquire);
         let last_alerts = self.last_seen_alert_bits.get();
@@ -190,7 +190,7 @@ impl<'a> NamClapMainThread<'a> {
         // the RT thread set it again and flood the log at every host tick.
         // The flag is left intact for the RT thread to own/clear on model
         // install or bypass; the main thread only logs the `false -> true`
-        // transition (F-PLUG-02).
+        // transition.
         let model_load_failed = self
             .shared
             .cold
@@ -344,7 +344,7 @@ impl<'a> NamClapMainThread<'a> {
             );
         }
 
-        // Rate-limited DSP overload/xrun warning (T-R2.3) — at most 1 warning / 5 s.
+        // Rate-limited DSP overload/xrun warning — at most 1 warning / 5 s.
         let overloads = self
             .shared
             .cold

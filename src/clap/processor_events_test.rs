@@ -20,6 +20,9 @@ mod tests {
 
     #[test]
     fn test_spsc_drain_truncation_warning_emitted() {
+        let _log_guard = test_util::TEST_LOGGER_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
@@ -102,6 +105,9 @@ mod tests {
 
     #[test]
     fn test_out_of_order_events_clamped_and_flag_set() {
+        let _log_guard = test_util::TEST_LOGGER_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
@@ -182,6 +188,9 @@ mod tests {
 
     #[test]
     fn test_events_beyond_n_samples_clamped_at_block_end_and_flag_set() {
+        let _log_guard = test_util::TEST_LOGGER_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 

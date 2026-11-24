@@ -24,6 +24,7 @@ use rtrb::Producer;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+/// Number of samples in the click-free master bypass linear crossfade ramp.
 pub const BYPASS_XFADE_SAMPLES: usize = 64;
 pub(crate) const BYPASS_XFADE_INV: f32 = 1.0 / BYPASS_XFADE_SAMPLES as f32;
 
@@ -90,6 +91,7 @@ pub struct BypassCrossfader {
 }
 
 impl BypassCrossfader {
+    /// Creates a new crossfader initialized in either the bypassed or active state.
     pub fn new(initial_bypass: bool) -> Self {
         let mix = if initial_bypass { 0.0 } else { 1.0 };
         Self {
@@ -308,10 +310,9 @@ pub struct NamClapProcessor<'a> {
     pub(crate) out_rms_ewma_l: f32,
     pub(crate) out_rms_ewma_r: f32,
     /// Parking lot for model/resampler disposal if the GC channel is full.
-    /// `parking_lot_dirty` mirrors the NAM-Audio-Pipe dirty latch: stored with
-    /// `Release` before each GC cascade so the audio-thread drain can skip the
-    /// 16-slot sweep with a single `Acquire` load when nothing was ever
-    /// parked (F-PERF-24).
+    /// `parking_lot_dirty` is stored with `Release` before each GC cascade so
+    /// the audio-thread drain can skip the 16-slot sweep with a single `Acquire`
+    /// load when nothing was ever parked.
     pub(crate) parking_lot: [Option<GcItem>; 16],
     /// Dirty latch for the RT parking lot. Set with `Release` by every
     /// [`GcSink`](neural_amp_modeler_rs::common::spsc::GcSink)-style cascade

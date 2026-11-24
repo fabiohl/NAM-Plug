@@ -45,9 +45,9 @@ fn test_slint_widgets_and_five_zones_lifecycle() {
     assert_eq!(window.get_buffer_size_text(), "— spl");
     assert_eq!(window.get_channels_text(), "Stereo");
     assert_eq!(window.get_latency_text(), "0 spl (0.0 ms)");
-    // Finding F6: the design-time default is an honest "no data yet"
-    // placeholder, not a hard-coded fake percentage — `SlintViewModel`
-    // never overwrites this property (no real per-block metric exists yet).
+    // The design-time default is an honest "no data yet" placeholder, not a
+    // hard-coded fake percentage — `SlintViewModel` overwrites this property
+    // once real per-block telemetry arrives.
     assert_eq!(window.get_dsp_load_text(), "—");
     assert_eq!(window.get_simd_badge(), "AVX2+FMA");
     assert_eq!(window.get_backend_text(), "Wayland Native");

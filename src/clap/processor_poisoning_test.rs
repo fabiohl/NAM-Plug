@@ -99,6 +99,7 @@ fn test_panic_to_error_uses_static_catalog_message() {
 
 #[test]
 fn test_crash_isolation_does_not_pollute_user_cache() {
+    let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = std::env::temp_dir().join("nam_plug_crash_isolation_check");
     let _ = std::fs::create_dir_all(&temp_dir);
     unsafe {
@@ -113,7 +114,7 @@ fn test_crash_isolation_does_not_pollute_user_cache() {
 
 #[test]
 fn test_process_panic_poisons_processor_silences_audio_and_limits_panics() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     ensure_isolated_crash_dir();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let config = audio_config();
@@ -141,7 +142,10 @@ fn test_process_panic_poisons_processor_silences_audio_and_limits_panics() {
     let mut out_r = vec![999.0f32; BLOCK];
 
     // Inject panic on next process callback
-    super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+    shared
+        .cold
+        .test_panic_injection
+        .store(true, Ordering::Relaxed);
 
     // 1. First process call encounters injected panic.
     let first_res = process_block(&mut started, &mut in_l, &mut in_r, &mut out_l, &mut out_r);
@@ -250,7 +254,7 @@ fn test_process_panic_poisons_processor_silences_audio_and_limits_panics() {
 
 #[test]
 fn test_reset_panic_poisons_processor_and_silences_subsequent_blocks() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     ensure_isolated_crash_dir();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let config = audio_config();
@@ -264,7 +268,10 @@ fn test_reset_panic_poisons_processor_and_silences_subsequent_blocks() {
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // Inject panic on reset
-    super::TEST_RESET_PANIC_INJECTION.store(true, Ordering::Relaxed);
+    shared
+        .cold
+        .test_reset_panic_injection
+        .store(true, Ordering::Relaxed);
 
     // Reset encounters panic, catches it, sets poisoned = true
     started.reset();
@@ -300,7 +307,7 @@ fn test_reset_panic_poisons_processor_and_silences_subsequent_blocks() {
 
 #[test]
 fn test_deactivate_discards_dsp_pipeline_when_poisoned() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     ensure_isolated_crash_dir();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let config = audio_config();
@@ -314,7 +321,10 @@ fn test_deactivate_discards_dsp_pipeline_when_poisoned() {
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // Inject panic to poison processor
-    super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+    shared
+        .cold
+        .test_panic_injection
+        .store(true, Ordering::Relaxed);
 
     let mut in_l = vec![0.0f32; BLOCK];
     let mut in_r = vec![0.0f32; BLOCK];
@@ -343,11 +353,12 @@ fn test_deactivate_discards_dsp_pipeline_when_poisoned() {
 
 #[test]
 fn test_f64_audio_ports_silenced_on_poisoning() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     ensure_isolated_crash_dir();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let config = audio_config();
     let state_ap = state.clone();
+    let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
         .activate(move |_, _| make_harness_audio_processor(&state_ap), config)
@@ -355,7 +366,10 @@ fn test_f64_audio_ports_silenced_on_poisoning() {
     let mut started = stopped.start_processing().expect("start_processing");
 
     // Poison processor via injected panic
-    super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+    shared
+        .cold
+        .test_panic_injection
+        .store(true, Ordering::Relaxed);
 
     let mut in_l = vec![0.0f32; BLOCK];
     let mut in_r = vec![0.0f32; BLOCK];
@@ -416,7 +430,7 @@ fn test_f64_audio_ports_silenced_on_poisoning() {
 /// host's subsequent `call_on_main_thread_callback()` triggers `request_restart()` within <= 1 callback.
 #[test]
 fn test_poisoning_triggers_single_request_callback_and_restart_without_timer_support() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     ensure_isolated_crash_dir();
 
     // 1. Host harness configured with timer support disabled (no HostTimer extension)
@@ -447,7 +461,10 @@ fn test_poisoning_triggers_single_request_callback_and_restart_without_timer_sup
     );
 
     // 2. Inject audio processing panic
-    super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+    shared
+        .cold
+        .test_panic_injection
+        .store(true, Ordering::Relaxed);
     let mut in_l = vec![0.5f32; BLOCK];
     let mut in_r = vec![0.5f32; BLOCK];
     let mut out_l = vec![1.0f32; BLOCK];

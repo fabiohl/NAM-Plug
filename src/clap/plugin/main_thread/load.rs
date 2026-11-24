@@ -145,8 +145,8 @@ impl<'a> NamClapMainThread<'a> {
         let len_before = meta_before.len();
         let mtime_before = meta_before.modified().ok();
 
-        // F-PLUG-03: single in-memory read (bounded, regular file) reused for
-        // both hashing and model construction — no second full-file I/O.
+        // Single in-memory read (bounded, regular file) reused for both hashing
+        // and model construction — no second full-file I/O.
         let (bytes, model_hash) =
             crate::clap::extensions::state_transaction::read_model_file_bytes(path).map_err(
                 |e| {
@@ -292,10 +292,9 @@ impl<'a> NamClapMainThread<'a> {
                 ));
             }
 
-            // Off-RT cost calibration (U-02 / F-PR-10): measure the freshly
-            // loaded, stabilized model so the audio thread sizes its first
-            // prewarm window from real hardware. `None` (no model) falls back
-            // to the per-family table.
+            // Off-RT cost calibration: measure the freshly loaded, stabilized
+            // model so the audio thread sizes its first prewarm window from real
+            // hardware. `None` (no model) falls back to the per-family table.
             prewarm_cost_ns = if crate::clap::processor::prewarm_policy::ADAPTIVE_COST_ENABLED {
                 // Cap the calibration block at the negotiated host quantum so
                 // it never exceeds the model's `max_buffer_size` (a smaller
@@ -411,7 +410,7 @@ impl<'a> NamClapMainThread<'a> {
 
         log::info!("Model loaded: {path:?}");
 
-        // A successful adoption clears any stale load error (F-UX-06): a later
+        // A successful adoption clears any stale load error: a later
         // success must never be shadowed by an earlier failure.
         self.shared
             .cold
@@ -482,9 +481,9 @@ impl<'a> NamClapMainThread<'a> {
             return;
         }
 
-        // F-PLUG-03: Audio epoch revalidation. If the host audio configuration
-        // renegotiated while the asynchronous prepare was in flight (or if buffer_size
-        // was zero at prepare time), rebuild the resampler and streaming adapter
+        // Audio epoch revalidation: if the host audio configuration renegotiated
+        // while the asynchronous prepare was in flight (or if buffer_size was
+        // zero at prepare time), rebuild the resampler and streaming adapter
         // off-RT for the actual active configuration before committing.
         let divergent = audio_epoch.sample_rate != current_host_rate
             || audio_epoch.buffer_size != current_buffer_size
@@ -1131,77 +1130,5 @@ pub(crate) fn prepare_model_offthread(
 }
 
 #[cfg(test)]
-mod load_error_code_tests {
-    use super::*;
-
-    fn write_temp_nam(name: &str, json: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("nam_plug_s06_{}_{name}.nam", std::process::id()));
-        std::fs::write(&path, json).expect("write temp .nam fixture");
-        path
-    }
-
-    #[test]
-    fn prepare_model_preserves_unknown_activation_code() {
-        let sys = SystemSnapshot::capture();
-
-        let unknown_act_json = r#"{
-            "version": "0.6.0",
-            "architecture": "WaveNet",
-            "sample_rate": 48000,
-            "config": {
-                "layers": [{
-                    "input_size": 1,
-                    "condition_size": 1,
-                    "channels": 1,
-                    "head_size": 1,
-                    "kernel_size": 1,
-                    "dilations": [1],
-                    "activation": "NotARealActivation",
-                    "gated": false,
-                    "head_bias": false
-                }],
-                "head_scale": 1.0
-            },
-            "weights": [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0]
-        }"#;
-        let p1 = write_temp_nam("unknown_act", unknown_act_json);
-        let err1 = prepare_model_offthread(&p1, 48000, 128, &sys)
-            .err()
-            .expect("unknown activation must fail");
-        let _ = std::fs::remove_file(&p1);
-        assert_eq!(err1.error_code(), NamErrorCode::NamJsonUnknownActivation);
-    }
-
-    #[test]
-    fn prepare_model_preserves_invalid_gating_mode_code() {
-        let sys = SystemSnapshot::capture();
-
-        let bad_gating_json = r#"{
-            "version": "0.6.0",
-            "architecture": "WaveNet",
-            "sample_rate": 48000,
-            "config": {
-                "layers": [{
-                    "input_size": 1,
-                    "condition_size": 1,
-                    "channels": 1,
-                    "head_size": 1,
-                    "kernel_size": 1,
-                    "dilations": [1],
-                    "activation": "ReLU",
-                    "gating_mode": "mystery_gate",
-                    "head_bias": false
-                }],
-                "head_scale": 1.0
-            },
-            "weights": [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0]
-        }"#;
-        let p2 = write_temp_nam("bad_gating", bad_gating_json);
-        let err2 = prepare_model_offthread(&p2, 48000, 128, &sys)
-            .err()
-            .expect("invalid gating_mode must fail");
-        let _ = std::fs::remove_file(&p2);
-        assert_eq!(err2.error_code(), NamErrorCode::InvalidModelTopology);
-    }
-}
+#[path = "load_test.rs"]
+mod load_error_code_tests;

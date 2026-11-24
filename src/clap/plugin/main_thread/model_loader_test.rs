@@ -589,6 +589,12 @@ fn test_model_loader_worker_panic_contained_and_recovers() {
     let panic_path = panic_model.clone();
     set_test_mid_load_hook(Some(move |path: &Path| {
         if path == panic_path.as_path() {
+            let _suppress =
+                neural_amp_modeler_rs::common::panic_hook::suppress_panic_report_on_current_thread(
+                );
+            let _suppress =
+                neural_amp_modeler_rs::common::panic_hook::suppress_panic_report_on_current_thread(
+                );
             panic_triggered_clone.store(true, Ordering::Release);
             panic!("simulated panic in model loader worker");
         }

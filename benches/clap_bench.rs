@@ -17,7 +17,7 @@
 //!    (16/64/256/1024 events) over 64/128/512 blocks, including the degenerate 1-event-per-sample case;
 //!    `CLAP_WorstCase_MonoDualMono`, `CLAP_WorstCase_Crossfade`, `CLAP_WorstCase_RingOut`,
 //!    `CLAP_WorstCase_RoundTripIPC`: real mono vs. dual-mono with L!=R content, bypass crossfade in flight,
-//!    gate-closed CabSim ring-out (impulse + drain lote), and a 2-thread `process` round-trip IPC dispatch harness.
+//!    gate-closed CabSim ring-out (impulse + drain batch), and a 2-thread `process` round-trip IPC dispatch harness.
 //! 5. `CLAP_Evidence_InferenceE2E`: e2e inference matrix model×block
 //!    (LSTM / WaveNet-A1 / WaveNet-A2 × 64/128/512 host samples), ns/sample via
 //!    `Throughput::Elements` — the block-size evidence anchor for regression
@@ -30,7 +30,7 @@
 //! ## Running
 //!
 //! ```sh
-//! export CARGO_BUILD_JOBS=4; cargo bench --features testing --bench clap_bench
+//! cargo bench --features testing --bench clap_bench
 //! ```
 
 mod common;
@@ -1002,15 +1002,13 @@ fn bench_worstcase_small_blocks(c: &mut Criterion) {
     }
 }
 
-// ── T-P0.2.2 — Isolated DryDelay (`DryDelay/{32,64,128,512}`) ──
+// ── Isolated DryDelay (`DryDelay/{32,64,128,512}`) ──
 //
 // Pure delay-line path (no model): sweeps delay 0 / typical / max in mono
-// and dual-mono. Archived numbers are the official baseline of F-NPPERF-01.
-// `DryDelayLine` itself is `pub(crate)`, so the bench drives the engine
-// `DelayLine<f32>` rings directly with the pattern the plugin executes per
-// sub-block after the T-P2.1.3 delegation: one bulk `process_block` per
-// ring in dual-mono; mono feeds only the L ring and mirrors its output into R
-// (the per-sample push/pop loop it replaced is the archived baseline).
+// and dual-mono. `DryDelayLine` itself is `pub(crate)`, so the bench drives the
+// engine `DelayLine<f32>` rings directly with the pattern the plugin executes
+// per sub-block: one bulk `process_block` per ring in dual-mono; mono feeds
+// only the L ring and mirrors its output into R.
 
 fn bench_worstcase_dry_delay(c: &mut Criterion) {
     const BLOCKS: &[usize] = &[32, 64, 128, 512];
@@ -1036,8 +1034,7 @@ fn bench_worstcase_dry_delay(c: &mut Criterion) {
                     let mut out_l = vec![0.0f32; block];
                     let mut out_r = vec![0.0f32; block];
                     b.iter(|| {
-                        // Same block pattern as `DryDelayLine::process_block`
-                        // (T-P0.2.2 invariant).
+                        // Same block pattern as `DryDelayLine::process_block`.
                         line_l.process_block(&sine[..block], &mut out_l);
                         if dual_mono {
                             line_r.process_block(&half[..block], &mut out_r);
@@ -1053,12 +1050,12 @@ fn bench_worstcase_dry_delay(c: &mut Criterion) {
     }
 }
 
-// ── T-P0.2.3 — Event flood (`ParamModulation/Flood_{16,64,256,1024}`) ──
+// ── Event flood (`ParamModulation/Flood_{16,64,256,1024}`) ──
 //
-// Dense automation baseline (mandatory for F-NPPERF-05): N
-// `ParamValueEvent`/`ParamModEvent`s spread over 64/128/512 blocks, plus the
-// degenerate 1-event-per-sample case. Only measures — semantics unchanged.
-// Curves ns/sample × event density are archived in the Criterion summary.
+// Dense automation baseline: N `ParamValueEvent`/`ParamModEvent`s spread over
+// 64/128/512 blocks, plus the degenerate 1-event-per-sample case. Only measures
+// — semantics unchanged. Curves ns/sample × event density are archived in the
+// Criterion summary.
 
 fn bench_worstcase_event_flood(c: &mut Criterion) {
     const BLOCKS: &[usize] = &[64, 128, 512];
@@ -1151,15 +1148,15 @@ fn bench_worstcase_event_flood(c: &mut Criterion) {
     group.finish();
 }
 
-// ── T5.3 — Event flood with a loaded model (F-UX-03, D1) ──
+// ── Event flood with a loaded model ──
 //
 // The empty-pipeline `CLAP_WorstCase_EventFlood` above only measures scheduler
-// overhead. F-UX-03's concern is that each event ends a sub-block and calls the
-// **inference** with a possibly 1-sample sub_n, losing the per-call
-// vectorization/amortization. This group reuses `build_flood_events` and the
-// model-loading path of `CLAP_Inference_*` (WaveNet A1 and LSTM) over the same
-// densities (16/64/256/1024 + 1-per-sample) and blocks (64/128/512) to expose
-// the real cost curve. Measurement only — no semantic change.
+// overhead. With a loaded model, each un-fused event ends a sub-block and calls
+// inference with a possibly 1-sample sub_n, losing per-call vectorization.
+// This group reuses `build_flood_events` and the model-loading path of
+// `CLAP_Inference_*` (WaveNet A1 and LSTM) over the same densities
+// (16/64/256/1024 + 1-per-sample) and blocks (64/128/512) to expose the real
+// cost curve. Measurement only — no semantic change.
 // Decision criterion: cost > 2× the block without events.
 
 fn bench_worstcase_event_flood_model(c: &mut Criterion) {
@@ -1274,8 +1271,8 @@ fn bench_worstcase_event_flood_model(c: &mut Criterion) {
     group.finish();
 }
 
-// ── T-P0.2.4 — Remaining scenarios ──
-// (1) Real mono vs. dual-mono with L!=R content (baseline of F-NPPERF-06);
+// ── Remaining scenarios ──
+// (1) Real mono vs. dual-mono with L!=R content;
 // (2) bypass crossfade in flight (PARAM_BYPASS event at offset 0, 64-sample
 // ramp active during the measured block); (3) gate closed with a loaded IR
 // (ring-out drain path); (4) `process` alternating between 2 host-side thread

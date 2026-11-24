@@ -18,6 +18,7 @@ impl LogLevelGuard {
         level: LevelFilter,
     ) -> Self {
         let previous_level = log::max_level();
+        log::set_max_level(level);
         logger.set_max_level(level);
         Self {
             logger,
@@ -28,6 +29,7 @@ impl LogLevelGuard {
 
 impl Drop for LogLevelGuard {
     fn drop(&mut self) {
+        log::set_max_level(self.previous_level);
         self.logger.set_max_level(self.previous_level);
     }
 }
@@ -48,6 +50,9 @@ fn test_nam_logger_initialized_on_plugin_construction() {
 
 #[test]
 fn test_log_info_reaches_log_buffer_during_plugin_lifecycle() {
+    let _log_guard = test_util::TEST_LOGGER_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (_entry, _host_info, _plugin_instance) = test_util::make_test_plugin();
     let logger = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
         .expect("NamLogger should be initialized");
@@ -68,7 +73,13 @@ fn test_log_info_reaches_log_buffer_during_plugin_lifecycle() {
 
 #[test]
 fn test_log_info_reaches_host_log_sink() {
+    let _log_guard = test_util::TEST_LOGGER_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (_entry, _host_info, _plugin_instance) = test_util::make_test_plugin();
+    let logger = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
+        .expect("NamLogger should be initialized");
+    let _level_guard = LogLevelGuard::new(logger, LevelFilter::Info);
 
     let (captured, _sink_arc) = test_util::register_test_sink();
 
@@ -86,7 +97,13 @@ fn test_log_info_reaches_host_log_sink() {
 
 #[test]
 fn test_log_error_levels_reach_both_sinks() {
+    let _log_guard = test_util::TEST_LOGGER_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (_entry, _host_info, _plugin_instance) = test_util::make_test_plugin();
+    let logger = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
+        .expect("NamLogger should be initialized");
+    let _level_guard = LogLevelGuard::new(logger, LevelFilter::Info);
     let (captured, _sink_arc) = test_util::register_test_sink();
 
     log::error!("CLAP integration: error level test");
@@ -125,6 +142,9 @@ fn test_instance_sink_unregistered_on_drop() {
 
 #[test]
 fn test_concurrent_logging_during_repeated_instance_lifecycle() {
+    let _log_guard = test_util::TEST_LOGGER_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;

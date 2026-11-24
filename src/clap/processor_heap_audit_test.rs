@@ -1582,7 +1582,10 @@ mod tests {
         // Inject the one-shot panic. The panicking callback itself is NOT the
         // audited contract (panic unwinding is not zero-alloc); the audited
         // contract is the silenced containment afterwards.
-        super::super::TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+        shared
+            .cold
+            .test_panic_injection
+            .store(true, Ordering::Relaxed);
         let poisoned = {
             let mut input_channels = [bufs.in_l.as_mut_slice(), bufs.in_r.as_mut_slice()];
             let input_audio = bufs.input_ports.with_input_buffers([AudioPortBuffer {

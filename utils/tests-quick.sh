@@ -38,11 +38,11 @@ else
   rm -f "${CUR_LOG%.log}-fail.log"
 fi
 emit "$(awk '/test result: / { p+=$4; f+=$6; i+=$8 } END { printf "PHASE: tests-summary passed=%d failed=%d ignored=%d", p, f, i }' "$CUR_LOG")"
-# Measured: x86=534 passed (local, engine 07428b4); aarch64=527 expected (526 + split); threshold=400
+# Measured: x86=559 passed (local, engine 7de6fe1); aarch64=527 expected (526 + split); threshold=400
 [ "$rc_tests" -eq 0 ] && assert_ran_tests "$CUR_LOG" 400 || { FAILS+=(tests); emit "PHASE: tests FAIL rc=$rc_tests log=$CUR_LOG"; PHASE_NAME=heap-audit; gap "blocked_by_tests"; finish || exit 1; exit 1; }
 emit "PHASE: tests PASS log=$CUR_LOG"
 
-# S9-T05: mantido no quick (custo medido 12.4% <= 20% do quick total; zero-alloc RT gate)
+# Mantido no quick (custo medido 12.4% <= 20% do quick total; zero-alloc RT gate)
 PHASE_NAME=heap-audit; CUR_LOG="$LOG_DIR/quick-heap-audit.log"; phase heap-audit
 rc_heap=0; rc_cab=0
 cargo test --locked --features testing,heap-audit --lib processor_heap_audit_test > "$CUR_LOG" 2>&1 || rc_heap=$?

@@ -5,10 +5,9 @@
 //!
 //! `utils/tests-long.sh` appends one machine-readable line per completed phase
 //! to `target/logs/long-audit-receipt.jsonl` using the **unified engine receipt
-//! schema** ([`neural_amp_modeler_rs::testing::receipt`]) — the same schema the
-//! engine and NAM-Audio-Pipe emit, so a single semantic verifier can validate
-//! every producer. The suite-level `overall` line is derived in Rust by
-//! `summary`, never re-derived from logs by the shell.
+//! schema** ([`neural_amp_modeler_rs::testing::receipt`]), so a single semantic
+//! verifier can validate every producer. The suite-level `overall` line is
+//! derived in Rust by `summary`, never re-derived from logs by the shell.
 //!
 //! The phase roster of this suite is `phase1`..`phase6` + terminal `overall`.
 //!
@@ -1158,79 +1157,5 @@ fn compute_build_status(gaps: &[String], bolt_proof: &str, strict: bool) -> (Str
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compute_build_status_strict_fatal_gaps() {
-        let gaps = vec!["pgo_not_applied".to_string()];
-        let (status, fatal) = compute_build_status(&gaps, "skipped", true);
-        assert_eq!(status, "FAILED");
-        assert_eq!(fatal, vec!["pgo_not_applied"]);
-
-        let gaps = vec!["bolt_not_applied".to_string()];
-        let (status, fatal) = compute_build_status(&gaps, "unverified:missing", true);
-        assert_eq!(status, "FAILED");
-        assert_eq!(fatal, vec!["bolt_not_applied"]);
-    }
-
-    #[test]
-    fn test_compute_build_status_fallback_plain() {
-        let gaps = vec![
-            "bolt_not_applied".to_string(),
-            "bolt_not_proven".to_string(),
-            "pgo_not_applied".to_string(),
-        ];
-        let (status, fatal) = compute_build_status(&gaps, "fallback_plain", true);
-        assert_eq!(status, "PASS_WITH_GAPS");
-        assert!(fatal.is_empty());
-
-        let gaps = vec!["bolt_not_applied".to_string(), "tool_missing".to_string()];
-        let (status, fatal) = compute_build_status(&gaps, "fallback_plain", true);
-        assert_eq!(status, "FAILED");
-        assert_eq!(fatal, vec!["tool_missing"]);
-    }
-
-    #[test]
-    fn test_compute_build_status_fallback_pgo_only() {
-        let gaps = vec![
-            "bolt_not_applied".to_string(),
-            "bolt_not_proven".to_string(),
-        ];
-        let (status, fatal) = compute_build_status(&gaps, "fallback_pgo_only", true);
-        assert_eq!(status, "PASS_WITH_GAPS");
-        assert!(fatal.is_empty());
-
-        let gaps = vec!["bolt_not_proven".to_string(), "pgo_not_applied".to_string()];
-        let (status, fatal) = compute_build_status(&gaps, "fallback_pgo_only", true);
-        assert_eq!(status, "FAILED");
-        assert_eq!(fatal, vec!["pgo_not_applied"]);
-    }
-
-    #[test]
-    fn test_compute_build_status_non_strict() {
-        let gaps = vec!["pgo_not_applied".to_string()];
-        let (status, fatal) = compute_build_status(&gaps, "skipped", false);
-        assert_eq!(status, "PASS_WITH_GAPS");
-        assert_eq!(fatal, vec!["pgo_not_applied"]);
-    }
-
-    #[test]
-    fn test_compute_build_status_clean_pass() {
-        let gaps = Vec::new();
-        let (status, fatal) = compute_build_status(&gaps, "applied", true);
-        assert_eq!(status, "PASSED");
-        assert!(fatal.is_empty());
-    }
-
-    #[test]
-    fn test_ceremony_proof_missing_file_rejected() {
-        let res = validate_ab_opt_ceremony_receipt(
-            std::path::Path::new("target/logs/non_existent_ceremony.json"),
-            None,
-            None,
-        );
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err().reason_code(), "ceremony_missing_receipt");
-    }
-}
+#[path = "plug_long_receipt_test.rs"]
+mod tests;

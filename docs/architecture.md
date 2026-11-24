@@ -27,7 +27,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 │        Main Thread          │  │    Audio Thread (RT)    │  │       GUI Thread       │
 │  - Plugin Lifecycle         │  │  - Hard RT Contract     │  │  - Slint Event Loop    │
 │  - Parameter Scanning       │  │  - Zero Heap Alloc      │  │  - "nam-slint-gui"     │
-│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.18 FemtoVG │
+│  - State Save / Load        │  │  - Zero Mutex Locks     │  │  - Slint v1.19 FemtoVG │
 │  - nam-model-loader Offload │  │  - Zero Blocking I/O    │  │  - Wayland & X11       │
 │  - GC Tier 1 Disposal       │  │  - DSP Signal Chain     │  │  - Async rfd FileDialog│
 │                             │  │                         │  │  - 5-Zone UI Layout    │
@@ -55,7 +55,7 @@ NAM-Plug enforces strict thread segregation to guarantee Real-Time (RT) safety d
 
 - **GUI Thread:**
 
-  - Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.18 (FemtoVG / winit backend).
+  - Dedicated `"nam-slint-gui"` event loop thread running `slint::run_event_loop()` with Slint 1.19 (FemtoVG / winit backend).
   - Fully isolated from the audio thread, synchronizing peak telemetry, DSP load, and parameter changes via `SlintViewModel` at 60 Hz (relaxed to 30 Hz while the signal is silent and the UI idle; suspended while the window is hidden).
 
 ### 1.2 Host vs. Plugin Real-Time Boundary & `rt-hardening` Delegation
@@ -78,7 +78,7 @@ The underlying DSP engine (`NeuralAmpModeler-rs`) provides an optional `rt-harde
 
 ## 2. Compilation Strategy & Feature Flags
 
-`NAM-Plug` compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) plus auxiliary binaries under `src/bin/`. Standalone PipeWire hosting is handled separately by `NAM-Audio-Pipe`.
+`NAM-Plug` compiles into a dynamic shared library (`libnam_plug.so`, installed as `nam_plug.clap`) plus auxiliary binaries under `src/bin/`.
 
 | Binary                   | Required Feature | Role                                                                                        |
 |:------------------------ |:---------------- |:------------------------------------------------------------------------------------------- |
@@ -138,7 +138,7 @@ Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/process
 |:---------------------------- |:----------------------------- |:------- |:--------------------------------------------------------------- |:------------------------------------------------------------------------------- |
 | **Input Gain**               | `input_gain_db` (0)           | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.                                   |
 | **Output Gain**              | `output_gain_db` (1)          | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.                                  |
-| **Gate Threshold**           | `gate_threshold_db` (2)       | dB      | `-90.0` to `-40.0` (default `-90.0`, off by default)            | Noise-gate opening threshold.                                                   |
+| **Gate Threshold**           | `gate_threshold_db` (2)       | dB      | `-90.0` to `0.0` (default `-90.0`, off by default)              | Noise-gate opening threshold.                                                   |
 | **Bypass**                   | `bypass` (3)                  | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables full plugin processing (64-sample click-free linear crossfade passthrough). |
 | **Active Model**             | `active_model` (4)            | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.                            |
 | **Adaptive Compute**         | `adaptive_compute` (5)        | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                                              |
@@ -171,7 +171,7 @@ Every asset reference persisted in state **must** carry its SHA-256 hex digest (
 
 All adoption paths compute the digest up-front and **fail closed** if it cannot be computed (e.g., file exceeding the 256 MiB streaming-hash limit). An asset without a digest is never adopted and never persisted.
 
-> **GAP-IR-INMEMORY-DECODE:** IR bytes are read once, bounded by 256 MiB, hashed, and staged to an exclusively-created private temp file (`create_new`, removed on every exit path) before `CabSimIr::load` decodes them. The pinned engine (`NeuralAmpModeler-rs` 2.1.0) exposes no `load_from_bytes` API, so a true in-memory decode cannot be implemented without expanding engine scope. The temp round-trip is content-safe (the verified buffer is written verbatim, never re-read from the source path), but it remains a documented residual GAP; removing it requires a new engine API.
+> **GAP-IR-INMEMORY-DECODE:** IR bytes are read once, bounded by 256 MiB, hashed, and staged to an exclusively-created private temp file (`create_new`, removed on every exit path) before `CabSimIr::load` decodes them. The pinned engine (`NeuralAmpModeler-rs` 4.0.0) exposes no `load_from_bytes` API for WAV IRs, so a true in-memory decode cannot be implemented without expanding engine scope. The temp round-trip is content-safe (the verified buffer is written verbatim, never re-read from the source path), but it remains a documented residual GAP; removing it requires a new engine API.
 
 ---
 
@@ -243,7 +243,7 @@ NAM-Plug negotiates channel configurations using standard CLAP `audio-ports-conf
 
 ## 5. Lock-Free Communication & RT Safety Architecture
 
-Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/shared.rs`). The audio thread hot path uses **zero mutexes, zero locks, and zero allocations**, relying on atomic primitives and lock-free SPSC channels (`rtrb`).
+Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/shared/mod.rs` and `state_blocks.rs`). The audio thread hot path uses **zero mutexes, zero locks, and zero allocations**, relying on atomic primitives and lock-free SPSC channels (`rtrb`).
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -253,7 +253,7 @@ Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/share
 │    - ui_peak_l / ui_peak_r, ui_clipped, active_channel_count, latency       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  #[repr(align(128))] UiToRt      (UI Thread -> RT Reads)                    │
-│    - 8 Parameter Atomics, gesture_flags, gui_param_generation               │
+│    - 13 Parameter Atomics, gesture_flags, gui_param_generation              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  #[repr(align(128))] ColdShared  (Main / UI / RT Setup)                     │
 │    - SPSC Command Queues, pending_model payload, IR state, alive_fence      │
@@ -272,7 +272,7 @@ To eliminate CPU cache bouncing (False Sharing) between the high-frequency audio
 
 ### 5.2 Generation-Counter Parameter Synchronization
 
-To prevent loading 8 atomic floats on every audio block when parameters are stationary:
+To prevent loading 13 atomic parameter fields on every audio block when parameters are stationary:
 
 1. UI/Main updates parameter atomics and executes `fetch_add(1, Release)` on `gui_param_generation`.
 2. Audio thread performs a single `Acquire` load of `gui_param_generation`. If unchanged, per-parameter reads are skipped. If incremented, it reads parameter targets with `Relaxed` ordering and passes them to `ParamSmoother`.
@@ -311,7 +311,7 @@ Recomputing effective latency (resampler latency + oversample latency + CabSim I
 
 ### 5.6 FFI Lifetime Safety, Panic Guard & Multi-Instance Isolation
 
-- **Refcounted Shared State (`Arc<GuiSharedState>`):** `NamClapShared` owns plugin shared state through `Arc<GuiSharedState>` (`src/clap/plugin/shared.rs`). Windows, background file pickers, and teardown reaper threads all hold refcounted references, preventing use-after-free conditions.
+- **Refcounted Shared State (`Arc<GuiSharedState>`):** `NamClapShared` owns plugin shared state through `Arc<GuiSharedState>` (`src/clap/plugin/shared/mod.rs`). Windows, background file pickers, and teardown reaper threads all hold refcounted references, preventing use-after-free conditions.
 - **Logical Validity Gate (`alive_fence`):** An `Arc<AtomicBool>` lowered in `NamClapShared::drop`. During teardown, the main thread lowers the fence and joins background threads before releasing state. Callbacks gated by the fence become no-ops, preventing callbacks to the host after `destroy()`.
 - **Safe Host Bridge (`GuiHostBridge`):** Stores the raw host pointer as `NonNull<()>` and reconstructs `HostSharedHandle<'static>` on demand, reflecting the CLAP guarantee that the host outlives the plugin.
 - **C-ABI Panic Guard & Processor Poisoning Latch:** All CLAP entry points wrap execution in `catch_unwind(AssertUnwindSafe(..))`. If a panic occurs on the audio thread:
@@ -511,7 +511,7 @@ To reconcile CLAP synchronous reset requirements with hard real-time deadlines:
 
 ## 7. Graphical User Interface (Slint GUI Architecture)
 
-The graphical interface is built using Slint (v1.18) under `src/clap/gui/`.
+The graphical interface is built using Slint (v1.19) under `src/clap/gui/`.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -525,7 +525,7 @@ The graphical interface is built using Slint (v1.18) under `src/clap/gui/`.
 │    Zone 4: Master Bypass (ToggleSwitch, "DSP ACTIVE" / "BYPASS")            │
 │    Zone 5: Status Bar (SR, BUF, LAT, CH, DSP load, alert pill, backend)     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Rendering Pipeline: Slint v1.18 ──► FemtoVG / OpenGL backend via winit     │
+│  Rendering Pipeline: Slint v1.19 ──► FemtoVG / OpenGL backend via winit     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Windowing: X11 embedded (native XEmbed) + X11/Wayland floating fallback    │
 │             Persistent per-instance GUI worker + bounded teardown reaper    │
@@ -536,13 +536,13 @@ The graphical interface is built using Slint (v1.18) under `src/clap/gui/`.
 
 ### 7.1 Module Organization
 
-- `src/clap/gui/mod.rs` — GUI entry point, default window dimensions (`600x275`), and `GuiHostBridge`.
+- `src/clap/gui/mod.rs` — GUI entry point, default window dimensions (`600x312`), and `GuiHostBridge`.
 - `src/clap/gui/worker.rs` — Persistent per-instance GUI worker thread (`GuiWorker`) owning the Slint platform and event loop.
 - `src/clap/gui/x11_embed.rs` — X11 XEmbed embed-at-creation engine and backend selection hooks.
 - `src/clap/gui/lifecycle.rs` — `GuiLifecycle` finite state machine for window visibility.
 - `src/clap/gui/slint/main.slint` — Declarative 5-Zone UI layout (`MainWindow`).
 - `src/clap/gui/slint/` — Modular Slint components (`RotaryKnob`, `VuMeter`, `ToggleSwitch`, `SelectorButton`, `LedIndicator`, `ModelCard`, `IrCard`).
-- `src/clap/gui/slint_view_model.rs` — `SlintViewModel`: bridges Slint properties with plugin atomics, drives adaptive 60/30 Hz polling, and applies peak-meter ballistics.
+- `src/clap/gui/slint_view_model/` — `SlintViewModel` (`mod.rs`, `callbacks.rs`, `formatting.rs`, `telemetry.rs`): bridges Slint properties with plugin atomics, drives adaptive 60/30 Hz polling, and applies peak-meter ballistics.
 - `src/clap/gui/file_dialogs.rs` — Asynchronous background file pickers using `rfd::AsyncFileDialog`.
 - `src/clap/gui/dialog_state.rs` — Lock-free state synchronization for file dialogs.
 - `src/bin/ui_preview.rs` — Standalone binary for rapid visual inspection without a DAW host.
@@ -573,7 +573,7 @@ Operational warnings are derived off-RT from `ColdShared::ui_alert_bits` and dis
 
 ### 7.3 Persistent GUI Worker & Bounded Teardown (`nam-gui-reaper`)
 
-**Thread-Pinning Rationale:** Slint 1.18 binds its platform, event loop, and window hooks to the thread that first initializes it. Creating a new thread per window open/close cycle causes `SetPlatformError`. NAM-Plug therefore runs **one** persistent `"nam-slint-gui"` thread per plugin instance.
+**Thread-Pinning Rationale:** Slint 1.19 binds its platform, event loop, and window hooks to the thread that first initializes it. Creating a new thread per window open/close cycle causes `SetPlatformError`. NAM-Plug therefore runs **one** persistent `"nam-slint-gui"` thread per plugin instance.
 
 **Teardown Protocol:**
 
@@ -648,7 +648,7 @@ Dynamic-links against the compiled `.so` binary using `PluginEntry::load(&artifa
 Adherence to the baseline `x86-64-v3` (AVX2/FMA/BMI2) architecture is contractual across every `x86_64` build target (`x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc` via `[target.'cfg(target_arch = "x86_64")']` in [`.cargo/config.toml`](../.cargo/config.toml) and the core engine's `.cargo/config.toml`):
 
 - Compiles with `-Ctarget-cpu=x86-64-v3` and without enabling the engine's opt-in `avx512` feature, ensuring zero EVEX instructions in `.text`.
-- Hot-path kernels such as `sanitize_copy_peak_sum_sq` ([`audio_loop.rs`](../src/clap/processor/dsp/orchestrator/audio_loop.rs)) invoke `#[target_feature(enable = "avx2", enable = "fma")]` directly under `#[cfg(target_arch = "x86_64")]` without runtime CPUID branching.
+- Hot-path kernels such as `sanitize_copy_peak_sum_sq` ([`output.rs`](../src/clap/processor/dsp/orchestrator/audio_loop/output.rs)) invoke `#[target_feature(enable = "avx2", enable = "fma")]` directly under `#[cfg(target_arch = "x86_64")]` without runtime CPUID branching.
 - Verified across compile-time feature matrices in `utils/lints.sh`.
 
 #### 9.3.1 Entry-Time CPU Feature Validation Gate

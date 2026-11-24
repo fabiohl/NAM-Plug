@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # tests-long.sh — suíte longa de auditoria, certificação e provas de artefato. Classe B.
 # Uso: utils/tests-long.sh [--strict] [--only <fase>[,<fase>]] [--artifact] [-h|--help]
-# Orçamento: 480         # +30: paranoid elevation, cpu gov metadata, text receipt phases
+# Orçamento: 490         # +10: build --lib isolado com PIPESTATUS e contagem condicional de art_cases
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -o pipefail
 
@@ -215,30 +215,28 @@ if should_run "catch-all"; then
 else
     skip_phase "phase1" "catch-all"
 fi
-# ── Fase artifact (compartilha --features testing com catch-all e perf) ──────
+# ── Fase artifact ────────────────────────────────────────────────────────────
 if should_run "artifact"; then
     t_start=$SECONDS; phase "artifact"
     plog="$LOG_DIR/long-artifact.log"; : > "$plog"
-    # timeout: pior comando ~180s (build neutral .so); 2x p100 ≈ 400s
+    # build: guarda de 1200s para --lib frio; execução: pior teste ~180s -> 400s
     plugin_under_test=""; exercised="false"; art_gaps=""; art_to=${NAM_PHASE_TIMEOUT_S:-400}
     if [ "$USE_ARTIFACT" = "1" ]; then
         plugin_under_test="$ARTIFACT_PATH"
         exercised="true"
     else
-        candidate="$CARGO_TARGET_DIR/release/libnam_plug.so"
-        if [ ! -f "$candidate" ]; then
-            echo "Building neutral release artifact..." >> "$plog"
-            build_rc=0
-            timeout --kill-after=30 "$art_to" cargo build --locked --release --features testing --target-dir "$CARGO_TARGET_DIR/neutral-artifact" 2>&1 | tee -a "$plog" || build_rc=1
-            cand_alt="$CARGO_TARGET_DIR/neutral-artifact/release/libnam_plug.so"
-            if [ "$build_rc" -ne 0 ]; then echo "ERROR: Neutral artifact build failed (rc=$build_rc)" >> "$plog"
-            elif [ -f "$cand_alt" ]; then candidate="$cand_alt"; fi
-        fi
-        if [ -f "$candidate" ]; then
-            plugin_under_test="$candidate"
+        echo "Building neutral release artifact (--lib)..." >> "$plog"
+        timeout --kill-after=30 1200 cargo build --locked --release --lib --target-dir "$CARGO_TARGET_DIR/neutral-artifact" 2>&1 | tee -a "$plog"
+        pst=("${PIPESTATUS[@]}")
+        build_rc=${pst[0]}; [ "$build_rc" -eq 0 ] && build_rc=${pst[1]:-0}
+        cand_alt="$CARGO_TARGET_DIR/neutral-artifact/release/libnam_plug.so"
+        if [ "$build_rc" -ne 0 ]; then
+            echo "ERROR: Neutral artifact build failed (rc=$build_rc)" >> "$plog"
+        elif [ -f "$cand_alt" ]; then
+            plugin_under_test="$cand_alt"
             echo "Using candidate release artifact: $plugin_under_test" >> "$plog"
         else
-            echo "ERROR: Neutral artifact $candidate not found" >> "$plog"
+            echo "ERROR: Neutral artifact $cand_alt not found" >> "$plog"
         fi
     fi
 
@@ -277,11 +275,13 @@ if should_run "artifact"; then
         timeout --kill-after=30 1200 cargo test --locked --features testing --release --no-run --test clap >> "$plog" 2>&1 || art_rc=1
         if [ "$art_rc" -eq 0 ]; then
             for atest in "${ARTIFACT_TESTS[@]}"; do
-                art_cases=$((art_cases + $(subcase_count "$atest")))
-                run_named "artifact" "$atest" timeout --kill-after=30 "$art_to" \
+                if run_named "artifact" "$atest" timeout --kill-after=30 "$art_to" \
                     cargo test --locked --features testing --release --test clap "$atest" \
-                    -- --ignored --exact --nocapture \
-                    || art_rc=1
+                    -- --ignored --exact --nocapture; then
+                    art_cases=$((art_cases + $(subcase_count "$atest")))
+                else
+                    art_rc=1
+                fi
             done
         fi
 
