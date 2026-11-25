@@ -809,6 +809,26 @@ fn cmd_ceremony_proof(args: &[String]) {
     }
 }
 
+/// Appends optimization gaps only for non-canonical states (genuine missing
+/// PGO/BOLT outside clean `fallback_pgo_only` / `fallback_plain` verdicts).
+fn push_optimization_gaps(
+    gaps: &mut Vec<String>,
+    pgo_applied: bool,
+    bolt_applied: bool,
+    bolt_status: &str,
+    bolt_proof: &str,
+) {
+    let clean_bolt_fallback = bolt_proof == "fallback_plain" || bolt_proof == "fallback_pgo_only";
+    if !pgo_applied && bolt_proof != "fallback_plain" {
+        gaps.push("pgo_not_applied".to_string());
+    }
+    if bolt_status == "not_proven" && !clean_bolt_fallback {
+        gaps.push("bolt_not_proven".to_string());
+    } else if !bolt_applied && !clean_bolt_fallback {
+        gaps.push("bolt_not_applied".to_string());
+    }
+}
+
 fn cmd_build_receipt(args: &[String]) {
     let flags = match parse_flags(args) {
         Ok(f) => f,
@@ -873,6 +893,7 @@ fn cmd_build_receipt(args: &[String]) {
         .and_then(|c| c.parse::<u64>().ok());
     let codegen_csv_pre = flags.get("codegen-csv-pre").cloned();
     let codegen_csv_post = flags.get("codegen-csv-post").cloned();
+    let pre_strip_artifact_path = flags.get("pre-strip-artifact").cloned();
     let tarball_path = flags.get("tarball-path").cloned();
     let flatpak_path = flags.get("flatpak-path").cloned();
     let flatpak_compat_path = flags.get("flatpak-compat-path").cloned();
@@ -911,6 +932,9 @@ fn cmd_build_receipt(args: &[String]) {
     let cargo_lock_sha256 = hash_file(cargo_lock_path).unwrap_or_else(|_| "absent".to_string());
     let engine_provenance = extract_engine_provenance(cargo_lock_path);
 
+    let pre_strip_artifact_sha256 = pre_strip_artifact_path
+        .as_ref()
+        .and_then(|p| hash_file(Path::new(p)).ok());
     let tarball_sha256 = tarball_path
         .as_ref()
         .and_then(|p| hash_file(Path::new(p)).ok());
@@ -930,9 +954,9 @@ fn cmd_build_receipt(args: &[String]) {
         match validate_ab_opt_ceremony_receipt(cr, Some(&git_commit), Some(&cargo_lock_sha256)) {
             Ok((proof_id, samples, fdata, verdict)) => {
                 if verdict == "UNOPTIMIZED" {
-                    ("fallback_plain".to_string(), samples, fdata)
+                    ("fallback_plain".to_string(), None, None)
                 } else if verdict == "PGO-ONLY" || bolt_status == "not_proven" {
-                    ("fallback_pgo_only".to_string(), samples, fdata)
+                    ("fallback_pgo_only".to_string(), None, None)
                 } else {
                     (proof_id, samples, fdata)
                 }
@@ -975,15 +999,18 @@ fn cmd_build_receipt(args: &[String]) {
 
     let pgo_applied = pgo_status == "applied";
     let bolt_applied = bolt_status == "applied";
-
-    if !pgo_applied {
-        gaps.push("pgo_not_applied".to_string());
-    }
-    if bolt_status == "not_proven" {
-        gaps.push("bolt_not_proven".to_string());
-    } else if !bolt_applied {
-        gaps.push("bolt_not_applied".to_string());
-    }
+    let (bolt_lbr_samples, bolt_lbr_fdata_sha256) = if bolt_applied {
+        (bolt_lbr_samples, bolt_lbr_fdata_sha256)
+    } else {
+        (None, None)
+    };
+    push_optimization_gaps(
+        &mut gaps,
+        pgo_applied,
+        bolt_applied,
+        &bolt_status,
+        &bolt_proof,
+    );
 
     gaps.sort();
     gaps.dedup();
@@ -1026,7 +1053,7 @@ fn cmd_build_receipt(args: &[String]) {
         artifacts: BuildArtifacts {
             artifact_path: artifact_path_str,
             artifact_sha256: artifact_sha256.clone(),
-            pre_strip_artifact_sha256: None,
+            pre_strip_artifact_sha256,
             tarball_path,
             tarball_sha256,
             flatpak_path,

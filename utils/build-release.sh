@@ -731,7 +731,6 @@ EOF
 
                 if [ "$f_branch" = "26.08" ]; then
                     flatpak build-bundle --runtime "$FLATPAK_REPO_DIR" "$FLATPAK_BUNDLE" org.freedesktop.LinuxAudio.Plugins.NAMPlug "${f_branch}"
-                    cp -f "$FLATPAK_BUNDLE" "$DIST_DIR/${ARCHIVE_NAME}-${f_branch}.flatpak"
                     FLATPAK_PATH="$FLATPAK_BUNDLE"
                     echo "Generated flatpak bundle (26.08 canonical): $FLATPAK_BUNDLE"
                 else
@@ -792,6 +791,7 @@ RECEIPT_ARGS=(
 )
 
 [ -n "$BOLT_VERSION" ] && RECEIPT_ARGS+=("--bolt-version" "$BOLT_VERSION")
+[ -f "$ACTIVE_SO" ] && RECEIPT_ARGS+=("--pre-strip-artifact" "$ACTIVE_SO")
 [ -f "$BOLT_PROFILE" ] && RECEIPT_ARGS+=("--bolt-profile" "$BOLT_PROFILE")
 [ -f "$LOG_DIR/ab-opt-ceremony-receipt.json" ] && RECEIPT_ARGS+=("--ceremony-receipt" "$LOG_DIR/ab-opt-ceremony-receipt.json")
 [ -f "$PGO_WORKLOAD_RECEIPT" ] && RECEIPT_ARGS+=("--pgo-workload-receipt" "$PGO_WORKLOAD_RECEIPT")

@@ -172,9 +172,7 @@ fn test_emit_pending_logs_overload_rate_limiting() {
         "No warnings should be emitted when there are no overloads"
     );
 
-    // 2. Phase 1: 1 isolated stall -> exactly 1 warning cycle emitted
-    // Note: emit_pending_logs emits via both HostLog and log::warn! (which NamLogger forwards to HostLog),
-    // yielding 2 HostEvent::PluginLog entries for the single logical warning.
+    // 2. Phase 1: 1 isolated stall -> exactly 1 warning emitted to HostLog
     shared
         .cold
         .rt_status
@@ -200,8 +198,8 @@ fn test_emit_pending_logs_overload_rate_limiting() {
         .collect::<Vec<_>>();
     assert_eq!(
         logs.len(),
-        2,
-        "1 isolated stall must emit warning via HostLog and log::warn!"
+        1,
+        "1 isolated stall must emit warning once to HostLog"
     );
     assert!(
         logs[0].contains("NAM-Plug: 1 blocks exceeded 85% of the callback budget (load 85%)"),
@@ -237,7 +235,7 @@ fn test_emit_pending_logs_overload_rate_limiting() {
         .collect::<Vec<_>>();
     assert_eq!(
         logs_after_burst.len(),
-        2,
+        1,
         "100 stalls in burst must be suppressed by the 5-second rate limiter (no new warnings in window)"
     );
 }
@@ -326,8 +324,17 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
         warnings
     );
 
-    let error_count_after_first = errors.len();
-    let warning_count_after_first = warnings.len();
+    let halted_count = errors.iter().filter(|m| m.contains("DSP halted")).count();
+    assert_eq!(
+        halted_count, 1,
+        "UI_ALERT_POISONED must emit once to HostLog: {errors:?}"
+    );
+    assert_eq!(
+        errors.len(),
+        2,
+        "expected 1 housekeeping restart request + 1 UI_ALERT_POISONED: {errors:?}"
+    );
+    assert_eq!(warnings.len(), 1);
 
     // 2. Subsequent ticks with identical state must emit 0 additional logs (no flooding)
     for _ in 0..5 {
@@ -357,12 +364,12 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
 
     assert_eq!(
         errors_after_ticks.len(),
-        error_count_after_first,
+        2,
         "Subsequent ticks without bit transition must not emit duplicate error logs"
     );
     assert_eq!(
         warnings_after_ticks.len(),
-        warning_count_after_first,
+        1,
         "Subsequent ticks without bit transition must not emit duplicate warning logs"
     );
 
@@ -387,8 +394,8 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
 
     assert_eq!(
         errors_after_new.len(),
-        error_count_after_first + 2, // 1 from HostLog + 1 from log::error! forwarding
-        "New transition must emit exactly one log cycle"
+        3, // +1 for HOST_CONTRACT (no duplicate HostLog emission)
+        "New transition must emit exactly one HostLog message"
     );
     assert!(
         errors_after_new
@@ -432,13 +439,14 @@ fn test_no_active_model_logs_only_on_rising_edge_not_every_poll() {
     host_harness::fire_timer(&mut instance, TimerId(1));
     let baseline = count_no_active_model(&host_state);
 
-    // Rising edge: RT reports no model; the main thread logs exactly once.
+    // Rising edge: RT reports load failure; the main thread logs exactly once.
     shared.cold.rt_status.set_flag(RT_STATUS_MODEL_LOAD_FAILED);
     host_harness::fire_timer(&mut instance, TimerId(1));
     let after_edge = count_no_active_model(&host_state);
-    assert!(
-        after_edge > baseline,
-        "rising edge of RT_STATUS_MODEL_LOAD_FAILED must emit the error log"
+    assert_eq!(
+        after_edge,
+        baseline + 1,
+        "rising edge of RT_STATUS_MODEL_LOAD_FAILED must emit exactly one HostLog error"
     );
 
     // Flag remains set (RT-owned): subsequent polls must not re-log.
@@ -471,11 +479,65 @@ fn test_no_active_model_logs_only_on_rising_edge_not_every_poll() {
     );
     shared.cold.rt_status.set_flag(RT_STATUS_MODEL_LOAD_FAILED);
     host_harness::fire_timer(&mut instance, TimerId(1));
-    let edge_delta = after_edge - baseline;
     assert_eq!(
         count_no_active_model(&host_state),
-        after_edge + edge_delta,
-        "a new rising edge must emit the same single logical error as the first edge"
+        after_edge + 1,
+        "a new rising edge must emit one more HostLog error"
+    );
+}
+
+#[test]
+fn test_overload_warning_uses_peak_when_ewma_decayed_to_zero() {
+    let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    use crate::clap::host_harness::{self, HostEvent};
+    use clack_extensions::log::LogSeverity;
+    use clack_extensions::timer::TimerId;
+
+    let (_entry, _host_info, mut instance, host_state) =
+        host_harness::make_test_plugin_with_harness();
+    let shared = unsafe { &*test_util::extract_shared(&mut instance) };
+
+    shared
+        .cold
+        .rt_status
+        .dsp_overloads
+        .store(1, Ordering::Relaxed);
+    shared
+        .rt_to_ui
+        .dsp_load_permille
+        .store(0, Ordering::Relaxed);
+    shared
+        .rt_to_ui
+        .dsp_overload_peak_permille
+        .store(960, Ordering::Relaxed);
+
+    host_harness::fire_timer(&mut instance, TimerId(1));
+
+    let logs: Vec<String> = host_state
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            HostEvent::PluginLog {
+                severity: LogSeverity::Warning,
+                message,
+            } if message.contains("blocks exceeded 85%") => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logs.len(), 1, "expected exactly 1 overload warning");
+    assert!(
+        logs[0].contains("(load 96%)"),
+        "expected peak load 96% when EWMA is 0, got: {}",
+        logs[0]
+    );
+    assert_eq!(
+        shared
+            .rt_to_ui
+            .dsp_overload_peak_permille
+            .load(Ordering::Relaxed),
+        0,
+        "dsp_overload_peak_permille must be drained on emission"
     );
 }
 

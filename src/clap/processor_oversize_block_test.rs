@@ -235,6 +235,7 @@ mod tests {
     #[test]
     fn test_oversize_block_cabsim_on() {
         let ir_path = write_test_ir("oversize_test_ir");
+        let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir_path.clone());
         let (_instance, _state, mut started) =
             setup_instance_with_model("lstm.nam", OversampleFactor::Off, Some(&ir_path));
 

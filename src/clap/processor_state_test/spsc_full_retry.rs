@@ -171,7 +171,8 @@ fn test_spsc_full_retry_publishes_full_ui_commit() {
 
 #[test]
 fn test_cabsim_retained_on_spsc_full_no_ui_desync() {
-    let ir_path = std::env::temp_dir().join("nam_plug_spsc_full_ir.wav");
+    let ir_path = test_util::tmp_path("spsc_full_ir.wav");
+    let _ir_guard = test_util::TempCleanupGuard::new(ir_path.clone());
     let samples: Vec<f32> = (0..64).map(|i| (i as f32 * 0.1).sin()).collect();
     neural_amp_modeler_rs::testing::wav::write_wav_f32(&ir_path, &samples, 48000)
         .expect("failed to write synthetic IR WAV");

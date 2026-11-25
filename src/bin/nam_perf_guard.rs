@@ -758,6 +758,7 @@ enum ScenarioEventMode {
     None,
     GainAutomation,
     BypassToggle,
+    ModelSwap,
 }
 
 impl ScenarioEventMode {
@@ -766,8 +767,41 @@ impl ScenarioEventMode {
             Self::None => "none",
             Self::GainAutomation => "automation",
             Self::BypassToggle => "bypass",
+            Self::ModelSwap => "model_swap",
         }
     }
+}
+
+fn resolve_fixture_asset(
+    fixture: Option<&str>,
+    kind: &str,
+) -> Result<(Option<std::path::PathBuf>, Option<String>), String> {
+    let Some(fixture) = fixture else {
+        return Ok((None, None));
+    };
+    let fixture_path = resolve_model_fixture(fixture)
+        .ok_or_else(|| format!("fixture_missing: Required {kind} '{fixture}' not found"))?;
+    let abs_path = std::fs::canonicalize(&fixture_path).map_err(|e| e.to_string())?;
+    let hash = sha256_of(&abs_path).map_err(|e| format!("fixture_hash_failed:{fixture}:{e}"))?;
+    Ok((Some(abs_path), Some(hash)))
+}
+
+fn build_state_payload(
+    fixture_file: Option<&str>,
+    cab_fixture_file: Option<&str>,
+    oversample: OversampleFactor,
+) -> Result<Vec<u8>, String> {
+    let (model_path, model_hash) = resolve_fixture_asset(fixture_file, "fixture")?;
+    let (ir_path, ir_hash) = resolve_fixture_asset(cab_fixture_file, "cabinet fixture")?;
+
+    let mut params = ProcessingParams::default();
+    params.oversample = oversample;
+    params.activation_precision = ActivationPrecision::Standard;
+    params.model_path = model_path;
+    params.model_hash = model_hash;
+    params.ir_path = ir_path;
+    params.ir_hash = ir_hash;
+    serde_json::to_vec(&params).map_err(|e| e.to_string())
 }
 
 fn oversample_label(factor: OversampleFactor) -> &'static str {
@@ -996,37 +1030,21 @@ fn measure_scenario(
 
     let expects_model = config.fixture_file.is_some();
     let expects_cab = config.cab_fixture_file.is_some();
-    let (model_path, model_hash) = if let Some(fixture) = config.fixture_file {
-        let fixture_path = resolve_model_fixture(fixture)
-            .ok_or_else(|| format!("fixture_missing: Required fixture '{fixture}' not found"))?;
-        let abs_path = std::fs::canonicalize(&fixture_path).map_err(|e| e.to_string())?;
-        let hash =
-            sha256_of(&abs_path).map_err(|e| format!("fixture_hash_failed:{fixture}:{e}"))?;
-        (Some(abs_path), Some(hash))
+    let state_bytes = build_state_payload(
+        config.fixture_file,
+        config.cab_fixture_file,
+        config.oversample,
+    )?;
+    let swap_state_bytes = if config.event_mode == ScenarioEventMode::ModelSwap {
+        Some(build_state_payload(
+            Some("a2_example.nam"),
+            config.cab_fixture_file,
+            config.oversample,
+        )?)
     } else {
-        (None, None)
-    };
-    let (ir_path, ir_hash) = if let Some(cab_fixture) = config.cab_fixture_file {
-        let fixture_path = resolve_model_fixture(cab_fixture).ok_or_else(|| {
-            format!("fixture_missing: Required cabinet fixture '{cab_fixture}' not found")
-        })?;
-        let abs_path = std::fs::canonicalize(&fixture_path).map_err(|e| e.to_string())?;
-        let hash =
-            sha256_of(&abs_path).map_err(|e| format!("fixture_hash_failed:{cab_fixture}:{e}"))?;
-        (Some(abs_path), Some(hash))
-    } else {
-        (None, None)
+        None
     };
 
-    let mut params = ProcessingParams::default();
-    params.oversample = config.oversample;
-    params.activation_precision = ActivationPrecision::Standard;
-    params.model_path = model_path;
-    params.model_hash = model_hash;
-    params.ir_path = ir_path;
-    params.ir_hash = ir_hash;
-
-    let state_bytes = serde_json::to_vec(&params).map_err(|e| e.to_string())?;
     match plugin_instance
         .plugin_handle()
         .get_extension::<PluginState>()
@@ -1120,12 +1138,47 @@ fn measure_scenario(
     // Benchmark measurement (1000 iterations, pre-allocated and prefaulted)
     const MEASUREMENT_CYCLES: usize = 1000;
     let mut latencies_ns = vec![0.0_f64; MEASUREMENT_CYCLES];
+    let swap_state_ext = (config.event_mode == ScenarioEventMode::ModelSwap)
+        .then(|| {
+            plugin_instance
+                .plugin_handle()
+                .get_extension::<PluginState>()
+        })
+        .flatten();
+    if config.event_mode == ScenarioEventMode::ModelSwap && swap_state_ext.is_none() {
+        return Err(
+            "state_extension_missing: PluginState extension unavailable for ModelSwap".to_string(),
+        );
+    }
+    let mut swap_count = 0usize;
 
     for (idx, slot) in latencies_ns.iter_mut().enumerate() {
+        let do_swap =
+            config.event_mode == ScenarioEventMode::ModelSwap && idx > 0 && idx.is_multiple_of(200);
+        if do_swap {
+            let mut next_slice: &[u8] = if swap_count.is_multiple_of(2) {
+                swap_state_bytes.as_deref().unwrap_or(&state_bytes)
+            } else {
+                &state_bytes
+            };
+            let handle = plugin_instance.plugin_handle();
+            swap_state_ext
+                .as_ref()
+                .expect("checked above")
+                .load(&handle, &mut next_slice)
+                .map_err(|e| format!("model_swap_load_failed_at_{idx}: {e:?}"))?;
+            swap_count += 1;
+        }
+
         let ev_buf = match config.event_mode {
-            ScenarioEventMode::None => None,
-            _ if idx % 2 == 0 => Some(&ev_a),
-            _ => Some(&ev_b),
+            ScenarioEventMode::None | ScenarioEventMode::ModelSwap => None,
+            ScenarioEventMode::GainAutomation | ScenarioEventMode::BypassToggle => {
+                if idx % 2 == 0 {
+                    Some(&ev_a)
+                } else {
+                    Some(&ev_b)
+                }
+            }
         };
         let elapsed = run_process_block(
             "measurement",
@@ -1142,6 +1195,10 @@ fn measure_scenario(
             &mut status_rejected,
         )?;
         *slot = elapsed.as_nanos() as f64;
+
+        if do_swap {
+            plugin_instance.call_on_main_thread_callback();
+        }
     }
 
     let (cab_probe_passed, cab_probe_max_abs_diff) =
@@ -1191,6 +1248,12 @@ fn measure_scenario(
 
     let stopped_processor = started_processor.stop_processing();
     plugin_instance.deactivate(stopped_processor);
+
+    if config.event_mode == ScenarioEventMode::ModelSwap && swap_count != 4 {
+        return Err(format!(
+            "model_swap_count_mismatch: expected 4 swaps across 1000 blocks, observed {swap_count}"
+        ));
+    }
 
     // Compute statistics
     latencies_ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1268,7 +1331,7 @@ fn build_timed_event_buffers(mode: ScenarioEventMode, n: usize) -> (EventBuffer,
     let mut ev_a = EventBuffer::with_capacity(4);
     let mut ev_b = EventBuffer::with_capacity(4);
     match mode {
-        ScenarioEventMode::None => {}
+        ScenarioEventMode::None | ScenarioEventMode::ModelSwap => {}
         ScenarioEventMode::GainAutomation => {
             let mid = (n / 2) as u32;
             ev_a.push(&ParamValueEvent::new(
@@ -1636,6 +1699,17 @@ fn main() -> ExitCode {
             stereo: true,
             oversample: OversampleFactor::Off,
             event_mode: ScenarioEventMode::BypassToggle,
+            block_size: 64,
+            sample_rate: 48000.0,
+        },
+        ScenarioConfig {
+            name: "WaveNet_A1_Stereo_ModelSwap_64_samp",
+            topology: "WaveNet A1 Standard",
+            fixture_file: Some("wavenet_a1_standard.nam"),
+            cab_fixture_file: None,
+            stereo: true,
+            oversample: OversampleFactor::Off,
+            event_mode: ScenarioEventMode::ModelSwap,
             block_size: 64,
             sample_rate: 48000.0,
         },

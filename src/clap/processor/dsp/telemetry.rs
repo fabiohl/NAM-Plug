@@ -95,6 +95,11 @@ impl<'a> NamClapProcessor<'a> {
                     .store(permille, Ordering::Relaxed);
 
                 if elapsed_nanos > self.cached_threshold_ns {
+                    let instant_u16 = (instant_permille.round() as u32).min(1000) as u16;
+                    self.shared
+                        .rt_to_ui
+                        .dsp_overload_peak_permille
+                        .fetch_max(instant_u16, Ordering::Relaxed);
                     let overloads =
                         self.rt_status.dsp_overloads.fetch_add(1, Ordering::Relaxed) + 1;
                     self.shared

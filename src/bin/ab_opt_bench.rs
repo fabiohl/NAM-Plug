@@ -462,8 +462,19 @@ fn run_measured_clap(
         .map_err(|e| format!("Start processing failed: {e:?}"))?;
 
     let n = block_size;
-    let mut in_l = vec![0.1f32; n];
-    let mut in_r = vec![0.1f32; n];
+    let raw_stress =
+        neural_amp_modeler_rs::testing::stress::generate_stress_signal_v2_default(48_000);
+    let ring_blocks = (raw_stress.len() / n).max(1);
+    let stress_ring: Vec<f32> = raw_stress
+        .iter()
+        .copied()
+        .cycle()
+        .take(ring_blocks * n)
+        .map(|s| s * 0.125)
+        .collect();
+
+    let mut in_l = vec![0.0f32; n];
+    let mut in_r = vec![0.0f32; n];
     let mut out_l = vec![0.0f32; n];
     let mut out_r = vec![0.0f32; n];
 
@@ -471,14 +482,17 @@ fn run_measured_clap(
     let mut output_ports = AudioPorts::with_capacity(2, 1);
     let mut output_events_buffer = EventBuffer::with_capacity(10);
 
-    for _ in 0..warmup_blocks {
+    for idx in 0..warmup_blocks {
+        let start = (idx as usize % ring_blocks) * n;
+        in_l.copy_from_slice(&stress_ring[start..start + n]);
+        in_r.copy_from_slice(&stress_ring[start..start + n]);
         let input_events = InputEvents::empty();
         let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
         let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
         let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
             latency: 0,
             channels: AudioPortBufferType::f32_input_only(
-                input_channels.iter_mut().map(InputChannel::constant),
+                input_channels.iter_mut().map(InputChannel::variable),
             ),
         }]);
         let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];
@@ -504,14 +518,17 @@ fn run_measured_clap(
     let mut cycles = Vec::with_capacity(measured_blocks as usize);
     let mut total_frames = 0u64;
 
-    for _ in 0..measured_blocks {
+    for idx in 0..measured_blocks {
+        let start = (idx as usize % ring_blocks) * n;
+        in_l.copy_from_slice(&stress_ring[start..start + n]);
+        in_r.copy_from_slice(&stress_ring[start..start + n]);
         let input_events = InputEvents::empty();
         let mut output_events = OutputEvents::from_buffer(&mut output_events_buffer);
         let mut input_channels = [in_l.as_mut_slice(), in_r.as_mut_slice()];
         let input_audio = input_ports.with_input_buffers([AudioPortBuffer {
             latency: 0,
             channels: AudioPortBufferType::f32_input_only(
-                input_channels.iter_mut().map(InputChannel::constant),
+                input_channels.iter_mut().map(InputChannel::variable),
             ),
         }]);
         let output_channels = [out_l.as_mut_slice(), out_r.as_mut_slice()];

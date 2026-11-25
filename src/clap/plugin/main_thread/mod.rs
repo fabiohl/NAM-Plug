@@ -676,14 +676,15 @@ impl Drop for TeardownQuiescenceGuard<'_> {
 
 impl<'a> Drop for NamClapMainThread<'a> {
     fn drop(&mut self) {
+        // Flush any remaining telemetry flags before announcing teardown so final
+        // RT warnings/errors appear chronologically prior to instance destruction.
+        self.emit_pending_logs();
+
         log::info!(
             "NAM-Plug: Plugin instance destroying — sink unregister, quiescence, GUI fence down, teardown + GC drain."
         );
 
         let mut quiescence_guard = TeardownQuiescenceGuard::new(self.shared);
-
-        // Flush any remaining telemetry flags before unregistering
-        self.emit_pending_logs();
 
         // 1. Unregister instance sink from global NamLogger so no future logs are dispatched to this instance
         if let Some(logger) =

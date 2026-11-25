@@ -169,6 +169,7 @@ mod tests {
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
         let ir = write_decay_ir("t44_batch_reset");
+        let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir.clone());
         mt.load_cabsim(&ir).expect("load decay IR");
 
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
@@ -264,6 +265,7 @@ mod tests {
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
         let ir = write_unit_ir("t44_xfade_ir");
+        let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir.clone());
         mt.load_cabsim(&ir).expect("load unit IR");
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
         shared
@@ -346,6 +348,7 @@ mod tests {
 
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t44_gate_handoff");
+        let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir.clone());
         mt.load_cabsim(&ir).expect("load decay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
 
@@ -411,6 +414,7 @@ mod tests {
 
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_unit_ir("t44_combined_ir");
+        let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir.clone());
         mt.load_cabsim(&ir).expect("load unit IR");
 
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
@@ -491,6 +495,7 @@ mod tests {
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
         let ir = write_decay_ir("t44_zero_alloc");
+        let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir.clone());
         mt.load_cabsim(&ir).expect("load IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config_48k());
 

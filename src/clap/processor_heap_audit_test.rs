@@ -95,7 +95,8 @@ mod tests {
             "wavenet_a1_standard.nam fixture missing — heap-audit gate requires a real model"
         );
 
-        let ir_path = std::env::temp_dir().join("nam_plug_heap_audit_ir.wav");
+        let ir_path = test_util::tmp_path("heap_audit_ir.wav");
+        let _ir_guard = test_util::TempCleanupGuard::new(ir_path.clone());
         write_synthetic_ir(&ir_path, 48000);
 
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
@@ -972,7 +973,8 @@ mod tests {
     fn test_heap_audit_invalid_model_graceful() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
-        let invalid_path = std::env::temp_dir().join("nam_plug_heap_audit_invalid.nam");
+        let invalid_path = test_util::tmp_path("heap_audit_invalid.nam");
+        let _invalid_guard = test_util::TempCleanupGuard::new(invalid_path.clone());
         test_util::write_invalid_model_fixture(&invalid_path);
 
         let params = test_util::make_default_params(Some(invalid_path));
@@ -1281,7 +1283,8 @@ mod tests {
             "wavenet_a1_standard.nam fixture missing — heap-audit gate requires a real model"
         );
 
-        let ir_path = std::env::temp_dir().join("nam_plug_heap_audit_tail_drain_ir.wav");
+        let ir_path = test_util::tmp_path("heap_audit_tail_drain_ir.wav");
+        let _ir_guard = test_util::TempCleanupGuard::new(ir_path.clone());
         write_synthetic_ir(&ir_path, 48000);
 
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();

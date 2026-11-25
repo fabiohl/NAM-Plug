@@ -14,18 +14,53 @@ use std::ffi::CString;
 use std::sync::atomic::Ordering;
 
 impl<'a> NamClapMainThread<'a> {
+    /// Emits an instance-scoped alert once to `LogBuffer` and the DAW `HostLog`.
+    ///
+    /// When `NamLogger` is active and has an instance sink registered for this
+    /// plugin, `log::*!` inside `scope_instance` forwards to `HostLog`
+    /// automatically; calling `HostLog::log` directly as well would duplicate
+    /// every message on the host console. Only fall back to direct `HostLog`
+    /// dispatch when `NamLogger` forwarding is unavailable.
+    fn emit_alert_log(&self, severity: LogSeverity, msg: &str) {
+        let level = match severity {
+            LogSeverity::Error => log::Level::Error,
+            LogSeverity::Warning => log::Level::Warn,
+            LogSeverity::Info => log::Level::Info,
+            LogSeverity::Debug => log::Level::Debug,
+            _ => log::Level::Info,
+        };
+        let forwarded_by_logger =
+            neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global().is_some()
+                && log::log_enabled!(level)
+                && self
+                    .shared
+                    .cold
+                    .host_log_sink
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+        match severity {
+            LogSeverity::Error => log::error!("{msg}"),
+            LogSeverity::Warning => log::warn!("{msg}"),
+            LogSeverity::Info => log::info!("{msg}"),
+            LogSeverity::Debug => log::debug!("{msg}"),
+            _ => log::info!("{msg}"),
+        }
+        if !forwarded_by_logger && let Some(log) = self.host.get_extension::<HostLog>() {
+            let cmsg = CString::new(msg.as_bytes()).unwrap_or_default();
+            log.log(&self.host.shared(), severity, &cmsg);
+        }
+    }
+
     /// Emits host log messages for RT telemetry flags that were set.
     ///
     /// RT-Safe: all `CString::new(…).unwrap_or_default()` calls use static
-    /// ASCII literals with no internal null bytes — guaranteed non-panicking.
+    /// ASCII literals or pre-formatted non-null strings — guaranteed non-panicking.
     pub(crate) fn emit_pending_logs(&self) {
         let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
             self.shared.cold.instance_id,
         );
         self.update_alert_bits();
-
-        let log_ext = self.host.get_extension::<HostLog>();
-        let shared = self.host.shared();
 
         // Standardized alert transition logs to host.
         // Emits only on 0 -> 1 transitions to prevent flooding.
@@ -35,86 +70,51 @@ impl<'a> NamClapMainThread<'a> {
         self.last_seen_alert_bits.set(current_alerts);
 
         if (new_alerts & UI_ALERT_POISONED) != 0 {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Error,
                 "NAM-Plug: Audio processor is poisoned due to a fatal panic in RT callback! DSP halted — restart requested.",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!(
-                "NAM-Plug: Audio processor is poisoned due to a fatal panic in RT callback! DSP halted — restart requested."
             );
         }
 
         if (new_alerts & UI_ALERT_HOST_CONTRACT) != 0 {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Error,
                 "NAM-Plug: Host audio buffer size exceeded negotiated maximum contract limit!",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!(
-                "NAM-Plug: Host audio buffer size exceeded negotiated maximum contract limit!"
             );
         }
 
         if (new_alerts & UI_ALERT_RESAMPLER_FAILED) != 0 {
-            let msg =
-                CString::new("NAM-Plug: Resampler rebuild failed for current host sample rate!")
-                    .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!("NAM-Plug: Resampler rebuild failed for current host sample rate!");
+            self.emit_alert_log(
+                LogSeverity::Error,
+                "NAM-Plug: Resampler rebuild failed for current host sample rate!",
+            );
         }
 
         if (new_alerts & UI_ALERT_CABSIM_CONTRACT) != 0 {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Error,
                 "NAM-Plug: Host buffer size violates CabSim partition contract limit!",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!("NAM-Plug: Host buffer size violates CabSim partition contract limit!");
+            );
         }
 
         if (new_alerts & UI_ALERT_DEGRADE_MINIMAL) != 0 {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Warning,
                 "NAM-Plug: DSP degraded to minimal quality mode due to critical CPU pressure.",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Warning, &msg);
-            }
-            log::warn!(
-                "NAM-Plug: DSP degraded to minimal quality mode due to critical CPU pressure."
             );
         }
 
         if (new_alerts & UI_ALERT_DEGRADE_REDUCED) != 0 {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Warning,
                 "NAM-Plug: DSP degraded to reduced quality mode due to high CPU pressure.",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Warning, &msg);
-            }
-            log::warn!("NAM-Plug: DSP degraded to reduced quality mode due to high CPU pressure.");
+            );
         }
 
         if (new_alerts & UI_ALERT_NON_FINITE_INPUT) != 0 {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Warning,
                 "NAM-Plug: Non-finite input samples (NaN/Inf) detected — recovering DSP state.",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Warning, &msg);
-            }
-            log::warn!(
-                "NAM-Plug: Non-finite input samples (NaN/Inf) detected — recovering DSP state."
             );
         }
 
@@ -124,17 +124,10 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HAS_CLIPPED)
         {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Warning,
                 "NAM-Plug: Output clipping detected! Consider reducing input/output gain, \
                  or checking whether the model carries a large DC offset.",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Warning, &msg);
-            }
-            log::warn!(
-                "NAM-Plug: Output clipping detected! Consider reducing input/output gain, \
-                 or checking whether the model carries a large DC offset."
             );
         }
 
@@ -144,12 +137,10 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_OVERFLOW)
         {
-            let msg = CString::new("NAM-Plug: GC channel overflow! Possible memory leak.")
-                .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!("NAM-Plug: GC channel overflow! Possible memory leak.");
+            self.emit_alert_log(
+                LogSeverity::Error,
+                "NAM-Plug: GC channel overflow! Possible memory leak.",
+            );
         }
 
         if self
@@ -158,15 +149,9 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_TIER3)
         {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Warning,
                 "NAM-Plug: GC cascade reached Tier 3 (overflow buffer). Sustained GC pressure.",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Warning, &msg);
-            }
-            log::warn!(
-                "NAM-Plug: GC cascade reached Tier 3 (overflow buffer). Sustained GC pressure."
             );
         }
 
@@ -176,21 +161,15 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_GC_CORRUPTED)
         {
-            let msg =
-                CString::new("NAM-Plug: GC overflow buffer corrupted! Forced leak to avoid UB.")
-                    .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!("NAM-Plug: GC overflow buffer corrupted! Forced leak to avoid UB.");
+            self.emit_alert_log(
+                LogSeverity::Error,
+                "NAM-Plug: GC overflow buffer corrupted! Forced leak to avoid UB.",
+            );
         }
 
         // Rising-edge detection only: the RT thread keeps this flag set while
-        // no model is active, so consuming it here (check_and_clear) would let
-        // the RT thread set it again and flood the log at every host tick.
-        // The flag is left intact for the RT thread to own/clear on model
-        // install or bypass; the main thread only logs the `false -> true`
-        // transition.
+        // the failure persists, so consuming it here (check_and_clear) would let
+        // a failure flood the log at every host tick.
         let model_load_failed = self
             .shared
             .cold
@@ -198,12 +177,10 @@ impl<'a> NamClapMainThread<'a> {
             .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
         let was_failed = self.last_seen_model_load_failed.replace(model_load_failed);
         if model_load_failed && !was_failed {
-            let msg = CString::new("NAM-Plug: Critical failure! No active model for processing.")
-                .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!("NAM-Plug: Critical failure! No active model for processing.");
+            self.emit_alert_log(
+                LogSeverity::Error,
+                "NAM-Plug: Critical failure! No active model for processing.",
+            );
         }
 
         if self
@@ -212,14 +189,10 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC)
         {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Error,
                 "NAM-Plug: Heap allocation detected in audio thread during process()!",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!("NAM-Plug: Heap allocation detected in audio thread during process()!");
+            );
         }
 
         if self
@@ -228,15 +201,9 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_HUGEPAGE_OK)
         {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Info,
                 "NAM-Plug: HugeTLB explicit 2 MB pages active — reduced TLB pressure on DSP thread.",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Info, &msg);
-            }
-            log::info!(
-                "NAM-Plug: HugeTLB explicit 2 MB pages active — reduced TLB pressure on DSP thread."
             );
         }
 
@@ -246,101 +213,63 @@ impl<'a> NamClapMainThread<'a> {
             .rt_status
             .check_and_clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_THP_ACTIVE)
         {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Info,
                 "NAM-Plug: Transparent Huge Pages (THP) advice active — kernel may promote to 2 MB.",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Info, &msg);
-            }
-            log::info!(
-                "NAM-Plug: Transparent Huge Pages (THP) advice active — kernel may promote to 2 MB."
             );
         }
 
         if self.shared.cold.rt_status.check_and_clear_flag(
             neural_amp_modeler_rs::common::spsc::RT_STATUS_SLIMMABLE_SLICE_FAILED,
         ) {
-            let msg = CString::new("NAM-Plug: WaveNet slimmable slice_channels rebuild failed.")
-                .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!("NAM-Plug: WaveNet slimmable slice_channels rebuild failed.");
+            self.emit_alert_log(
+                LogSeverity::Error,
+                "NAM-Plug: WaveNet slimmable slice_channels rebuild failed.",
+            );
         }
 
         if self.shared.cold.rt_status.check_and_clear_flag(
             neural_amp_modeler_rs::common::spsc::RT_STATUS_SPSC_DRAIN_TRUNCATED,
         ) {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Warning,
                 "Event queue saturation: SPSC drain limit (64) or input event budget (4096) exceeded - pending events deferred",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Warning, &msg);
-            }
-            log::warn!(
-                "Event queue saturation: SPSC drain limit (64) or input event budget (4096) exceeded - pending events deferred"
             );
         }
 
         if self.shared.cold.rt_status.check_and_clear_flag(
             neural_amp_modeler_rs::common::spsc::RT_STATUS_GUI_EVENT_BACKPRESSURE,
         ) {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Warning,
                 "NAM-Plug: GUI event queue backpressure - host output full; gesture events retained for retry",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Warning, &msg);
-            }
-            log::warn!(
-                "NAM-Plug: GUI event queue backpressure - host output full; gesture events retained for retry"
             );
         }
 
         if self.shared.cold.rt_status.check_and_clear_flag(
             neural_amp_modeler_rs::common::spsc::RT_STATUS_STRUCTURAL_DEFERRED,
         ) {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Info,
                 "NAM-Plug: Structural command deferred to the next callback (command budget 1/callback) - FIFO order preserved",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Info, &msg);
-            }
-            log::info!(
-                "NAM-Plug: Structural command deferred to the next callback (command budget 1/callback) - FIFO order preserved"
             );
         }
 
         if self.shared.cold.rt_status.check_and_clear_flag(
             neural_amp_modeler_rs::common::spsc::RT_STATUS_STRUCTURAL_SUPERSEDED,
         ) {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Info,
                 "NAM-Plug: Deferred structural command superseded by a newer same-kind command; obsolete resources discarded off-RT (coalescing)",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Info, &msg);
-            }
-            log::info!(
-                "NAM-Plug: Deferred structural command superseded by a newer same-kind command; obsolete resources discarded off-RT (coalescing)"
             );
         }
 
         if self.shared.cold.rt_status.check_and_clear_flag(
             neural_amp_modeler_rs::common::spsc::RT_STATUS_EVENT_TIMING_ANOMALY,
         ) {
-            let msg = CString::new(
+            self.emit_alert_log(
+                LogSeverity::Warning,
                 "NAM-Plug: Parameter event timing anomaly detected (out-of-order, late, or beyond block limits); clamped defensively with zero event loss",
-            )
-            .unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Warning, &msg);
-            }
-            log::warn!(
-                "NAM-Plug: Parameter event timing anomaly detected (out-of-order, late, or beyond block limits); clamped defensively with zero event loss"
             );
         }
 
@@ -363,23 +292,23 @@ impl<'a> NamClapMainThread<'a> {
                 self.last_seen_overloads.set(overloads);
                 self.last_overload_log_instant.set(Some(now));
 
-                let permille = self
+                let peak_permille = self
+                    .shared
+                    .rt_to_ui
+                    .dsp_overload_peak_permille
+                    .swap(0, Ordering::Relaxed);
+                let ewma_permille = self
                     .shared
                     .rt_to_ui
                     .dsp_load_permille
                     .load(Ordering::Relaxed);
+                let permille = peak_permille.max(ewma_permille);
                 let load_pct = (permille as u32 + 5) / 10;
 
                 let msg_str = format!(
                     "NAM-Plug: {delta} blocks exceeded 85% of the callback budget (load {load_pct}%)"
                 );
-                let msg = CString::new(msg_str.as_bytes()).unwrap_or_default();
-                if let Some(log) = log_ext {
-                    log.log(&shared, LogSeverity::Warning, &msg);
-                }
-                log::warn!(
-                    "NAM-Plug: {delta} blocks exceeded 85% of the callback budget (load {load_pct}%)"
-                );
+                self.emit_alert_log(LogSeverity::Warning, &msg_str);
             }
         }
 
@@ -391,13 +320,7 @@ impl<'a> NamClapMainThread<'a> {
             let msg_str = format!(
                 "NAM-Plug: RetiredBoxOverflow overwrote {delta} undrained box shell(s) (total={box_overwritten})."
             );
-            let msg = CString::new(msg_str.as_bytes()).unwrap_or_default();
-            if let Some(log) = log_ext {
-                log.log(&shared, LogSeverity::Error, &msg);
-            }
-            log::error!(
-                "NAM-Plug: RetiredBoxOverflow overwrote {delta} undrained box shell(s) (total={box_overwritten})."
-            );
+            self.emit_alert_log(LogSeverity::Error, &msg_str);
         }
     }
 }

@@ -15,8 +15,8 @@
 //!                       [--bolt-cause <text>]
 //! ```
 //!
-//! Exit codes: 0 proven/fallback verdict; 1 unoptimized or unusable receipts;
-//! 2 usage error.
+//! Exit codes: 0 valid ceremony verdict (PGO+BOLT, PGO-ONLY, or UNOPTIMIZED
+//! fallback); 1 missing/invalid/incomplete receipts; 2 usage error.
 
 use std::env;
 use std::fs;
@@ -24,12 +24,16 @@ use std::path::PathBuf;
 use std::process::exit;
 
 use nam_plug::receipt::ab_opt::{
-    derive_bolt_lbr, derive_provenance, evaluate_ceremony, fmt, fmt_num, median_num, read_runs,
+    CeremonyBoltLbr, CeremonyProvenance, derive_bolt_lbr, derive_provenance, evaluate_ceremony,
+    fmt, fmt_num, median_num, read_runs,
 };
 use serde_json::{Map, Value};
 
 const USAGE: &str = "usage: plug_ab_opt compare --dir <dir> --out <file> --runs <N> \
     [--bolt-applied 0|1] [--bolt-cause <text>]\n       \
+    plug_ab_opt write-meta --dir <dir> [--cpu-bench <core>] [--paranoid-before <N>] \
+    [--paranoid-after <N>] [--engine-commit <sha>] [--bolt-applied 0|1] \
+    [--bolt-samples <N>] [--bolt-fdata-sha256 <hex>] [--bolt-mode <lbr|instrumented>]\n       \
     plug_ab_opt pick-core [--bench-core <N>]";
 
 fn main() {
@@ -40,6 +44,7 @@ fn main() {
     };
     match action {
         "compare" => compare(&args[1..]),
+        "write-meta" => write_meta(&args[1..]),
         "pick-core" => pick_core(&args[1..]),
         "-h" | "--help" => {
             println!("{USAGE}");
@@ -304,4 +309,124 @@ fn compare(args: &[String]) {
     );
     println!();
     println!("  Receipt: {}", cfg.out.display());
+}
+
+fn read_engine_commit_from_vars() -> Option<String> {
+    let content = fs::read_to_string("variables.env").ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("ENGINE_COMMIT=") {
+            let val = rest.trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn write_meta(args: &[String]) {
+    let mut dir = PathBuf::from("target/logs");
+    let mut cpu_bench: Option<String> = None;
+    let mut paranoid_before: Option<i32> = None;
+    let mut paranoid_after: Option<i32> = None;
+    let mut engine_commit: Option<String> = None;
+    let mut bolt_applied = false;
+    let mut bolt_samples: Option<u64> = None;
+    let mut bolt_fdata_sha256: Option<String> = None;
+    let mut bolt_mode: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let val = |idx: usize| -> String {
+            args.get(idx + 1).cloned().unwrap_or_else(|| {
+                eprintln!("plug_ab_opt: {} requires a value", args[idx]);
+                exit(2);
+            })
+        };
+        match args[i].as_str() {
+            "--dir" => {
+                dir = PathBuf::from(val(i));
+                i += 2;
+            }
+            "--cpu-bench" => {
+                cpu_bench = Some(val(i));
+                i += 2;
+            }
+            "--paranoid-before" => {
+                paranoid_before = val(i).parse().ok();
+                i += 2;
+            }
+            "--paranoid-after" => {
+                paranoid_after = val(i).parse().ok();
+                i += 2;
+            }
+            "--engine-commit" => {
+                engine_commit = Some(val(i));
+                i += 2;
+            }
+            "--bolt-applied" => {
+                bolt_applied = val(i) == "1";
+                i += 2;
+            }
+            "--bolt-samples" => {
+                bolt_samples = val(i).parse().ok();
+                i += 2;
+            }
+            "--bolt-fdata-sha256" => {
+                bolt_fdata_sha256 = Some(val(i));
+                i += 2;
+            }
+            "--bolt-mode" => {
+                bolt_mode = Some(val(i));
+                i += 2;
+            }
+            other => {
+                eprintln!("plug_ab_opt: unknown flag in write-meta: {other}");
+                exit(2);
+            }
+        }
+    }
+
+    if let Err(e) = fs::create_dir_all(&dir) {
+        fail(&format!("cannot create {}: {e}", dir.display()));
+    }
+
+    let prov_path = dir.join("ab-opt-provenance.json");
+    let _ = fs::remove_file(&prov_path);
+    let mut prov: CeremonyProvenance = derive_provenance(&dir, cpu_bench.as_deref());
+    if let Some(ec) = engine_commit
+        .filter(|s| !s.is_empty())
+        .or_else(read_engine_commit_from_vars)
+    {
+        prov.engine_commit = ec;
+    }
+    if let Some(pb) = paranoid_before {
+        prov.perf_event_paranoid_before = pb;
+    }
+    if let Some(pa) = paranoid_after {
+        prov.perf_event_paranoid_after = pa;
+    }
+
+    let prov_json = serde_json::to_string_pretty(&prov.to_json())
+        .unwrap_or_else(|e| fail(&format!("cannot serialize provenance: {e}")));
+    if let Err(e) = fs::write(&prov_path, format!("{prov_json}\n")) {
+        fail(&format!("cannot write {}: {e}", prov_path.display()));
+    }
+
+    let lbr_path = dir.join("ab-opt-bolt-lbr.json");
+    if bolt_applied {
+        let lbr = CeremonyBoltLbr {
+            samples: bolt_samples.unwrap_or(0),
+            fdata_sha256: bolt_fdata_sha256.unwrap_or_else(|| "unknown".to_string()),
+            mode: bolt_mode.unwrap_or_else(|| "instrumented".to_string()),
+        };
+        let lbr_json = serde_json::to_string_pretty(&lbr.to_json())
+            .unwrap_or_else(|e| fail(&format!("cannot serialize bolt lbr: {e}")));
+        if let Err(e) = fs::write(&lbr_path, format!("{lbr_json}\n")) {
+            fail(&format!("cannot write {}: {e}", lbr_path.display()));
+        }
+    } else {
+        let _ = fs::remove_file(&lbr_path);
+    }
 }

@@ -100,7 +100,30 @@ fn test_panic_to_error_uses_static_catalog_message() {
 #[test]
 fn test_crash_isolation_does_not_pollute_user_cache() {
     let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let temp_dir = std::env::temp_dir().join("nam_plug_crash_isolation_check");
+    let prev_crash_dir = std::env::var_os("NAM_CRASH_DIR");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "nam_plug_crash_isolation_check_{}",
+        std::process::id()
+    ));
+    struct CrashDirRestore {
+        prev: Option<std::ffi::OsString>,
+        temp_dir: std::path::PathBuf,
+    }
+    impl Drop for CrashDirRestore {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var("NAM_CRASH_DIR", v),
+                    None => std::env::remove_var("NAM_CRASH_DIR"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.temp_dir);
+        }
+    }
+    let _guard = CrashDirRestore {
+        prev: prev_crash_dir,
+        temp_dir: temp_dir.clone(),
+    };
     let _ = std::fs::create_dir_all(&temp_dir);
     unsafe {
         std::env::set_var("NAM_CRASH_DIR", temp_dir.as_os_str());

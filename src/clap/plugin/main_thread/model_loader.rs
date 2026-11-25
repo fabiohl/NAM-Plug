@@ -516,6 +516,10 @@ fn worker_main(
                         .unwrap_or_else(|e| e.into_inner());
                     *msg = crate::clap::plugin::errors::model_loader::WORKER_PANIC.to_string();
                 }
+                shared
+                    .cold
+                    .rt_status
+                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
                 shared.cold.ui_load_error.store(true, Ordering::Relaxed);
                 shared.cold.ui_loading.store(false, Ordering::Relaxed);
                 shared.cold.host_call_quiescence.host_call(|| {

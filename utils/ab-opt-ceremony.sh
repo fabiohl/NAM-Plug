@@ -76,6 +76,7 @@ rm -f "$AB_DIR"/ab-opt-pgo-gen.json "$AB_DIR"/ab-opt-bolt-probe.json "$AB_DIR"/a
 rm -rf "$AB_BUILD_DIR"
 mkdir -p "$AB_BUILD_DIR"
 export CARGO_TARGET_DIR="$AB_BUILD_DIR"
+export CARGO_PROFILE_DIST_STRIP="false"
 cargo build --quiet --locked --release --bin plug_ab_opt
 COMPARE_BIN="$AB_BUILD_DIR/release/plug_ab_opt"
 
@@ -149,142 +150,137 @@ if [ "$USE_BOLT" = 1 ]; then
     fi
 fi
 
+stage_begin() { CUR_STAGE="$1"; CUR_LOG="$AB_DIR/ab-opt-ceremony-$1.log"; : > "$CUR_LOG"; phase "$1"; }
+stage_exec() {
+    local pst
+    set +e; "$@" 2>&1 | tee -a "$CUR_LOG"; pst=("${PIPESTATUS[@]}"); set -e
+    [ "${pst[0]}" -eq 0 ] || return "${pst[0]}"
+    [ "${pst[1]}" -eq 0 ] || return "${pst[1]}"
+}
+stage_pass() { emit "PHASE: $CUR_STAGE PASS log=$CUR_LOG"; }
+
 build_variant() {
     local name="$1" flags="$2"
     echo "building variant '$name'"
-    run_timed "$VARIANT_TIMEOUT_S" env RUSTFLAGS="$flags" \
-        cargo build --locked --release --features testing --bin ab_opt_bench
+    stage_exec run_timed "$VARIANT_TIMEOUT_S" env RUSTFLAGS="$flags" \
+        cargo build --locked --profile dist --features testing --bin ab_opt_bench
 }
 run_variant() {
     local name="$1" bin="$2"
     [ -x "$bin" ] || die "binário da variante '$name' ausente: $bin"
     echo "running variant '$name' (runs=$RUNS, blocks=$BLOCKS)"
-    run_timed "$VARIANT_TIMEOUT_S" "$bin" \
+    stage_exec run_timed "$VARIANT_TIMEOUT_S" "$bin" \
         --variant "$name" --runs "$RUNS" "${AB_BENCH_FLAGS[@]}" \
         --receipt "$AB_DIR/ab-opt-$name.json"
 }
 
 echo "A/B optimization ceremony: runs=$RUNS blocks=$BLOCKS flags=${AB_BENCH_FLAGS[*]}"
+stage_begin plain
 build_variant plain "$CONFIG_RUSTFLAGS"
-run_variant plain "$AB_BUILD_DIR/release/ab_opt_bench"
+run_variant plain "$AB_BUILD_DIR/dist/ab_opt_bench"
+stage_pass
 cooldown
 
 PGO_DIR="$AB_BUILD_DIR/pgo"
 BOLT_APPLIED=0
 BOLT_CAUSE=""
+LBR=0
 if [ "$USE_PGO" = 1 ]; then
+    stage_begin pgo
     mkdir -p "$PGO_DIR/profraw"
     echo "building variant 'pgo-gen'"
-    run_timed "$VARIANT_TIMEOUT_S" env \
+    stage_exec run_timed "$VARIANT_TIMEOUT_S" env \
         RUSTFLAGS="$CONFIG_RUSTFLAGS -Cprofile-generate=$PGO_DIR/profraw -Cllvm-args=-vp-counters-per-site=8" \
-        cargo build --locked --release --features testing --bin ab_opt_bench
+        cargo build --locked --profile dist --features testing --bin ab_opt_bench
     echo "running variant 'pgo-gen' (profile capture)"
-    run_timed "$VARIANT_TIMEOUT_S" env \
+    stage_exec run_timed "$VARIANT_TIMEOUT_S" env \
         LLVM_PROFILE_FILE="$PGO_DIR/profraw/default_%m_%p.profraw" \
-        "$AB_BUILD_DIR/release/ab_opt_bench" --variant pgo-gen --runs 1 \
-        --blocks "$BLOCKS" --receipt "$AB_DIR/ab-opt-pgo-gen.json"
+        "$AB_BUILD_DIR/dist/ab_opt_bench" --variant pgo-gen --runs 1 \
+        "${AB_BENCH_FLAGS[@]}" --receipt "$AB_DIR/ab-opt-pgo-gen.json"
     PROFRAW_COUNT=$(find "$PGO_DIR/profraw" -name '*.profraw' | wc -l)
     [ "$PROFRAW_COUNT" -gt 0 ] || die "PGO: nenhum .profraw gerado."
-    run_timed "$VARIANT_TIMEOUT_S" "$LLVM_PROFDATA" merge -sparse \
+    stage_exec run_timed "$VARIANT_TIMEOUT_S" "$LLVM_PROFDATA" merge -sparse \
         -o "$PGO_DIR/merged.profdata" "$PGO_DIR"/profraw/*.profraw
     build_variant pgo "$CONFIG_RUSTFLAGS -Cprofile-use=$PGO_DIR/merged.profdata"
-    run_variant pgo "$AB_BUILD_DIR/release/ab_opt_bench"
+    run_variant pgo "$AB_BUILD_DIR/dist/ab_opt_bench"
+    stage_pass
     cooldown
 
     if [ "$USE_BOLT" = 1 ] && [ -n "$LLVM_BOLT" ] && { [ "$HAS_PERF" = 1 ] || [ -n "$MERGE_FDATA" ]; }; then
+        stage_begin bolt
         echo "building & running variant 'pgo+bolt'"
         rm -f "$PGO_DIR/perf.data" "$PGO_DIR"/bolt.fdata.*
-        LBR=0
         if [ "$HAS_PERF" = 1 ] && run_timed 60 perf record -e cycles:u -j any,u -F 99 -o /dev/null -- true >/dev/null 2>&1; then
             LBR=1
         fi
         if [ "$LBR" = 1 ]; then
-            if ! run_timed "$VARIANT_TIMEOUT_S" perf record -F 99 -e cycles:u -j any,u -o "$PGO_DIR/perf.data" -- \
-                "$AB_BUILD_DIR/release/ab_opt_bench" --variant pgo-gen --runs 1 \
-                --blocks "$BLOCKS" --receipt "$AB_DIR/ab-opt-bolt-probe.json" >/dev/null 2>&1; then
+            if ! stage_exec run_timed "$VARIANT_TIMEOUT_S" perf record -F 99 -e cycles:u -j any,u -o "$PGO_DIR/perf.data" -- \
+                "$AB_BUILD_DIR/dist/ab_opt_bench" --variant pgo-gen --runs 1 \
+                "${AB_BENCH_FLAGS[@]}" --receipt "$AB_DIR/ab-opt-bolt-probe.json"; then
                 BOLT_CAUSE="BOLT_FAILED: perf record session failed."
             elif [ ! -s "$PGO_DIR/perf.data" ]; then
                 BOLT_CAUSE="BOLT_FAILED: perf.data empty or missing."
             elif ! chmod 644 "$PGO_DIR/perf.data" 2>/dev/null || ! run_timed "$VARIANT_TIMEOUT_S" "$PERF2BOLT" \
-                -p "$PGO_DIR/perf.data" "$AB_BUILD_DIR/release/ab_opt_bench" \
+                -p "$PGO_DIR/perf.data" "$AB_BUILD_DIR/dist/ab_opt_bench" \
                 -o "$PGO_DIR/perf.fdata" >"$PGO_DIR/perf2bolt.log" 2>&1; then
+                cat "$PGO_DIR/perf2bolt.log" >>"$CUR_LOG" 2>/dev/null || true
                 BOLT_CAUSE="BOLT_FAILED: perf2bolt conversion failed: $(tail -n1 "$PGO_DIR/perf2bolt.log" 2>/dev/null || true)"
             fi
         elif [ -n "$MERGE_FDATA" ]; then
-            echo "  hardware LBR unavailable; using llvm-bolt -instrument fallback"
-            if ! run_timed "$VARIANT_TIMEOUT_S" "$LLVM_BOLT" "$AB_BUILD_DIR/release/ab_opt_bench" \
-                -instrument -o "$AB_BUILD_DIR/release/ab_opt_bench.instrumented" \
+            echo "  hardware LBR unavailable; using llvm-bolt -instrument fallback" | tee -a "$CUR_LOG"
+            if ! run_timed "$VARIANT_TIMEOUT_S" "$LLVM_BOLT" "$AB_BUILD_DIR/dist/ab_opt_bench" \
+                -instrument -o "$AB_BUILD_DIR/dist/ab_opt_bench.instrumented" \
                 --instrumentation-file="$PGO_DIR/bolt.fdata" --instrumentation-file-append-pid \
                 >"$PGO_DIR/bolt-instrument.log" 2>&1; then
+                cat "$PGO_DIR/bolt-instrument.log" >>"$CUR_LOG" 2>/dev/null || true
                 BOLT_CAUSE="BOLT_FAILED: llvm-bolt instrumentation failed: $(tail -n1 "$PGO_DIR/bolt-instrument.log" 2>/dev/null || true)"
-            elif ! run_timed "$VARIANT_TIMEOUT_S" "$AB_BUILD_DIR/release/ab_opt_bench.instrumented" \
-                --variant pgo-gen --runs 1 --blocks "$BLOCKS" \
-                --receipt "$AB_DIR/ab-opt-bolt-probe.json" >/dev/null 2>&1; then
+            elif ! stage_exec run_timed "$VARIANT_TIMEOUT_S" "$AB_BUILD_DIR/dist/ab_opt_bench.instrumented" \
+                --variant pgo-gen --runs 1 "${AB_BENCH_FLAGS[@]}" \
+                --receipt "$AB_DIR/ab-opt-bolt-probe.json"; then
                 BOLT_CAUSE="BOLT_FAILED: instrumented workload failed."
             else
                 FDATA_FILES=()
                 while IFS= read -r -d '' f; do [ -s "$f" ] && FDATA_FILES+=("$f"); done < <(find "$PGO_DIR" -maxdepth 1 -name 'bolt.fdata.*' -print0 2>/dev/null || true)
                 if [ ${#FDATA_FILES[@]} -eq 0 ] || ! run_timed "$VARIANT_TIMEOUT_S" "$MERGE_FDATA" \
                     "${FDATA_FILES[@]}" >"$PGO_DIR/perf.fdata" 2>"$PGO_DIR/merge-fdata.log"; then
+                    cat "$PGO_DIR/merge-fdata.log" >>"$CUR_LOG" 2>/dev/null || true
                     BOLT_CAUSE="BOLT_FAILED: merge-fdata produced no representative profile."
                 fi
             fi
         else
             BOLT_CAUSE="BOLT_SKIPPED: hardware LBR unavailable and merge-fdata missing"
             gap bolt_lbr_unsupported
-            echo "  reason: $BOLT_CAUSE"
+            echo "  reason: $BOLT_CAUSE" | tee -a "$CUR_LOG"
         fi
         if [ -z "$BOLT_CAUSE" ] && run_timed "$VARIANT_TIMEOUT_S" "$LLVM_BOLT" \
-            "$AB_BUILD_DIR/release/ab_opt_bench" -o "$AB_BUILD_DIR/release/ab_opt_bench.bolt" \
+            "$AB_BUILD_DIR/dist/ab_opt_bench" -o "$AB_BUILD_DIR/dist/ab_opt_bench.bolt" \
             -data "$PGO_DIR/perf.fdata" --reorder-blocks=ext-tsp --reorder-functions=hfsort \
             --relocs --lite >"$PGO_DIR/llvm-bolt.log" 2>&1; then
+            cat "$PGO_DIR/llvm-bolt.log" >>"$CUR_LOG" 2>/dev/null || true
             BOLT_APPLIED=1
         elif [ -z "$BOLT_CAUSE" ]; then
+            cat "$PGO_DIR/llvm-bolt.log" >>"$CUR_LOG" 2>/dev/null || true
             BOLT_CAUSE="BOLT_FAILED: llvm-bolt failed: $(tail -n1 "$PGO_DIR/llvm-bolt.log" 2>/dev/null || true)"
         fi
         if [ "$BOLT_APPLIED" = 1 ]; then
-            run_variant pgo+bolt "$AB_BUILD_DIR/release/ab_opt_bench.bolt"
+            run_variant pgo+bolt "$AB_BUILD_DIR/dist/ab_opt_bench.bolt"
             cooldown
         else
-            gap bolt_not_applied; echo "  reason: $BOLT_CAUSE"
+            gap bolt_not_applied; echo "  reason: $BOLT_CAUSE" | tee -a "$CUR_LOG"
         fi
+        stage_pass
     elif [ "$USE_BOLT" = 1 ]; then
+        stage_begin bolt
         BOLT_CAUSE="BOLT_UNAVAILABLE: ${LLVM_BOLT:-llvm-bolt-not-found}/perf=$HAS_PERF"
-        gap bolt_skipped; echo "  reason: $BOLT_CAUSE"
+        gap bolt_skipped; echo "  reason: $BOLT_CAUSE" | tee -a "$CUR_LOG"
+        stage_pass
     fi
 fi
 
 restore_paranoid
 PARANOID_AFTER=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)
-GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-GIT_DIRTY=false
-if [ -n "$(git status --porcelain 2>/dev/null)" ]; then GIT_DIRTY=true; fi
-CARGO_LOCK_SHA=$(sha256sum Cargo.lock 2>/dev/null | awk '{print $1}' || echo "unknown")
-RUSTC_VV_SHA=$(rustc -vV 2>/dev/null | sha256sum | awk '{print $1}' || echo "unknown")
-[ -f variables.env ] && . ./variables.env
-ENGINE_COMMIT="${ENGINE_COMMIT:-unknown}"
-ISOLATED=$(cat /sys/devices/system/cpu/isolated 2>/dev/null || true)
-GOVERNOR=$(cat "/sys/devices/system/cpu/cpu${bench_core:-0}/cpufreq/scaling_governor" 2>/dev/null || echo "unknown")
-TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-cat > "$AB_DIR/ab-opt-provenance.json" <<EOF
-{
-  "git_sha": "$GIT_SHA",
-  "git_dirty": $GIT_DIRTY,
-  "cargo_lock_sha256": "$CARGO_LOCK_SHA",
-  "rustc_vv_sha256": "$RUSTC_VV_SHA",
-  "engine_commit": "$ENGINE_COMMIT",
-  "run_id": "${NAM_RUN_ID:-none}",
-  "proof_subject": "ab_opt_bench",
-  "ts": "$TS",
-  "cpu_bench": "${bench_core:-none}",
-  "isolated": "$ISOLATED",
-  "governor": "$GOVERNOR",
-  "perf_event_paranoid_before": $PARANOID_BEFORE,
-  "perf_event_paranoid_after": $PARANOID_AFTER
-}
-EOF
-
+META_ARGS=(--dir "$AB_DIR" --paranoid-before "$PARANOID_BEFORE" --paranoid-after "$PARANOID_AFTER" --bolt-applied "$BOLT_APPLIED")
+[ -n "$bench_core" ] && META_ARGS+=(--cpu-bench "$bench_core")
 if [ "$BOLT_APPLIED" = 1 ]; then
     FDATA_SHA=$(sha256sum "$PGO_DIR/perf.fdata" 2>/dev/null | awk '{print $1}' || echo "unknown")
     if [ "$LBR" = 1 ]; then
@@ -295,22 +291,23 @@ if [ "$BOLT_APPLIED" = 1 ]; then
         LBR_MODE="instrumented"
     fi
     [ -n "$LBR_SAMPLES" ] || LBR_SAMPLES=0
-    cat > "$AB_DIR/ab-opt-bolt-lbr.json" <<EOF
-{
-  "samples": $LBR_SAMPLES,
-  "fdata_sha256": "$FDATA_SHA",
-  "mode": "$LBR_MODE"
-}
-EOF
+    META_ARGS+=(--bolt-samples "$LBR_SAMPLES" --bolt-fdata-sha256 "$FDATA_SHA" --bolt-mode "$LBR_MODE")
 fi
+"$COMPARE_BIN" write-meta "${META_ARGS[@]}"
 
 if [ "$USE_PGO" = 1 ]; then
+    stage_begin verdict
     CAUSE=()
     [ "$BOLT_APPLIED" = 1 ] || CAUSE=(--bolt-cause "${BOLT_CAUSE:-BOLT not requested}")
     RC=0
-    run_timed 120 "$COMPARE_BIN" compare --dir "$AB_DIR" --out "$RECEIPT" --runs "$RUNS" \
+    stage_exec run_timed 120 "$COMPARE_BIN" compare --dir "$AB_DIR" --out "$RECEIPT" --runs "$RUNS" \
         --bolt-applied "$BOLT_APPLIED" ${CAUSE[@]+"${CAUSE[@]}"} || RC=$?
-    [ "$RC" -eq 0 ] || FAILS+=(verdict)
+    if [ "$RC" -eq 0 ]; then
+        stage_pass
+    else
+        FAILS+=(verdict)
+        emit "PHASE: verdict FAIL rc=$RC log=$CUR_LOG"
+    fi
 else
     echo "PLAIN-only diagnostic run; no PGO/BOLT verdict."
 fi

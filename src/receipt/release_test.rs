@@ -250,3 +250,39 @@ fn test_certify_verdict_mismatch_rejected() {
         receipt.fails
     );
 }
+
+#[test]
+fn test_certify_fallback_pgo_only_clean_passed() {
+    let (_dir, art, bld, lng) = create_mock_release_env(
+        "pgo_only_clean",
+        true,
+        false,
+        "fallback_pgo_only",
+        "PASSED",
+        false,
+        vec![],
+    );
+
+    let receipt = evaluate_certification(&art, &bld, &lng, true, Some("test-run-123"));
+    assert_eq!(receipt.status, "CERTIFIED", "fails: {:?}", receipt.fails);
+    assert!(receipt.fails.is_empty());
+    assert!(receipt.gaps.is_empty());
+}
+
+#[test]
+fn test_certify_fallback_plain_clean_passed() {
+    let (_dir, art, bld, lng) = create_mock_release_env(
+        "plain_only_clean",
+        false,
+        false,
+        "fallback_plain",
+        "PASSED",
+        false,
+        vec![],
+    );
+
+    let receipt = evaluate_certification(&art, &bld, &lng, true, Some("test-run-123"));
+    assert_eq!(receipt.status, "CERTIFIED", "fails: {:?}", receipt.fails);
+    assert!(receipt.fails.is_empty());
+    assert!(receipt.gaps.is_empty());
+}

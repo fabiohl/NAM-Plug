@@ -113,6 +113,9 @@ pub struct RtToUi {
     pub active_channel_count: AtomicU32,
     /// DSP load permille (0..=1000) updated per block via EWMA (tau ≈ 250 ms).
     pub dsp_load_permille: AtomicU16,
+    /// Peak instantaneous DSP load permille observed on any overloaded block since
+    /// the last main-thread log drain (`0` when no overload occurred in window).
+    pub dsp_overload_peak_permille: AtomicU16,
     /// Xrun / overload counter epoch (mirrors `dsp_overloads`).
     pub xrun_epoch: AtomicU32,
     /// Non-finite input detection epoch counter incremented by RT audio loop.
@@ -181,6 +184,7 @@ impl Default for RtToUi {
             cabsim_tail_samples: AtomicU32::new(0),
             active_channel_count: AtomicU32::new(1),
             dsp_load_permille: AtomicU16::new(0),
+            dsp_overload_peak_permille: AtomicU16::new(0),
             xrun_epoch: AtomicU32::new(0),
             non_finite_epoch: AtomicU32::new(0),
             prewarm_starvation_epoch: AtomicU32::new(0),

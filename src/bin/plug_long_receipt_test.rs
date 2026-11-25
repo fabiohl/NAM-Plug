@@ -75,3 +75,43 @@ fn test_ceremony_proof_missing_file_rejected() {
     assert!(res.is_err());
     assert_eq!(res.unwrap_err().reason_code(), "ceremony_missing_receipt");
 }
+
+#[test]
+fn test_push_optimization_gaps_clean_fallbacks_have_no_gaps() {
+    let mut gaps_pgo_only = Vec::new();
+    push_optimization_gaps(
+        &mut gaps_pgo_only,
+        true,
+        false,
+        "not_proven",
+        "fallback_pgo_only",
+    );
+    assert!(
+        gaps_pgo_only.is_empty(),
+        "fallback_pgo_only should not emit optimization gaps: {gaps_pgo_only:?}"
+    );
+
+    let mut gaps_plain = Vec::new();
+    push_optimization_gaps(&mut gaps_plain, false, false, "skipped", "fallback_plain");
+    assert!(
+        gaps_plain.is_empty(),
+        "fallback_plain should not emit optimization gaps: {gaps_plain:?}"
+    );
+}
+
+#[test]
+fn test_push_optimization_gaps_flags_unproven_without_clean_fallback() {
+    let mut gaps = Vec::new();
+    push_optimization_gaps(&mut gaps, true, false, "not_proven", "real-proof-id");
+    assert_eq!(gaps, vec!["bolt_not_proven"]);
+
+    let mut missing_pgo = Vec::new();
+    push_optimization_gaps(
+        &mut missing_pgo,
+        false,
+        false,
+        "not_proven",
+        "fallback_pgo_only",
+    );
+    assert_eq!(missing_pgo, vec!["pgo_not_applied"]);
+}

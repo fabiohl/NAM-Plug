@@ -777,7 +777,7 @@ Flatpak bundle creation is integrated into Phase 6 (`packaging`) of `utils/build
 2. **Install:** Reuses the single optimized host binary `nam_plug.clap` into `files/clap/`, `LICENSE.txt` and `NOTICE` into `files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/`, and AppStream XML into `files/share/metainfo/`.
 3. **Finish:** Runs `flatpak build-finish --extension-priority=100`.
 4. **Export OSTree:** Executes `flatpak build-export --update-appstream`.
-5. **Create Bundles:** Generates the canonical bundle `target/dist/nam-plug-<VERSION>-linux-x86_64.flatpak` (branch 26.08, alongside a `-26.08.flatpak` alias) and the compatibility bundle `target/dist/nam-plug-<VERSION>-linux-x86_64-25.08.flatpak` (recorded in receipts as `flatpak_compat_path` / `flatpak_compat_sha256`).
+5. **Create Bundles:** Generates the canonical bundle `target/dist/nam-plug-<VERSION>-linux-x86_64.flatpak` (branch 26.08) and the compatibility bundle `target/dist/nam-plug-<VERSION>-linux-x86_64-25.08.flatpak` (recorded in receipts as `flatpak_compat_path` / `flatpak_compat_sha256`).
 6. **Deploy:** Automatically installs both branches when `--certify --install` succeeds.
 
 ### 10.5 AppStream Catalog Dynamics & Bundle Semantics

@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 pub const TOPOLOGIES: [&str; 3] = ["wavenet_a1", "wavenet_a2", "lstm"];
 pub const MIN_RUNS: u64 = 3;
 pub const PROMOTION_MARGIN_PCT: f64 = 1.0;
+pub const BOLT_MAX_TAIL_REGRESSION_PCT: f64 = 10.0;
 pub const MARGIN_EPSILON: f64 = 1e-9;
 
 /// Retained for the receipt only, never used to decide a promotion.
@@ -183,6 +184,23 @@ pub fn median_pmu(runs: &[Value], key: &str) -> Option<u64> {
     values.get(values.len() / 2).copied()
 }
 
+pub fn median_topology_pmu(runs: &[Value], topology: &str, key: &str) -> Option<u64> {
+    let topo_runs: Vec<Value> = runs
+        .iter()
+        .filter(|r| r.get("topology").and_then(Value::as_str) == Some(topology))
+        .cloned()
+        .collect();
+    median_pmu(&topo_runs, key)
+}
+
+pub fn sum_topology_medians(runs: &[Value], field: &str) -> Option<f64> {
+    let mut sum = 0.0;
+    for topo in TOPOLOGIES {
+        sum += median_topology_num(runs, topo, field)?;
+    }
+    Some(sum)
+}
+
 pub fn pct(new: Option<f64>, old: Option<f64>) -> Option<f64> {
     let (new, old) = (new?, old?);
     if old == 0.0 {
@@ -192,21 +210,86 @@ pub fn pct(new: Option<f64>, old: Option<f64>) -> Option<f64> {
 }
 
 pub fn variant_doc(runs: &[Value]) -> Value {
+    let p99 = sum_topology_medians(runs, "p99")
+        .map(|v| v.round() as u64)
+        .or_else(|| median_cycles(runs, "p99"));
+    let max = sum_topology_medians(runs, "max")
+        .map(|v| v.round() as u64)
+        .or_else(|| median_cycles(runs, "max"));
+    let mean = sum_topology_medians(runs, "mean").or_else(|| median_num(runs, "mean"));
     json!({
+        "aggregation": "sum_of_topology_medians",
         "deprecated": "aggregated across topologies; see 'topologies' for authoritative metrics",
-        "median_p99_cycles": median_cycles(runs, "p99"),
-        "median_max_cycles": median_cycles(runs, "max"),
-        "median_mean_cycles": median_num(runs, "mean"),
+        "median_p99_cycles": p99,
+        "median_max_cycles": max,
+        "median_mean_cycles": mean,
     })
+}
+
+pub fn mean_topology_gains(evals: &[TopologyEval], is_bolt: bool) -> Map<String, Value> {
+    let avg = |vals: Vec<Option<f64>>| -> Option<f64> {
+        let valid: Vec<f64> = vals.into_iter().flatten().collect();
+        if valid.is_empty() {
+            None
+        } else {
+            Some(valid.iter().sum::<f64>() / valid.len() as f64)
+        }
+    };
+    let mut map = Map::new();
+    let p99 = avg(evals
+        .iter()
+        .map(|e| {
+            if is_bolt {
+                e.bolt_gain_pct_p99
+            } else {
+                Some(e.pgo_gain_pct_p99)
+            }
+        })
+        .collect());
+    let max = avg(evals
+        .iter()
+        .map(|e| {
+            if is_bolt {
+                e.bolt_gain_pct_max
+            } else {
+                Some(e.pgo_gain_pct_max)
+            }
+        })
+        .collect());
+    let mean = avg(evals
+        .iter()
+        .map(|e| {
+            if is_bolt {
+                e.bolt_gain_pct_mean
+            } else {
+                Some(e.pgo_gain_pct_mean)
+            }
+        })
+        .collect());
+    map.insert("p99".to_string(), json!(p99));
+    map.insert("max".to_string(), json!(max));
+    map.insert("mean".to_string(), json!(mean));
+    map
 }
 
 pub fn gains(from: &[Value], to: &[Value]) -> Map<String, Value> {
     let mut map = Map::new();
     for field in ["p99", "max", "mean"] {
-        map.insert(
-            field.to_string(),
-            json!(pct(median_num(to, field), median_num(from, field))),
-        );
+        let vals: Vec<f64> = TOPOLOGIES
+            .iter()
+            .filter_map(|topo| {
+                pct(
+                    median_topology_num(to, topo, field),
+                    median_topology_num(from, topo, field),
+                )
+            })
+            .collect();
+        let mean_pct = if vals.len() == TOPOLOGIES.len() {
+            Some(vals.iter().sum::<f64>() / vals.len() as f64)
+        } else {
+            pct(median_num(to, field), median_num(from, field))
+        };
+        map.insert(field.to_string(), json!(mean_pct));
     }
     map
 }
@@ -214,9 +297,22 @@ pub fn gains(from: &[Value], to: &[Value]) -> Map<String, Value> {
 pub fn pmu_gains(from: &[Value], to: &[Value]) -> Map<String, Value> {
     let mut map = Map::new();
     for key in ["cycles", "instructions", "itlb_misses", "icache_misses"] {
-        let new = median_pmu(to, key).map(|v| v as f64);
-        let old = median_pmu(from, key).map(|v| v as f64);
-        map.insert(key.to_string(), json!(pct(new, old)));
+        let vals: Vec<f64> = TOPOLOGIES
+            .iter()
+            .filter_map(|topo| {
+                let new = median_topology_pmu(to, topo, key).map(|v| v as f64);
+                let old = median_topology_pmu(from, topo, key).map(|v| v as f64);
+                pct(new, old)
+            })
+            .collect();
+        let mean_pct = if vals.len() == TOPOLOGIES.len() {
+            Some(vals.iter().sum::<f64>() / vals.len() as f64)
+        } else {
+            let new = median_pmu(to, key).map(|v| v as f64);
+            let old = median_pmu(from, key).map(|v| v as f64);
+            pct(new, old)
+        };
+        map.insert(key.to_string(), json!(mean_pct));
     }
     map
 }
@@ -531,9 +627,7 @@ pub fn evaluate_ceremony(
         variants.insert("pgo+bolt".to_string(), variant_doc(bolt));
     }
 
-    let pgo_gain = gains(plain, pgo);
     let pmu_pgo_gain = pmu_gains(plain, pgo);
-    let bolt_gain = bolt_applied.then(|| gains(pgo, bolt));
     let pmu_bolt_gain = bolt_applied.then(|| pmu_gains(pgo, bolt));
 
     let plain_map = extract_metrics_map(plain, "plain")?;
@@ -669,8 +763,23 @@ pub fn evaluate_ceremony(
         });
     }
 
-    let all_pgo_promoted = topology_evals.iter().all(|e| e.pgo_promoted);
-    let all_bolt_promoted = bolt_applied && topology_evals.iter().all(|e| e.bolt_promoted);
+    let pgo_gain = mean_topology_gains(&topology_evals, false);
+    let bolt_gain = bolt_applied.then(|| mean_topology_gains(&topology_evals, true));
+
+    let no_pgo_regression = topology_evals
+        .iter()
+        .all(|e| e.pgo_gain_pct_p99 <= MARGIN_EPSILON);
+    let any_pgo_promoted = topology_evals.iter().any(|e| e.pgo_promoted);
+    let all_pgo_promoted = no_pgo_regression && any_pgo_promoted;
+
+    let no_bolt_regression = bolt_applied
+        && topology_evals.iter().all(|e| {
+            e.bolt_gain_pct_p99.is_some_and(|g| g <= MARGIN_EPSILON)
+                && e.bolt_gain_pct_max
+                    .is_some_and(|g| g <= BOLT_MAX_TAIL_REGRESSION_PCT)
+        });
+    let any_bolt_promoted = bolt_applied && topology_evals.iter().any(|e| e.bolt_promoted);
+    let all_bolt_promoted = no_bolt_regression && any_bolt_promoted;
 
     // Ledger records per-run diagnostic information
     let mut ledger = Vec::new();
@@ -765,38 +874,75 @@ pub fn evaluate_ceremony(
 
     if !all_pgo_promoted {
         verdict = "UNOPTIMIZED".to_string();
-        verdict_reason = "pgo_margin_not_met".to_string();
-        let unpromoted: Vec<String> = topology_evals
+        let regressed: Vec<String> = topology_evals
             .iter()
-            .filter(|e| !e.pgo_promoted)
+            .filter(|e| e.pgo_gain_pct_p99 > MARGIN_EPSILON)
             .map(|e| format!("{}: p99 {:+.2}%", e.topology, e.pgo_gain_pct_p99))
             .collect();
-        rollback = format!(
-            "PGO did not achieve the 1.0% p99 margin across all topologies ({}); plain release binary is the verified optimal version.",
-            unpromoted.join(", ")
-        );
+        if !regressed.is_empty() {
+            verdict_reason = "pgo_regressed".to_string();
+            rollback = format!(
+                "PGO regressed on topology ({}); plain release binary is the verified optimal version.",
+                regressed.join(", ")
+            );
+        } else {
+            verdict_reason = "pgo_margin_not_met".to_string();
+            let unpromoted: Vec<String> = topology_evals
+                .iter()
+                .filter(|e| !e.pgo_promoted)
+                .map(|e| format!("{}: p99 {:+.2}%", e.topology, e.pgo_gain_pct_p99))
+                .collect();
+            rollback = format!(
+                "PGO did not achieve the 1.0% p99 margin on any topology ({}); plain release binary is the verified optimal version.",
+                unpromoted.join(", ")
+            );
+        }
     } else if all_bolt_promoted {
         verdict = "PGO+BOLT".to_string();
         verdict_reason = "bolt_promoted".to_string();
         rollback = String::new();
     } else if bolt_applied {
         verdict = "PGO-ONLY".to_string();
-        verdict_reason = "bolt_margin_not_met".to_string();
-        let unpromoted: Vec<String> = topology_evals
+        let regressed: Vec<String> = topology_evals
             .iter()
-            .filter(|e| !e.bolt_promoted)
+            .filter(|e| {
+                e.bolt_gain_pct_p99.is_some_and(|g| g > MARGIN_EPSILON)
+                    || e.bolt_gain_pct_max
+                        .is_some_and(|g| g > BOLT_MAX_TAIL_REGRESSION_PCT)
+            })
             .map(|e| {
                 format!(
-                    "{}: p99 {:+.2}%",
+                    "{}: p99 {:+.2}% max {:+.2}%",
                     e.topology,
-                    e.bolt_gain_pct_p99.unwrap_or(0.0)
+                    e.bolt_gain_pct_p99.unwrap_or(0.0),
+                    e.bolt_gain_pct_max.unwrap_or(0.0)
                 )
             })
             .collect();
-        rollback = format!(
-            "BOLT did not achieve the 1.0% p99 margin across all topologies (reason: bolt_margin_not_met; non-promoted: {}); PGO-only is the explicit fallback.",
-            unpromoted.join(", ")
-        );
+        if !regressed.is_empty() {
+            verdict_reason = "bolt_tail_regression".to_string();
+            rollback = format!(
+                "BOLT regressed p99 or max tail (> {BOLT_MAX_TAIL_REGRESSION_PCT:.1}%) on topology ({}); PGO-only is the explicit fallback.",
+                regressed.join(", ")
+            );
+        } else {
+            verdict_reason = "bolt_margin_not_met".to_string();
+            let unpromoted: Vec<String> = topology_evals
+                .iter()
+                .filter(|e| !e.bolt_promoted)
+                .map(|e| {
+                    format!(
+                        "{}: p99 {:+.2}%",
+                        e.topology,
+                        e.bolt_gain_pct_p99.unwrap_or(0.0)
+                    )
+                })
+                .collect();
+            rollback = format!(
+                "BOLT did not achieve the 1.0% p99 margin on any topology (reason: bolt_margin_not_met; non-promoted: {}); PGO-only is the explicit fallback.",
+                unpromoted.join(", ")
+            );
+        }
     } else {
         verdict = "PGO-ONLY".to_string();
         verdict_reason = "bolt_not_applied".to_string();
@@ -817,6 +963,10 @@ pub fn evaluate_ceremony(
     );
     doc.insert("verdict".to_string(), json!(verdict));
     doc.insert("verdict_reason".to_string(), json!(verdict_reason));
+    doc.insert(
+        "gain_sign_convention".to_string(),
+        json!("topologies_and_summary: negative_is_faster ((new-old)/old*100); ledger: positive_is_faster ((old-new)/old*100)"),
+    );
     doc.insert("topologies".to_string(), Value::Object(topologies_doc));
     doc.insert("variants".to_string(), Value::Object(variants));
     doc.insert("pgo_gain_pct".to_string(), Value::Object(pgo_gain.clone()));

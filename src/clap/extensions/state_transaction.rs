@@ -63,7 +63,7 @@ pub(crate) fn restore_state_transactional(
     let buffer_size = main_thread.shared.cold.buffer_size.load(Ordering::Relaxed);
 
     // ══════ Phase 2: VALIDATE — build resources off-RT ══════
-    let validated = validate::validate_and_build_with_cab(
+    let validated = match validate::validate_and_build_with_cab(
         &loaded_params,
         ir_level_policy,
         calibration,
@@ -73,7 +73,19 @@ pub(crate) fn restore_state_transactional(
         buffer_size,
         &main_thread.sys,
         &mode,
-    )?;
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            if loaded_params.model_path.is_some() {
+                main_thread
+                    .shared
+                    .cold
+                    .rt_status
+                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
+            }
+            return Err(err);
+        }
+    };
 
     // ══════ Phase 3: COMMIT — publish atomically ══════
     commit::commit(validated, main_thread, &mode)?;

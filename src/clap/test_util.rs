@@ -162,6 +162,44 @@ pub fn tmp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("nam_plug_{}_{n}_{name}", std::process::id()))
 }
 
+/// Removes a temporary file or directory when dropped so tests leave `/tmp` clean.
+pub struct TempCleanupGuard {
+    path: PathBuf,
+}
+
+impl TempCleanupGuard {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for TempCleanupGuard {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for TempCleanupGuard {
+    type Target = PathBuf;
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for TempCleanupGuard {
+    fn drop(&mut self) {
+        if self.path.is_dir() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        } else {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Writes a copy of `src` (a `.nam` model) with the top-level `"sample_rate"`
 /// field set to `sample_rate`, returning the temporary file path.
 pub fn write_model_with_rate(src: &std::path::Path, sample_rate: u32) -> PathBuf {

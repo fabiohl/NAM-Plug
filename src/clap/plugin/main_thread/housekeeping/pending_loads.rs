@@ -179,6 +179,10 @@ impl<'a> NamClapMainThread<'a> {
         } else {
             e.error_code().message().to_string()
         };
+        self.shared
+            .cold
+            .rt_status
+            .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
         *lock_cold(&self.shared.cold.ui_load_error_msg, "ui_load_error_msg") = err_msg.clone();
         self.shared
             .cold

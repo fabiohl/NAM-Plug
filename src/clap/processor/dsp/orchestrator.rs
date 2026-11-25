@@ -457,18 +457,13 @@ impl<'a> NamClapProcessor<'a> {
         };
         self.refresh_gate_config();
 
-        let model_load_fail = self.model_l.is_none() && !self.params.bypass;
-        let current_fail_flag = self
-            .rt_status
-            .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
-        if model_load_fail != current_fail_flag {
-            if model_load_fail {
-                self.rt_status
-                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
-            } else {
-                self.rt_status
-                    .clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
-            }
+        if (self.model_l.is_some() || self.params.bypass)
+            && self
+                .rt_status
+                .check_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED)
+        {
+            self.rt_status
+                .clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
         }
     }
 

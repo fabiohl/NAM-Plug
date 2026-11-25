@@ -289,9 +289,15 @@ if should_run "artifact"; then
         if [ "$art_rc" -eq 0 ]; then
             exercised="true"
             if command -v clap-validator >/dev/null 2>&1; then
-                if ! timeout --kill-after=30 "$art_to" clap-validator validate "$plugin_under_test" 2>&1 | tee -a "$plog"; then
+                cv_home=$(mktemp -d -t nam-plug-clapval-home.XXXXXX)
+                mkdir -p "$cv_home/.nam/models"
+                for m in wavenet_a1_standard.nam a2_example.nam lstm.nam; do
+                    [ -f "tests/fixtures/models/$m" ] && cp -f "tests/fixtures/models/$m" "$cv_home/.nam/models/"
+                done
+                if ! HOME="$cv_home" timeout --kill-after=30 "$art_to" clap-validator validate "$plugin_under_test" 2>&1 | tee -a "$plog"; then
                     art_rc=1
                 fi
+                rm -rf "$cv_home"
             else
                 gap "artifact:clap_validator_missing"; art_gaps="${art_gaps:+$art_gaps,}artifact:clap_validator_missing"
             fi

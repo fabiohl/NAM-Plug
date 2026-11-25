@@ -414,6 +414,10 @@ impl<'a> NamClapMainThread<'a> {
         // success must never be shadowed by an earlier failure.
         self.shared
             .cold
+            .rt_status
+            .clear_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
+        self.shared
+            .cold
             .ui_load_error
             .store(false, Ordering::Relaxed);
         lock_cold(&self.shared.cold.ui_load_error_msg, "ui_load_error_msg").clear();
@@ -780,7 +784,16 @@ impl<'a> NamClapMainThread<'a> {
         let host_rate = self.shared.cold.sample_rate.load(Ordering::Relaxed);
         let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed) as usize;
 
-        let prepared = Self::prepare_model(path, host_rate, buffer_size, &self.sys)?;
+        let prepared = match Self::prepare_model(path, host_rate, buffer_size, &self.sys) {
+            Ok(p) => p,
+            Err(e) => {
+                self.shared
+                    .cold
+                    .rt_status
+                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_MODEL_LOAD_FAILED);
+                return Err(e);
+            }
+        };
         self.commit_prepared_model(prepared);
         Ok(())
     }

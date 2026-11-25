@@ -376,7 +376,8 @@ mod tests {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
-        let invalid_path = std::env::temp_dir().join("nam_plug_gui_invalid.nam");
+        let invalid_path = test_util::tmp_path("gui_invalid.nam");
+        let _invalid_guard = test_util::TempCleanupGuard::new(invalid_path.clone());
         test_util::write_invalid_model_fixture(&invalid_path);
 
         if let Ok(mut pending_guard) = shared.cold.pending_model_requests.lock() {

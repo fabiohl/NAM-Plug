@@ -587,9 +587,19 @@ fn run_multi_rate_parity(
         "  Calibration: input_mult_adj={input_mult_adj:.6}, output_mult_adj={output_mult_adj:.6}"
     );
 
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     let model_sr = get_model_sample_rate(&model_path);
-    let tmp_dir = std::env::temp_dir().join("nam_plug_clap_parity");
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "nam_plug_clap_parity_{}_{model_name}_{model_sr}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&tmp_dir).ok();
+    let _tmp_dir_guard = TempDirGuard(tmp_dir.clone());
 
     // Oracle capability probe (E-D.1): the render tool rejects unsupported
     // topologies before any real signal is rendered. Probe with silence so a
@@ -865,8 +875,19 @@ fn run_oversample_parity(model_name: &str, factor: OversampleFactor) {
             &model_path,
         );
     let stress = generate_stress_signal(model_sr as f64, 0.5);
-    let tmp_dir = std::env::temp_dir().join("nam_plug_clap_parity");
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "nam_plug_clap_parity_os_{}_{}",
+        std::process::id(),
+        factor.multiplier()
+    ));
     std::fs::create_dir_all(&tmp_dir).ok();
+    let _tmp_dir_guard = TempDirGuard(tmp_dir.clone());
 
     let scaled_input: Vec<f32> = stress.iter().map(|s| s * input_mult_adj).collect();
     let mut os = OversampleEngine::new(factor, REFERENCE_OS_BLOCK)

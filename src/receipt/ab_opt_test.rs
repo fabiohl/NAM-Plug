@@ -48,9 +48,9 @@ fn fixture_runs_reproduce_table_2_2_and_pgo_only_verdict() {
     let decision =
         evaluate_ceremony(&plain, &pgo, &bolt, 3, None, prov, lbr).expect("evaluate ceremony");
 
-    // Verdict is PGO-ONLY when BOLT fails to meet the 1.0% promotion margin.
+    // Verdict is PGO-ONLY when any topology regresses under BOLT (a1 +0.54%, lstm +0.47%).
     assert_eq!(decision.verdict, "PGO-ONLY");
-    assert_eq!(decision.verdict_reason, "bolt_margin_not_met");
+    assert_eq!(decision.verdict_reason, "bolt_tail_regression");
     assert!(decision.effective_reproducible_gain);
     assert!(!decision.bolt_reproducible_gain);
 
@@ -225,4 +225,71 @@ fn two_topologies_fails_coverage() {
 
     let err = evaluate_ceremony(&plain, &pgo, &[], 3, None, None, None).unwrap_err();
     assert!(err.contains("missing topology 'lstm' run 1"));
+}
+
+#[test]
+fn mixed_improvement_zero_regression_promotes_pgo() {
+    let mut plain = Vec::new();
+    let mut pgo = Vec::new();
+    for run in 1..=3 {
+        plain.push(make_run("wavenet_a1", run, 346_734.0, 573_912.0, 315_252.0));
+        plain.push(make_run("wavenet_a2", run, 162_198.0, 314_838.0, 141_845.0));
+        plain.push(make_run("lstm", run, 50_760.0, 145_818.0, 32_112.0));
+
+        // wavenet_a1 -7.24%, wavenet_a2 -0.64% (no regression, < 1%), lstm -6.06%
+        pgo.push(make_run("wavenet_a1", run, 321_642.0, 551_142.0, 293_132.0));
+        pgo.push(make_run("wavenet_a2", run, 161_154.0, 325_746.0, 139_680.0));
+        pgo.push(make_run("lstm", run, 47_682.0, 53_946.0, 29_054.0));
+    }
+    let decision = evaluate_ceremony(&plain, &pgo, &[], 3, None, None, None).expect("evaluate");
+    assert_eq!(decision.verdict, "PGO-ONLY");
+    assert_eq!(decision.verdict_reason, "bolt_not_applied");
+    assert!(decision.effective_reproducible_gain);
+}
+
+#[test]
+fn single_topology_regression_blocks_pgo_promotion() {
+    let mut plain = Vec::new();
+    let mut pgo = Vec::new();
+    for run in 1..=3 {
+        plain.push(make_run("wavenet_a1", run, 346_734.0, 573_912.0, 315_252.0));
+        plain.push(make_run("wavenet_a2", run, 162_198.0, 314_838.0, 141_845.0));
+        plain.push(make_run("lstm", run, 50_760.0, 145_818.0, 32_112.0));
+
+        // wavenet_a2 regresses by +0.5% -> blocks promotion
+        pgo.push(make_run("wavenet_a1", run, 321_642.0, 551_142.0, 293_132.0));
+        pgo.push(make_run("wavenet_a2", run, 163_010.0, 325_746.0, 139_680.0));
+        pgo.push(make_run("lstm", run, 47_682.0, 53_946.0, 29_054.0));
+    }
+    let decision = evaluate_ceremony(&plain, &pgo, &[], 3, None, None, None).expect("evaluate");
+    assert_eq!(decision.verdict, "UNOPTIMIZED");
+    assert_eq!(decision.verdict_reason, "pgo_regressed");
+    assert!(!decision.effective_reproducible_gain);
+}
+
+#[test]
+fn bolt_catastrophic_max_spike_blocks_bolt_promotion() {
+    let mut plain = Vec::new();
+    let mut pgo = Vec::new();
+    let mut bolt = Vec::new();
+    for run in 1..=3 {
+        plain.push(make_run("wavenet_a1", run, 346_734.0, 573_912.0, 315_252.0));
+        plain.push(make_run("wavenet_a2", run, 162_198.0, 314_838.0, 141_845.0));
+        plain.push(make_run("lstm", run, 50_760.0, 145_818.0, 32_112.0));
+
+        pgo.push(make_run("wavenet_a1", run, 321_642.0, 551_142.0, 293_132.0));
+        pgo.push(make_run("wavenet_a2", run, 161_154.0, 325_746.0, 139_680.0));
+        pgo.push(make_run("lstm", run, 47_682.0, 53_946.0, 29_054.0));
+
+        // wavenet_a1 improves -1.56%, wavenet_a2 -0.25%, lstm -0.23% p99
+        // BUT lstm max_cycles spikes +136% (53946 -> 127656) -> must reject BOLT!
+        bolt.push(make_run("wavenet_a1", run, 316_620.0, 545_598.0, 286_056.0));
+        bolt.push(make_run("wavenet_a2", run, 160_758.0, 327_906.0, 138_088.0));
+        bolt.push(make_run("lstm", run, 47_574.0, 127_656.0, 28_927.0));
+    }
+    let decision = evaluate_ceremony(&plain, &pgo, &bolt, 3, None, None, None).expect("evaluate");
+    assert_eq!(decision.verdict, "PGO-ONLY");
+    assert_eq!(decision.verdict_reason, "bolt_tail_regression");
+    assert!(decision.effective_reproducible_gain);
+    assert!(!decision.bolt_reproducible_gain);
 }

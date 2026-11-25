@@ -47,7 +47,8 @@ fn test_model_load_failed_edge_detection() {
     let input_events = InputEvents::empty();
     let mut output_events = OutputEvents::from_buffer(&mut bufs.output_events_buffer);
 
-    // Process first block with no model loaded and bypass = false (default)
+    // Process first block on a freshly activated empty plugin (no model loaded, no load failure):
+    // RT_STATUS_MODEL_LOAD_FAILED must remain clear.
     started_processor
         .process(
             &input_audio,
@@ -59,16 +60,21 @@ fn test_model_load_failed_edge_detection() {
         )
         .unwrap();
 
-    // Edge detection sets the flag on transition to fail
     assert!(
-        mt.shared
+        !mt.shared
             .cold
             .rt_status
             .check_flag(RT_STATUS_MODEL_LOAD_FAILED),
-        "RT_STATUS_MODEL_LOAD_FAILED should be set when model_l is None and bypass is false"
+        "RT_STATUS_MODEL_LOAD_FAILED must not be set on an empty/unloaded instance without a failed load"
     );
 
-    // Process a second block: edge detection should keep the flag set without oscillating
+    // Simulate a genuine model load failure, then process a subsequent block:
+    // the flag must stay set without oscillating while model_l is None and bypass is false.
+    mt.shared
+        .cold
+        .rt_status
+        .set_flag(RT_STATUS_MODEL_LOAD_FAILED);
+
     started_processor
         .process(
             &input_audio,
