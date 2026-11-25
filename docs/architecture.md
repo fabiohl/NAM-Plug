@@ -7,7 +7,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 This document is the primary architecture reference and source of truth for **NAM-Plug**, a Neural Amp Modeler (NAM) audio plugin built on the CLAP (CLever Audio Plug-in) specification for Linux.
 
-NAM-Plug wraps the low-latency DSP neural inference engine provided by the [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) library crate into a production-grade CLAP plugin. It manages plugin lifecycle, DAW parameter automation, lock-free real-time audio processing, state persistence, host extension compliance, and an immediate-mode graphical user interface.
+NAM-Plug wraps the low-latency DSP neural inference engine provided by the [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) library crate into a production-grade CLAP plugin. It manages plugin lifecycle, DAW parameter automation, lock-free real-time audio processing, state persistence, host extension compliance, and a hardware-accelerated declarative graphical user interface (Slint).
 
 > **Scope Boundary:** For microarchitectural details on neural model execution (WaveNet, LSTM, ConvNet, Linear), SIMD kernels (AVX2 `x86-64-v3`), polyphase resamplers, half-band FIR filters, or model loading formats (`.nam`/`.namb`), see the core engine documentation in [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) (`docs/architecture.md`).
 
@@ -134,24 +134,24 @@ Core DSP neural inference is mono by definition. Buffer extraction and VU meteri
 
 Exposed via `src/clap/extensions/params/` and synchronized via `src/clap/processor/params.rs` (using engine parameters from `RtProcessingParams`). Parameter IDs are `u32` constants (`PARAM_*`, 0–13):
 
-| Parameter                    | ID                            | Type    | Range / Options                                                 | Description                                                                     |
-|:---------------------------- |:----------------------------- |:------- |:--------------------------------------------------------------- |:------------------------------------------------------------------------------- |
-| **Input Gain**               | `input_gain_db` (0)           | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.                                   |
-| **Output Gain**              | `output_gain_db` (1)          | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.                                  |
-| **Gate Threshold**           | `gate_threshold_db` (2)       | dB      | `-90.0` to `0.0` (default `-90.0`, off by default)              | Noise-gate opening threshold.                                                   |
-| **Bypass**                   | `bypass` (3)                  | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables full plugin processing (64-sample click-free linear crossfade passthrough). |
-| **Active Model**             | `active_model` (4)            | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.                            |
-| **Adaptive Compute**         | `adaptive_compute` (5)        | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                                              |
-| **Slim Override**            | `slim_override` (6)           | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                                      |
-| **Oversampling**             | `oversample` (7)              | Stepped | `0` (`Off` / default), `1` (`2x`), `2` (`4x`)                   | Activation oversampling factor.                                                 |
-| **Activation Precision**     | `activation_precision` (8)    | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact / `Fast` Padé-minimax).                             |
-| **Calibrate Input**          | `calibrate_input` (9)         | Binary  | `0` (`Off` / default) / `1` (`On`)                              | Enables pre-nonlinearity input calibration from model `input_level` dBu.         |
-| **Input Calibration Level**  | `input_calibration_level` (10)| dBu     | `-60.0` to `+60.0` dBu (default `12.0`)                         | Reference 0 dBFS input level in dBu used for calibrated gain equations.         |
-| **Output Mode**              | `output_mode` (11)            | Stepped | `0` (`Raw`), `1` (`Normalized` / default), `2` (`Calibrated`)   | Output level normalization mode (`loudness`, `output_level`, or unity).         |
-| **Gate Mode**                | `gate_mode` (12)              | Stepped | `0` (`Silence` / default), `1` (`Musical`)                      | Gate topology (`Silence` post-IR Schmitt gate vs `Musical` pre-IR expander).     |
-| **Cab Bypass**               | `cab_bypass` (13)             | Binary  | `0.0` (false / default) / `1.0` (true)                          | Independently bypasses the cabinet slot with constant PDC latency and 64-sample cosine crossfade. |
+| Parameter                | ID                             | Type    | Range / Options                                                 | Description                                                                                                          |
+|:------------------------ |:------------------------------ |:------- |:--------------------------------------------------------------- |:-------------------------------------------------------------------------------------------------------------------- |
+| **Input Gain**           | `input_gain_db` (0)            | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Pre-inference gain, sample-accurate smoothed.                                                                        |
+| **Output Gain**          | `output_gain_db` (1)           | dB      | `-96.0` to `+30.0` (default `0.0`)                              | Post-inference gain, sample-accurate smoothed.                                                                       |
+| **Gate Threshold**       | `gate_threshold_db` (2)        | dB      | `-90.0` to `0.0` (default `-90.0`, off by default)              | Noise-gate opening threshold.                                                                                        |
+| **Bypass**               | `bypass` (3)                   | Binary  | `0.0` (false / default) / `1.0` (true)                          | Disables full plugin processing (64-sample click-free linear crossfade passthrough).                                 |
+| **Active Model**         | `active_model` (4)             | String  | `0.0` to `1000.0` (Read-only, default `0.0`)                    | Filename / identification of currently loaded model.                                                                 |
+| **Adaptive Compute**     | `adaptive_compute` (5)         | Stepped | `0` (`Off`), `1` (`Conservative` / default), `2` (`Aggressive`) | CPU-based dynamic degradation FSM.                                                                                   |
+| **Slim Override**        | `slim_override` (6)            | Stepped | `0` (`Auto` / default), `1` (`ForceFull`), `2` (`ForceLite`)    | Slimmable A2 container submodel selection.                                                                           |
+| **Oversampling**         | `oversample` (7)               | Stepped | `0` (`Off` / default), `1` (`2x`), `2` (`4x`)                   | Activation oversampling factor.                                                                                      |
+| **Activation Precision** | `activation_precision` (8)     | Stepped | `0` (`Fast`), `1` (`Standard` / universal default)              | Math mode (`Standard` exact / `Fast` Padé-minimax).                                                                  |
+| **Calibrate Input**      | `calibrate_input` (9)          | Binary  | `0` (`Off` / default) / `1` (`On`)                              | Enables pre-nonlinearity input calibration from model `input_level` dBu (`Calibration` module).                      |
+| **Input Cal Level**      | `input_calibration_level` (10) | dBu     | `-60.0` to `+60.0` dBu (default `12.0`)                         | Reference 0 dBFS input level in dBu used for calibrated gain equations (`Calibration` module).                       |
+| **Output Mode**          | `output_mode` (11)             | Stepped | `0` (`Raw`), `1` (`Normalized` / default), `2` (`Calibrated`)   | Output level normalization mode (`loudness`, `output_level`, or unity) (`Calibration` module).                       |
+| **Gate Mode**            | `gate_mode` (12)               | Stepped | `0` (`Silence` / default), `1` (`Musical`)                      | Gate topology (`Silence` post-IR Schmitt gate vs `Musical` pre-IR expander).                                         |
+| **Cabinet Bypass**       | `cab_bypass` (13)              | Binary  | `0.0` (false / default) / `1.0` (true)                          | Independently bypasses the cabinet slot with constant PDC latency and 64-sample cosine crossfade (`Cabinet` module). |
 
-The table lists the host-facing (authoritative) ranges. The GUI knobs expose a narrower, ergonomic subset (`INPUT` −20 to +20 dB, `OUTPUT` −40 to +20 dB); values written by the GUI are clamped to the host range by the parameter layer (`src/clap/extensions/params/mod.rs`).
+The table lists the host-facing (authoritative) ranges and defaults (`Output Gain` host default is `0.0` dB). The GUI knobs expose a narrower, ergonomic subset (`INPUT` −20 to +20 dB, `OUTPUT` −40 to +20 dB with visual default `-3.0` dB); values written by the GUI are clamped to the host range by the parameter layer (`src/clap/extensions/params/mod.rs`).
 
 Model file paths (`.nam`/`.namb`) and Cabinet slot file paths (`.wav`, `.nam`, or `.namb`) are managed as **DAW State Properties** (`clap_plugin_state`), enabling project-level serialization and restoration.
 
@@ -219,13 +219,13 @@ Besides the plugin factory, `NamEntry` (`src/clap/entry.rs`) registers a **prese
 
 #### 4.1.1 Host Integration Compatibility Matrix
 
-| Host / Session                             | GUI Presentation                      | Operational Behavior                                                                                                                                                                                                                |
-|:------------------------------------------ |:------------------------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bitwig Studio** (X11)                    | Embedded (XEmbed)                     | Native XEmbed child window integration; fully verified.                                                                                                                                                                             |
-| **REAPER** (Native Linux, X11)             | Embedded (XEmbed)                     | Native XEmbed child window integration; fully verified.                                                                                                                                                                             |
-| **X11 Hosts in General**                   | Embedded / Floating                   | Supported as negotiated by host (`is_floating`).                                                                                                                                                                                    |
+| Host / Session                             | GUI Presentation                      | Operational Behavior                                                                                                                                                                                                                                                                                                                   |
+|:------------------------------------------ |:------------------------------------- |:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bitwig Studio** (X11)                    | Embedded (XEmbed)                     | Native XEmbed child window integration; fully verified.                                                                                                                                                                                                                                                                                |
+| **REAPER** (Native Linux, X11)             | Embedded (XEmbed)                     | Native XEmbed child window integration; fully verified.                                                                                                                                                                                                                                                                                |
+| **X11 Hosts in General**                   | Embedded / Floating                   | Supported as negotiated by host (`is_floating`).                                                                                                                                                                                                                                                                                       |
 | **Fender Studio Pro 8.2** (Linux, Wayland) | Generic Host Controls (No Plugin GUI) | Host requests only embedded Wayland (`CLAP_WINDOW_API_WAYLAND` with `is_floating = false`) and does not negotiate floating by host design, falling back to its native generic parameter controls. Preset browsing/loading from `~/.nam/models` via `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN` and `.song` state persistence are verified. |
-| **Wayland Hosts Requesting Floating**      | Floating Window (*Experimental*)      | Plugin code supports `CLAP_WINDOW_API_WAYLAND` with `is_floating = true`; marked **experimental** due to absence of an available test host that negotiates floating windows under Wayland.                                          |
+| **Wayland Hosts Requesting Floating**      | Floating Window (*Experimental*)      | Plugin code supports `CLAP_WINDOW_API_WAYLAND` with `is_floating = true`; marked **experimental** due to absence of an available test host that negotiates floating windows under Wayland.                                                                                                                                             |
 
 ### 4.2 Audio Port Layout Negotiation Protocol
 
@@ -250,13 +250,16 @@ Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/share
 │                          NamClapShared Allocation                           │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  #[repr(align(128))] RtToUi      (RT Thread -> UI Reads)                    │
-│    - ui_peak_l / ui_peak_r, ui_clipped, active_channel_count, latency       │
+│    - ui_in_peak_l/r, ui_in_rms_l/r, ui_in_clipped, ui_peak_l/r,             │
+│      ui_out_rms_l/r, ui_clipped, dsp_load_permille, xrun/non_finite/        │
+│      prewarm epochs, active_channel_count, current_latency, cabsim_tail     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  #[repr(align(128))] UiToRt      (UI Thread -> RT Reads)                    │
-│    - 13 Parameter Atomics, gesture_flags, gui_param_generation              │
+│    - 13 Writable Parameter Atomics, gesture_flags, gui_param_generation     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  #[repr(align(128))] ColdShared  (Main / UI / RT Setup)                     │
-│    - SPSC Command Queues, pending_model payload, IR state, alive_fence      │
+│    - SPSC Command, GC & Box-GC Queues, RetiredBoxOverflow, pending_model,   │
+│      IR/Cab state, alive_fence                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -264,11 +267,11 @@ Shared cross-thread state is anchored in `NamClapShared` (`src/clap/plugin/share
 
 To eliminate CPU cache bouncing (False Sharing) between the high-frequency audio thread and the UI/Main threads:
 
-- **`RtToUi`** — Dedicated 128-byte aligned cache line for telemetry communicated from RT to UI (`ui_peak_l`, `ui_peak_r`, `ui_clipped`, `ui_clip_indicator`, `ui_gate_active`, `current_latency`, `cabsim_tail_samples`, `active_channel_count`).
+- **`RtToUi`** — Dedicated 128-byte aligned cache line for telemetry communicated from RT to UI (`ui_in_peak_l`, `ui_in_peak_r`, `ui_in_rms_l`, `ui_in_rms_r`, `ui_in_clipped`, `ui_in_clip_indicator`, `ui_peak_l`, `ui_peak_r`, `ui_out_rms_l`, `ui_out_rms_r`, `ui_clipped`, `ui_clip_indicator`, `ui_gate_active`, `current_latency`, `cabsim_tail_samples`, `active_channel_count`, `dsp_load_permille`, `xrun_epoch`, `non_finite_epoch`, `prewarm_starvation_epoch`, `prewarm_pending`).
   - Peak levels are accumulated across audio blocks by RT via `AtomicU32::fetch_max` and read/cleared by UI via `swap(0.0f32.to_bits())` without TOCTOU races.
-  - The `ui_clipped` sticky flag is set by RT and cleared by UI upon acknowledgement.
-- **`UiToRt`** — Dedicated 128-byte aligned cache line for parameters written by UI (`input_gain_db`, `output_gain_db`, etc.) and the `gui_param_generation` counter.
-- **`ColdShared`** — Dedicated 128-byte aligned structure for low-frequency channels and lifecycle flags (`alive_fence`, pending payloads).
+  - The sticky clip flags (`ui_in_clipped`, `ui_clipped`) are set by RT and cleared by UI upon acknowledgement.
+- **`UiToRt`** — Dedicated 128-byte aligned cache line for the 13 writable parameters written by UI (`input_gain_db`, `output_gain_db`, etc.) and the `gui_param_generation` counter.
+- **`ColdShared`** — Dedicated 128-byte aligned structure for low-frequency channels (`param_tx`/`rx`, `gc_tx`/`rx`, `box_gc_tx`/`rx`, `box_overflow`) and lifecycle flags (`alive_fence`, pending payloads).
 
 ### 5.2 Generation-Counter Parameter Synchronization
 
@@ -298,6 +301,8 @@ RT Thread (Replaced Asset)
 1. **Tier 1 (SPSC GC Queue):** Push to `gc_tx` (32 slots). The main thread drains and drops objects during periodic `housekeeping()`.
 2. **Tier 2 (Processor Parking Lot):** Fixed array `[Option<GcItem>; 16]` inside `PluginAudioProcessor`. Flushed back to SPSC whenever capacity frees. At plugin teardown, `deactivate()` passes `&mut parking_lot` to `drain_gc_final()` for single-owner disposal on the main thread.
 3. **Tier 3 (`GcOverflowBuffer`):** Atomic ring buffer. Overwrites the oldest slot if completely saturated, setting `RT_STATUS_GC_OVERFLOW` to preserve hard real-time deadlines.
+
+Consumed boxed command envelopes (`ClapParamPayload`, `SlimmableRebuild`) follow a parallel zero-allocation retirement channel (`box_gc_tx` / `box_gc_rx` with `RetiredBoxOverflow` in `src/clap/plugin/retired_box.rs`) so heap envelopes are freed strictly on the main thread.
 
 ### 5.4 Poison-Resilient Activation Rollback Guard (`ActivateRollbackGuard` & `StagedItemsRollbackGuard`)
 
@@ -382,62 +387,63 @@ The audio thread entry point `PluginAudioProcessor::process()` (`src/clap/proces
 
 ```mermaid
 graph TD
-    HostInput[/"Host Input Buffer"/] --> DryDelay["DryDelayLine\n(circular ring, L/R)"]
+    HostInput[/"Host Input Buffer"/] --> DryDelay["DryDelayLine (circular ring, L/R)"]
     DryDelay --> BypassCheck{"Bypass Active?"}
-    BypassCheck -->|"Yes"| RunBypass["copy_delayed_dry_to_output()\n(Latency-compensated passthrough)"]
-    BypassCheck -->|"No"| ChanExt["extract_channels()\n(Mono / Adaptive Stereo)"]
+    BypassCheck -->|"Yes"| RunBypass["copy_delayed_dry_to_output() (Latency-compensated passthrough)"]
+    BypassCheck -->|"No"| ChanExt["extract_channels() (Mono / Dual-Mono Stereo)"]
 
-    ChanExt --> InGain["Input Gain\n(SIMD + ParamSmoother)"]
-    InGain --> InStage["apply_input_stage()\n(Dither & Gate FSM)"]
+    ChanExt --> InGain["Input Gain (SIMD + ParamSmoother)"]
+    InGain --> InMeter["Input Metering Tap (ui_in_peak / ui_in_rms)"]
+    InMeter --> InStage["Input Stage (Dither, Gate Detector & smoother_cal_in)"]
 
-    InStage --> GateCheck{"Gate Open?"}
-    GateCheck -->|"No"| ZeroBuf["Fill Scratch Buffer with 0.0"]
-    GateCheck -->|"Yes"| InferEngine["run_inference()\n- NamResampler (Up to 48kHz)\n- NamModel::process()\n- NamResampler (Down to Host SR)"]
+    InStage --> GateCheck{"Silence Gate Closed?"}
+    GateCheck -->|"Yes"| ZeroBuf["Fill Scratch Buffer with 0.0"]
+    GateCheck -->|"No"| InferEngine["run_inference() (NamResampler, NamModel, 2x/4x OS)"]
 
     ZeroBuf --> OutStage
-    InferEngine --> OutStage["apply_output_stage()\n(Dither Comp & Gate Fade\n& Adaptive Compute Check)"]
+    InferEngine --> OutStage["Output Stage (Dither Comp, Musical/Silence Gate, smoother_cal_out, AdaptiveCompute)"]
 
-    OutStage --> CabCheck{"Cabsim IR Loaded?"}
-    CabCheck -->|"Yes"| CabConv["UPOLS Cabsim Convolution\n(ConvEngine::process)"]
+    OutStage --> CabCheck{"Cabinet Slot Loaded?"}
+    CabCheck -->|"Yes"| CabSlot["Exclusive Cab Slot (.wav UPOLS or 1x1 .nam/.namb) + PARAM_CAB_BYPASS"]
     CabCheck -->|"No"| OutGain
-    CabConv --> OutGain["Output Gain + Hard Clipping\n(SIMD + ParamSmoother)"]
+    CabSlot --> OutGain["Output Gain + Hard Clipping (SIMD + ParamSmoother)"]
 
-    OutGain --> PeakStore["store_peaks()\n(Write to RtToUi Atomics)"]
-    PeakStore --> HostOutput[/"Host Output Buffer"/]
+    OutGain --> OutMeter["Output Metering Tap (ui_peak / ui_out_rms)"]
+    OutMeter --> HostOutput[/"Host Output Buffer"/]
 ```
 
 ### 6.0 Processor Subsystem Architecture (`src/clap/processor/`)
 
 To ensure strict separation of concerns, the real-time audio processor lifecycle is decomposed into dedicated, cohesive submodules:
 
-| Submodule               | Role & Responsibilities                                                                                                                                                                   |
-|:----------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`activate.rs`**       | Off-RT buffer pre-allocation (`AlignedVec`), SPSC channel extraction, staged restore/swap adaptation (`StagedItemsRollbackGuard`), DSP component assembly, and initial latency reporting. |
-| **`deactivated.rs`**    | `DeactivatedDspState` definition and `deactivate()` lifecycle implementation, preserving reusable heavy DSP assets off the audio thread.                                                  |
-| **`ftz.rs`**            | RAII `FtzDazGuard` asserting hardware FTZ/DAZ denormal flushing during block rendering and restoring host MXCSR on drop with zero leakage.                                                |
-| **`mod.rs`**            | CLAP `PluginAudioProcessor` trait implementation for `NamClapProcessor`: `start_processing()` thread setup, top-level callback (`process()`), reset logic, and panic containment.         |
-| **`dsp/`**              | Audio signal chain (channel extraction, latency-compensated dry delay, noise gate FSM, neural inference, peak telemetry) and the `orchestrator/` event scheduler with sub-block slicing.  |
-| **`events.rs`**         | SPSC command ring drainage (`RtSwapHandler` binding), host event handling, GUI parameter sync, and latency monitoring.                                                                    |
-| **`gc.rs`**             | Allocation- and lock-free disposal of replaced resources (parking lot + overflow buffer), see §5.3.                                                                                       |
-| **`heap_audit.rs`**     | `CountingAllocator` registration under the `heap-audit` feature.                                                                                                                          |
-| **`params.rs`**         | Atomic parameter snapshotting and `ParamSmoother` integration.                                                                                                                            |
-| **`prewarm_policy.rs`** | Proportional zero-budget stabilization policy and execution step sizing for two-phase model resets.                                                                                       |
-| **`rollback.rs`**       | Panic-resilient resource recovery guard (`ActivateRollbackGuard`).                                                                                                                        |
-| **`state.rs`**          | `NamClapProcessor` struct declaration and click-free `BypassCrossfader` state machine.                                                                                                    |
+| Submodule               | Role & Responsibilities                                                                                                                                                                           |
+|:----------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`activate.rs`**       | Off-RT buffer pre-allocation (`AlignedVec`), SPSC channel extraction, staged restore/swap adaptation (`StagedItemsRollbackGuard`), DSP component assembly, and initial latency reporting.         |
+| **`deactivated.rs`**    | `DeactivatedDspState` definition and `deactivate()` lifecycle implementation, preserving reusable heavy DSP assets off the audio thread.                                                          |
+| **`ftz.rs`**            | RAII `FtzDazGuard` asserting hardware FTZ/DAZ denormal flushing during block rendering and restoring host MXCSR on drop with zero leakage.                                                        |
+| **`mod.rs`**            | CLAP `PluginAudioProcessor` trait implementation for `NamClapProcessor`: `start_processing()` thread setup, top-level callback (`process()`), reset logic, and panic containment.                 |
+| **`dsp/`**              | Audio signal chain (channel extraction, latency-compensated dry delay, noise gate FSM, neural inference, peak/EWMA RMS telemetry) and the `orchestrator/` event scheduler with sub-block slicing. |
+| **`events.rs`**         | SPSC command ring drainage (`RtSwapHandler` binding), host event handling, GUI parameter sync, cabinet neural rebuild dirty/generation signaling, and latency monitoring.                         |
+| **`gc.rs`**             | Allocation- and lock-free disposal of replaced resources (parking lot + overflow buffer), see §5.3.                                                                                               |
+| **`heap_audit.rs`**     | `CountingAllocator` registration under the `heap-audit` feature.                                                                                                                                  |
+| **`params.rs`**         | Atomic parameter snapshotting and `ParamSmoother` integration.                                                                                                                                    |
+| **`prewarm_policy.rs`** | Proportional zero-budget stabilization policy and execution step sizing for two-phase model resets.                                                                                               |
+| **`rollback.rs`**       | Panic-resilient resource recovery guard (`ActivateRollbackGuard`).                                                                                                                                |
+| **`state.rs`**          | `NamClapProcessor` struct declaration, click-free `BypassCrossfader` state machine, and cabinet neural rebuild state (`cab_neural_dirty` / generation tracking).                                  |
 
 ### 6.1 Execution Sequence
 
 1. **Subnormal & Denormal Setup:** First block applies one-shot thread setup (`apply_rt_thread_setup()`), and every callback asserts Flush-To-Zero (FTZ) and Denormals-Are-Zero (DAZ) via RAII `FtzDazGuard` (`src/clap/processor/ftz.rs`), restoring host MXCSR upon exit.
 2. **Event & Command Draining (`process_events()`):** Drains command and slimmable rings via `RtSwapDrain` schedulers (at most one structural swap per callback), then updates local parameter targets from GUI atomics.
 3. **Channel Extraction (`extract_channels()`):** Maps host input buffers into contiguous working scratch buffers and detects active channel count (`1` or `2`) for adaptive metering.
-4. **Input Gain & Stage:** Applies user input gain (SIMD + `ParamSmoother`), injects anti-subnormal dither (`-220 dBFS`), and evaluates the Noise Gate FSM.
+4. **Input Gain, IN Metering & Stage:** Applies user input gain (SIMD + `ParamSmoother`), records post-trim/pre-model IN peak and EWMA RMS telemetry, injects anti-subnormal dither (`-220 dBFS`), evaluates the Noise Gate FSM, and applies input calibration (`smoother_cal_in`).
 5. **Neural Inference (`run_inference()`):**
    - Upsamples host sample rate to native 48 kHz via minimum-phase polyphase `NamResampler` (bypassed if host rate is 48 kHz).
    - Runs `NamModel::process()` (with optional 2x/4x oversampling around neural activations).
    - Downsamples 48 kHz back to host sample rate.
-6. **Output Stage & Degradation Check:** Compensates dither, applies linear gate fade ramps, and checks block deadlines for `AdaptiveCompute` CPU fallback.
-7. **Cabinet Stage (Optional Single Exclusive Slot):** Executes either Uniform-Partitioned Overlap-Save (UPOLS) frequency-domain convolution (`WavIr` via `ConvEngine::process()`) for `.wav` IRs **or** a dedicated 1-in/1-out neural cabinet model (`NamModel` dual-mono `model_l`/`model_r` with dedicated `StreamingResampleBuffer`, strict unity gain isolated from amp calibration and `IrLevelPolicy`, and fail-closed WaveNet post-stack `head` rejection scoped strictly to the cabinet slot). Independent `PARAM_CAB_BYPASS` (13) routes the cabinet stage through a latency-aligned `DryDelayLine`, 64-sample cosine crossfade, lazy `reset()` on re-engagement, and steady-state DSP skip while preserving constant host PDC.
-8. **Output Gain & Clipping:** Applies output gain (SIMD + `ParamSmoother`), enforces hard clipping at `+0 dBFS` if configured, and updates peak telemetry atomics.
+6. **Output Stage & Degradation Check:** Compensates dither, applies `Silence` gate fade ramps or `Musical` downward-expander gain, applies output calibration/normalization (`smoother_cal_out`), and checks block deadlines for `AdaptiveCompute` CPU fallback.
+7. **Cabinet Stage (Optional Single Exclusive Slot):** Executes either Uniform-Partitioned Overlap-Save (UPOLS) frequency-domain convolution (`WavIr` via `ConvEngine::process()`) for `.wav` IRs **or** a dedicated 1-in/1-out neural cabinet model (`NamModel` dual-mono `model_l`/`model_r` with dedicated `StreamingResampleBuffer`, off-RT dirty/generation rebuilds on sample-rate/oversampling changes, strict unity gain isolated from amp calibration and `IrLevelPolicy`, and fail-closed WaveNet post-stack `head` rejection scoped strictly to the cabinet slot). Independent `PARAM_CAB_BYPASS` (13) routes the cabinet stage through a latency-aligned `DryDelayLine`, 64-sample cosine crossfade, lazy `reset()` on re-engagement, and steady-state DSP skip while preserving constant host PDC.
+8. **Output Gain, Clipping & OUT Metering:** Applies output gain (SIMD + `ParamSmoother`), enforces hard clipping at `+0 dBFS` if configured, and updates OUT peak and EWMA RMS telemetry atomics.
 
 ### 6.2 Branchless FMA Bypass Crossfader (`process_crossfade_sub_block`)
 
@@ -460,7 +466,7 @@ NAM models may supply embedded metadata (`input_level_dbu`, `output_level_dbu`, 
 
 - `input_mult_adj`: when `calibrate_input` is enabled and `input_level_dbu` exists, `10^((input_calibration_level_dbu - input_level_dbu) / 20)` applied post-gate / pre-nonlinearity; otherwise `1.0` (the noise gate continues evaluating raw pre-calibration input).
 - `output_mult_adj`: `Raw` -> `1.0`; `Normalized` -> `10^((-18.0 - loudness) / 20)` if `loudness` exists else `1.0`; `Calibrated` -> `10^((output_level_dbu - input_calibration_level_dbu) / 20)` if `output_level_dbu` exists else `1.0`.
-- **State Migration (`StateEnvelope` v2):** Sessions persist `CalibrationState` (`calibrate_input`, `input_calibration_level_dbu`, `output_mode`), optional `gate_mode` (`Silence` / `Musical`), and optional `cab_bypass` (`bool`) alongside cabinet slot `.wav`/`.nam`/`.namb` identity (`ir_path` + `ir_hash`). Restoring `v0`/`v1` envelopes lacking `"calibration"` preserves upstream legacy playback semantics (`calibrate_input = true`, `12.0` dBu, `Normalized`), while missing `gate_mode` / `cab_bypass` default cleanly to `Silence` / `false`. In `Musical` mode, `MusicalNoiseGate` triggers post-user-trim / pre-calibration and applies gain post-model / pre-cabinet while keeping neural inference continuous without hard cutouts.
+- **State Migration (`StateEnvelope` v2):** Sessions persist `CalibrationState` (`calibrate_input`, `input_calibration_level_dbu`, `output_mode`), optional `gate_mode` (`Silence` / `Musical`), and optional `cab_bypass` (`bool`) alongside cabinet slot `.wav`/`.nam`/`.namb` identity (`ir_path` + `ir_hash`). Restoring `v0`/`v1` envelopes lacking `"calibration"` preserves upstream legacy playback semantics (`calibrate_input = true`, `12.0` dBu, `Normalized`), while missing `gate_mode` / `cab_bypass` default cleanly to `Silence` / `false`. In `Musical` mode, `MusicalNoiseGate` (re-exported from `NeuralAmpModeler-rs` via `src/clap/extensions/gate_mode.rs`) triggers post-user-trim / pre-calibration and applies gain post-model / pre-cabinet while keeping neural inference continuous without hard cutouts.
 
 ### 6.4 Host Event Scheduling, In-Block Slicing & Anomaly Containment
 
@@ -520,8 +526,9 @@ The graphical interface is built using Slint (v1.19) under `src/clap/gui/`.
 │  5-Zone UI Layout (main.slint)                                              │
 │    Zone 1: Identity Bar (Brand, SIMD badge, ModelCard, IrCard)              │
 │    Zone 2: Gain & Gate Stages (INPUT/OUTPUT/GATE knobs, Sil/Mus, Gate LED)  │
-│            + Oversample (Off/2×/4×) and Precision (Std/Fast) selectors      │
-│    Zone 3: Meters Section (Adaptive VuMeter: Mono / Stereo, clip LED)       │
+│            + Oversample (Off/2×/4×), Precision (Std/Fast),                  │
+│            + Calibration (CAL IN, dBu stepper) & Out (Raw/Norm/Cal)         │
+│    Zone 3: Meters Section (Dual IN/OUT VuMeter: Mono/Stereo, RMS, Clip)     │
 │    Zone 4: Master Bypass (ToggleSwitch, "DSP ACTIVE" / "BYPASS")            │
 │    Zone 5: Status Bar (SR, BUF, LAT, CH, DSP load, alert pill, backend)     │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -550,12 +557,12 @@ The graphical interface is built using Slint (v1.19) under `src/clap/gui/`.
 ### 7.2 Telemetry Synchronization & Peak-Meter Ballistics
 
 - A Slint timer polls atomic telemetry from `NamClapShared::rt_to_ui` at 60 Hz (`TELEMETRY_PERIOD_FULL`), relaxing to 30 Hz (`TELEMETRY_PERIOD_LOW`) while the signal is below −90 dBFS and the UI is idle; the timer is suspended with the window.
-- Peak levels follow IEC 60268-10-inspired peak-programme ballistics (constants in `slint_view_model.rs`):
+- Peak levels follow IEC 60268-10-inspired peak-programme ballistics (constants in `src/clap/gui/slint_view_model/telemetry.rs`), paired with continuous EWMA RMS cores ($\tau = 300\text{ ms}$) for both IN and OUT stages:
   - **Attack:** Immediate (single-block peak capture).
-  - **Decay:** Exponential release with a per-frame multiplier of `0.962` (`BALLISTICS_DECAY_RATE`, ≈ 20 dB in 1 s at 60 Hz).
+  - **Decay:** Exponential release with a per-frame multiplier of `0.962` (`BALLISTICS_DECAY_RATE`, ≈ 20 dB in ~1.0 s at 60 Hz).
   - **Peak-Hold Indicator:** 2.0-second retention (`PEAK_HOLD_FRAMES = 120`) before release.
-  - **Clip LED:** Sticky until the user clicks the meter.
-- **Adaptive Track Configuration:** Adapts automatically between a centered mono bar and independent stereo L/R bars based on `active_channel_count`.
+  - **Dual Clip LEDs:** Independent `IN CLIP` and `OUT CLIP` latching indicators cleared on user click.
+- **Adaptive Track Configuration:** Adapts automatically between centered mono IN/OUT bars and independent stereo L/R IN/OUT bars based on `active_channel_count`.
 
 #### 7.2.1 Identity and Status-Bar Readouts
 
@@ -689,7 +696,7 @@ Floating window lifecycles and clipboard integration are validated under a virtu
 
 ## 10. Flatpak Packaging & CLAP Discovery Architecture
 
-NAM-Plug supports distribution as a Flatpak audio plugin extension, enabling integration with containerized DAWs (Bitwig Studio, REAPER, Ardour Flatpaks) without host filesystem sandbox holes (`--filesystem=host`):
+NAM-Plug supports distribution as a Flatpak audio plugin extension, enabling integration with containerized DAWs (Bitwig Studio, REAPER, Fender Studio Pro Flatpaks) without host filesystem sandbox holes (`--filesystem=host`):
 
 ### 10.1 Freedesktop LinuxAudio Extension Topology
 
@@ -731,7 +738,6 @@ The metadata descriptor (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.N
   <extends>org.freedesktop.LinuxAudio.BaseExtension</extends>
   <extends>com.bitwig.BitwigStudio</extends>
   <extends>fm.reaper.Reaper</extends>
-  <extends>org.ardour.Ardour</extends>
   <extends>com.fender.studioapp8</extends>
   <name>NAM Plug</name>
   <summary>Neural Amp Modeler CLAP audio plugin</summary>
@@ -740,7 +746,7 @@ The metadata descriptor (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.N
 
 ### 10.3 Manifest Specification
 
-The Flatpak manifest (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml`) targets the `26.08` runtime branch:
+The Flatpak manifest (`packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml`) targets the canonical `26.08` runtime branch (`utils/build-release.sh --package` builds both `26.08` and `25.08` compatibility bundles from the single compiled `nam_plug.clap`):
 
 ```yaml
 id: org.freedesktop.LinuxAudio.Plugins.NAMPlug
@@ -758,19 +764,21 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm755 nam_plug.clap ${FLATPAK_DEST}/clap/nam_plug.clap
+      - install -Dm644 LICENSE.txt -t ${FLATPAK_DEST}/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/
+      - install -Dm644 NOTICE -t ${FLATPAK_DEST}/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/
       - install -Dm644 org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/
 ```
 
 ### 10.4 Integrated Release Pipeline (`build-release.sh`)
 
-Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh` with zero-recompile **multi-stack** bundling across `26.08` and `25.08`:
+Flatpak bundle creation is integrated into Phase 6 (`packaging`) of `utils/build-release.sh` with zero-recompile **multi-stack** bundling across `26.08` and `25.08`:
 
 1. **Initialize:** Runs `flatpak build-init --type=extension --extension-tag=<branch>` for each branch.
-2. **Install:** Reuses the single optimized host binary `nam_plug.clap` into `files/clap/` and AppStream XML into `files/share/metainfo/`.
+2. **Install:** Reuses the single optimized host binary `nam_plug.clap` into `files/clap/`, `LICENSE.txt` and `NOTICE` into `files/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/`, and AppStream XML into `files/share/metainfo/`.
 3. **Finish:** Runs `flatpak build-finish --extension-priority=100`.
 4. **Export OSTree:** Executes `flatpak build-export --update-appstream`.
-5. **Create Bundles:** Generates the canonical bundle `target/dist/nam-plug-<VERSION>-linux-x86_64.flatpak` (branch 26.08) and the compatibility bundle `target/dist/nam-plug-<VERSION>-linux-x86_64-25.08.flatpak`.
-6. **Deploy:** Automatically deploys both branches when `--install` is supplied.
+5. **Create Bundles:** Generates the canonical bundle `target/dist/nam-plug-<VERSION>-linux-x86_64.flatpak` (branch 26.08, alongside a `-26.08.flatpak` alias) and the compatibility bundle `target/dist/nam-plug-<VERSION>-linux-x86_64-25.08.flatpak` (recorded in receipts as `flatpak_compat_path` / `flatpak_compat_sha256`).
+6. **Deploy:** Automatically installs both branches when `--certify --install` succeeds.
 
 ### 10.5 AppStream Catalog Dynamics & Bundle Semantics
 
@@ -779,7 +787,7 @@ Flatpak bundle creation is integrated into Phase 7 of `utils/build-release.sh` w
    - Consequently, local bundle installations show generic icons and fallback names in graphical software centers (e.g., Warehouse).
    - In production (Flathub), `flatpak build-update-repo` indexes the metainfo XML into the centralized AppStream branch, displaying full titles, release notes, and icons.
 2. **Semantic Versioning in `flatpak list`:**
-   - The `Versão` (Version) column in `flatpak list` is populated from the cached AppStream catalog. When installed from a standalone bundle without catalog indexing, this column remains blank while the `Ramo` (Branch) column displays `26.08`.
+   - The `Version` column in `flatpak list` is populated from the cached AppStream catalog. When installed from a standalone bundle without catalog indexing, this column remains blank while the `Branch` column displays `26.08` (or `25.08`).
 3. **Sandbox Permissions:**
    - Plugin extensions are shared libraries mounted into host containers, not standalone sandboxed applications. They declare zero independent sandbox permissions (`--filesystem`, `--device`) and inherit the security boundary of the host DAW. Running `flatpak info --show-permissions` legitimately displays zero lines.
 

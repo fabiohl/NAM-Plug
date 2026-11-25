@@ -18,7 +18,7 @@ body:
       description: Select your primary DAW.
       options:
         - "Bitwig Studio"
-        - "Reaper (Native Linux)"
+        - "REAPER (Native Linux)"
         - "Ardour"
         - "Carla Plugin Host"
         - "Harrison Mixbus"
@@ -34,8 +34,8 @@ body:
     id: daw_version
     attributes:
       label: DAW Version & Architecture
-      description: Exact version of the DAW (e.g. Bitwig 5.2.1, Reaper 7.15 x86_64).
-      placeholder: "e.g. Bitwig 5.2.1 (Linux x86_64)"
+      description: Exact version of the DAW (e.g. Bitwig Studio 6.x, REAPER 7.x x86_64, Fender Studio Pro 8.2).
+      placeholder: "e.g. Bitwig Studio 6.x, REAPER 7.x (Linux x86_64), Fender Studio Pro 8.2"
     validations:
       required: true
 
@@ -47,8 +47,8 @@ body:
       options:
         - "Parameter Automation / Smoothing"
         - "Project State Save & Restore"
-        - "GUI Embedding / Window Resize / Wayland Support"
-        - "CLAP Preset Discovery"
+        - "GUI Embedding (XEmbed) / Floating Window / Wayland Support"
+        - "CLAP Preset Discovery & Loading"
         - "Plugin Scanning / Validation Failure"
         - "Offline Render / Freeze / Bounce Inconsistency"
         - "Latency Compensation Reporting"

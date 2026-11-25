@@ -15,7 +15,7 @@ Control begins formally with version 1.0.0.
 
 ## [Unreleased]
 
-## [1.2.0] - 2026-11-14
+## [1.2.0] - 2026-11-24
 
 ### Added [1.2.0]
 
@@ -23,29 +23,41 @@ Control begins formally with version 1.0.0.
   - Extended `NamPresetDiscoveryFactory`, `PluginPresetLoadImpl`, `PresetLocationOrigin`, and main-thread notifications (`housekeeping.rs`) to support `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN` with per-file `load_key` metadata alongside `CLAP_PRESET_DISCOVERY_LOCATION_FILE`.
   - Added deterministic host indexer routing in `create_provider()` (`use_plugin_location`), declaring `Location::Plugin` for PreSonus/Fender indexers and `Location::File` for Bitwig Studio and other standard indexers while supporting both location kinds in `get_metadata()` and `load_from_location()`.
   - Verified empirical preset browsing, model loading, dynamic detection of newly added `.nam` files in `~/.nam/models`, and model-bearing `.song`/`.clappreset` state persistence in Fender Studio Pro 8.2 under Linux Wayland.
-- **Exclusive Cabinet Slot & Independent Bypass (`PARAM_CAB_BYPASS`):**
-  - Expanded the single exclusive Cabinet slot (`src/clap/extensions/cabinet.rs`) to accept either `.wav` impulse responses or 1-in/1-out neural cabinet models (`.nam`/`.namb`, dual-mono at strict unity gain with WaveNet post-stack head rejection scoped to the cabinet slot).
-  - Added independent `Cabinet Bypass` (`PARAM_CAB_BYPASS`, ID 13) with latency-aligned dry delay compensation, 64-sample cosine crossfade, lazy state reset on re-engagement, and steady-state DSP skip while preserving constant host PDC.
-  - Added explicit selectable IR Level Policy (`Preserve`, `GainMatched`, `Normalized`) with backwards-compatible state persistence.
+- **Exclusive Cabinet Slot, Independent Bypass (`PARAM_CAB_BYPASS`), & IR Level Policy:**
+  - Expanded the single exclusive Cabinet slot (`src/clap/extensions/cabinet.rs`) to accept either `.wav` impulse responses (UPOLS FFT convolution) or 1-in/1-out neural cabinet models (`.nam`/`.namb`, dual-mono at strict unity gain with WaveNet post-stack `head` rejection scoped to the cabinet slot), plus off-RT neural cabinet rebuilds with dirty-flag and generation tracking (`events.rs`, `state.rs`).
+  - Added independent `Cabinet Bypass` (`PARAM_CAB_BYPASS`, ID 13) with latency-aligned `DryDelayLine`, 64-sample cosine crossfade, lazy state reset on re-engagement, and steady-state DSP skip while preserving constant host PDC.
+  - Added explicit selectable IR Level Policy (`IrLevelPolicy`: `PeakNormalized` / `Peak` `"peak-normalized"` default, `Preserved` `"preserved"`, `LegacyNamPlugin` `"legacy-nam-plugin"`) with backwards-compatible state persistence.
 - **Input Calibration & Output Normalization Modes:**
-  - Added `Calibrate Input` (`PARAM_CALIBRATE_INPUT`, ID 9), `Input Cal Level` (`PARAM_INPUT_CALIBRATION_LEVEL`, ID 10, `[-60.0, +60.0]` dBu), and `Output Mode` (`PARAM_OUTPUT_MODE`, ID 11: `Raw`, `Normalized`, `Calibrated`) backed by StateEnvelope v2 migration.
+  - Added `Calibrate Input` (`PARAM_CALIBRATE_INPUT`, ID 9), `Input Cal Level` (`PARAM_INPUT_CALIBRATION_LEVEL`, ID 10, `[-60.0, +60.0]` dBu), and `Output Mode` (`PARAM_OUTPUT_MODE`, ID 11: `Raw`, `Normalized`, `Calibrated`) backed by `StateEnvelope` v2 migration.
 - **Musical Noise Gate Mode & Dual IN/OUT Metering:**
-  - Added selectable `Gate Mode` (`PARAM_GATE_MODE`, ID 12: `Silence` legacy Schmitt gate vs. `Musical` C++-compatible downward expander).
+  - Added selectable `Gate Mode` (`PARAM_GATE_MODE`, ID 12: `Silence` legacy Schmitt gate vs. `Musical` C++-compatible downward expander re-exported from `NeuralAmpModeler-rs`).
   - Implemented lock-free dual IN (post-trim/pre-model) and OUT (post-gain) peak + EWMA RMS VU metering (`tau = 300 ms`) with dual clip latching in the Slint GUI.
+- **Lock-Free Retired-Box Overflow & Miri Audit Gate:**
+  - Added `RetiredBoxOverflow` (`src/clap/plugin/retired_box.rs`) for zero-allocation off-RT disposal of consumed boxed command envelopes alongside the existing SPSC GC cascade.
+  - Added optional Class D `utils/miri-audit.sh` UB/aliasing audit gate covering `retired_box`, `GuiHostBridge`, and `quiescence`.
 
 ### Changed [1.2.0]
 
-- **DSP Engine Update (`NeuralAmpModeler-rs` `v2.1.0`):** Updated engine dependency and pinned provenance metadata to consume calibration, musical gate, and neural cabinet capabilities.
-- **Gate Threshold & Parameter Contract Alignment:**
+- **DSP Engine & Toolchain Upgrades:**
+  - Upgraded `NeuralAmpModeler-rs` to **`v4.0.0`** (with pinned provenance `ENGINE_TAG="v4.0.0"` and `ENGINE_COMMIT="7de6fe17ea7238d8905d7c918214fcbf77cc3328"` in `variables.env`), updated Slint GUI to **`1.19`**, and aligned MSRV to Rust **`1.99.0`**.
+- **Gate Threshold & 14-Parameter Contract Alignment:**
   - Harmonized `Gate Threshold` (`PARAM_GATE_THRESH`) range and sanitizer to `[-90.0, 0.0]` dB (default `-90.0` dB).
-  - Expanded CLAP exposed parameter set from 9 to 14 parameters (`PARAM_COUNT = 14`), applying `ParamInfoFlags::IS_ENUM` across stepped parameters and `ParamRescanFlags::VALUES | ParamRescanFlags::TEXT` on model changes.
-- **Dual-Stack Flatpak Runtime Architecture (`26.08` and `25.08`):** Upgraded `packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml` and configured `utils/build-release.sh` with zero-recompile multi-stack bundling targeting both `26.08` (modern hosts such as Fender Studio Pro 8) and `25.08` (Bitwig Studio and REAPER), enabling simultaneous coexistence and universal Flatpak DAW discovery.
-- **CI & QA Infrastructure Modularization:** Extracted shared composite GitHub Actions (`engine-checkout`, `qa-summary`, `record-provenance`) and typed quick/build status parsing.
+  - Expanded CLAP exposed parameter set from 9 to 14 parameters (`PARAM_COUNT = 14`), applying `ParamInfoFlags::IS_ENUM` across stepped enum parameters and `ParamRescanFlags::VALUES | ParamRescanFlags::TEXT` on model changes.
+- **Dual-Stack Flatpak Architecture (`26.08` & `25.08`) & Certified Compatibility Artifacts:**
+  - Upgraded `packaging/flatpak/org.freedesktop.LinuxAudio.Plugins.NAMPlug.yml` and `utils/build-release.sh` with zero-recompile multi-stack bundling targeting both `26.08` (canonical) and `25.08` (compatibility) runtimes for universal Flatpak DAW discovery.
+  - Tracked compatibility Flatpak bundles (`flatpak_compat_path` / `flatpak_compat_sha256`) in `BuildArtifacts` / `ReleaseArtifacts` and enforced fail-closed installation under `--certify --install`.
+- **Codebase & Build-Profile Modularization:**
+  - Scoped `clap_entry` symbol retention to the `cdylib` target (`build.rs`) and introduced `[profile.release-nolto]` in `Cargo.toml` for non-LTO release test linking in `utils/tests-long.sh`.
+  - Decomposed `slint_view_model.rs` into `src/clap/gui/slint_view_model/{mod,callbacks,formatting,telemetry}.rs` and extracted `src/bin/plug_long_receipt_test.rs` and `src/clap/gui/worker_test.rs`.
+- **CI & QA Infrastructure Hardening:**
+  - Extracted shared composite GitHub Actions (`load-env`, `engine-checkout`, `qa-summary`, `record-provenance`) and provisioned preset discovery fixtures in CI workflows.
+  - Added typed `build-status` parsing with multiline gap reconciliation (`plug_long_receipt`), expanded `utils/rt_alloc_scan.awk` RT-API guards, added bidirectional cross-target clippy checks (`x86_64` ↔ `aarch64`) in `utils/lints.sh`, and added `kernel.perf_event_paranoid` restoration in `utils/tests-long.sh`.
 
 ### Fixed [1.2.0]
 
 - **Model Load Error Reporting:** Preserved specific `NamErrorCode` diagnostics when asynchronous model loading fails instead of collapsing error categories.
-- **Documentation & Generic Host Workflow:** Updated `README.md`, `docs/architecture.md`, and `docs/functional-tests.md` with the full 14-parameter generic host surface, `Location::Plugin` preset discovery behavior, and exclusive Cabinet slot boundaries.
+- **Telemetry & PMU Robustness:** Discarded anomalous block elapsed times exceeding 1 second in RT telemetry, captured warm-up state in DSP overload telemetry tests, and updated `median_pmu` to handle both PMU and PMC counter schemas.
+- **Documentation, Packaging & Templates Synchronization:** Updated `README.md`, `docs/`, `packaging/flatpak/`, and `.github/` templates to match the 14-parameter surface, exclusive Cabinet slot, `Location::Plugin` preset discovery, `NeuralAmpModeler-rs 4.0.0`, and current QA/release workflows.
 
 ## [1.1.0] - 2026-11-10
 

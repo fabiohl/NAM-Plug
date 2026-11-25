@@ -19,22 +19,22 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
   <description>
     <p>
       NAM-Plug is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin
-      for real-time Neural Amp Modeler (NAM) simulation on Linux DAWs (Bitwig Studio, REAPER, etc.).
+      for real-time Neural Amp Modeler (NAM) simulation on Linux DAWs (Bitwig Studio, REAPER, Fender Studio Pro, etc.).
     </p>
     <p>
-      It embeds the NeuralAmpModeler-rs DSP engine, combining state-of-the-art neural guitar amplifier
+      It embeds the NeuralAmpModeler-rs DSP engine, combining neural guitar amplifier
       and pedal modeling with strict zero-allocation real-time safety, SIMD AVX2/FMA vectorization, and
-      dual-oracle numerical parity (>136 dB SNR).
+      dual-oracle numerical parity (&gt;136 dB SNR).
     </p>
     <p>Key highlights:</p>
     <ul>
       <li>Comprehensive neural architectures: WaveNet (A1/A2), LSTM, ConvNet, Linear FIR/FFT, and Sequential models.</li>
-      <li>Integrated exclusive speaker cabinet slot supporting .wav impulse responses (UPOLS FFT convolution) or 1-in/1-out .nam/.namb neural cabinet models with independent bypass.</li>
+      <li>Integrated exclusive speaker cabinet slot supporting .wav impulse responses (UPOLS FFT convolution) or 1-in/1-out .nam/.namb neural cabinet models with independent latency-aligned bypass and selectable IR level policy.</li>
       <li>Native Minimum-Phase Polyphase Sinc Resampler (256 phases × 64 taps) seamlessly adapting 48 kHz models to 44.1, 96, and 192 kHz.</li>
-      <li>Hardware-accelerated Slint 1.19 GUI with native X11 XEmbed embedding into host plugin panels and Wayland/X11 floating windows.</li>
+      <li>Hardware-accelerated Slint 1.19 GUI with native X11 XEmbed embedding into host plugin panels, X11 floating windows, and experimental Wayland floating window support.</li>
       <li>Live (zero added latency, adaptive compute) and HQ/Offline modes with 2×/4× polyphase anti-aliasing oversampling.</li>
       <li>Hard real-time audio thread determinism: zero heap allocations, zero mutex locks, and a 3-tier lock-free GC cascade.</li>
-      <li>IEC 60268-10 PPM adaptive mono/stereo VU metering, sample-accurate parameter automation, and dynamic Plugin Delay Compensation (PDC).</li>
+      <li>Dual IN/OUT quasi-peak and EWMA RMS VU metering, selectable Silence/Musical noise gate, input calibration/output normalization modes, sample-accurate automation, and dynamic Plugin Delay Compensation (PDC).</li>
     </ul>
   </description>
   <url type="homepage">https://github.com/fabiohl/NAM-Plug</url>
@@ -59,14 +59,15 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
     <keyword>plugin</keyword>
   </keywords>
   <releases>
-    <release version="1.2.0" date="2026-11-14">
+    <release version="1.2.0" date="2026-11-24">
       <description>
         <p>NAM-Plug 1.2.0:</p>
         <ul>
           <li>CLAP Preset Discovery via Location::Plugin: Exposes ~/.nam/models presets to both standard file-location hosts and plugin-location hosts such as Fender Studio Pro 8.2.</li>
-          <li>Exclusive Cabinet Slot and Bypass: Supports .wav impulse responses or 1-in/1-out .nam/.namb neural cabinet models with latency-aligned independent bypass and selectable IR level policy.</li>
+          <li>Exclusive Cabinet Slot and Bypass: Supports .wav impulse responses or 1-in/1-out .nam/.namb neural cabinet models with latency-aligned independent bypass, off-RT neural cabinet rebuilds, and selectable IR level policy (PeakNormalized, Preserved, LegacyNamPlugin).</li>
           <li>Input Calibration and Output Modes: Added Calibrate Input, Input Cal Level, and Raw/Normalized/Calibrated output modes with StateEnvelope v2 migration.</li>
-          <li>Musical Noise Gate and Dual VU Metering: Added C++-compatible Musical downward-expander gate mode and lock-free dual IN/OUT peak and EWMA RMS metering.</li>
+          <li>Musical Noise Gate and Dual VU Metering: Added C++-compatible Musical downward-expander gate mode (shared engine DSP) and lock-free dual IN/OUT peak and EWMA RMS metering.</li>
+          <li>Engine, GUI, and Dual-Stack Packaging: Upgraded to NeuralAmpModeler-rs 4.0.0 and Slint 1.19, added dual-stack Flatpak bundling (26.08 canonical and 25.08 compatibility), and hardened lock-free RT telemetry and disposal.</li>
         </ul>
       </description>
     </release>

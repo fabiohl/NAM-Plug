@@ -21,7 +21,7 @@ body:
         - "CLAP Extensions (Remote controls, Preset discovery, Tail)"
         - "Parameter & Automation Control"
         - "Preset & Bank Management"
-        - "Cabinet IR & Tone Controls"
+        - "Cabinet Slot (.wav IR / Neural Cab) & Calibration"
         - "Workflow & Productivity"
         - "Other"
     validations:

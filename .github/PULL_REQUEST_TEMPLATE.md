@@ -13,11 +13,11 @@ Fixes #
 ## Subsystem & Scope
 <!-- Check all that apply. For documentation, GUI-only, or packaging PRs, RT/CLAP checklists below may be marked N/A. -->
 - [ ] **CLAP Protocol & Extensions** (`src/clap/`, parameter automation, state context, latency reporting)
-- [ ] **Real-Time Audio Processing** (`src/audio/`, audio callback, SPSC parameter & model sync)
-- [ ] **GUI & User Interface** (`src/clap/gui/`, Slint 1.18 controls, visual meters, FemtoVG/OpenGL rendering, X11 XEmbed & Wayland)
-- [ ] **Preset & Model Management** (`src/presets/`, IR loading, state serialization)
-- [ ] **Benchmarks & Quality Gates** (`benches/`, `tests/`)
-- [ ] **Documentation & Assets** (`docs/`, `README.md`)
+- [ ] **Real-Time Audio Processing** (`src/clap/processor/`, `src/clap/processor/dsp/`, audio callback, SPSC parameter & model sync, lock-free GC)
+- [ ] **GUI & User Interface** (`src/clap/gui/`, Slint 1.19 controls, dual IN/OUT VU meters, Cabinet slot UI, FemtoVG/OpenGL rendering, X11 XEmbed/floating & experimental Wayland floating)
+- [ ] **Preset, Model & Cabinet Management** (`src/clap/factory/preset_discovery.rs`, `src/clap/extensions/preset_load.rs`, `src/clap/extensions/cabinet.rs`, `src/clap/extensions/ir_level_policy.rs`, `src/clap/extensions/state*.rs`, `src/clap/plugin/main_thread/`)
+- [ ] **Benchmarks & Quality Gates** (`benches/`, `tests/`, `utils/`, `src/bin/`)
+- [ ] **Documentation & Packaging** (`docs/`, `README.md`, `CHANGELOG.md`, `packaging/flatpak/`)
 
 ---
 
@@ -39,7 +39,7 @@ Fixes #
 - [ ] **N/A**: This PR does not touch CLAP protocol or host integration code.
 - [ ] **Sample-Accurate Automation**: Parameter changes and automations are processed at exact sample offsets.
 - [ ] **State Serialization**: State save/restore is robust, deterministic, and backwards-compatible with saved projects.
-- [ ] **Latency & Tail Reporting**: Accurate latency (in samples) and tail length are reported when oversampling or linear phase filters change.
+- [ ] **Latency & Tail Reporting**: Accurate latency (in samples) and tail length are reported when oversampling, sample-rate resampling, or the cabinet slot (`.wav` IR / neural cabinet) changes.
 - [ ] **Render Mode Awareness**: Plugin correctly responds to `CLAP_RENDER_REALTIME` vs `CLAP_RENDER_OFFLINE` modes.
 
 ---
@@ -65,8 +65,8 @@ cargo test --lib <module>
 ### 2. Optional Full Local Suite (If environment allows)
 
 ```bash
-utils/lints.sh        # Static analysis, fmt, clippy (-D warnings), SPDX validation
-utils/tests-quick.sh  # Agile testing, host integration tests, CLAP validation
+utils/lints.sh        # Static analysis: fmt, check/clippy (-D warnings), cross-target clippy, doc, SPDX, RT-alloc scan, AppStream validation, script budgets
+utils/tests-quick.sh  # Agile suite (<= 5 min): non-ignored unit/integration tests and RT heap-audit
 ```
 
 - [ ] **Targeted Local Checks Passed**: Code compiles cleanly without warnings (`cargo check --all-targets`) and unit tests for modified components pass.

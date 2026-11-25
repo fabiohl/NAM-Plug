@@ -7,7 +7,7 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 
 ![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg) ![Rust](https://img.shields.io/badge/Rust-1.99%2B-orange.svg) ![Format](https://img.shields.io/badge/Format-CLAP%201.2%2B-brightgreen.svg) ![Version](https://img.shields.io/badge/Version-1.2.0-informational.svg) ![GUI](https://img.shields.io/badge/GUI-Slint%201.19%20%7C%20FemtoVG%20%7C%20X11%20Embedded%20%2F%20Floating-blueviolet.svg) ![Latency](https://img.shields.io/badge/Latency-Zero--Added%20%2F%20Sub--ms-red.svg) ![RT-Safe](https://img.shields.io/badge/RT--Safe-Zero--Alloc%20%7C%20Zero--Locks-brightgreen.svg) ![SIMD](https://img.shields.io/badge/SIMD-AVX2%20x86--64--v3-blueviolet.svg) ![Models](https://img.shields.io/badge/Models-WaveNet%20A1%20A2%20%7C%20LSTM%20%7C%20ConvNet-success.svg) ![Parity](https://img.shields.io/badge/Parity-Dual--Oracle%20%3E136dB%20SNR-success.svg)
 
-**NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs (Bitwig Studio, REAPER, Studio One, etc.).
+**NAM-Plug** is a high-performance, ultra-low latency CLAP (CLever Audio Plug-in) audio plugin for real-time [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com/) simulation on Linux DAWs (Bitwig Studio, REAPER, Fender Studio Pro, etc.).
 
 Powered directly by the [`NeuralAmpModeler-rs`](https://github.com/fabiohl/NeuralAmpModeler-rs) neural DSP engine, NAM-Plug brings world-class guitar amplifier and pedal modeling into modern Linux music production—combining **strict zero-allocation real-time safety**, SIMD AVX2/FMA vectorization, sub-millisecond audio determinism, and dual-oracle bit-exact fidelity.
 
@@ -27,8 +27,8 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 
 *The hardware-accelerated Slint interface running inside a Linux DAW. Organized into five ergonomic zones:*
 
-1. **Asset Selection & Identity (Left Panel):** Load `.nam` / `.namb` neural amp models and `.wav` speaker cabinet impulse responses (IRs), accompanied by the SIMD badge (`AVX2+FMA`) and version info.
-2. **Analog Gain, Gate & Quality Stages (Center Panel):** Input trim ($-20\text{ to }+20\text{ dB}$), Output level ($-40\text{ to }+20\text{ dB}$), integrated noise gate ($-90\text{ to }0\text{ dB}$, `"OFF"` at `-90.0 dB`) with selectable topology (`Sil` block-RMS silence gate or `Mus` C++-reference quadratic downward expander) and dynamic LED indicator, anti-aliasing oversampling (`Off`, `2×`, `4×`), and activation precision (`Std` vs `Fast`).
+1. **Asset Selection & Identity (Left Panel):** Load `.nam` / `.namb` neural amp models in the **AMP MODEL** card and either `.wav` speaker cabinet impulse responses (IRs) or 1-in/1-out `.nam` / `.namb` neural cabinet models in the exclusive **CABINET** card (with selectable `Peak` / `Preserved` / `Legacy` IR level policy and independent `ON` / `BYP` cabinet bypass), accompanied by the SIMD badge (`AVX2+FMA`) and version info.
+2. **Analog Gain, Gate, Calibration & Quality Stages (Center Panel):** Input trim ($-20\text{ to }+20\text{ dB}$), Output level ($-40\text{ to }+20\text{ dB}$), integrated noise gate ($-90\text{ to }0\text{ dB}$, `"OFF"` at `-90.0 dB`) with selectable topology (`Sil` block-RMS silence gate or `Mus` C++-reference quadratic downward expander) and dynamic LED indicator, anti-aliasing oversampling (`Off`, `2×`, `4×`), activation precision (`Std` vs `Fast`), Input Calibration (`CAL IN` toggle + `-60.0 to +60.0 dBu` stepper), and Output Mode (`Raw` / `Norm` / `Cal`).
 3. **Dual-Stage Precision Metering:** Dual stereo/mono input (post-trim, pre-model) and output (post-gain) level meters with simultaneous IEC 60268-10 Type I quasi-peak ballistics, solid inner EWMA RMS cores ($\tau = 300\text{ ms}$), 2-second peak-hold bars, and independent latching IN CLIP / OUT CLIP indicators with click-to-reset.
 4. **Master Bypass:** Hardware toggle switch transitioning cleanly between `DSP ACTIVE` and `BYPASS` via a 64-sample click-free crossfade.
 5. **Real-Time Telemetry Bar (Footer):** Live status reporting sample rate (`SR`), buffer size (`BUF`), latency (`LAT`), channel layout (`CH`), DSP load percentage (`% DSP` with overload/XRUN alert LED and tooltip), contextual alert pill, and window backend.
@@ -39,35 +39,35 @@ Whether tracking live guitar with sub-millisecond roundtrip latency or producing
 
 * **Pure Rust & Strict Real-Time Determinism:** Inherits the hard real-time safety guarantees of `NeuralAmpModeler-rs`. The audio processing callback performs zero heap allocations, zero heap deallocations, and zero mutex locks (audited via `CountingAllocator`). Dropped models, IRs, and oversampling buffers retire asynchronously through a 3-tier lock-free SPSC garbage-collection cascade (*SPSC queue → 16-slot parking lot → overflow ring buffer*) with rollback guards.
 * **SIMD AVX2 Vectorization & Zero-Vtable Dispatch:** Enforces the `x86-64-v3` (AVX2/FMA/BMI2) instruction set baseline. Compute kernels employ tap-major memory layouts and `sum0..sum3` instruction-level parallelism unrolling. Static monomorphization via `dispatch_simd!` eliminates virtual function tables (vtables) and indirect function pointers from the audio path.
-* **Dual-Oracle Numerical Parity:** Formally certified against canonical C++ NAMCore ($f32$) and double-precision ($f64$) mathematical oracles across 52 baseline envelopes (`docs/quality-contract.json`). Typical WaveNet models achieve ESR $< 2.31 \times 10^{-14}$ (SNR $> 136.4\text{ dB}$, MR-STFT $< 6.5 \times 10^{-6}$), while ConvNet achieves ESR $< 9.33 \times 10^{-16}$ (SNR $> 150.3\text{ dB}$).
-* **Native CLAP 1.2+ Standard Integration:** Built directly upon the `clack` framework, exposing a clean, translation-free CLAP implementation. Fully supports sample-accurate parameter automation, project state persistence (JSON serialization with SHA-256 asset verification), host latency reporting with dynamic PDC (`clap_plugin_latency`), and native host extensions (`audio-ports`, `gui`, `params`, `state`, `preset-discovery`, `render`, `tail`, `track-info`).
-* **Hardware-Accelerated Slint GUI with Native X11 Embedding:** Declarative user interface rendered via FemtoVG / OpenGL with **native X11 XEmbed host panel embedding** into Bitwig Studio and REAPER, plus X11 floating and experimental Wayland floating window support. A dedicated 60 Hz event-loop thread polls lock-free atomic view models with 0% audio thread overhead.
-* **Complete Integrated Tone Pipeline:** Includes a native 256-phase minimum-phase Kaiser sinc resampler ($0.7\text{–}1.3\text{ µs}$ execution, $>105\text{ dB}$ stopband, 0 pre-ringing) adapting any model sample rate to host rates (44.1, 48, 96, 192 kHz), Uniform-Partitioned Overlap-Save (UPOLS) FFT cabinet IR convolution ($1.3\text{ µs}$ for 512-sample IRs), polyphase half-band oversampling (2×/4×), and branchless crossfaded bypass (64-sample ramp, about 1.3 ms at 48 kHz).
+* **Dual-Oracle Numerical Parity:** Formally certified against canonical C++ NAMCore ($f32$) and double-precision ($f64$) mathematical oracles across 52 baseline envelopes (defined in the core engine's [`docs/quality-contract.json`](https://github.com/fabiohl/NeuralAmpModeler-rs/blob/main/docs/quality-contract.json)). Typical WaveNet models achieve ESR $< 2.31 \times 10^{-14}$ (SNR $> 136.4\text{ dB}$, MR-STFT $< 6.5 \times 10^{-6}$), while ConvNet achieves ESR $< 9.33 \times 10^{-16}$ (SNR $> 150.3\text{ dB}$).
+* **Native CLAP 1.2+ Standard Integration:** Built directly upon the `clack` framework, exposing a clean, translation-free CLAP implementation. Fully supports sample-accurate parameter automation across 14 host parameters, project state persistence (`StateEnvelope` v2 JSON serialization with SHA-256 asset verification), host latency reporting with dynamic PDC (`clap_plugin_latency`), 16 host extensions (`audio-ports`, `audio-ports-config`, `audio-ports-config-info`, `audio-ports-activation`, `params`, `state`, `state-context`, `latency`, `track-info`, `remote-controls`, `param-indication`, `preset-load`, `render`, `tail`, `timer-support`, `gui`), and a CLAP Preset Discovery factory supporting both `Location::File` and `Location::Plugin`.
+* **Hardware-Accelerated Slint GUI with Native X11 Embedding:** Declarative user interface rendered via FemtoVG / OpenGL with **native X11 XEmbed host panel embedding** into Bitwig Studio and REAPER, plus X11 floating and experimental Wayland floating window support. A dedicated event-loop thread polls lock-free atomic view models at 60 Hz (relaxing to 30 Hz in silence) with 0% audio thread overhead.
+* **Complete Integrated Tone Pipeline:** Includes a native 256-phase minimum-phase Kaiser sinc resampler ($0.7\text{–}1.3\text{ µs}$ execution, $>105\text{ dB}$ stopband, 0 pre-ringing) adapting any model sample rate to host rates (44.1, 48, 96, 192 kHz), an exclusive cabinet slot supporting Uniform-Partitioned Overlap-Save (UPOLS) FFT `.wav` IR convolution ($1.3\text{ µs}$ for 512-sample IRs) or 1-in/1-out `.nam`/`.namb` neural cabinet models with independent latency-aligned bypass, selectable `Silence`/`Musical` noise gate, input calibration/output normalization modes, polyphase half-band oversampling (2×/4×), and branchless crossfaded master bypass (64-sample ramp, about 1.3 ms at 48 kHz).
 * **Binary `.namb` v2 Container Support:** Loads pre-transposed binary models (Gate-Major LSTM, Interleaved-4 WaveNet) with IEEE 802.3 CRC32 integrity validation, slashing model loading and hot-swap times from $\sim 50\text{ ms}$ to $< 1\text{ ms}$.
-* **Sandbox-Ready Flatpak Audio Plugin Extension:** Distributed as an official Flatpak extension (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`) extending `org.freedesktop.LinuxAudio.BaseExtension` 26.08, providing automatic discovery in sandboxed DAWs (Fender Studio Pro, Bitwig, REAPER, Studio One) without compromising filesystem security.
+* **Sandbox-Ready Dual-Stack Flatpak Extension:** Distributed as an official Flatpak extension (`org.freedesktop.LinuxAudio.Plugins.NAMPlug`) targeting both `26.08` (canonical) and `25.08` (compatibility) `org.freedesktop.LinuxAudio.BaseExtension` branches simultaneously, providing automatic discovery in sandboxed DAWs (Fender Studio Pro, Bitwig Studio, REAPER) without compromising filesystem security.
 
 ---
 
 ## 🥊 Feature Showcase
 
-| Feature / Attribute            | Technical Implementation                                                                        | Benefit & Impact                                                                                                       |
-|:------------------------------ |:----------------------------------------------------------------------------------------------- |:---------------------------------------------------------------------------------------------------------------------- |
-| **Inference Topologies**       | WaveNet (A1/A2), LSTM (1- & 2-layer, multi-I/O), ConvNet, Linear FIR/FFT, Sequential            | Comprehensive NAM model coverage with native Rust execution speed                                                      |
-| **Plugin Standard**            | Native CLAP 1.2+ via `clack-plugin` & `clack-extensions`                                        | Zero translation layer; sample-accurate automation, dynamic PDC, and full state saving                                 |
-| **RT Determinism**             | Zero heap alloc/free, zero mutex locks, 3-tier lock-free GC cascade                             | Deterministic, dropout-free audio under sub-millisecond buffer sizes (32–64 samples)                                   |
-| **SIMD Acceleration**          | Mandatory `x86-64-v3` (AVX2/FMA) baseline; static `dispatch_simd!` dispatch                     | WaveNet Standard ≈ 41.8 µs / LSTM 1×16 ≈ 6.8 µs per 64-sample block (Ryzen 7 5700U)                                    |
-| **Dual-Oracle Parity**         | Validated against C++ NAMCore ($f32$) and double-precision $f64$                                | Bit-exact fidelity ($>136.4\text{ dB}$ SNR WaveNet, $>150.3\text{ dB}$ SNR ConvNet)                                    |
-| **Native Polyphase Resampler** | 256 phases × 64 taps Kaiser sinc resampler (minimum-phase cepstrum)                             | Pristine multi-rate conversion (>105 dB stopband, < 0.05 dB ripple) in 0.7–1.3 µs                                      |
-| **Cabinet IR Convolution**     | Uniform-Partitioned Overlap-Save (UPOLS) FFT convolution engine (.wav)                          | Ultra-low-overhead speaker cabinet simulation ($1.3\text{ µs}$ for 512-sample IRs)                                     |
-| **Anti-Aliasing Oversampling** | Half-band polyphase FIR filters (`Off`, `2x`, `4x`, >100 dB stopband)                           | Eliminates non-linear high-frequency foldover/aliasing in high-gain models                                             |
-| **Activation Precision**       | `Standard` (exact Taylor minimax) vs `Fast` (Padé polynomial approximations)                    | User-selectable balance between floating-point precision (+89.5 dB SNR) and CPU cycles                                 |
-| **Graphical User Interface**   | Slint 1.19 declarative UI (FemtoVG/OpenGL via `winit`)                                          | Native X11 XEmbed host panel embedding, X11/Wayland floating fallback (Wayland floating experimental), 60 FPS metering |
-| **Denormal Armor**             | Symmetric −220 dBFS dither injection + hardware MXCSR FTZ/DAZ                                   | Eliminates 10–100× CPU microcode penalties during digital silence with zero net DC drift                               |
-| **Bypass Crossfader**          | 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with branchless FMA loop & phase compensation | Smooth, pop-free transitions with zero phase cancellation                                                              |
-| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`                           | Instant host Plugin Delay Compensation with 0 per-block audio thread overhead                                          |
-| **Binary `.namb` v2 Format**   | Pre-transposed memory layout (Gate-Major LSTM, Interleaved-4 WaveNet) with CRC32                | Reduces model loading and DAW track hot-swap time from ~50 ms to $< 1\text{ ms}$                                       |
-| **Flatpak Extension**          | `org.freedesktop.LinuxAudio.Plugins.NAMPlug` on BaseExtension 26.08                             | Seamless 1-click loading in sandboxed Flatpak DAWs without host permissions                                            |
-| **Release Optimization**       | 5-phase PGO + LLVM-BOLT pipeline with demangled assembly verification                           | Maximized CPU instruction throughput and minimized I-Cache misses                                                      |
+| Feature / Attribute            | Technical Implementation                                                                                      | Benefit & Impact                                                                                                    |
+|:------------------------------ |:------------------------------------------------------------------------------------------------------------- |:------------------------------------------------------------------------------------------------------------------- |
+| **Inference Topologies**       | WaveNet (A1/A2), LSTM (1- & 2-layer, multi-I/O), ConvNet, Linear FIR/FFT, Sequential                          | Comprehensive NAM model coverage with native Rust execution speed                                                   |
+| **Plugin Standard**            | Native CLAP 1.2+ via `clack-plugin` & `clack-extensions`                                                      | Zero translation layer; sample-accurate automation, dynamic PDC, and full state saving                              |
+| **RT Determinism**             | Zero heap alloc/free, zero mutex locks, 3-tier lock-free GC cascade                                           | Deterministic, dropout-free audio under sub-millisecond buffer sizes (32–64 samples)                                |
+| **SIMD Acceleration**          | Mandatory `x86-64-v3` (AVX2/FMA) baseline; static `dispatch_simd!` dispatch                                   | WaveNet Standard ≈ 41.8 µs / LSTM 1×16 ≈ 6.8 µs per 64-sample block (Ryzen 7 5700U)                                 |
+| **Dual-Oracle Parity**         | Validated against C++ NAMCore ($f32$) and double-precision $f64$                                              | Bit-exact fidelity ($>136.4\text{ dB}$ SNR WaveNet, $>150.3\text{ dB}$ SNR ConvNet)                                 |
+| **Native Polyphase Resampler** | 256 phases × 64 taps Kaiser sinc resampler (minimum-phase cepstrum)                                           | Pristine multi-rate conversion (>105 dB stopband, < 0.05 dB ripple) in 0.7–1.3 µs                                   |
+| **Exclusive Cabinet Slot**     | UPOLS FFT convolution (`.wav` IR) or 1×1 neural cabinet (`.nam`/`.namb`); `IrLevelPolicy`; `PARAM_CAB_BYPASS` | Ultra-low-overhead cabinet simulation ($1.3\text{ µs}$ for 512-sample IRs) with latency-aligned bypass              |
+| **Anti-Aliasing Oversampling** | Half-band polyphase FIR filters (`Off`, `2x`, `4x`, >100 dB stopband)                                         | Eliminates non-linear high-frequency foldover/aliasing in high-gain models                                          |
+| **Activation Precision**       | `Standard` (exact Taylor minimax) vs `Fast` (Padé polynomial approximations)                                  | User-selectable balance between floating-point precision (+89.5 dB SNR) and CPU cycles                              |
+| **Graphical User Interface**   | Slint 1.19 declarative UI (FemtoVG/OpenGL via `winit`)                                                        | Native X11 XEmbed embedding, X11/Wayland floating fallback (Wayland experimental), 60/30 Hz dual IN/OUT VU metering |
+| **Denormal Armor**             | Symmetric −220 dBFS dither injection + hardware MXCSR FTZ/DAZ                                                 | Eliminates 10–100× CPU microcode penalties during digital silence with zero net DC drift                            |
+| **Bypass Crossfader**          | 64-sample crossfade ramp (about 1.3 ms at 48 kHz) with branchless FMA loop & phase compensation               | Smooth, pop-free transitions with zero phase cancellation                                                           |
+| **Dynamic Latency (PDC)**      | Cold-path cached effective latency with dynamic `clap_plugin_latency`                                         | Instant host Plugin Delay Compensation with 0 per-block audio thread overhead                                       |
+| **Binary `.namb` v2 Format**   | Pre-transposed memory layout (Gate-Major LSTM, Interleaved-4 WaveNet) with CRC32                              | Reduces model loading and DAW track hot-swap time from ~50 ms to $< 1\text{ ms}$                                    |
+| **Flatpak Extension**          | `org.freedesktop.LinuxAudio.Plugins.NAMPlug` (dual-stack `26.08` & `25.08`)                                   | Seamless loading in sandboxed Flatpak DAWs without host filesystem holes                                            |
+| **Release Optimization**       | A/B ceremony (`ab-opt-ceremony.sh`) gating PGO / optional BOLT, codegen guard & receipt chain                 | Empirical optimization promotion, zero-alloc/div codegen checks, and cryptographic SHA-256 certification            |
 
 ---
 
@@ -126,7 +126,7 @@ Execution times measured per **64-sample block at 48 kHz** ($1.33\text{ ms}$ rea
 
 ### 2. End-to-End CLAP Plugin Binary Certification (`nam_plug.clap`)
 
-In addition to core DSP benchmarks, the distributed release artifact (`~/.clap/nam_plug.clap`) undergoes automated real-time certification via `nam_perf_guard --certify` under realistic DAW host conditions (event queues, parameter smoothing, crossfading, buffer routing) after PGO + LLVM-BOLT optimization:
+In addition to core DSP benchmarks, the distributed release artifact (`~/.clap/nam_plug.clap`) undergoes automated real-time certification via `nam_perf_guard certify` under realistic DAW host conditions (event queues, parameter smoothing, crossfading, buffer routing) using the build selected by the empirical A/B optimization ceremony (`utils/ab-opt-ceremony.sh`, promoting PGO / optional LLVM-BOLT only when proven):
 
 | Host Scenario / Topology        | Block Size  | p50 Latency  | p99 Latency  | Deadline Budget | Budget Used (p50 / p99) | Headroom  | Certification Status |
 |:------------------------------- |:----------- |:------------ |:------------ |:--------------- |:----------------------- |:--------- |:-------------------- |
@@ -151,7 +151,7 @@ New to Neural Amp Modeler or guitar amp simulation? Here is everything you need 
 In guitar production, an authentic recorded amp tone consists of two distinct components:
 
 1. **The Amplifier Head (`.nam` / `.namb` file):** Captures the nonlinear tube saturation, distortion harmonics, EQ tone stack, and compression of the physical guitar amp or overdrive pedal.
-2. **The Speaker Cabinet (`.wav` Impulse Response):** Captures the acoustic frequency curve of the physical speaker cabinet, speaker cone resonance, microphone type, and mic placement.
+2. **The Speaker Cabinet (`.wav` Impulse Response or 1×1 `.nam` / `.namb` Neural Cabinet):** Captures the acoustic frequency curve, cone resonance, microphone type, and placement of the physical speaker cabinet.
 
 > [!IMPORTANT]
 > **Pair Your Amp Model with a Cab IR!**
@@ -174,10 +174,12 @@ In guitar production, an authentic recorded amp tone consists of two distinct co
 3. **Load a Cabinet (.wav or .nam/.namb):** Click **`LOAD CAB`** in the CABINET card and select either a `.wav` speaker impulse response or a 1-in/1-out neural cabinet model (`.nam` / `.namb`) in the single exclusive slot (loading one asset atomically replaces any active cabinet asset, showing a `WAV`, `NAM`, or `NAMB` format badge and disambiguated `parent/file.ext` label, while preserving the previous cabinet on failure).
    * For `.wav` IRs, click the **IR level policy badge** (`Peak` / `Preserved` / `Legacy`) in the card header to choose between peak normalization (`peak-normalized`, default), 1:1 original WAV amplitude (`preserved`), or legacy C++ plugin level scaling (`legacy-nam-plugin`, $10^{-18/20} \times 48000 / f_s$). Neural cabinet models (`.nam`/`.namb`) ignore amp calibration and `IrLevelPolicy`, always running at unity gain (and add neural inference CPU/latency when active).
    * Click the cabinet **`ON` / `BYP`** toggle (`PARAM_CAB_BYPASS`) at any time to bypass only the cabinet stage with click-free 64-sample cosine crossfading and constant PDC latency.
-4. **Dial in Gain Staging:**
+4. **Dial in Gain Staging & Calibration:**
    * Adjust **`INPUT`** ($-20\text{ to }+20\text{ dB}$, default `0.0 dB`) to feed the model the right amount of drive.
-   * Adjust **`OUTPUT`** ($-40\text{ to }+20\text{ dB}$, default `-3.0 dB`) to balance levels with your overall mix.
-   * Watch the tricolor peak meters and reset the red clip LED if digital clipping occurs.
+   * Adjust **`OUTPUT`** ($-40\text{ to }+20\text{ dB}$, GUI default `-3.0 dB`, host parameter default `0.0 dB`) to balance levels with your overall mix.
+   * Hold **`Shift`** while dragging or scrolling any knob for `0.1×` fine-tuning, and double-click a knob to reset it to its default.
+   * Toggle **`CAL IN`** and step the **`dBu`** reference (`-60.0` to `+60.0 dBu`, default `12.0 dBu`) to align your audio interface's 0 dBFS headroom with model metadata, and choose **`Out`** (`Raw`, `Norm` default, or `Cal`).
+   * Watch the dual IN/OUT tricolor meters and click either **`IN CLIP`** or **`OUT CLIP`** indicator to reset it if digital clipping occurs.
 5. **Set the Noise Gate:** If your guitar pickups produce single-coil hum or high-gain hiss, turn the **`GATE`** knob up from `-90.0 dB` (`"OFF"` by default) until silence is reached between notes (`GATE ACTIVE` indicator). Use **`Sil`** (default) for CPU-skipping silence shutoff after the IR, or **`Mus`** for continuous C++-reference quadratic downward expansion applied post-model / pre-CabSim IR so cabinet impulse tails decay naturally.
 6. **Choose Oversampling:**
    * **`Off` (Live Mode):** Pure zero added latency, perfect for real-time tracking and monitoring.
@@ -191,15 +193,15 @@ In guitar production, an authentic recorded amp tone consists of two distinct co
 
 The footer displays instantaneous DSP telemetry polled at 60 Hz (relaxing to 30 Hz in silence):
 
-| Readout       | What It Means                        | Ideal Value / Behavior                                   |
-|:------------- |:------------------------------------ |:-------------------------------------------------------- |
-| **`SR`**      | Current host sample rate             | `44100 Hz`, `48000 Hz`, `96000 Hz`                       |
-| **`BUF`**     | Quantum block size received from DAW | `64 spl`, `128 spl`, `256 spl`                           |
-| **`LAT`**     | Latency added by the plugin          | `0 spl (0.0 ms)` in live mode; reported to host PDC      |
-| **`CH`**      | Negotiated audio channel layout      | `Mono` (Config 0) or `Stereo` (Config 1)                 |
-| **`% DSP`**   | % of audio deadline budget consumed  | Typically `3% – 12%`; red LED lights up if XRUN occurs   |
-| **`ALERT`**   | Contextual diagnostic status pill    | Blank in normal operation; displays fault/warning text   |
-| **`BACKEND`** | Active window display backend        | `X11 (Embedded)`, `X11 (Floating)`, `Wayland (Floating)` |
+| Readout       | What It Means                        | Ideal Value / Behavior                                                           |
+|:------------- |:------------------------------------ |:-------------------------------------------------------------------------------- |
+| **`SR`**      | Current host sample rate             | `44100 Hz`, `48000 Hz`, `96000 Hz`                                               |
+| **`BUF`**     | Quantum block size received from DAW | `64 spl`, `128 spl`, `256 spl`                                                   |
+| **`LAT`**     | Latency added by the plugin          | `0 spl (0.0 ms)` in live mode (no IR/resampling/OS); updates dynamically for PDC |
+| **`CH`**      | Negotiated audio channel layout      | `Mono` (Config 0) or `Stereo` (Config 1)                                         |
+| **`% DSP`**   | % of audio deadline budget consumed  | Typically `3% – 12%`; red LED lights up if XRUN occurs                           |
+| **`ALERT`**   | Contextual diagnostic status pill    | Blank in normal operation; displays fault/warning text                           |
+| **`BACKEND`** | Active window display backend        | `X11 (Embedded)`, `X11 (Floating)`, `Wayland (Floating)`                         |
 
 ### 5. Metering Architecture & Ballistics
 
@@ -208,7 +210,7 @@ NAM-Plug features a dual-stage input and output metering system designed for pre
 * **Input Metering (IN):** Tapped **post-trim / pre-model** (immediately after the input gain knob and smoother, before entering the noise gate and neural model). This allows the performer to gauge the actual drive level fed into the neural network, matching the canonical C++ reference input pointer (`mInputPointers`).
 * **Output Metering (OUT):** Tapped **post-gain / post-cabsim** at the final stage before passing audio to the DAW host.
 * **Ballistics & Visual Representation:**
-  * **Peak Bar:** Quasi-peak level with calibrated IEC 60268-10 Type I ballistics (20 dB decay in 1.7 s, ~12 dB/s), rendered as a responsive semi-transparent outer bar.
+  * **Peak Bar:** Quasi-peak level with responsive exponential release (`BALLISTICS_DECAY_RATE = 0.962` at 60 Hz, ≈ 20 dB decay in ~1.0 s, tuned from IEC 60268-10 Type I ballistics), rendered as a semi-transparent outer bar.
   * **RMS Core:** Continuous energy level smoothed via a single-pole leaky EWMA integrator with $\tau = 300\text{ ms}$ (matching `IPeakAvgSender` ballistics), rendered as a solid high-contrast inner bar.
   * **Peak Hold:** 2-second (120 frames at 60 Hz) floating marker with instant attack and smooth linear drop.
   * **Digital Clip Indicators:** Separate, latching `IN CLIP` and `OUT CLIP` warning buttons lighting up at $\ge 0.0\text{ dBFS}$ with touch/click reset.
@@ -228,13 +230,13 @@ To maintain uncompromising real-time determinism, pristine modularity, and zero-
 
 ## 🛠️ System Prerequisites
 
-| Requirement          | Specification                                       | Verification Command |
-|:-------------------- |:--------------------------------------------------- |:-------------------- |
-| **Operating System** | Linux (Kernel $\ge 5.10$)                           | `uname -r`           |
-| **CPU Architecture** | `x86_64` with AVX2/FMA (`x86-64-v3` baseline)       | `lscpu`              |
-| **Rust Toolchain**   | $\ge 1.99.0$ (Edition 2024)                         | `rustc --version`    |
-| **CLAP Host / DAW**  | Bitwig Studio, REAPER, Studio One, etc.             | Host application     |
-| **System Libraries** | Build tools, CMake, X11, OpenGL development headers | See command below    |
+| Requirement          | Specification                                                                     | Verification Command |
+|:-------------------- |:--------------------------------------------------------------------------------- |:-------------------- |
+| **Operating System** | Linux (Kernel $\ge 5.10$)                                                         | `uname -r`           |
+| **CPU Architecture** | `x86_64` with AVX2/FMA/BMI2 (`x86-64-v3` baseline); `aarch64` (NEON) CI-validated | `lscpu`              |
+| **Rust Toolchain**   | $\ge 1.99.0$ (Edition 2024)                                                       | `rustc --version`    |
+| **CLAP Host / DAW**  | Bitwig Studio, REAPER, Fender Studio Pro, etc.                                    | Host application     |
+| **System Libraries** | Build tools, CMake, X11, OpenGL development headers                               | See command below    |
 
 > **MSRV Policy:** `rust-version = "1.99.0"` in `Cargo.toml` is the guaranteed public MSRV promise. The project builds and validates on stable Rust.
 
@@ -242,6 +244,12 @@ To maintain uncompromising real-time determinism, pristine modularity, and zero-
 
 ```bash
 sudo apt update && sudo apt install -y build-essential pkg-config cmake libgl1-mesa-dev libx11-dev libxcursor-dev libxcb1-dev libxkbcommon-dev
+```
+
+For running the full local lint, AppStream metadata, and headless GUI test suites (`utils/lints.sh` and `utils/tests-long.sh`), also install:
+
+```bash
+sudo apt install -y libxkbcommon-x11-dev libfontconfig1-dev binutils appstream xvfb
 ```
 
 ---
@@ -286,7 +294,7 @@ flatpak uninstall --user org.freedesktop.LinuxAudio.Plugins.NAMPlug
 > [!NOTE]
 > **Host Memory Management:**
 > On systems with constrained RAM, configure `CARGO_BUILD_JOBS` in your host shell profile (e.g. `~/.bashrc`) to prevent memory exhaustion during parallel codegen.
-
+>
 > [!NOTE]
 > **Engine Dependency & Optional C++ Parity Checkout:** NAM-Plug consumes `NeuralAmpModeler-rs` (`4.0.0`) directly from crates.io via `Cargo.toml`. No sibling checkout is needed to build or run `cargo test --features testing`. When running full C++ NAMCore parity tests (`utils/tests-long.sh`) without an external `NAM_CORE_RENDER_BIN`, clone the engine next to this repository at the commit pinned in `variables.env` (`ENGINE_COMMIT`):
 >
@@ -314,19 +322,19 @@ cargo run --bin ui_preview
 
 ### Method 3: Hyper-Optimized Build (`./utils/build-release.sh`)
 
-For maximum performance in live and studio environments, compile using the automated optimization pipeline combining **Profile-Guided Optimization (PGO)** and **LLVM-BOLT** machine-code layout reordering into canonical artifacts in `target/dist/`:
+For maximum performance in live and studio environments, compile using the automated release pipeline, which follows the empirical A/B optimization ceremony (`utils/ab-opt-ceremony.sh`, applying PGO and optional LLVM-BOLT only when proven) and delivers canonical artifacts into `target/dist/`:
 
 ```bash
 ./utils/build-release.sh
 ```
 
-| Canonical Option | Purpose                                                                                 |
-|:---------------- |:--------------------------------------------------------------------------------------- |
-| `--package`      | Generates distribution archive (`.tar.zst`) and Flatpak extension (`.flatpak`)          |
-| `--install`      | Automatically installs the generated CLAP binary to `~/.clap/` (and flatpak bundle)     |
-| `--strict`       | Enforces fail-closed mode: any optimization or verification gap aborts with exit code 1 |
-| `--certify`      | Does not compile; strictly validates and certifies canonical artifacts via receipts     |
-| `-h, --help`     | Displays command-line help screen and exits                                             |
+| Canonical Option | Purpose                                                                                                 |
+|:---------------- |:------------------------------------------------------------------------------------------------------- |
+| `--package`      | Generates distribution archive (`.tar.zst`) and dual-stack Flatpak bundles (`26.08` & `25.08`)          |
+| `--install`      | Only with `--certify`: installs the verified `nam_plug.clap` to `~/.clap/` and declared Flatpak bundles |
+| `--strict`       | Enforces fail-closed mode: any optimization or verification gap aborts with exit code 1                 |
+| `--certify`      | Does not compile; strictly validates and certifies canonical artifacts via receipts                     |
+| `-h, --help`     | Displays command-line help screen and exits                                                             |
 
 ---
 
@@ -334,13 +342,13 @@ For maximum performance in live and studio environments, compile using the autom
 
 The table below summarizes verified GUI presentation and host integration behavior across Linux host environments:
 
-| Host / Session                                | Plugin GUI Support                  | Notes & Operational Behavior                                                                                                                                                                                    |
-|:--------------------------------------------- |:----------------------------------- |:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bitwig Studio** (X11)                       | ✅ Embedded (XEmbed)                | Native X11 embedded GUI panel (default), sample-accurate automation, state save/restore, and offline bouncing.                                                                                                  |
-| **REAPER** (Native Linux, X11)                | ✅ Embedded (XEmbed)                | Native X11 embedded GUI panel (default), parameter automation, dynamic PDC, and ultra-low latency playback.                                                                                                     |
-| **X11 Hosts in General**                      | ✅ Embedded / Floating              | Embedded via XEmbed or floating window, depending on host window negotiation (`is_floating`).                                                                                                                   |
+| Host / Session                                | Plugin GUI Support                  | Notes & Operational Behavior                                                                                                                                                                                                                                                                                                                   |
+|:--------------------------------------------- |:----------------------------------- |:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bitwig Studio** (X11)                       | ✅ Embedded (XEmbed)                | Native X11 embedded GUI panel (default), sample-accurate automation, state save/restore, and offline bouncing.                                                                                                                                                                                                                                 |
+| **REAPER** (Native Linux, X11)                | ✅ Embedded (XEmbed)                | Native X11 embedded GUI panel (default), parameter automation, dynamic PDC, and ultra-low latency playback.                                                                                                                                                                                                                                    |
+| **X11 Hosts in General**                      | ✅ Embedded / Floating              | Embedded via XEmbed or floating window, depending on host window negotiation (`is_floating`).                                                                                                                                                                                                                                                  |
 | **Fender Studio Pro 8.2** (Linux, Wayland)    | ⚠️ Generic Host Controls            | **Plugin GUI not available (host design decision)**: the host exclusively requests embedded Wayland (`is_floating = false`), does not negotiate floating windows for CLAP plugins, and uses its native generic parameter editor. Model selection and state restore work natively via `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN` and `clap.state`. |
-| **Wayland Hosts Requesting Floating Windows** | 🧪 Floating Window (*Experimental*) | Standalone floating window supported by the plugin code (`is_floating = true`), but classified as **experimental** due to the absence of a verified test host negotiating floating windows under Wayland.                                                                                                               |
+| **Wayland Hosts Requesting Floating Windows** | 🧪 Floating Window (*Experimental*) | Standalone floating window supported by the plugin code (`is_floating = true`), but classified as **experimental** due to the absence of a verified test host negotiating floating windows under Wayland.                                                                                                                                      |
 
 ### Using Without a Graphical Interface
 
@@ -370,15 +378,16 @@ When running in a host or display server environment where the custom graphical 
 
 The `./utils/` suite automates formatting, static analysis, parity verification, and release certification:
 
-| Script                                                     | Purpose & Scope                                                                                                                                             |
-|:---------------------------------------------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`utils/lints.sh`](utils/lints.sh)                         | **Static Analysis Gate:** Runs `cargo fmt`, `cargo check` matrix, strict `clippy`, validates SPDX headers, policies, and RT allocations (~6s).              |
-| [`utils/tests-quick.sh`](utils/tests-quick.sh)             | **Agile QA Suite:** Fast test run (≤ 5 min budget) covering unit/integration tests and real-time allocation heap audit (`heap-audit`).                      |
-| [`utils/tests-long.sh`](utils/tests-long.sh)               | **Pre-Release Audit:** Heavy stress testing (GC model swaps, off-RT drain, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`. |
-| [`utils/ab-opt-ceremony.sh`](utils/ab-opt-ceremony.sh)     | **A/B Optimization Ceremony:** Empirical performance comparison (`plain` vs. `pgo` vs. `pgo+bolt`) on an isolated core prior to canonical build.            |
-| [`utils/build-release.sh`](utils/build-release.sh)         | **Release Pipeline & Certification:** Compiles release artifacts (`target/dist/`), packages bundles, and certifies canonical receipts (`--certify`).        |
-| [`utils/verify_rt_codegen.sh`](utils/verify_rt_codegen.sh) | **Static Codegen Guard:** Disassembles the CLAP `.so` and asserts zero `malloc`/`free`, zero `div`/`idiv`, and bounded TLS access.                          |
-| [`utils/mod-update.sh`](utils/mod-update.sh)               | **Dependency Maintenance:** Manual toolchain and Cargo dependency upgrade utility.                                                                          |
+| Script                                                     | Purpose & Scope                                                                                                                                                                                                   |
+|:---------------------------------------------------------- |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`utils/lints.sh`](utils/lints.sh)                         | **Static Analysis Gate:** Runs `cargo fmt`, `cargo check` matrix, strict `clippy`, bidirectional cross-target clippy, doc, SPDX headers, RT allocation scan, AppStream validation, and script budgets (~8s warm). |
+| [`utils/tests-quick.sh`](utils/tests-quick.sh)             | **Agile QA Suite:** Fast test run (≤ 5 min budget) covering unit/integration tests and real-time allocation heap audit (`heap-audit`).                                                                            |
+| [`utils/tests-long.sh`](utils/tests-long.sh)               | **Pre-Release Audit:** Heavy stress testing (GC model swaps, off-RT drain, RT priority/latency, Xvfb GUI). Supports `--strict`, `--artifact`, and `--only`.                                                       |
+| [`utils/ab-opt-ceremony.sh`](utils/ab-opt-ceremony.sh)     | **A/B Optimization Ceremony:** Empirical performance comparison (`plain` vs. `pgo` vs. `pgo+bolt`) on an isolated core prior to canonical build.                                                                  |
+| [`utils/build-release.sh`](utils/build-release.sh)         | **Release Pipeline & Certification:** Compiles release artifacts (`target/dist/`), packages bundles, and certifies canonical receipts (`--certify`).                                                              |
+| [`utils/verify_rt_codegen.sh`](utils/verify_rt_codegen.sh) | **Static Codegen Guard:** Disassembles the CLAP `.so` and asserts zero `malloc`/`free`, zero `div`/`idiv`, and bounded TLS access.                                                                                |
+| [`utils/miri-audit.sh`](utils/miri-audit.sh)               | **Optional UB/Aliasing Audit:** Runs `cargo +nightly miri` over `retired_box`, `GuiHostBridge`, and `quiescence` teardown protocols.                                                                              |
+| [`utils/mod-update.sh`](utils/mod-update.sh)               | **Dependency Maintenance:** Manual toolchain and Cargo dependency upgrade utility.                                                                                                                                |
 
 ### Script Contract & Release Chain
 
@@ -427,7 +436,7 @@ For in-depth architectural specifications and engineering guides, consult the [`
 
 We welcome community contributions, bug reports, and feedback!
 
-* **Test in Your DAW:** Try NAM-Plug in your favorite Linux DAW (Bitwig, REAPER, Studio One, etc.) with different buffer sizes (32, 64, 128, 256) and sample rates.
+* **Test in Your DAW:** Try NAM-Plug in your favorite Linux DAW (Bitwig Studio, REAPER, Fender Studio Pro, etc.) with different buffer sizes (32, 64, 128, 256) and sample rates.
 * **Model & IR Compatibility:** Test your favorite `.nam` models and speaker IRs, and share your experience or benchmarks.
 * **Issue Reporting:** Submit detailed bug reports, questions, or feature requests via [GitHub Issues](https://github.com/fabiohl/NAM-Plug/issues).
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 
+# Canonical 26.08 runtime manifest; utils/build-release.sh --package builds both 26.08 and 25.08 compatibility bundles from the single compiled nam_plug.clap.
 id: org.freedesktop.LinuxAudio.Plugins.NAMPlug
 branch: "26.08"
 runtime: org.freedesktop.LinuxAudio.BaseExtension
@@ -16,9 +17,15 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm755 nam_plug.clap ${FLATPAK_DEST}/clap/nam_plug.clap
+      - install -Dm644 LICENSE.txt -t ${FLATPAK_DEST}/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/
+      - install -Dm644 NOTICE -t ${FLATPAK_DEST}/share/licenses/org.freedesktop.LinuxAudio.Plugins.NAMPlug/
       - install -Dm644 org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/
     sources:
       - type: file
         path: nam_plug.clap
+      - type: file
+        path: LICENSE.txt
+      - type: file
+        path: NOTICE
       - type: file
         path: org.freedesktop.LinuxAudio.Plugins.NAMPlug.metainfo.xml

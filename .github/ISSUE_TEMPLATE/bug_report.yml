@@ -21,7 +21,7 @@ body:
         - "GUI / Window Rendering (Slint / FemtoVG-OpenGL)"
         - "Host Automation & Parameter Sync"
         - "State Save / Restore (DAW Project Reload)"
-        - "Model & CabSim IR Loading"
+        - "Model & Cabinet Slot Loading (.nam / .namb / .wav IR)"
         - "Offline Render / Audio Bounce"
         - "Preset Management & Discovery"
         - "Plugin Initialization / Crash on Load"
@@ -35,7 +35,7 @@ body:
     attributes:
       label: DAW / Host Application & Version
       description: Enter the name and version of your Digital Audio Workstation or CLAP host.
-      placeholder: "e.g. Bitwig Studio 5.2.1, REAPER 7.15 (Native Linux), Fender Studio Pro 8.2"
+      placeholder: "e.g. Bitwig Studio 6.x, REAPER 7.x (Native Linux), Fender Studio Pro 8.2"
     validations:
       required: true
 
@@ -45,8 +45,8 @@ body:
       label: Environment & System Details
       description: Provide details about your OS, desktop session, and CPU.
       placeholder: |
-        - NAM-Plug Release v1.0.0 (or commit hash)
-        - OS & Kernel: Ubuntu 26.04 / Arch Linux (kernel 6.8.0-lowlatency)
+        - NAM-Plug Release v1.2.0 (or commit hash)
+        - OS & Kernel: Ubuntu 26.04 / Arch Linux (kernel 6.x)
         - Display Server: Wayland / X11
         - CPU Model: AMD Ryzen 7 5800X / Intel Core i7-12700K
     validations:
@@ -58,7 +58,7 @@ body:
       label: Audio & Buffer Configuration
       description: Specify sampling rate, buffer size, and driver backend.
       placeholder: |
-        - Audio Server / Driver: PipeWire 1.0.3 (JACK client) / ALSA
+        - Audio Server / Driver: PipeWire 1.x (JACK / PipeWire-JACK) / ALSA
         - Sample Rate: 48000 Hz (or 44100 / 96000 Hz)
         - Buffer Size / Quantum: 64 samples (or 128 / 256 samples)
         - Render Mode: Realtime Playback / Offline Bounce

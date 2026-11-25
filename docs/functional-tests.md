@@ -6,8 +6,8 @@ Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights 
 # Functional Testing Guide (Human QA) - NAM-Plug (CLAP Plugin)
 
 **Audience:** Developers, QA Testers, and End Users.
-**Target DAWs:** Bitwig Studio 6+ and Reaper / Fender Studio Pro 8+ (Linux, Flatpak / Native).
-**Preparation:** `~/.clap/nam_plug.clap` installed (Release build via `utils/build-release.sh` or `target/release/libnam_plug.so`), ≥1 valid `.nam` model, 1 invalid file, 1 `.wav` IR file, Guitar DI or audio signal generator on track, and `pw-top` open to monitor XRUNs (Recommended: 128 samples @ 48 kHz).
+**Target DAWs:** Bitwig Studio 6+, REAPER, and Fender Studio Pro 8+ (Linux, Flatpak / Native).
+**Preparation:** `~/.clap/nam_plug.clap` installed (canonical artifact `target/dist/nam_plug.clap` via `utils/build-release.sh`, or `target/release/libnam_plug.so`), ≥1 valid `.nam` model, 1 invalid file, 1 `.wav` IR file (and optionally 1 1×1 `.nam`/`.namb` neural cabinet model), Guitar DI or audio signal generator on track, and `pw-top` open to monitor XRUNs (Recommended: 128 samples @ 48 kHz).
 
 > [!NOTE]
 > This guide covers manual human QA workflows. For automated unit and integration tests (`cargo test`), property testing, allocation auditing, and Criterion performance benchmarks (`cargo bench`), refer to [`testing.md`](testing.md).
@@ -33,9 +33,9 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 - [ ] **T1.1 Load Model & Cabinet Asset:** Click `[LOAD .NAM]` in the **AMP MODEL** card → select a valid `.nam` model → Click `[LOAD CAB]` in the **CABINET** card → select a valid `.wav` IR (or 1×1 `.nam`/`.namb` neural cabinet).
   *Expected:* Both load asynchronously without host UI freeze or audio dropouts. Amp modeling and cabinet processing become audible immediately. Active model name and cabinet filename update in Zone 1.
 - [ ] **T1.2 Knobs & Double-Click Reset:** Drag **INPUT** knob to +6.0 dB, drag **GATE** to −50.0 dB → Double-click **INPUT**.
-  *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to default 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to default −90.0 dB (off by default); double-clicking **OUTPUT** resets to default −3.0 dB.
-- [ ] **T1.3 Bypass & VU Meter Layout:** Insert plugin in DAW configured as Mono (Config 0, default: 1 centered meter bar), then instantiate on a Stereo track via `audio-ports-config` (Config 1: 2 meter bars L/R) → Toggle **BYPASS** (toggle switch).
-  *Expected:* Meter layout matches the negotiated port configuration (1 centered bar for Mono vs. 2 bars L/R for Stereo; configuration negotiated strictly via CLAP `audio-ports-config`). The toggle switch transitions cleanly between `DSP ACTIVE` and `BYPASS` via a 64-sample click-free linear crossfade, yielding a bit-transparent dry signal without audible clicks.
+  *Expected:* Knobs move smoothly without zipper noise. Double-click instantly resets **INPUT** to default 0.0 dB (GATE remains at −50.0 dB). Double-clicking **GATE** resets it to default −90.0 dB (`"OFF"` by default); double-clicking **OUTPUT** resets the GUI knob to `-3.0 dB` (host CLAP parameter default is `0.0 dB`).
+- [ ] **T1.3 Bypass & Dual IN/OUT VU Meter Layout:** Insert plugin in DAW configured as Mono (Config 0, default: 1 centered IN + 1 centered OUT meter column), then instantiate on a Stereo track via `audio-ports-config` (Config 1: 2 IN L/R + 2 OUT L/R meter columns) → Toggle **BYPASS** (toggle switch).
+  *Expected:* Meter layout matches the negotiated port configuration (Mono IN/OUT vs. Stereo L/R IN/OUT; configuration negotiated strictly via CLAP `audio-ports-config`). Both IN and OUT columns display quasi-peak outer bars with solid inner EWMA RMS cores. The toggle switch transitions cleanly between `DSP ACTIVE` and `BYPASS` via a 64-sample click-free linear crossfade, yielding a bit-transparent dry signal without audible clicks.
 - [ ] **T1.4 Host Parameter Automation (`[Bitwig]`):** Draw a quick automation ramp for `input_gain_db` or `output_gain_db` in DAW → start playback.
   *Expected:* Host automation smoothly drives parameter values and audio volume without zipper noise or audio dropouts.
 - [ ] **T1.5 Real-Time Telemetry Bar Verification:** Observe the status bar (Zone 5) during playback.
@@ -61,6 +61,10 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
   *Expected:* Submodel swaps cleanly without audible clicks. Under high CPU load in `"Auto"`, telemetry flags reflect adaptive degradation safely.
 - [ ] **2A.6 Multi-Instance Isolation:** Insert 3 NAM-Plug instances across different tracks → load different models & IRs on each.
   *Expected:* All 3 instances process audio independently with zero cross-talk, state leakage, or audio dropouts.
+- [ ] **2A.7 Input Calibration & Output Modes:** Load a model with `input_level` / `loudness` / `output_level` metadata → toggle **`CAL IN`**, step **`dBu`** (`-60.0` to `+60.0 dBu`), and switch **`Out`** between `Raw`, `Norm`, and `Cal` → then load a model lacking calibration metadata.
+  *Expected:* Input calibration scales pre-nonlinearity drive and output modes switch cleanly without audio glitches. When a model lacks calibration metadata, `CAL IN` / `Norm` / `Cal` controls reflect unavailable state (`"No meta"` / disabled).
+- [ ] **2A.8 Cabinet Slot Switching, IR Level Policy & Independent Cabinet Bypass:** Load a `.wav` IR → cycle the IR level policy badge (`Peak` → `Preserved` → `Legacy`) → toggle cabinet **`ON` / `BYP`** (`PARAM_CAB_BYPASS`) → replace with a 1×1 `.nam`/`.namb` neural cabinet model (and optionally test a non-1×1 or post-stack `head` model).
+  *Expected:* `.wav` policy switches cleanly; `ON`/`BYP` crossfades over 64 samples without clicks while preserving constant reported PDC latency. Loading a 1×1 neural cabinet atomically replaces the `.wav` IR, switches the header badge to `UNITY` (`NAM`/`NAMB`), and non-1×1 or post-stack `head` models fail closed leaving the previous cabinet intact.
 
 ---
 
@@ -69,19 +73,19 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
 - [ ] **2B.1 Knob Tooltips & Fine-Tune:** Drag knobs or hover and scroll with mouse wheel → hold **Shift** while dragging/scrolling.
   *Expected:* Numerical text in knob center updates smoothly (e.g. `"+3.5 dB"`). Holding **Shift** scales adjustments by 0.1× for precision fine-tuning.
 - [ ] **2B.2 Interactive Knob Glow & Double-Click:** Drag any knob dial, then double-click it.
-  *Expected:* The active value arc tracks the cursor. Double-clicking instantly returns the parameter to its defined default (`0.0 dB` for INPUT, `-3.0 dB` for OUTPUT, `-90.0 dB` for GATE).
+  *Expected:* The active value arc tracks the cursor. Double-clicking instantly returns the parameter to its defined GUI default (`0.0 dB` for INPUT, `-3.0 dB` for OUTPUT, `-90.0 dB` for GATE).
 - [ ] **2B.3 Discrete Selectors (Oversampling & Precision):** Click `"Off"`, `"2×"`, `"4×"` under Oversample, and `"Std"`, `"Fast"` under Precision.
   *Expected:* Active option highlights crisply with distinct background color. Changes dispatch discrete CLAP parameter events to host and update DSP state instantly without audio glitches.
-- [ ] **2B.4 VU Peak Hold & Clipping:** Feed a high-gain signal to induce digital clipping (>0 dBFS) → stop audio → click the red clipped indicator bar.
-  *Expected:* Peak hold indicator pauses ~2.0s before decaying smoothly. Red clip indicator at the top persists until clicked to reset.
+- [ ] **2B.4 Dual IN/OUT VU Peak Hold, RMS Core & Clipping:** Feed a high-gain signal to induce input clipping and/or output digital clipping (≥0.0 dBFS) → stop audio → click the red **`IN CLIP`** and/or **`OUT CLIP`** indicator bar(s).
+  *Expected:* Outer quasi-peak bars and inner solid EWMA RMS cores track IN (post-trim/pre-model) and OUT (post-gain) stages independently. Peak hold markers pause ~2.0s before decaying smoothly. Red `IN CLIP` and `OUT CLIP` indicators latch independently at top until clicked to reset.
 - [ ] **2B.5 VU Meter L/R Channel Independence (`[Stereo Track]`):** On a stereo track (Config 1), test 4 signal scenarios:
-  - (a) Signal **only on L** (hard-pan L) → only the L bar moves; R remains at minimum.
-  - (b) Signal **only on R** → only the R bar moves; L remains at minimum.
-  - (c) **Symmetric signal** (equal L and R) → both bars move to equal levels.
-  - (d) **Asymmetric signal** (different levels) → bars move independently.
-  *Expected:* L and R channels operate independently with zero channel crosstalk.
-- [ ] **2B.6 Noise Gate LED Indicator:** Feed a low-level signal below the set gate threshold → then play above threshold.
-  *Expected:* LED displays `"GATE ACTIVE"` in green when closed (silencing background noise) and transitions to `"GATE OPEN"` when audio passes through.
+  - (a) Signal **only on L** (hard-pan L) → only the L bars (IN L and OUT L) move; R bars remain at minimum.
+  - (b) Signal **only on R** → only the R bars (IN R and OUT R) move; L bars remain at minimum.
+  - (c) **Symmetric signal** (equal L and R) → both L and R bars move to equal levels.
+  - (d) **Asymmetric signal** (different levels) → L and R bars move independently.
+  *Expected:* L and R channels operate independently across both IN and OUT meters with zero channel crosstalk.
+- [ ] **2B.6 Noise Gate Mode & LED Indicator (`Sil` vs. `Mus`):** With a `.wav` IR loaded, set GATE threshold above background noise → test **`Sil`** mode and **`Mus`** mode with low-level signal below threshold followed by a plucked note.
+  *Expected:* LED displays `"GATE ACTIVE"` in green when closing and transitions to `"GATE OPEN"` when audio passes. In `Sil` mode, output mutes cleanly; in `Mus` mode, downward expansion applies pre-cabinet so the loaded cabinet IR tail decays naturally after the note stops.
 
 ---
 
@@ -91,20 +95,20 @@ To ensure comprehensive testing without unnecessary friction, this guide is orga
   *Expected:* Plugin queries host track info (`clap_plugin_track_info`) and parameter indication (`clap_plugin_param_indication`) without errors or crashes. Shared state records track color and mapping metadata safely off the audio thread.
 - [ ] **2C.2 Automation Tracking & Playback:** Play back active automation on `output_gain_db` or `input_gain_db` in DAW while monitoring audio.
   *Expected:* Audio gain ramps smoothly without zipper noise or audio dropouts, and UI display synchronizes with current parameter values.
-- [ ] **2C.4 Full Project State Reload:** Set custom gain, gate, oversampling, activation, model, and IR → save DAW project → close DAW → reopen project.
+- [ ] **2C.3 Full Project State Reload:** Set custom gain, gate, oversampling, activation, model, and IR → save DAW project → close DAW → reopen project.
   *Expected:* All parameters, model path, and IR path restore perfectly with identical audio output. Missing model files degrade cleanly to `"No model loaded"`.
-- [ ] **2C.5 Preset Discovery Browser:** Place `.nam`/`.namb` models in `~/.nam/models` → open the host's preset browser / FX browser for NAM-Plug → inspect entries → load one.
+- [ ] **2C.4 Preset Discovery Browser:** Place `.nam`/`.namb` models in `~/.nam/models` → open the host's preset browser / FX browser for NAM-Plug → inspect entries → load one.
   *Expected:* Under standard file-location hosts (e.g., Bitwig Studio, `CLAP_PRESET_DISCOVERY_LOCATION_FILE`) and plugin-location hosts (e.g., Fender Studio Pro 8+, `CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN`), entries display model name, creator, and gear metadata; selecting a preset loads the model cleanly without XRUNs, and reopening the host or rescanning plugins detects newly added files in `~/.nam/models`.
-- [ ] **2C.6 Preset Portability (`clap.state-context`):** Move `.nam` model file to a different directory → load saved DAW device preset.
+- [ ] **2C.5 Preset Portability (`clap.state-context`):** Move `.nam` model file to a different directory → load saved DAW device preset.
   *Expected:* Plugin locates model via fallback search paths or basename and restores full state.
-- [ ] **2C.7 GUI Window Negotiation (Embedded & Floating):**
+- [ ] **2C.6 GUI Window Negotiation (Embedded & Floating):**
   - **Embedded mode (default):** GUI renders inside the host plugin window as an X11 child (via XEmbed; Wayland embedded is rejected per CLAP specification) without orphan windows or memory growth.
   - **Floating mode:** GUI opens as a clean standalone window when requested by the host (`is_floating = true`; verified on X11; experimental on Wayland due to lack of a test host negotiating floating).
   - **Honest fallback:** An unsupported embedded request (such as Wayland embedded) fails gracefully at `create()` rather than silently opening an orphan floating window; conforming hosts either negotiate a floating window or display their generic parameter editor.
   - **Reopen cycles:** Closing and reopening the GUI window 5+ times on the same instance re-embeds cleanly with zero crashes or platform re-initialization errors.
-- [ ] **2C.8 Bitwig Device Panel Pages (`[Bitwig]`):** Open Bitwig Device Panel → navigate between pages.
+- [ ] **2C.7 Bitwig Device Panel Pages (`[Bitwig]`):** Open Bitwig Device Panel → navigate between pages.
   *Expected:* 2 pages present: **"Main"** (INPUT, OUTPUT, BYPASS) and **"Gate"** (GATE). Moving a slider in the Device Panel updates the corresponding knob in the GUI, and vice versa.
-- [ ] **2C.9 Category & Search Indexing:** Search host plugin browser for `"distortion"`, `"gate"`, or `"mono"`.
+- [ ] **2C.8 Category & Search Indexing:** Search host plugin browser for `"distortion"`, `"gate"`, or `"mono"`.
   *Expected:* NAM-Plug correctly indexed under **Audio FX → Distortion**.
 
 ---
@@ -195,7 +199,7 @@ Before signing off on manual QA, verify that the automated release gates and mat
 
 ```text
 **Test ID:** <e.g.: T1.2, 2A.2, 3.2.1>
-**Environment:** <OS / Kernel, e.g. Ubuntu 24.04 / Linux 6.8-lowlatency>
+**Environment:** <OS / Kernel, e.g. Ubuntu 26.04 / Linux 6.x>
 **DAW & Host Mode:** <e.g. Bitwig Studio 6.0.6 (Flatpak), Embedded Mode>
 **Buffer / Sample Rate:** <e.g. 128 samples @ 48 kHz>
 **Active Model & IR:** <e.g. jcm800.nam, vintage30.wav>
