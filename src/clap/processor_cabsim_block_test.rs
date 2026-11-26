@@ -110,6 +110,7 @@ mod tests {
             .activate(|_, _| make_harness_audio_processor(state), config)
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(instance) };
         mt.load_cabsim(ir).expect("load cab IR");
         perform_restart(instance, started, state, config)
@@ -145,6 +146,7 @@ mod tests {
     fn cab_contract_flag(
         instance: &mut PluginInstance<crate::clap::host_harness::CompleteHost>,
     ) -> bool {
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(instance) };
         shared
             .cold
@@ -220,6 +222,7 @@ mod tests {
     #[test]
     fn test_cabsim_declared_latency_matches_partition_and_peak_alignment() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         // No IR yet: 0-sample latency announced, no notification.
@@ -239,6 +242,7 @@ mod tests {
 
         // Install a pre-delay IR (impulse exactly at the partition index) and
         // restart: the announced latency is the fixed partition.
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir("cabsim_declared_latency");
         mt.load_cabsim(&ir).expect("load pre-delay IR");
@@ -309,6 +313,7 @@ mod tests {
     #[test]
     fn test_cabsim_adapter_reused_across_quantum_renegotiation() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
         let ir = write_decay_ir("cabsim_quantum_reneg");
 
@@ -320,6 +325,7 @@ mod tests {
             )
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_cabsim(&ir).expect("load decay IR");
         let mut started = perform_restart(&mut instance, started, &state, audio_config(256));

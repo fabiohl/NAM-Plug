@@ -21,6 +21,7 @@ mod tests {
             max_frames_count: 512,
         };
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();

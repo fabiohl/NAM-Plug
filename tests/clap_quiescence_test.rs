@@ -128,6 +128,7 @@ fn test_host_call_quiescence_blocks_destroy_until_complete_and_rejects_subsequen
 
     // 2. Extract shared state
     let shared_ptr = test_util::extract_shared(&mut instance);
+    // SAFETY: `shared_ptr` points to the live plugin instance's shared state; the instance outlives these assertions and the dereference is read-only through interior-mutable fields.
     let shared = unsafe { &*shared_ptr };
     let quiescence = Arc::clone(&shared.cold.host_call_quiescence);
 

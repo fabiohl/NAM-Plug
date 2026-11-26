@@ -293,6 +293,7 @@ mod tests {
             )
             .expect("Failure in process()");
 
+        // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
         let processor_ptr = unsafe {
             clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
                 raw_ptr,
@@ -303,6 +304,7 @@ mod tests {
             )
             .unwrap()
         };
+        // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the processor is stopped and driven exclusively by this test, so the mutable borrow is unique and cannot outlive the instance.
         let processor = unsafe { &mut *processor_ptr };
 
         assert_eq!(
@@ -331,6 +333,7 @@ mod tests {
         let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
         let _started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
         let processor_ptr = unsafe {
             clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
                 raw_ptr,
@@ -341,6 +344,7 @@ mod tests {
             )
             .unwrap()
         };
+        // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the processor is stopped and driven exclusively by this test, so the mutable borrow is unique and cannot outlive the instance.
         let processor = unsafe { &mut *processor_ptr };
 
         processor.gate_dirty = false;

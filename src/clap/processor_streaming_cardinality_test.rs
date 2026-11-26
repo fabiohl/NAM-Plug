@@ -358,6 +358,7 @@ mod tests {
         // irregular blocks: no NaN/Inf, bounded RMS (no exploded/glitchy
         // output) and full write coverage on every callback.
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         let mut started = setup_with_model(&mut plugin_instance, 44100.0, 512, 8);
 

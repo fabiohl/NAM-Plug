@@ -13,6 +13,17 @@ use clack_extensions::log::{HostLog, LogSeverity};
 use std::ffi::CString;
 use std::sync::atomic::Ordering;
 
+pub(crate) fn lossy_cstring(msg: &str) -> CString {
+    if !msg.as_bytes().contains(&0) {
+        return CString::new(msg).unwrap_or_default();
+    }
+    let sanitized: String = msg
+        .chars()
+        .map(|ch| if ch == '\0' { '\u{FFFD}' } else { ch })
+        .collect();
+    CString::new(sanitized).unwrap_or_default()
+}
+
 impl<'a> NamClapMainThread<'a> {
     /// Emits an instance-scoped alert once to `LogBuffer` and the DAW `HostLog`.
     ///
@@ -47,15 +58,12 @@ impl<'a> NamClapMainThread<'a> {
             _ => log::info!("{msg}"),
         }
         if !forwarded_by_logger && let Some(log) = self.host.get_extension::<HostLog>() {
-            let cmsg = CString::new(msg.as_bytes()).unwrap_or_default();
+            let cmsg = lossy_cstring(msg);
             log.log(&self.host.shared(), severity, &cmsg);
         }
     }
 
     /// Emits host log messages for RT telemetry flags that were set.
-    ///
-    /// RT-Safe: all `CString::new(…).unwrap_or_default()` calls use static
-    /// ASCII literals or pre-formatted non-null strings — guaranteed non-panicking.
     pub(crate) fn emit_pending_logs(&self) {
         let _scope = neural_amp_modeler_rs::common::diagnostics::scope_instance(
             self.shared.cold.instance_id,
@@ -322,5 +330,28 @@ impl<'a> NamClapMainThread<'a> {
             );
             self.emit_alert_log(LogSeverity::Error, &msg_str);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lossy_cstring;
+
+    #[test]
+    fn lossy_cstring_replaces_embedded_nul_and_keeps_suffix() {
+        let converted = lossy_cstring("before\0after");
+        assert_eq!(
+            converted.to_str().expect("sanitized message is UTF-8"),
+            "before\u{FFFD}after"
+        );
+    }
+
+    #[test]
+    fn lossy_cstring_preserves_clean_messages() {
+        let converted = lossy_cstring("NAM-Plug: clean message");
+        assert_eq!(
+            converted.to_str().expect("clean message is UTF-8"),
+            "NAM-Plug: clean message"
+        );
     }
 }

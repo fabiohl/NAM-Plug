@@ -418,15 +418,15 @@ To ensure strict separation of concerns, the real-time audio processor lifecycle
 
 | Submodule               | Role & Responsibilities                                                                                                                                                                           |
 |:----------------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`activate.rs`**       | Off-RT buffer pre-allocation (`AlignedVec`), SPSC channel extraction, staged restore/swap adaptation (`StagedItemsRollbackGuard`), DSP component assembly, and initial latency reporting.         |
+| **`activate.rs`**       | Off-RT activation entry point: buffer pre-allocation (`AlignedVec`), SPSC channel extraction, staged restore/swap adaptation, DSP component assembly, and initial latency reporting. Off-RT model/CabSim helpers live in `activate/helpers.rs`. |
 | **`deactivated.rs`**    | `DeactivatedDspState` definition and `deactivate()` lifecycle implementation, preserving reusable heavy DSP assets off the audio thread.                                                          |
 | **`ftz.rs`**            | RAII `FtzDazGuard` asserting hardware FTZ/DAZ denormal flushing during block rendering and restoring host MXCSR on drop with zero leakage.                                                        |
 | **`mod.rs`**            | CLAP `PluginAudioProcessor` trait implementation for `NamClapProcessor`: `start_processing()` thread setup, top-level callback (`process()`), reset logic, and panic containment.                 |
-| **`dsp/`**              | Audio signal chain (channel extraction, latency-compensated dry delay, noise gate FSM, neural inference, peak/EWMA RMS telemetry) and the `orchestrator/` event scheduler with sub-block slicing. |
+| **`dsp/`**              | Audio signal chain (channel extraction, latency-compensated dry delay, noise gate FSM, neural inference, peak/EWMA RMS telemetry) and the `orchestrator/` event scheduler with sub-block slicing. The orchestrator keeps the block entry and shared port-slicing helper in `orchestrator.rs`, with wet/dry/event/telemetry methods in sibling submodules (`wet.rs`, `dry.rs`, `events.rs`, `telemetry.rs`). |
 | **`events.rs`**         | SPSC command ring drainage (`RtSwapHandler` binding), host event handling, GUI parameter sync, cabinet neural rebuild dirty/generation signaling, and latency monitoring.                         |
 | **`gc.rs`**             | Allocation- and lock-free disposal of replaced resources (parking lot + overflow buffer), see §5.3.                                                                                               |
 | **`heap_audit.rs`**     | `CountingAllocator` registration under the `heap-audit` feature.                                                                                                                                  |
-| **`params.rs`**         | Atomic parameter snapshotting and `ParamSmoother` integration.                                                                                                                                    |
+| **`params.rs`**         | Atomic parameter snapshotting, `ParamSmoother` integration, and the split-borrow `ParamTarget` construction used by host events, GUI sync, and scheduled RT events. |
 | **`prewarm_policy.rs`** | Proportional zero-budget stabilization policy and execution step sizing for two-phase model resets.                                                                                               |
 | **`rollback.rs`**       | Panic-resilient resource recovery guard (`ActivateRollbackGuard`).                                                                                                                                |
 | **`state.rs`**          | `NamClapProcessor` struct declaration, click-free `BypassCrossfader` state machine, and cabinet neural rebuild state (`cab_neural_dirty` / generation tracking).                                  |
@@ -470,14 +470,21 @@ NAM models may supply embedded metadata (`input_level_dbu`, `output_level_dbu`, 
 
 ### 6.4 Host Event Scheduling, In-Block Slicing & Anomaly Containment
 
-Host parameter automation and modulation events are processed in `src/clap/processor/dsp/orchestrator.rs`:
+Host parameter automation and modulation events are processed through `ParamTarget::apply` (`src/clap/processor/dsp/orchestrator/worker.rs`), scheduled by `src/clap/processor/dsp/orchestrator.rs` and its event submodule:
 
 1. **Bounded Event Buffer (`MAX_SCHEDULED_EVENTS`):** Input events are parsed into a pre-allocated buffer of 4096 entries. Floods exceeding capacity are truncated, asserting `RT_STATUS_SPSC_DRAIN_TRUNCATED` for off-RT logging.
-2. **Sample-Accurate Sub-Block Slicing:** The block is partitioned into consecutive slices bounded by distinct event timestamps (`sub_end = scheduled_events[event_idx].time`). Sliced audio is processed through the DSP chain, events are applied at slice boundaries, and smoothers resynchronize.
+2. **Sample-Accurate Sub-Block Slicing:** The block is partitioned into consecutive slices bounded by distinct event timestamps (`sub_end = scheduled_events[event_idx].time`). Sliced audio is processed through the DSP chain, events are applied at slice boundaries via the canonical split-borrow `ParamTarget`, and smoothers resynchronize.
 3. **Temporal Anomaly Policy:**
    - **Jittered Events (`time < block_offset`):** Clamped to `block_offset` and applied immediately before subsequent DSP processing.
    - **Out-of-Bounds Events (`time >= n_samples`):** Clamped to `n_samples` and applied at the block close boundary, guaranteeing parameter values are never lost.
    - **Telemetry:** Timing anomalies assert `RT_STATUS_EVENT_TIMING_ANOMALY` for off-RT diagnostic reporting via `log::warn!`.
+
+### 6.4.1 Canonical Parameter Assignment & Drain Acknowledgments
+
+- **Parameter Assignment:** Host `set_*` adapters, GUI `sync_*` snapshots, CLAP modulation copies, and scheduled RT events converge on `ParamTarget::apply` (`worker.rs`). GUI sync uses `apply_synced` so equality/tolerance checks do not republish atomics, while scheduled events and host adapters publish normally. Full `RtProcessingParams` snapshots remain on their snapshot-specific path. Gate-mode changes reset both `musical_gate` and `silence_hyst` from the same helper, including restore transactions and structural payloads.
+- **Monotonic Acknowledgments:** The drain callback, rollback, and deactivation consumer publish absolute sequence watermarks through `ack_processed` (`fetch_max`) in `command_scheduler.rs`; the drain invokes it once in `after_drain`, and no load-then-store update remains.
+- **Shared Port Slicing:** Wet and dry paths share `for_each_port_slice` for channel pairing, active-port gating and oversize chunking, while retaining their distinct gate/FSM/cabinet side effects in closures.
+- **Model Install Registration:** Activation and RT install paths share `dsp/install.rs::on_model_installed`; main-thread identity publication stays in the loader.
 
 ### 6.5 Two-Phase Non-Finite Containment
 

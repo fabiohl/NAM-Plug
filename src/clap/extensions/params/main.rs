@@ -26,201 +26,169 @@ use neural_amp_modeler_rs::common::params::RtProcessingParams;
 use neural_amp_modeler_rs::math::constants::{GAIN_MAX_DB, GAIN_MIN_DB};
 use std::ffi::CStr;
 
+struct ParamDesc {
+    id: u32,
+    flags: u32,
+    name: &'static [u8],
+    module: &'static [u8],
+    min_value: f64,
+    max_value: f64,
+    default_value: f64,
+}
+
+const A: u32 = ParamInfoFlags::IS_AUTOMATABLE.bits();
+const M: u32 = ParamInfoFlags::IS_MODULATABLE.bits();
+const S: u32 = ParamInfoFlags::IS_STEPPED.bits();
+const E: u32 = ParamInfoFlags::IS_ENUM.bits();
+const B: u32 = ParamInfoFlags::IS_BYPASS.bits();
+const R: u32 = ParamInfoFlags::IS_READONLY.bits();
+
+const PARAMS: [ParamDesc; PARAM_COUNT] = [
+    ParamDesc {
+        id: PARAM_INPUT_GAIN,
+        flags: A | M,
+        name: b"Input Gain",
+        module: b"",
+        min_value: GAIN_MIN_DB as f64,
+        max_value: GAIN_MAX_DB as f64,
+        default_value: 0.0,
+    },
+    ParamDesc {
+        id: PARAM_OUTPUT_GAIN,
+        flags: A | M,
+        name: b"Output Gain",
+        module: b"",
+        min_value: GAIN_MIN_DB as f64,
+        max_value: GAIN_MAX_DB as f64,
+        default_value: 0.0,
+    },
+    ParamDesc {
+        id: PARAM_GATE_THRESH,
+        flags: A | M,
+        name: b"Gate Threshold",
+        module: b"",
+        min_value: -90.0,
+        max_value: 0.0,
+        default_value: -90.0,
+    },
+    ParamDesc {
+        id: PARAM_BYPASS,
+        flags: A | S | B,
+        name: b"Bypass",
+        module: b"",
+        min_value: 0.0,
+        max_value: 1.0,
+        default_value: 0.0,
+    },
+    ParamDesc {
+        id: PARAM_ACTIVE_MODEL,
+        flags: R,
+        name: b"Active Model",
+        module: b"",
+        min_value: 0.0,
+        max_value: 1000.0,
+        default_value: 0.0,
+    },
+    ParamDesc {
+        id: PARAM_ADAPTIVE_COMPUTE,
+        flags: A | S | E,
+        name: b"Adaptive Compute",
+        module: b"",
+        min_value: 0.0,
+        max_value: 2.0,
+        default_value: 1.0,
+    },
+    ParamDesc {
+        id: PARAM_SLIM_OVERRIDE,
+        flags: A | S | E,
+        name: b"Slim Override",
+        module: b"",
+        min_value: 0.0,
+        max_value: 2.0,
+        default_value: 0.0,
+    },
+    ParamDesc {
+        id: PARAM_OVERSAMPLE,
+        flags: A | S | E,
+        name: b"Oversampling",
+        module: b"",
+        min_value: 0.0,
+        max_value: 2.0,
+        default_value: 0.0,
+    },
+    ParamDesc {
+        id: PARAM_ACTIVATION,
+        flags: A | S | E,
+        name: b"Activation Precision",
+        module: b"",
+        min_value: 0.0,
+        max_value: 1.0,
+        default_value: 1.0,
+    },
+    ParamDesc {
+        id: PARAM_CALIBRATE_INPUT,
+        flags: A | S,
+        name: b"Calibrate Input",
+        module: b"Calibration",
+        min_value: 0.0,
+        max_value: 1.0,
+        default_value: 0.0,
+    },
+    ParamDesc {
+        id: PARAM_INPUT_CALIBRATION_LEVEL,
+        flags: A,
+        name: b"Input Cal Level",
+        module: b"Calibration",
+        min_value: INPUT_CALIBRATION_LEVEL_MIN_DBU as f64,
+        max_value: INPUT_CALIBRATION_LEVEL_MAX_DBU as f64,
+        default_value: INPUT_CALIBRATION_LEVEL_DEFAULT_DBU as f64,
+    },
+    ParamDesc {
+        id: PARAM_OUTPUT_MODE,
+        flags: A | S | E,
+        name: b"Output Mode",
+        module: b"Calibration",
+        min_value: 0.0,
+        max_value: 2.0,
+        default_value: 1.0,
+    },
+    ParamDesc {
+        id: PARAM_GATE_MODE,
+        flags: A | S | E,
+        name: b"Gate Mode",
+        module: b"",
+        min_value: 0.0,
+        max_value: 1.0,
+        default_value: 0.0,
+    },
+    ParamDesc {
+        id: PARAM_CAB_BYPASS,
+        flags: A | S,
+        name: b"Cabinet Bypass",
+        module: b"Cabinet",
+        min_value: 0.0,
+        max_value: 1.0,
+        default_value: 0.0,
+    },
+];
+
 impl PluginMainThreadParams for NamClapMainThread<'_> {
     fn count(&self) -> u32 {
         PARAM_COUNT as u32
     }
 
     fn get_info(&self, param_index: u32, info: &mut ParamInfoWriter) {
-        match param_index {
-            PARAM_INPUT_GAIN => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_INPUT_GAIN),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_MODULATABLE,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Input Gain",
-                    module: b"",
-                    min_value: GAIN_MIN_DB as f64,
-                    max_value: GAIN_MAX_DB as f64,
-                    default_value: 0.0,
-                });
-            }
-            PARAM_OUTPUT_GAIN => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_OUTPUT_GAIN),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_MODULATABLE,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Output Gain",
-                    module: b"",
-                    min_value: GAIN_MIN_DB as f64,
-                    max_value: GAIN_MAX_DB as f64,
-                    default_value: 0.0,
-                });
-            }
-            PARAM_GATE_THRESH => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_GATE_THRESH),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_MODULATABLE,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Gate Threshold",
-                    module: b"",
-                    min_value: -90.0,
-                    max_value: 0.0,
-                    // Gate off by default: parked at the most permissive end of the
-                    // range so the noise gate practically never closes out of the box
-                    // (opt-in tightening via automation/GUI).
-                    default_value: -90.0,
-                });
-            }
-            PARAM_BYPASS => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_BYPASS),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE
-                        | ParamInfoFlags::IS_STEPPED
-                        | ParamInfoFlags::IS_BYPASS,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Bypass",
-                    module: b"",
-                    min_value: 0.0,
-                    max_value: 1.0,
-                    default_value: 0.0,
-                });
-            }
-            PARAM_ACTIVE_MODEL => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_ACTIVE_MODEL),
-                    flags: ParamInfoFlags::IS_READONLY,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Active Model",
-                    module: b"",
-                    min_value: 0.0,
-                    max_value: 1000.0,
-                    default_value: 0.0,
-                });
-            }
-            PARAM_ADAPTIVE_COMPUTE => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_ADAPTIVE_COMPUTE),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE
-                        | ParamInfoFlags::IS_STEPPED
-                        | ParamInfoFlags::IS_ENUM,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Adaptive Compute",
-                    module: b"",
-                    min_value: 0.0,
-                    max_value: 2.0,
-                    default_value: 1.0,
-                });
-            }
-            PARAM_SLIM_OVERRIDE => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_SLIM_OVERRIDE),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE
-                        | ParamInfoFlags::IS_STEPPED
-                        | ParamInfoFlags::IS_ENUM,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Slim Override",
-                    module: b"",
-                    min_value: 0.0,
-                    max_value: 2.0,
-                    default_value: 0.0,
-                });
-            }
-            PARAM_OVERSAMPLE => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_OVERSAMPLE),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE
-                        | ParamInfoFlags::IS_STEPPED
-                        | ParamInfoFlags::IS_ENUM,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Oversampling",
-                    module: b"",
-                    min_value: 0.0,
-                    max_value: 2.0,
-                    default_value: 0.0,
-                });
-            }
-            PARAM_ACTIVATION => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_ACTIVATION),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE
-                        | ParamInfoFlags::IS_STEPPED
-                        | ParamInfoFlags::IS_ENUM,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Activation Precision",
-                    module: b"",
-                    min_value: 0.0,
-                    max_value: 1.0,
-                    // Universal default is `Standard` (exact-grade, value 1.0),
-                    // not `Fast` (value 0.0) — see ACTIVATION_STANDARD/ACTIVATION_FAST.
-                    default_value: 1.0,
-                });
-            }
-            PARAM_CALIBRATE_INPUT => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_CALIBRATE_INPUT),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Calibrate Input",
-                    module: b"Calibration",
-                    min_value: 0.0,
-                    max_value: 1.0,
-                    default_value: 0.0,
-                });
-            }
-            PARAM_INPUT_CALIBRATION_LEVEL => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_INPUT_CALIBRATION_LEVEL),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Input Cal Level",
-                    module: b"Calibration",
-                    min_value: INPUT_CALIBRATION_LEVEL_MIN_DBU as f64,
-                    max_value: INPUT_CALIBRATION_LEVEL_MAX_DBU as f64,
-                    default_value: INPUT_CALIBRATION_LEVEL_DEFAULT_DBU as f64,
-                });
-            }
-            PARAM_OUTPUT_MODE => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_OUTPUT_MODE),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE
-                        | ParamInfoFlags::IS_STEPPED
-                        | ParamInfoFlags::IS_ENUM,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Output Mode",
-                    module: b"Calibration",
-                    min_value: 0.0,
-                    max_value: 2.0,
-                    default_value: OutputMode::Normalized.to_f32() as f64,
-                });
-            }
-            PARAM_GATE_MODE => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_GATE_MODE),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE
-                        | ParamInfoFlags::IS_STEPPED
-                        | ParamInfoFlags::IS_ENUM,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Gate Mode",
-                    module: b"",
-                    min_value: 0.0,
-                    max_value: 1.0,
-                    default_value: GateMode::Silence.to_f32() as f64,
-                });
-            }
-            PARAM_CAB_BYPASS => {
-                info.set(&ParamInfo {
-                    id: ClapId::new(PARAM_CAB_BYPASS),
-                    flags: ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED,
-                    cookie: clack_plugin::utils::Cookie::empty(),
-                    name: b"Cabinet Bypass",
-                    module: b"Cabinet",
-                    min_value: 0.0,
-                    max_value: 1.0,
-                    default_value: 0.0,
-                });
-            }
-            _ => {}
+        if let Some(desc) = PARAMS.get(param_index as usize) {
+            info.set(&ParamInfo {
+                id: ClapId::new(desc.id),
+                flags: ParamInfoFlags::from_bits_truncate(desc.flags),
+                cookie: clack_plugin::utils::Cookie::empty(),
+                name: desc.name,
+                module: desc.module,
+                min_value: desc.min_value,
+                max_value: desc.max_value,
+                default_value: desc.default_value,
+            });
         }
     }
 
@@ -639,6 +607,13 @@ impl PluginMainThreadParams for NamClapMainThread<'_> {
         }
 
         if param_changed || cal_changed || gate_mode_changed || cab_bypass_changed {
+            // GUI atomics can be newer than this thread's params mirror (the
+            // audio thread owns the authoritative values). Refresh the mirror
+            // first so the snapshot never reverts a value already published by
+            // the GUI/audio side.
+            if param_changed {
+                self.snapshot_params();
+            }
             // Scoped params borrow: released before the SPSC producer borrow
             // below, and both are released before the host
             // `request_callback()` in the error path.

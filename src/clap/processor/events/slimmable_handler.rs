@@ -76,6 +76,20 @@ impl RtSwapHandler for SlimmableSwapHandler<'_, '_> {
             }
             return;
         }
+        if self.model_l.is_none() {
+            // A slimmable rebuild only makes sense over an active primary
+            // model. Without one, return both built models through the GC
+            // channel (never dropping on the audio thread) and leave the
+            // DSP slots untouched.
+            if let Some(model) = model {
+                gc.retire(GcItem::Model(model));
+            }
+            if let Some(model_r) = model_r {
+                gc.retire(GcItem::Model(model_r));
+            }
+            self.ack_if_still_pending(request_id);
+            return;
+        }
         if let Some(model) = model
             && let Some(old) = self.model_l.replace(model)
         {

@@ -136,6 +136,7 @@ fn test_malformed_json_state_is_rejected() {
 fn test_missing_model_path_is_rejected_and_keeps_old_dsp() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let shared_ptr = test_util::extract_shared(&mut instance);
+    // SAFETY: `shared_ptr` points to the live plugin instance's shared state; the instance outlives these assertions and the dereference is read-only through interior-mutable fields.
     let shared = unsafe { &*shared_ptr };
 
     // Load valid model first
@@ -211,6 +212,7 @@ fn test_corrupted_model_weights_rejected_gracefully() {
 
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let shared_ptr = test_util::extract_shared(&mut instance);
+    // SAFETY: `shared_ptr` points to the live plugin instance's shared state; the instance outlives these assertions and the dereference is read-only through interior-mutable fields.
     let shared = unsafe { &*shared_ptr };
 
     let model_a = model_fixture("lstm.nam");
@@ -328,6 +330,7 @@ fn test_cross_machine_restore_via_basename_search_succeeds() {
         assert!(result.is_ok(), "Cross-machine restore must succeed");
     }
 
+    // SAFETY: `shared_ptr` points to the live plugin instance's shared state; the instance outlives these assertions and the dereference is read-only through interior-mutable fields.
     let shared = unsafe { &*shared_ptr };
     assert!(shared.cold.model_load_counter.load(Ordering::Relaxed) > 0);
     let ui_name = shared.cold.ui_model_name.lock().unwrap();
@@ -434,6 +437,7 @@ fn test_state_load_after_failed_restore_still_works() {
         );
     }
 
+    // SAFETY: `shared_ptr` points to the live plugin instance's shared state; the instance outlives these assertions and the dereference is read-only through interior-mutable fields.
     let shared = unsafe { &*shared_ptr };
     assert!(shared.cold.model_load_counter.load(Ordering::Relaxed) > 0);
     let ui_name = shared.cold.ui_model_name.lock().unwrap();
@@ -444,6 +448,7 @@ fn test_state_load_after_failed_restore_still_works() {
 fn test_all_failure_modes_preserve_dsp_and_produce_finite_output() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
     let shared_ptr = test_util::extract_shared(&mut instance);
+    // SAFETY: `shared_ptr` points to the live plugin instance's shared state; the instance outlives these assertions and the dereference is read-only through interior-mutable fields.
     let shared = unsafe { &*shared_ptr };
 
     let model_a = model_fixture("wavenet_a1_standard.nam");

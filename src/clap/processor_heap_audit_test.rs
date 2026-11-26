@@ -140,6 +140,7 @@ mod tests {
 
         // Run audited blocks.
         let shared_ptr = test_util::extract_shared(&mut plugin_instance);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*shared_ptr };
         let _audit_guard = ArmGuard::set(true);
 
@@ -196,6 +197,7 @@ mod tests {
 
         let shared_ptr = test_util::extract_shared(&mut plugin_instance);
         let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*shared_ptr };
 
         // Warm-up: drain LoadModel / Params commands before the audit starts.
@@ -246,6 +248,7 @@ mod tests {
 
         // Step 1 — Load IR 1: the drained `LoadCabIr` swap must be zero-alloc.
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
                 .borrow_mut()
@@ -277,6 +280,7 @@ mod tests {
         // Step 2 — Swap IR 2 (A → B): zero-alloc, and the tail must change
         // (proving a real adapter swap, not a no-op).
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
                 .borrow_mut()
@@ -307,6 +311,7 @@ mod tests {
 
         // Step 3 — Clear IR (B → None): zero-alloc, tail must drop to zero.
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
                 .borrow_mut()
@@ -334,6 +339,7 @@ mod tests {
         // Drain the GC channel off-RT: the replaced adapters must be dropped
         // on the main thread, never leaked.
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             mt.housekeeping();
         }
@@ -463,6 +469,7 @@ mod tests {
 
         let shared_ptr = test_util::extract_shared(&mut plugin_instance);
         let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*shared_ptr };
 
         // The model MUST have loaded — a zero counter means the audit only
@@ -560,6 +567,7 @@ mod tests {
             // callback: the engine collapses the burst latest-wins and
             // applies C directly; A and B are superseded to the GC).
             {
+                // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
                 let mt = unsafe { &*main_thread_ptr };
                 for len in [512usize, 1024, 2048] {
                     mt.cmd_producer
@@ -589,6 +597,7 @@ mod tests {
             // callback: only the last model installs; the two intermediates
             // are superseded to the GC).
             {
+                // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
                 let mt = unsafe { &*main_thread_ptr };
                 for name in [
                     if round % 2 == 0 {
@@ -649,6 +658,7 @@ mod tests {
             // 2 → 2 callbacks (the restore is deferred one callback).
             next_gen += 1;
             {
+                // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
                 let mt = unsafe { &*main_thread_ptr };
                 mt.cmd_producer
                     .borrow_mut()
@@ -712,6 +722,7 @@ mod tests {
             // RestoreTxn is ack-gated and never superseded, so each callback
             // applies exactly one generation in FIFO order).
             {
+                // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
                 let mt = unsafe { &*main_thread_ptr };
                 for _ in 0..3 {
                     next_gen += 1;
@@ -745,6 +756,7 @@ mod tests {
             // the audit lane because the tracking guard is not active outside
             // the audio callback.
             {
+                // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
                 let mt = unsafe { &*main_thread_ptr };
                 mt.housekeeping();
             }
@@ -814,6 +826,7 @@ mod tests {
         instance: &mut PluginInstance<TestHost>,
     ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
         let raw_ptr = instance.plugin_handle().as_raw_ptr();
+        // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
         unsafe {
             clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
                 raw_ptr,
@@ -852,6 +865,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         assert!(
             shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
@@ -919,6 +933,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         // Warm up with conforming blocks
@@ -983,6 +998,7 @@ mod tests {
         let handle = plugin_instance.plugin_handle();
         let _ = state_ext.load(&handle, &mut state_bytes.as_slice());
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         // Invalid fixture fails to build (model_l = None post-build).
@@ -1084,6 +1100,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         assert!(
             shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
@@ -1302,6 +1319,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         assert!(
             shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
@@ -1403,6 +1421,7 @@ mod tests {
 
         let shared_ptr = test_util::extract_shared(&mut plugin_instance);
         let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*shared_ptr };
         assert!(
             shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
@@ -1451,6 +1470,7 @@ mod tests {
         // Install 2×: the structural apply lands inside this audited callback
         // and the publish path reports the higher effective latency.
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
                 .borrow_mut()
@@ -1485,6 +1505,7 @@ mod tests {
 
         // Install 4×: same contract under the deeper oversampling stage.
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
                 .borrow_mut()
@@ -1558,6 +1579,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         assert!(
             shared.cold.model_load_counter.load(Ordering::Relaxed) > 0,
@@ -1672,6 +1694,7 @@ mod tests {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
         let main_thread_ptr = {
             let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+            // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
             unsafe {
                 clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
                     raw_ptr,
@@ -1697,6 +1720,7 @@ mod tests {
             )
             .unwrap();
         let mut started_processor = stopped.start_processing().unwrap();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         let mut bufs = StereoTestBuffers::new(256, 0.01, 0.01);
 
@@ -1711,6 +1735,7 @@ mod tests {
         shared.cold.rt_status.clear_flag(RT_STATUS_HEAP_ALLOC);
 
         // 1. Stale generation discard while armed: zero alloc + zero dealloc.
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         unsafe { &*main_thread_ptr }
             .slimmable_tx
             .borrow_mut()
@@ -1730,6 +1755,7 @@ mod tests {
 
         // 2. Same-generation burst (supersede + install) while armed: zero alloc + zero dealloc.
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             let mut tx = mt.slimmable_tx.borrow_mut();
             tx.push(Box::new(SlimmableRebuild {
@@ -1755,6 +1781,7 @@ mod tests {
         );
 
         drop(_audit_guard);
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         unsafe { &*main_thread_ptr }.housekeeping();
         let stopped = started_processor.stop_processing();
         plugin_instance.deactivate(stopped);
@@ -1891,6 +1918,7 @@ mod tests {
             )
             .unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         let mut bufs = StereoTestBuffers::new(BLOCK, 0.05, 0.05);
 
@@ -1944,6 +1972,7 @@ mod tests {
             (AdaptiveComputeMode::Off, SlimOverride::Auto),
         ];
         for (mode, slim_override) in transitions {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr(&mut plugin_instance) };
             mt.cmd_producer
                 .borrow_mut()
@@ -2070,6 +2099,7 @@ mod tests {
         }
 
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             mt.cmd_producer
                 .borrow_mut()
@@ -2104,6 +2134,7 @@ mod tests {
 
         // Prove a real install: the replaced model is retired through the GC.
         {
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*main_thread_ptr };
             let mut retired_models = 0usize;
             while let Ok(item) = mt.gc_rx.borrow_mut().pop() {
@@ -2129,6 +2160,7 @@ mod tests {
         use neural_amp_modeler_rs::common::spsc::RT_STATUS_HEAP_ALLOC;
 
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         {

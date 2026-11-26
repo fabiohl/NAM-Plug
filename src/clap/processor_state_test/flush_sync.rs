@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering;
 
 fn get_processor_mut(instance: &mut PluginInstance<TestHost>) -> &mut NamClapProcessor<'_> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     let ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -23,6 +24,7 @@ fn get_processor_mut(instance: &mut PluginInstance<TestHost>) -> &mut NamClapPro
         )
         .unwrap()
     };
+    // SAFETY: the raw pointer/operation is derived from the live test fixture and is valid, aligned, and uniquely borrowed for the duration of this expression; no other reference to the same allocation is live.
     unsafe { &mut *ptr }
 }
 

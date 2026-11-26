@@ -283,8 +283,11 @@ mod tests {
             // the same buffer for input and output; the slices are used only to
             // register raw pointers, never aliased by this test.
             let in_l = unsafe { std::slice::from_raw_parts_mut(l_ptr, n) };
+            // SAFETY: `l_ptr` points to a live `Vec<f32>` buffer with `n` initialized samples; the slice length is exactly `n` and both remain alive and exclusively borrowed while the fine-grained ports use them.
             let out_l = unsafe { std::slice::from_raw_parts_mut(l_ptr, n) };
+            // SAFETY: `r_ptr` points to a live `Vec<f32>` buffer with `n` initialized samples; the slice length is exactly `n` and both remain alive and exclusively borrowed while the fine-grained ports use them.
             let in_r = unsafe { std::slice::from_raw_parts_mut(r_ptr, n) };
+            // SAFETY: `r_ptr` points to a live `Vec<f32>` buffer with `n` initialized samples; the slice length is exactly `n` and both remain alive and exclusively borrowed while the fine-grained ports use them.
             let out_r = unsafe { std::slice::from_raw_parts_mut(r_ptr, n) };
 
             let mut input_ports = AudioPorts::with_capacity(2, 1);
@@ -373,6 +376,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
 
         let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+        // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
         let processor_ptr = unsafe {
             clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
                 raw_ptr,
@@ -383,6 +387,7 @@ mod tests {
             )
             .unwrap()
         };
+        // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the processor is stopped and driven exclusively by this test, so the mutable borrow is unique and cannot outlive the instance.
         let processor = unsafe { &mut *processor_ptr };
 
         let initial_gen = processor
@@ -449,6 +454,7 @@ mod tests {
             )
             .expect("Failure in process after flush saturation");
 
+        // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
         let processor_after = unsafe {
             &mut *{
                 clack_plugin::extensions::wrapper::PluginWrapper::<
@@ -489,6 +495,7 @@ mod tests {
         let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
 
         {
+            // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
             let processor_ptr = unsafe {
                 clack_plugin::extensions::wrapper::PluginWrapper::<
                     crate::clap::NamClapPlugin,
@@ -498,6 +505,7 @@ mod tests {
                 })
                 .unwrap()
             };
+            // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the processor is stopped and driven exclusively by this test, so the mutable borrow is unique and cannot outlive the instance.
             let processor = unsafe { &mut *processor_ptr };
 
             let mut input_events_buffer = EventBuffer::new();
@@ -520,6 +528,7 @@ mod tests {
 
         let stopped_processor2 = plugin_instance.activate(|_, _| (), audio_config).unwrap();
 
+        // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
         let processor_ptr2 = unsafe {
             clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
                 raw_ptr,
@@ -530,6 +539,7 @@ mod tests {
             )
             .unwrap()
         };
+        // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the processor is stopped and driven exclusively by this test, so the mutable borrow is unique and cannot outlive the instance.
         let processor2 = unsafe { &mut *processor_ptr2 };
 
         let expected_linear = processor2.gain_lut.db_to_linear(-12.0);

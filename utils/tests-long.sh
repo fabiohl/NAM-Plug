@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
 # tests-long.sh — suíte longa de auditoria, certificação e provas de artefato. Classe B.
 # Uso: utils/tests-long.sh [--strict] [--only <fase>[,<fase>]] [--artifact] [-h|--help]
-# Orçamento: 490         # +10: build --lib isolado com PIPESTATUS e contagem condicional de art_cases
+# Orçamento: 505         # +15: casos proptest lidos do sublog (1/invocação + HEAP_PROPTEST_CASES)
 set -x; PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
 set -o pipefail
 
@@ -20,6 +20,7 @@ export CARGO_TARGET_DIR
 USE_ARTIFACT=0; ONLY_PHASES=""; STRICT=0
 ARTIFACT_PATH=""
 ARTIFACT_SHA256=""
+LAST_SUBLOG=""
 
 usage() {
     cat <<'EOF'
@@ -183,15 +184,20 @@ run_named() {
     fi
     [ "$rc" -eq 0 ] && ran_tests "$sublog"
 }
-# Declared subcase cardinality for receipt counts: matrix/property tests execute
+# Declared subcase cardinality for receipt counts: matrix tests execute
 # more cases than the single Cargo invocation the log parser can observe.
 subcase_count() {
     case "$1" in
         *test_clap_parity_multi_rate) echo 9 ;;   # 3 fixtures x 3 host rates
         *test_clap_parity_oversample) echo 2 ;;   # X2 + X4
-        *prop_gc_swap_idempotence) echo 500 ;;    # proptest cases
         *) echo 1 ;;
     esac
+}
+# Observed proptest cardinality: the property test publishes its own case
+# budget (`HEAP_PROPTEST_CASES=<n>` under `--nocapture`). An absent line leaves
+# the count unproven, which must surface as a typed GAP instead of a constant.
+heap_proptest_cases() {
+    sed -n 's/^HEAP_PROPTEST_CASES=\([0-9][0-9]*\)$/\1/p' "$1" 2>/dev/null | tail -n 1
 }
 # ── Fase catch-all ───────────────────────────────────────────────────────────
 if should_run "catch-all"; then
@@ -367,8 +373,8 @@ if should_run "gui"; then
             clap::extensions::gui::gui_lifecycle_integration_test::gui_x11_embedded_open_close_cycles_no_leak
             clap::extensions::gui::gui_lifecycle_integration_test::gui_x11_lifecycle_embedded_set_parent_honest
             clap::extensions::gui::gui_lifecycle_integration_test::gui_x11_lifecycle_hide_after_show_with_real_window
-            clap::processor::processor_gui_test::tests::gui_x11_headless_clipboard_works
-            clap::processor::processor_gui_test::tests::gui_x11_headless_floating_window_lifecycle
+            clap::processor::tests::processor_gui_test::tests::gui_x11_headless_clipboard_works
+            clap::processor::tests::processor_gui_test::tests::gui_x11_headless_floating_window_lifecycle
         )
         timeout --kill-after=30 600 cargo test --locked --features testing,gui-x11 --profile release-nolto --lib --no-run >> "$plog" 2>&1 || gui_rc=1
         if [ "$gui_rc" -eq 0 ]; then
@@ -390,6 +396,7 @@ run_feature_test() {
     local tname="$2" sublog rc=0
     [ "$1" = "--test" ] && tname="$2-$3"
     sublog="$LOG_DIR/long-${prefix}-${tname##*::}.log"
+    LAST_SUBLOG="$sublog"
     echo "--- Running ${label}: $* ---" >> "$plog"
     if ! timeout --kill-after=30 "$to" cargo test --locked --features testing,heap-audit --profile release-nolto "$@" < /dev/null 2>&1 | tee "$sublog" >> "$plog"; then
         rc=1
@@ -405,7 +412,7 @@ if should_run "heap-audit"; then
     t_start=$SECONDS; phase "heap-audit"
     plog="$LOG_DIR/long-heap-audit.log"; : > "$plog"
     # timeout: pior comando ~215s (build heap-audit + soak); 2x p100 ≈ 500s
-    heap_rc=0; heap_cases=0; heap_to=${NAM_PHASE_TIMEOUT_S:-500}
+    heap_rc=0; heap_cases=0; heap_gaps=""; heap_to=${NAM_PHASE_TIMEOUT_S:-500}
     run_heap_test() { run_feature_test heap "heap/RT test" heap_rc "$heap_to" "$@"; }
 
     if run_heap_test --lib test_gc_stress_1000_swaps -- --ignored; then heap_cases=$((heap_cases + 1)); fi
@@ -413,12 +420,17 @@ if should_run "heap-audit"; then
     if run_heap_test --lib test_teardown_drains_rt_parking_lot_off_rt -- --ignored; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --test clap test_multi_instance_rt_priority -- --ignored --test-threads=1; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --test cabinet_slot_and_bypass_test t08_3_cab_bypass_constant_latency_phase_crossfade_and_heap_audit; then heap_cases=$((heap_cases + 1)); fi
-    if run_heap_test --test heap_audit prop_gc_swap_idempotence -- --ignored; then heap_cases=$((heap_cases + 500)); fi
+    if run_heap_test --test heap_audit prop_gc_swap_idempotence -- --ignored --nocapture; then
+        heap_cases=$((heap_cases + 1))
+        heap_n=$(heap_proptest_cases "$LAST_SUBLOG")
+        if [ -n "$heap_n" ]; then heap_cases=$((heap_cases + heap_n));
+        else gap "heap:proptest_cases_unreported"; heap_gaps="heap:proptest_cases_unreported"; fi
+    fi
     if run_heap_test --lib test_corrupted_states_10000_heap_stable -- --ignored --test-threads=1; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --test musical_gate_parity_test t05_musical_gate_rt_zero_alloc_proof; then heap_cases=$((heap_cases + 1)); fi
     if run_heap_test --lib test_swap_handler_drain_zero_alloc; then heap_cases=$((heap_cases + 1)); fi
 
-    close_phase "phase5" "heap-audit" "$heap_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$heap_cases" false
+    close_phase "phase5" "heap-audit" "$heap_rc" "$plog" $(( (SECONDS - t_start) * 1000 )) "$heap_cases" false "$heap_gaps"
 else
     skip_phase "phase5" "heap-audit"
 fi

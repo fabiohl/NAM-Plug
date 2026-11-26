@@ -12,6 +12,7 @@ fn test_render_mode_transitions() {
 
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let render_ext = plugin_instance
@@ -137,6 +138,7 @@ fn test_offline_mode_forces_adaptive_off() {
 
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let render_ext = plugin_instance

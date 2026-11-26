@@ -76,6 +76,7 @@ fn main_thread_ptr(
     instance: &mut PluginInstance<TestHost>,
 ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -95,6 +96,7 @@ fn activate_with_staged(
 ) {
     let shared_ptr = test_util::extract_shared(plugin_instance);
     {
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*shared_ptr };
         let mut staged = shared.cold.recovered_commands.lock().unwrap();
         for &generation in generations {
@@ -116,6 +118,7 @@ fn activate_with_staged(
 fn test_recovered_replay_survives_deactivate_before_first_callback() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (started, shared_ptr) = activate_with_staged(&mut plugin_instance, &[1, 2]);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     let stopped = started.stop_processing();
@@ -128,6 +131,7 @@ fn test_recovered_replay_survives_deactivate_before_first_callback() {
     );
 
     let (mut started, shared_ptr) = activate_with_staged(&mut plugin_instance, &[]);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
     let mut bufs = StereoTestBuffers::new(N, 0.0, 0.0);
     process_block(&mut started, &mut bufs);
@@ -148,10 +152,12 @@ fn test_recovered_replay_survives_deactivate_before_first_callback() {
 fn test_recovered_replay_respects_structural_budget_and_fifo() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (mut started, shared_ptr) = activate_with_staged(&mut plugin_instance, &[1, 2, 3]);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     {
         let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
@@ -221,6 +227,7 @@ fn test_recovered_replay_light_backlog_is_bounded_per_callback() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let shared_ptr = test_util::extract_shared(&mut plugin_instance);
     {
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*shared_ptr };
         let mut staged = shared.cold.recovered_commands.lock().unwrap();
         for _ in 0..100 {
@@ -233,6 +240,7 @@ fn test_recovered_replay_light_backlog_is_bounded_per_callback() {
         .activate(|_, _| (), audio_config(N as u32))
         .unwrap();
     let mut started = stopped.start_processing().unwrap();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
     let mut bufs = StereoTestBuffers::new(N, 0.0, 0.0);
 

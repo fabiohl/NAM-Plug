@@ -66,6 +66,7 @@ fn basename(path: &Path) -> String {
 fn test_rapid_gui_loads_last_wins_only_b_installed() {
     let _hook_guard = test_mid_load_hook_lock();
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let a = temp_model("lstm.nam");
@@ -119,7 +120,9 @@ fn test_rapid_gui_loads_last_wins_only_b_installed() {
 fn test_secondary_queue_stays_bounded() {
     let _hook_guard = test_mid_load_hook_lock();
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
 
     // Stall the first (heavy) load so the worker stays busy while presets pile up.
@@ -176,6 +179,7 @@ fn test_error_then_success_keeps_success() {
     use crate::clap::test_util::write_invalid_model_fixture;
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let bad = std::env::temp_dir().join(format!(
@@ -223,6 +227,7 @@ fn test_loading_state_transitions() {
     use crate::clap::test_util::write_invalid_model_fixture;
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let good = temp_model("lstm.nam");
@@ -278,6 +283,7 @@ fn test_loading_state_transitions() {
 fn test_destroy_during_in_flight_prepare_is_safe() {
     let _hook_guard = test_mid_load_hook_lock();
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
     let fence: Arc<AtomicBool> = Arc::clone(&shared.gui.cold.alive_fence);
 
@@ -317,7 +323,9 @@ fn test_watchdog_fast_cadence_while_rebuild_pending() {
     use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_OS_REBUILD;
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
 
     // At rest the nominal cadence is retained (no re-arm).
@@ -356,7 +364,9 @@ fn test_adaptive_rebuild_worker_services_slimmable_flag() {
     use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD;
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
     shared.cold.publish_slimmable_request(8, 0, false);
 
@@ -398,6 +408,7 @@ fn test_adaptive_rebuild_worker_services_oversample_flag() {
     use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_OS_REBUILD;
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // X2 factor encoding (`OversampleFactor::X2.to_f32() as u32 == 2`).
@@ -436,6 +447,7 @@ fn test_multi_instance_housekeeping_tick_stays_fast() {
     let mut live = Vec::new();
     for _ in 0..N {
         let (entry, host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
         let stopped = instance
             .activate(|_, _| make_harness_audio_processor(&state), audio_config())
@@ -461,6 +473,7 @@ fn test_multi_instance_housekeeping_tick_stays_fast() {
 
     // Drain every instance so the loaders finish before teardown.
     for (_entry, _host_info, instance, _started) in live.iter_mut() {
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(instance) };
         test_util::drain_async_model_loading(instance, shared);
     }
@@ -472,6 +485,7 @@ fn test_multi_instance_housekeeping_tick_stays_fast() {
 #[test]
 fn test_adaptive_worker_polling_reduces_idle_wakeups_by_at_least_10x_and_preserves_swap_latency() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // 1. Load an initial model to ensure the loader worker thread is running.
@@ -577,6 +591,7 @@ fn test_adaptive_worker_polling_reduces_idle_wakeups_by_at_least_10x_and_preserv
 fn test_model_loader_worker_panic_contained_and_recovers() {
     let _hook_guard = test_mid_load_hook_lock();
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let panic_model = temp_model("lstm.nam");
@@ -673,6 +688,7 @@ fn test_model_loader_worker_panic_contained_and_recovers() {
 fn test_async_load_interleaved_with_audio_renegotiation_adapts_to_current_config() {
     let _hook_guard = test_mid_load_hook_lock();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // 1. Activate at 48 kHz / 128 frames
@@ -802,7 +818,9 @@ fn test_slimmable_result_a_does_not_erase_newer_request_b() {
     use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD;
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
     install_dyn_wavenet(shared);
 
@@ -862,7 +880,9 @@ fn test_slimmable_skip_and_failure_are_identity_scoped() {
     };
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
     let mut mem = TestRebuildPollState::default();
 
@@ -927,7 +947,9 @@ fn test_slimmable_full_ring_retains_request_identity() {
     use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_SLIMMABLE_REBUILD;
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
     install_dyn_wavenet(shared);
 
@@ -980,7 +1002,9 @@ fn test_slimmable_generation_change_keeps_newer_request() {
     use super::model_loader::TestRebuildPollState;
 
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
     install_dyn_wavenet(shared);
 

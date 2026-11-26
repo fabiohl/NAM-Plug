@@ -543,6 +543,9 @@ pub fn extract_plugin_shared(
     instance: &mut PluginInstance<CompleteHost>,
 ) -> *const crate::clap::plugin::NamClapShared {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` belongs to the live `instance`; `handle` runs the
+    // closure synchronously while the instance is borrowed, and the returned
+    // shared pointer is only dereferenced by the caller while it stays alive.
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
             raw_ptr,
@@ -566,6 +569,9 @@ pub fn extract_plugin_main_thread(
     instance: &mut PluginInstance<CompleteHost>,
 ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` belongs to the live `instance`; `handle` runs the
+    // closure synchronously while the instance is borrowed, so the main-thread
+    // reference it yields cannot outlive the plugin instance.
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
             raw_ptr,

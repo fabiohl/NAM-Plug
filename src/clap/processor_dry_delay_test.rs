@@ -113,6 +113,7 @@ mod tests {
     #[test]
     fn test_bypass_dry_aligned_with_wet_cabsim() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         // Activate and load a unit IR (partition = 256 → declared L = 256).
@@ -121,6 +122,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_unit_ir(256, "t41_cabsim");
         mt.load_cabsim(&ir).expect("load unit IR");
@@ -202,6 +204,7 @@ mod tests {
     #[test]
     fn test_bypass_dry_aligned_with_wet_oversample() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         // Activate with OS X2 pre-set.
@@ -271,6 +274,7 @@ mod tests {
     #[test]
     fn test_bypass_crossfade_single_peak_alignment() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let _shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let stopped = instance
@@ -278,6 +282,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_unit_ir(256, "t41_xfade");
         mt.load_cabsim(&ir).expect("load unit IR");
@@ -336,6 +341,7 @@ mod tests {
     #[test]
     fn test_bypass_steady_state_gain_preserved() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let stopped = instance
@@ -343,6 +349,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t41_ss");
         mt.load_cabsim(&ir).expect("load unit IR");
@@ -377,6 +384,7 @@ mod tests {
         use crate::clap::test_util::assert_zero_alloc;
 
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let stopped = instance
@@ -384,6 +392,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_pre_delay_ir(256, "t41_zalloc");
         mt.load_cabsim(&ir).expect("load unit IR");

@@ -214,6 +214,7 @@ mod tests {
     fn test_reset_clears_tail_and_matches_fresh_impulse_response() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
         select_audio_config(&mut instance, CONFIG_ID_MONO);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let stopped = instance
@@ -222,6 +223,7 @@ mod tests {
         let started = stopped.start_processing().expect("start_processing");
 
         // First IR load (0 → partition latency) is staged + host restart.
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t43_reset_tail");
         mt.load_cabsim(&ir).expect("load decay IR");
@@ -300,6 +302,7 @@ mod tests {
     #[test]
     fn test_reset_lstm_equivalent_to_fresh() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let stopped = instance
@@ -309,6 +312,7 @@ mod tests {
 
         let model = model_path("lstm.nam");
         assert!(model.exists(), "lstm.nam fixture missing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&model).expect("load lstm model");
 
@@ -415,6 +419,7 @@ mod tests {
 
         for (fixture_name, expected_callbacks_to_wet) in fixtures.iter().copied() {
             let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+            // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
             let shared = unsafe { &*extract_plugin_shared(&mut instance) };
             let stopped = instance
                 .activate(|_, _| make_harness_audio_processor(&state), audio_config())
@@ -423,6 +428,7 @@ mod tests {
 
             let path = model_path(fixture_name);
             assert!(path.exists(), "fixture missing: {fixture_name}");
+            // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
             let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
             mt.load_model(&path).expect("load model");
 
@@ -542,6 +548,7 @@ mod tests {
         use neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED;
 
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
         let rt_status = &shared.cold.rt_status;
         let stopped = instance
@@ -551,6 +558,7 @@ mod tests {
 
         let path = model_path("lstm.nam");
         assert!(path.exists(), "lstm.nam fixture missing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&path).expect("load lstm model");
 
@@ -619,6 +627,7 @@ mod tests {
 
         let path = model_path("wavenet_a1_standard.nam");
         assert!(path.exists(), "fixture missing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&path).expect("load model");
 
@@ -755,6 +764,7 @@ mod tests {
         use neural_amp_modeler_rs::common::spsc::RT_STATUS_NON_FINITE_INPUT_DETECTED;
 
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
         let rt_status = &shared.cold.rt_status;
         select_audio_config(&mut instance, CONFIG_ID_STEREO);
@@ -766,6 +776,7 @@ mod tests {
 
         let path = model_path("lstm.nam");
         assert!(path.exists(), "lstm.nam fixture missing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&path).expect("load lstm model");
 
@@ -864,6 +875,7 @@ mod tests {
         use neural_amp_modeler_rs::common::spsc::RT_STATUS_HOST_CONTRACT_VIOLATION;
 
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
         let rt_status = &shared.cold.rt_status;
 
@@ -883,6 +895,7 @@ mod tests {
 
         let path = model_path("a2_example.nam");
         assert!(path.exists(), "fixture missing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&path).expect("load model");
 
@@ -992,6 +1005,7 @@ mod tests {
     #[test]
     fn test_reset_zero_alloc() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         // Pre-set OS X2 so the activation installs the oversample engines
@@ -1010,6 +1024,7 @@ mod tests {
         // Model + IR installed (IR load is staged + restart).
         let model = model_path("lstm.nam");
         assert!(model.exists(), "lstm.nam fixture missing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&model).expect("load lstm model");
         let ir = write_decay_ir("t43_reset_zalloc");
@@ -1062,6 +1077,7 @@ mod tests {
     #[test]
     fn test_reset_preserves_config_and_allows_steady_time_regression() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let stopped = instance
@@ -1075,6 +1091,7 @@ mod tests {
             .param_bypass
             .store(bypass_bool_to_u32(false), Ordering::Relaxed);
         shared.bump_generation();
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t43_reset_cfg");
         mt.load_cabsim(&ir).expect("load decay IR");
@@ -1173,6 +1190,7 @@ mod tests {
             for &fixture_name in &fixtures {
                 let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
                 select_audio_config(&mut instance, layout_id);
+                // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
                 let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
                 let stopped = instance
@@ -1182,6 +1200,7 @@ mod tests {
 
                 let path = model_path(fixture_name);
                 assert!(path.exists(), "fixture missing: {fixture_name}");
+                // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
                 let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
                 mt.load_model(&path).expect("load model");
 
@@ -1479,6 +1498,7 @@ mod tests {
 
         let model = model_path("lstm.nam");
         assert!(model.exists(), "lstm.nam fixture missing");
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         mt.load_model(&model).expect("load lstm model");
 

@@ -381,6 +381,7 @@ fn test_mono_mode_single_chain_behavior() {
 fn test_audio_ports_activation_gating_behavior() {
     let model_path = test_util::model_path("wavenet_a1_standard.nam");
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     // Select Stereo configuration

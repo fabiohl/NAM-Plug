@@ -32,7 +32,7 @@ impl HostHandlers for TestHost {
 fn create_plugin_instance() -> PluginInstance<TestHost> {
     let artifact = super::artifact_validator::TestedArtifact::resolve_and_hash();
 
-    // SAFETY: Dynamic plugin loading from the build artifact.
+    // SAFETY: `PluginEntry::load` dynamically loads the just-built CLAP artifact and initializes its entry point; the test host keeps the artifact path and returned entry alive for the plugin lifetime and only calls through that validated entry.
     let entry = unsafe {
         PluginEntry::load(&artifact.path).expect("Failed to load plugin entry from build artifact")
     };
@@ -71,6 +71,7 @@ fn plugin_shared(
     instance: &mut PluginInstance<TestHost>,
 ) -> *const nam_plug::clap::plugin::NamClapShared {
     let raw_plugin_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_plugin_ptr` is the live plugin handle from this test's instance; `PluginWrapper::handle` invokes the closure synchronously while the instance stays alive, and the returned raw pointer is only dereferenced while that instance remains in scope.
     let shared_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
             raw_plugin_ptr,

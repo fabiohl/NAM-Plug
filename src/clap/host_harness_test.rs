@@ -212,6 +212,7 @@ fn assert_reported_latency_matches_physical(
 fn test_latency_changed_notification() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let audio_config = default_audio_config();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -308,6 +309,7 @@ fn test_latency_changed_notification() {
     );
 
     // ── Same-latency model swap (48k over 48k): continuous, silent ─────────
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
     let base = model_path("lstm.nam");
     assert!(base.exists(), "lstm.nam fixture missing");
@@ -665,6 +667,7 @@ fn test_watchdog_timer_detects_poisoned_processor_and_requests_restart() {
         .expect("activate failed");
     let _started = stopped.start_processing().expect("start_processing failed");
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
     // Simulate RT processor poisoning via atomic bitmask
     shared
@@ -750,6 +753,7 @@ fn test_watchdog_timer_syncs_latency_without_other_stimulus() {
 fn test_housekeeping_requests_restart_instead_of_illegal_latency_changed() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let audio_config = default_audio_config();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
     let stopped = instance
         .activate(|_, _| make_harness_audio_processor(&state), audio_config)
@@ -779,6 +783,7 @@ fn test_housekeeping_requests_restart_instead_of_illegal_latency_changed() {
 #[test]
 fn test_watchdog_timer_drains_gc_channel() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // Fill the GC queue with 30 items before activation
@@ -893,6 +898,7 @@ fn baselined_housekeeping_load_blocking_time() {
     use crate::clap::plugin::shared::{ModelRequestOrigin, PendingModelRequest};
 
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
     let audio_config = default_audio_config();
 

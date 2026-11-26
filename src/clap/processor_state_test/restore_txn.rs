@@ -63,6 +63,7 @@ fn main_thread_ptr(
     instance: &mut PluginInstance<TestHost>,
 ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -99,6 +100,7 @@ fn settle(
     bufs: &mut StereoTestBuffers,
 ) {
     process_block(started, bufs);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*main_thread_ptr };
     mt.housekeeping();
 }
@@ -112,11 +114,13 @@ fn test_restore_ui_not_published_until_ack() {
 
     let shared_ptr = test_util::extract_shared(&mut plugin_instance);
     let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     // Saturate the SPSC command ring (capacity 256) so the restore txn cannot
     // be pushed immediately.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         for _ in 0..256 {
             mt.cmd_producer
@@ -138,6 +142,7 @@ fn test_restore_ui_not_published_until_ack() {
 
     // Stage phase: the whole transaction is retained; NOTHING is published yet.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         assert!(
             mt.pending_restore.borrow().is_some(),
@@ -172,6 +177,7 @@ fn test_restore_ui_not_published_until_ack() {
         process_block(&mut started, &mut bufs);
     }
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.housekeeping();
     }
@@ -189,10 +195,12 @@ fn test_restore_ui_not_published_until_ack() {
 
     // Ack phase: housekeeping publishes the UI now that the ack landed.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.housekeeping();
     }
     assert!(
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         unsafe { &*main_thread_ptr }
             .pending_restore
             .borrow()
@@ -232,6 +240,7 @@ fn test_restore_full_clear_removes_rt_model() {
 
     let shared_ptr = test_util::extract_shared(&mut plugin_instance);
     let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     // 1. Load a model via a Full restore.
@@ -295,6 +304,7 @@ fn test_restore_hash_rejected_keeps_previous_dsp() {
 
     let shared_ptr = test_util::extract_shared(&mut plugin_instance);
     let main_thread_ptr = main_thread_ptr(&mut plugin_instance);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     // 1. Load a valid model (with hash) and settle it.

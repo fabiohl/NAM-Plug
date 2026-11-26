@@ -74,16 +74,17 @@ fn spawn_reaper(name: &'static str, handle: std::thread::JoinHandle<()>) {
         .ok(); // Spawn failure — the handle is dropped and the OS reclaims.
 }
 
+/// Returns true when an environment variable exists and is non-empty.
+fn has_non_empty_env(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
 /// Extracts the host X11 `Window` id (`u32` XID) from a CLAP window handle.
 ///
 /// Primary path: `Window::as_x11_handle()` (the `x11` member of the CLAP
 /// window union). Fallback: the rwh-0.6 `HasWindowHandle` impl behind
 /// clack's `raw-window-handle_06` feature, used when the host reports a
 /// custom API whose payload is still an X11 id.
-fn has_non_empty_env(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|v| !v.is_empty())
-}
-
 fn extract_parent_x11_id(window: &Window<'_, '_>) -> Option<u32> {
     if let Some(handle) = window.as_x11_handle() {
         return u32::try_from(handle).ok();

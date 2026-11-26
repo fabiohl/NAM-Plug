@@ -165,6 +165,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
@@ -261,12 +262,14 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");
         let ir = write_unit_ir("t44_xfade_ir");
         let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir.clone());
         mt.load_cabsim(&ir).expect("load unit IR");
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
         shared
             .ui_to_rt
@@ -346,6 +349,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t44_gate_handoff");
         let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir.clone());
@@ -396,6 +400,7 @@ mod tests {
     #[test]
     fn test_combined_resampling_oversampling_cabsim_temporal_alignment() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         // Set oversampling to 2X (L_os = 12 samples)
@@ -412,6 +417,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_unit_ir("t44_combined_ir");
         let _ir_guard = crate::clap::test_util::TempCleanupGuard::new(ir.clone());
@@ -491,6 +497,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let model_file = model_path("lstm.nam");
         mt.load_model(&model_file).expect("load LSTM model");

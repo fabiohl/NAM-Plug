@@ -57,7 +57,9 @@ mod tests {
     /// downgraded to sentinel-based ones.
     fn pin_to_cpu(cpu: usize) -> bool {
         assert!(cpu < libc::CPU_SETSIZE as usize);
+        // SAFETY: `libc::cpu_set_t` is a plain POD bitmask, so an all-zero value is a valid empty CPU set.
         let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `cpu` is asserted below `libc::CPU_SETSIZE` and `set` is a live stack `cpu_set_t` with enough storage for that CPU bit.
         unsafe { libc::CPU_SET(cpu, &mut set) };
         // SAFETY: pid 0 targets the calling thread only; the mask spans the
         // whole `cpu_set_t` allocation.
@@ -94,6 +96,7 @@ mod tests {
 
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
         let shared_ptr = extract_plugin_shared(&mut instance);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let rt_status = unsafe { (&*shared_ptr).cold.rt_status.clone() };
 
         // Activation is a main-thread operation; only start/stop/process must
@@ -116,6 +119,7 @@ mod tests {
             let moved_stopped = stopped_a;
             let thread_a = scope.spawn(move || {
                 let pinned = pin_to_cpu(0);
+                // SAFETY: `sched_getcpu` takes no pointer arguments, only reads the current thread's CPU id, and cannot violate memory safety.
                 let cpu_a = unsafe { libc::sched_getcpu() };
 
                 let mut started = moved_stopped
@@ -161,10 +165,10 @@ mod tests {
             let (tx_ba, rx_ba) = std::sync::mpsc::channel();
             let thread_b = scope.spawn(move || {
                 let pinned = pin_to_cpu(1);
+                // SAFETY: `sched_getcpu` takes no pointer arguments, only reads the current thread's CPU id, and cannot violate memory safety.
                 let cpu_b = unsafe { libc::sched_getcpu() };
 
-                let mut started =
-                    stopped_b.start_processing().expect("start_processing on B");
+                let mut started = stopped_b.start_processing().expect("start_processing on B");
 
                 // FTZ/DAZ active on the migrated thread BEFORE the first
                 // block — the 1023-block staleness window cannot exist.
@@ -192,21 +196,16 @@ mod tests {
 
                 process_block(&mut started);
 
-                // Fallback path: `reset()` re-arms the one-shot latch; the
-                // next block re-runs the setup inside `process()` on this
-                // thread (defense for hosts that skip start_processing).
+                // `reset()` (seek / loop) must not re-arm the one-shot setup:
+                // the next block issues no scheduler or CPU query on this thread.
                 started.reset();
                 rt_b.rt_cpu.store(-1, Ordering::Relaxed);
                 process_block(&mut started);
-                if pinned {
-                    assert_eq!(
-                        rt_b.rt_cpu.load(Ordering::Relaxed),
-                        cpu_b as i32,
-                        "process() fallback must re-run the one-shot setup after reset() re-arms the latch"
-                    );
-                } else {
-                    assert!(rt_b.rt_cpu.load(Ordering::Relaxed) >= 0);
-                }
+                assert_eq!(
+                    rt_b.rt_cpu.load(Ordering::Relaxed),
+                    -1,
+                    "reset() must not re-run the RT thread setup on the next block"
+                );
 
                 let stopped = started.stop_processing();
                 tx_ba.send(stopped).expect("send processor back to main");

@@ -27,6 +27,7 @@ fn load_cab_and_activate_48k(
         min_frames_count: 256,
         max_frames_count: 256,
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*crate::clap::host_harness::extract_plugin_main_thread(&mut inst) };
     mt.load_cabsim(cab_path).expect("load cabsim");
     let stopped = inst
@@ -111,6 +112,7 @@ fn t4_4_cab_nam_reengage_and_reset_off_rt_parity_and_zero_rt_prewarm() {
     let lstm_cab = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models/lstm.nam");
     assert!(lstm_cab.exists(), "missing lstm.nam fixture");
     let (_e_d, _h_d, mut dut_inst, _s_d, mut dut_proc) = load_cab_and_activate_48k(&lstm_cab);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*crate::clap::host_harness::extract_plugin_shared(&mut dut_inst) };
 
     let sine: Vec<f32> = (0..512)
@@ -186,6 +188,7 @@ fn t4_4_cab_nam_reengage_and_reset_off_rt_parity_and_zero_rt_prewarm() {
         .cab_nam_stale_discarded_total
         .load(Ordering::Relaxed);
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*crate::clap::host_harness::extract_plugin_main_thread(&mut dut_inst) };
         if let Err(err) = mt.cmd_producer.borrow_mut().try_push_command(
             crate::clap::plugin::ClapParamPayload::RebuildCabNam {

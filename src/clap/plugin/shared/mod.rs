@@ -170,6 +170,49 @@ impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for GuiShare
     }
 }
 
+impl NamClapShared {
+    /// Builds the RT-safe parameter snapshot from the UI→RT atomics.
+    ///
+    /// Single source of truth shared by the main-thread state snapshot and by
+    /// `activate()`, so both observe exactly the same mapping (and activation
+    /// can never seed a partially defaulted processor when a GUI value is
+    /// already published).
+    pub(crate) fn processing_params_from_atomics(
+        &self,
+    ) -> neural_amp_modeler_rs::common::params::RtProcessingParams {
+        use neural_amp_modeler_rs::common::params::{
+            ActivationPrecision, AdaptiveComputeMode, RtProcessingParams,
+        };
+        use neural_amp_modeler_rs::dsp::adaptive::SlimOverride;
+        use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
+        use std::sync::atomic::Ordering;
+
+        let mut params = RtProcessingParams::default();
+        params.input_gain_db =
+            f32::from_bits(self.ui_to_rt.param_input_gain.load(Ordering::Relaxed));
+        params.output_gain_db =
+            f32::from_bits(self.ui_to_rt.param_output_gain.load(Ordering::Relaxed));
+        params.gate_threshold_db =
+            f32::from_bits(self.ui_to_rt.param_gate_thresh.load(Ordering::Relaxed));
+        params.bypass = crate::clap::extensions::params::bypass_u32_to_bool(
+            self.ui_to_rt.param_bypass.load(Ordering::Relaxed),
+        );
+        params.adaptive_compute = AdaptiveComputeMode::from_f32(
+            self.ui_to_rt.param_adaptive_compute.load(Ordering::Relaxed) as f32,
+        );
+        params.slim_override = SlimOverride::from_f32(
+            self.ui_to_rt.param_slim_override.load(Ordering::Relaxed) as f32,
+        );
+        params.oversample = OversampleFactor::from_f32(
+            self.ui_to_rt.param_oversample.load(Ordering::Relaxed) as f32,
+        );
+        params.activation_precision = ActivationPrecision::from_f32(
+            self.ui_to_rt.param_activation.load(Ordering::Relaxed) as f32,
+        );
+        params
+    }
+}
+
 impl neural_amp_modeler_rs::common::diagnostics::HasRuntimeSnapshot for NamClapShared {
     fn model_info(&self) -> Option<neural_amp_modeler_rs::common::diagnostics::ModelInfo> {
         self.gui.model_info()

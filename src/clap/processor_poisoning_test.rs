@@ -79,6 +79,7 @@ pub(crate) fn ensure_isolated_crash_dir() {
     if std::env::var_os("NAM_CRASH_DIR").is_none() {
         let temp_dir = std::env::temp_dir().join("nam_plug_test_crashes");
         let _ = std::fs::create_dir_all(&temp_dir);
+        // SAFETY: this test-only crash-directory variable is set before any worker/audio thread is spawned and is only read by the process panic hook; the mutation is confined to this test.
         unsafe {
             std::env::set_var("NAM_CRASH_DIR", temp_dir.as_os_str());
         }
@@ -111,6 +112,7 @@ fn test_crash_isolation_does_not_pollute_user_cache() {
     }
     impl Drop for CrashDirRestore {
         fn drop(&mut self) {
+            // SAFETY: this test-only crash-directory variable is set before any worker/audio thread is spawned and is only read by the process panic hook; the mutation is confined to this test.
             unsafe {
                 match &self.prev {
                     Some(v) => std::env::set_var("NAM_CRASH_DIR", v),
@@ -125,6 +127,7 @@ fn test_crash_isolation_does_not_pollute_user_cache() {
         temp_dir: temp_dir.clone(),
     };
     let _ = std::fs::create_dir_all(&temp_dir);
+    // SAFETY: this test-only crash-directory variable is set before any worker/audio thread is spawned and is only read by the process panic hook; the mutation is confined to this test.
     unsafe {
         std::env::set_var("NAM_CRASH_DIR", temp_dir.as_os_str());
     }
@@ -148,7 +151,9 @@ fn test_process_panic_poisons_processor_silences_audio_and_limits_panics() {
         .expect("activate");
     let mut started = stopped.start_processing().expect("start_processing");
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread = unsafe { &*extract_plugin_main_thread(&mut instance) };
 
     // Initially, processor is healthy and bit is not set.
@@ -288,6 +293,7 @@ fn test_reset_panic_poisons_processor_and_silences_subsequent_blocks() {
         .expect("activate");
     let mut started = stopped.start_processing().expect("start_processing");
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // Inject panic on reset
@@ -341,6 +347,7 @@ fn test_deactivate_discards_dsp_pipeline_when_poisoned() {
         .expect("activate");
     let mut started = stopped.start_processing().expect("start_processing");
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // Inject panic to poison processor
@@ -381,6 +388,7 @@ fn test_f64_audio_ports_silenced_on_poisoning() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
     let config = audio_config();
     let state_ap = state.clone();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -468,6 +476,7 @@ fn test_poisoning_triggers_single_request_callback_and_restart_without_timer_sup
         .activate(move |_, _| make_harness_audio_processor(&state_ap), config)
         .expect("activate");
     let mut started = stopped.start_processing().expect("start_processing");
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     assert!(

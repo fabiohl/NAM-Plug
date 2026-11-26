@@ -123,6 +123,7 @@ fn main_thread_ptr(
     instance: &mut PluginInstance<TestHost>,
 ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -188,6 +189,7 @@ fn test_drain_p99_automation_burst_under_1us() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (mut started, shared_ptr, main_thread_ptr) =
         activate_plugin(&mut plugin_instance, N as u32);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     let mut bufs = StereoTestBuffers::new(N, 0.0, 0.0);
@@ -199,6 +201,7 @@ fn test_drain_p99_automation_burst_under_1us() {
     // Fill the command ring to 100% capacity with atomic restore
     // transactions (never coalesced, never superseded).
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         for generation in 1..=BURST_COMMANDS as u64 {
             mt.cmd_producer
@@ -265,6 +268,7 @@ fn test_drain_scalar_saturation_within_deadline_budget() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (mut started, shared_ptr, main_thread_ptr) =
         activate_plugin(&mut plugin_instance, N as u32);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     let mut bufs = StereoTestBuffers::new(N, 0.0, 0.0);
@@ -279,6 +283,7 @@ fn test_drain_scalar_saturation_within_deadline_budget() {
     // Seed the backlog below the ring capacity (256), then top it up every
     // block so the drain always exits on the pop cap, never on an empty ring.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         for _ in 0..SATURATION_BACKLOG {
             mt.cmd_producer
@@ -293,6 +298,7 @@ fn test_drain_scalar_saturation_within_deadline_budget() {
         process_block(&mut started, &mut bufs);
         *slot = read_probe();
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         for _ in 0..SATURATION_TOPUP {
             mt.cmd_producer

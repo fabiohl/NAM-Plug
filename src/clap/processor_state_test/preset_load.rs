@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 fn test_preset_load_integration() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let preset_load_ext = plugin_instance
@@ -52,6 +53,7 @@ fn test_preset_load_integration() {
 #[test]
 fn test_consecutive_preset_loads_fifo_and_notification() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let preset_load_ext = instance
@@ -138,6 +140,7 @@ fn test_consecutive_preset_loads_fifo_and_notification() {
 #[test]
 fn test_interleaved_gui_and_preset_loads() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let preset_load_ext = instance
@@ -209,6 +212,7 @@ fn test_interleaved_gui_and_preset_loads() {
 #[test]
 fn test_preset_load_queue_capacity_bound_16() {
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let preset_load_ext = instance
@@ -245,6 +249,7 @@ fn test_preset_load_queue_capacity_bound_16() {
 #[test]
 fn test_pre_enqueuing_validation() {
     let (_entry, _host_info, mut instance, _state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let preset_load_ext = instance
@@ -353,6 +358,7 @@ fn test_pre_enqueuing_validation() {
 #[test]
 fn test_preset_load_from_plugin_location_with_valid_load_key() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let preset_load_ext = instance
@@ -402,6 +408,7 @@ fn test_preset_load_from_plugin_location_with_valid_load_key() {
 #[test]
 fn test_preset_load_from_plugin_location_error_notifies_plugin_location() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let preset_load_ext = instance
@@ -464,6 +471,7 @@ fn test_toctou_rejection_on_file_modification_during_load() {
     // Serialise against other tests that install the global mid-load hook.
     let _hook_guard = crate::clap::plugin::main_thread::load::test_mid_load_hook_lock();
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let preset_load_ext = instance

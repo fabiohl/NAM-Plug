@@ -111,6 +111,7 @@ mod tests {
         {
             let _guard = ENV_LOCK.lock().unwrap();
             // Ensure Wayland session is simulated.
+            // SAFETY: process-environment mutation is confined to this test and serialized by the test's env lock or single-threaded setup; no other thread reads or writes these variables concurrently.
             unsafe { std::env::set_var("WAYLAND_DISPLAY", "wayland-0") };
 
             let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
@@ -143,6 +144,7 @@ mod tests {
         {
             let _guard = ENV_LOCK.lock().unwrap();
             // Simulate pure X11 session.
+            // SAFETY: process-environment mutation is confined to this test and serialized by the test's env lock or single-threaded setup; no other thread reads or writes these variables concurrently.
             unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
 
             let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
@@ -266,6 +268,7 @@ mod tests {
         let params = test_util::make_default_params(Some(model_dir));
         test_util::load_plugin_state(&mut plugin_instance, &params);
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         // Check model name basename was updated
@@ -337,6 +340,7 @@ mod tests {
         use crate::clap::plugin::shared::{ModelRequestOrigin, PendingModelRequest};
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let path_with_null = PathBuf::from("invalid_model\0name.nam");
@@ -374,6 +378,7 @@ mod tests {
     fn test_gui_load_model_build_failed() {
         use crate::clap::plugin::shared::{ModelRequestOrigin, PendingModelRequest};
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let invalid_path = test_util::tmp_path("gui_invalid.nam");

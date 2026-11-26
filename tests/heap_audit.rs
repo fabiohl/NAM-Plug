@@ -52,6 +52,16 @@ const PARKING_LOT_SLOTS: usize = 16;
 const HOST_RATE: u32 = 48_000;
 const MODEL_RATE: u32 = 48_000;
 const MAX_BLOCK: usize = 64;
+/// Property-case budget for `prop_gc_swap_idempotence`, published to the
+/// long-audit harness so the receipt derives cardinality from the run.
+const HEAP_PROPTEST_CASES: u32 = 500;
+
+/// Emits the case budget exactly once per process, even though the property
+/// body runs once per case.
+fn announce_heap_proptest_cases() {
+    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+    ANNOUNCED.call_once(|| println!("HEAP_PROPTEST_CASES={HEAP_PROPTEST_CASES}"));
+}
 
 type ParkingLot = [Option<GcItem>; PARKING_LOT_SLOTS];
 
@@ -363,7 +373,7 @@ fn run_idempotence_case(total_swaps: usize, producer_threads: usize, prefill: us
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 500,
+        cases: HEAP_PROPTEST_CASES,
         failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::Off)),
         ..ProptestConfig::default()
     })]
@@ -378,6 +388,7 @@ proptest! {
         producer_threads in 2usize..=8,
         prefill in 49usize..=111,
     ) {
+        announce_heap_proptest_cases();
         // The initial spike is bounded by prefill + one in-flight item per
         // requester: cap the prefill so the cascade's 112-item capacity is
         // never exceeded even if every requester pushes before the drainer

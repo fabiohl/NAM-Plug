@@ -152,6 +152,9 @@ struct Pmc {
 
 impl Pmc {
     fn open(name: &'static str, attr: PerfEventAttr) -> Self {
+        // SAFETY: `attr` is a valid stack `perf_event_attr`; `perf_event_open(2)`
+        // is invoked with the documented argument order and no user pointers
+        // beyond `attr`. A negative return is handled as an error below.
         let fd = unsafe {
             libc::syscall(
                 NR_PERF_EVENT_OPEN,
@@ -179,6 +182,8 @@ impl Pmc {
 
     fn reset(&mut self) {
         if let Some(fd) = self.fd {
+            // SAFETY: `fd` was opened by `Pmc::open` and is still owned here;
+            // `PERF_EVENT_IOC_RESET` takes no pointer argument.
             unsafe {
                 libc::ioctl(fd, PERF_EVENT_IOC_RESET, 0);
             }
@@ -187,6 +192,8 @@ impl Pmc {
 
     fn enable(&mut self) {
         if let Some(fd) = self.fd {
+            // SAFETY: `fd` is a live perf event descriptor owned by this `Pmc`;
+            // `PERF_EVENT_IOC_ENABLE` takes no pointer argument.
             unsafe {
                 libc::ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
             }
@@ -195,6 +202,8 @@ impl Pmc {
 
     fn disable(&mut self) {
         if let Some(fd) = self.fd {
+            // SAFETY: `fd` is a live perf event descriptor owned by this `Pmc`;
+            // `PERF_EVENT_IOC_DISABLE` takes no pointer argument.
             unsafe {
                 libc::ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
             }
@@ -204,6 +213,8 @@ impl Pmc {
     fn read_count(&self) -> Option<u64> {
         let fd = self.fd?;
         let mut count = 0u64;
+        // SAFETY: `fd` is a live perf event descriptor; `count` is a writable
+        // `u64` and the size passed to `read` matches it exactly.
         let n = unsafe {
             libc::read(
                 fd,
@@ -222,6 +233,8 @@ impl Pmc {
 impl Drop for Pmc {
     fn drop(&mut self) {
         if let Some(fd) = self.fd.take() {
+            // SAFETY: `take()` moves ownership out of `self`, so this is the
+            // single close of the descriptor opened by `Pmc::open`.
             unsafe {
                 libc::close(fd);
             }
@@ -298,6 +311,12 @@ impl PmcSet {
 // ── Affinity / Thread Pinning ───────────────────────────────────────────────
 
 fn apply_bench_affinity(core: usize) -> Result<usize, String> {
+    if core >= libc::CPU_SETSIZE as usize {
+        return Err(format!("cpu_out_of_range:{core}"));
+    }
+    // SAFETY: `cpu_set_t` is a plain bitset; zeroing it yields a valid empty
+    // set, `core` is bounds-checked above, and `sched_setaffinity` is called
+    // for pid 0 (the current thread) with the exact size of the set.
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_SET(core, &mut set);
@@ -353,6 +372,8 @@ fn pin_thread(cpu: Option<usize>) -> Result<(), String> {
 
 #[inline(always)]
 fn rdtsc_serialized() -> u64 {
+    // SAFETY: x86-64 only; `_mm_lfence`/`_rdtsc` are side-effect-free CPU
+    // instructions that serialize the TSC read and touch no memory.
     #[cfg(target_arch = "x86_64")]
     unsafe {
         std::arch::x86_64::_mm_lfence();

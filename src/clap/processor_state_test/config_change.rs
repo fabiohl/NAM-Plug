@@ -78,9 +78,11 @@ fn test_staged_restore_reconstructs_and_applies_on_rate_and_buffer_reconfigurati
     let mut started = stopped.start_processing().unwrap();
 
     let shared_ptr = test_util::extract_shared(&mut plugin_instance);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -88,6 +90,7 @@ fn test_staged_restore_reconstructs_and_applies_on_rate_and_buffer_reconfigurati
         )
         .unwrap()
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread = unsafe { &*mt_ptr };
 
     // Process initial block
@@ -162,6 +165,7 @@ fn test_staged_restore_reconstructs_and_applies_on_rate_and_buffer_reconfigurati
 
     // 6. Verify that the audio processor's active streaming adapter and resampler
     //    are reconstructed for the new 44.1 kHz / 256 frames configuration.
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     let proc_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -169,6 +173,7 @@ fn test_staged_restore_reconstructs_and_applies_on_rate_and_buffer_reconfigurati
         )
         .unwrap()
     };
+    // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the test keeps the instance and processor alive, and only reads through this reference with no overlapping mutable borrow.
     let processor = unsafe { &*proc_ptr };
     assert_eq!(
         processor.stream.host_rate(),
@@ -214,6 +219,7 @@ fn test_staged_restore_full_clear_adapts_on_reconfiguration() {
     let started = stopped.start_processing().unwrap();
 
     let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -221,6 +227,7 @@ fn test_staged_restore_full_clear_adapts_on_reconfiguration() {
         )
         .unwrap()
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread = unsafe { &*mt_ptr };
 
     // Full restore without model, requesting Oversample 4x (forces Strict Restart Policy)
@@ -245,6 +252,7 @@ fn test_staged_restore_full_clear_adapts_on_reconfiguration() {
         .activate(|_, _| (), audio_config(44100.0, 128))
         .expect("activate on clear restore reconfig must succeed");
 
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     let proc_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -252,6 +260,7 @@ fn test_staged_restore_full_clear_adapts_on_reconfiguration() {
         )
         .unwrap()
     };
+    // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the test keeps the instance and processor alive, and only reads through this reference with no overlapping mutable borrow.
     let processor = unsafe { &*proc_ptr };
     assert!(processor.model_l.is_none(), "Model must be cleared");
     assert_eq!(processor.stream.host_rate(), 44100);

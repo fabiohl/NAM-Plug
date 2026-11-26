@@ -25,6 +25,7 @@ fn test_audio_processor_flush() {
     let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
 
     let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     let processor_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -35,6 +36,7 @@ fn test_audio_processor_flush() {
         )
         .unwrap()
     };
+    // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the processor is stopped and driven exclusively by this test, so the mutable borrow is unique and cannot outlive the instance.
     let processor = unsafe { &mut *processor_ptr };
 
     // Ensure initially generation is 0
@@ -114,6 +116,7 @@ fn test_audio_processor_flush() {
         .unwrap();
 
     // After process(), the processor's last_seen_generation should match current_gen
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     let processor_ptr_after = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -124,6 +127,7 @@ fn test_audio_processor_flush() {
         )
         .unwrap()
     };
+    // SAFETY: the processor pointer comes from the active wrapper of this live plugin instance; the processor is stopped and driven exclusively by this test, so the mutable borrow is unique and cannot outlive the instance.
     let processor_after = unsafe { &mut *processor_ptr_after };
     assert_eq!(processor_after.last_seen_generation, current_gen);
 }

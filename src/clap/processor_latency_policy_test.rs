@@ -60,6 +60,7 @@ fn expected_44k_stream_latency() -> u32 {
 #[test]
 fn test_model_swap_same_rate_is_continuous_no_restart() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -68,6 +69,7 @@ fn test_model_swap_same_rate_is_continuous_no_restart() {
     let mut started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
 
     let model = crate::clap::test_util::model_path("lstm.nam");
@@ -111,6 +113,7 @@ fn test_model_swap_same_rate_is_continuous_no_restart() {
 #[test]
 fn test_model_swap_diff_rate_triggers_restart_and_stages() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -119,6 +122,7 @@ fn test_model_swap_diff_rate_triggers_restart_and_stages() {
     let mut started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
@@ -168,6 +172,7 @@ fn test_model_swap_diff_rate_triggers_restart_and_stages() {
 #[test]
 fn test_restart_cycle_applies_staged_model_and_latency() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -176,6 +181,7 @@ fn test_restart_cycle_applies_staged_model_and_latency() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
@@ -231,6 +237,7 @@ fn test_restart_cycle_applies_staged_model_and_latency() {
 #[test]
 fn test_ir_load_and_swap_policy() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -239,6 +246,7 @@ fn test_ir_load_and_swap_policy() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
 
     let ir1 = write_ir(512, "ir1");
@@ -318,6 +326,7 @@ fn test_ir_load_and_swap_policy() {
 #[test]
 fn test_ir_clear_triggers_restart() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -326,6 +335,7 @@ fn test_ir_clear_triggers_restart() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
 
     let ir = write_ir(512, "clear");
@@ -388,6 +398,7 @@ fn test_ir_clear_triggers_restart() {
 #[test]
 fn test_same_latency_swap_supersedes_staged() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -396,6 +407,7 @@ fn test_same_latency_swap_supersedes_staged() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
@@ -457,6 +469,7 @@ fn test_same_latency_swap_supersedes_staged() {
 #[test]
 fn test_latency_notification_ordering() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -468,6 +481,7 @@ fn test_latency_notification_ordering() {
     instance.call_on_main_thread_callback();
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
@@ -546,6 +560,7 @@ fn load_state(
 #[test]
 fn test_restore_same_latency_is_continuous_no_restart() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -568,6 +583,7 @@ fn test_restore_same_latency_is_continuous_no_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
     assert!(
         mt.staged_restore.borrow().is_none(),
@@ -600,6 +616,7 @@ fn test_restore_same_latency_is_continuous_no_restart() {
 #[test]
 fn test_restore_diff_rate_stages_and_requests_restart() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -624,6 +641,7 @@ fn test_restore_diff_rate_stages_and_requests_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
     assert!(
         mt.staged_restore.borrow().is_some(),
@@ -684,6 +702,7 @@ fn test_restore_diff_rate_stages_and_requests_restart() {
 #[test]
 fn test_restore_ir_stages_and_requests_restart() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -703,6 +722,7 @@ fn test_restore_ir_stages_and_requests_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
     assert!(
         mt.staged_restore.borrow().is_some(),
@@ -752,6 +772,7 @@ fn test_restore_ir_stages_and_requests_restart() {
 #[test]
 fn test_restore_coalescing_latest_wins() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -773,6 +794,7 @@ fn test_restore_coalescing_latest_wins() {
     assert!(state.restart_requested.load(Ordering::SeqCst));
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
     assert!(mt.staged_restore.borrow().is_some());
 
@@ -822,6 +844,7 @@ fn test_restore_combined_model_and_oversample_single_restart() {
     use crate::clap::plugin::PendingRestartOs;
 
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -845,6 +868,7 @@ fn test_restore_combined_model_and_oversample_single_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
     assert!(mt.staged_restore.borrow().is_some());
     assert_eq!(
@@ -880,6 +904,7 @@ fn test_restore_combined_model_and_oversample_single_restart() {
 #[test]
 fn test_restore_pre_activate_remains_local_commit() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let base = crate::clap::test_util::model_path("lstm.nam");
@@ -900,6 +925,7 @@ fn test_restore_pre_activate_remains_local_commit() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
     assert!(
         mt.staged_restore.borrow().is_none(),
@@ -931,6 +957,7 @@ fn test_restore_pre_activate_remains_local_commit() {
 #[test]
 fn test_restore_for_preset_without_model_preserves_active_model() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     let stopped = instance
@@ -939,6 +966,7 @@ fn test_restore_for_preset_without_model_preserves_active_model() {
     let started = stopped.start_processing().expect("start_processing");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
 
     // Initial 48k model load

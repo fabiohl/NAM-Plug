@@ -30,6 +30,7 @@ fn make_activated_plugin(
     &'static NamClapShared,
 ) {
     let (entry, host_info, mut instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
     let shared = unsafe { &*test_util::extract_shared(&mut instance) };
 
     let audio_config = PluginAudioConfiguration {

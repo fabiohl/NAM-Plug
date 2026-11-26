@@ -17,9 +17,9 @@ fn mock_host_bridge() -> (clap_sys::host::clap_host, crate::clap::gui::GuiHostBr
         request_callback: None,
     };
     let raw = std::ptr::NonNull::new(&mut mock_host).unwrap();
-    // SAFETY: `raw` points to the live mock `clap_host` owned by the caller
-    // for the duration of the test.
     let shared_handle =
+        // SAFETY: `raw` points to the live mock `clap_host` owned by the caller
+        // for the duration of the test; `from_raw` only wraps that pointer.
         unsafe { clack_plugin::host::HostAudioProcessorHandle::from_raw(raw).shared() };
     let bridge = crate::clap::gui::GuiHostBridge::new(&shared_handle);
     (mock_host, bridge)

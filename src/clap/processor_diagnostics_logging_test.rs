@@ -48,6 +48,7 @@ fn test_emit_pending_logs_messages_reach_log_buffer() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let logger = neural_amp_modeler_rs::common::diagnostics::logger::NamLogger::global()
@@ -152,6 +153,7 @@ fn test_emit_pending_logs_overload_rate_limiting() {
 
     let (_entry, _host_info, mut instance, host_state) =
         host_harness::make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut instance) };
 
     // 1. Initial state: 0 overloads -> timer fires -> 0 warnings
@@ -255,6 +257,7 @@ fn test_emit_pending_logs_alert_transitions_and_no_repeat() {
 
     let (_entry, _host_info, mut instance, host_state) =
         host_harness::make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut instance) };
 
     // Initial state: tick timer, expect zero warning/error alert logs
@@ -418,6 +421,7 @@ fn test_no_active_model_logs_only_on_rising_edge_not_every_poll() {
 
     let (_entry, _host_info, mut instance, host_state) =
         host_harness::make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut instance) };
 
     let count_no_active_model = |host_state: &crate::clap::host_harness::CompleteHostState| {
@@ -496,6 +500,7 @@ fn test_overload_warning_uses_peak_when_ewma_decayed_to_zero() {
 
     let (_entry, _host_info, mut instance, host_state) =
         host_harness::make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut instance) };
 
     shared
@@ -564,6 +569,7 @@ fn test_successful_load_publishes_active_model_telemetry() {
         .expect("activate");
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
     let model = crate::clap::test_util::model_path("lstm.nam");
     mt.load_model(&model).expect("load model");

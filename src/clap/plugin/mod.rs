@@ -33,7 +33,6 @@ use lock::lock_cold;
 use neural_amp_modeler_rs::common::diagnostics::SystemSnapshot;
 use neural_amp_modeler_rs::common::params::ProcessingParams;
 use std::cell::{Cell, RefCell};
-use std::ffi::CString;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -194,7 +193,7 @@ impl DefaultPluginFactory for NamClapPlugin {
                         "DEBUG" => LogSeverity::Debug,
                         _ => LogSeverity::Info,
                     };
-                    let cmsg = CString::new(msg).unwrap_or_default();
+                    let cmsg = crate::clap::plugin::main_thread::lossy_cstring(msg);
                     // SAFETY: `_guard` keeps host-log quiescence active for this
                     // dispatch; `NamClapMainThread::drop` quiesces it before the
                     // host is released, so the handle does not outlive the host.

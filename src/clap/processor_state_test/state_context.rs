@@ -16,6 +16,7 @@ fn test_state_context_roundtrip() {
         .get_extension::<PluginStateContext>()
         .expect("PluginStateContext extension not found");
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let model_path = crate::clap::test_util::model_path("lstm.nam");
@@ -187,6 +188,7 @@ fn test_state_context_preset_roundtrip_via_state_load() {
         .get_extension::<PluginStateContext>()
         .expect("PluginStateContext extension not found");
 
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let model_path = crate::clap::test_util::model_path("lstm.nam");

@@ -78,6 +78,7 @@ fn main_thread_ptr(
     instance: &mut PluginInstance<TestHost>,
 ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -145,6 +146,7 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
 
     // Push two structural commands; the first block applies #1 and defers #2.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
@@ -166,8 +168,10 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
     // (publish path) — proving the ack sequence survived the deferred drop.
     let (mut started, shared_ptr, main_thread_ptr) =
         activate_plugin(&mut plugin_instance, N as u32);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
@@ -195,10 +199,12 @@ fn test_deferred_structural_resolved_on_deactivate_ack_gapless() {
 
     // Ack phase: housekeeping publishes the restore.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.housekeeping();
     }
     assert!(
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         unsafe { &*main_thread_ptr }
             .pending_restore
             .borrow()
@@ -216,8 +222,10 @@ fn test_structural_budget_one_per_callback() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (mut started, shared_ptr, main_thread_ptr) =
         activate_plugin(&mut plugin_instance, N as u32);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*main_thread_ptr };
     for generation in 1..=8u64 {
         mt.cmd_producer
@@ -293,6 +301,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (mut started, shared_ptr, main_thread_ptr) =
         activate_plugin(&mut plugin_instance, N as u32);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     // Three distinct IRs pushed in one burst: A (512 ⇒ tail 512),
@@ -303,6 +312,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
 
     {
         use crate::clap::extensions::cabinet::CabSlotDsp;
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
@@ -367,6 +377,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
     // next callback supersedes the parked one in Phase 0 — it is discarded
     // (its adapter retired to the GC) and never observed by the DSP.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
@@ -408,6 +419,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
     );
 
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.cmd_producer
             .borrow_mut()
@@ -437,6 +449,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
     // Every superseded adapter must be drained off-RT (never dropped on the
     // audio thread, never leaked).
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         mt.housekeeping();
     }
@@ -453,6 +466,7 @@ fn test_structural_coalescing_supersedes_same_kind() {
 fn test_structural_burst_deferral_counts_deterministic() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (mut started, shared_ptr, main_thread_ptr) = activate_plugin(&mut plugin_instance, 64);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     let mut bufs = StereoTestBuffers::new(64, 0.0, 0.0);
@@ -466,6 +480,7 @@ fn test_structural_burst_deferral_counts_deterministic() {
     // Burst: enqueue 64 non-coalescible structural commands (atomic restores)
     // and drain them over the following 64 blocks.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         for generation in 1..=64u64 {
             mt.cmd_producer
@@ -517,6 +532,7 @@ fn test_structural_burst_deferral_counts_deterministic() {
 fn test_structural_burst_p99_within_contract() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
     let (mut started, shared_ptr, main_thread_ptr) = activate_plugin(&mut plugin_instance, 64);
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*shared_ptr };
 
     let mut bufs = StereoTestBuffers::new(64, 0.0, 0.0);
@@ -540,6 +556,7 @@ fn test_structural_burst_p99_within_contract() {
     // superseded, so every block applies exactly one structural transaction —
     // the worst-case drain cost per callback.
     {
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*main_thread_ptr };
         for generation in 1..=64u64 {
             mt.cmd_producer

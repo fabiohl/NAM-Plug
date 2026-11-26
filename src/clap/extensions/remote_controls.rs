@@ -80,6 +80,9 @@ mod tests {
     fn test_fill_pages() {
         // Page 0: Main
         let mut raw_page = MaybeUninit::<clap_remote_controls_page>::zeroed();
+        // SAFETY: `clap_remote_controls_page` is a plain C struct with a valid
+        // all-zero value; the writer fills every field before `assume_init_ref`,
+        // and the reference never outlives `raw_page`.
         unsafe {
             let mut writer = RemoteControlsPageWriter::from_raw(raw_page.as_mut_ptr());
             fill_remote_controls_page(0, &mut writer);
@@ -102,6 +105,9 @@ mod tests {
 
         // Page 1: Gate
         let mut raw_page = MaybeUninit::<clap_remote_controls_page>::zeroed();
+        // SAFETY: `clap_remote_controls_page` is a plain C struct with a valid
+        // all-zero value; the writer fills every field before `assume_init_ref`,
+        // and the reference never outlives `raw_page`.
         unsafe {
             let mut writer = RemoteControlsPageWriter::from_raw(raw_page.as_mut_ptr());
             fill_remote_controls_page(1, &mut writer);

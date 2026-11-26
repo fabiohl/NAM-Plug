@@ -69,6 +69,7 @@ fn load_state(instance: &mut PluginInstance<TestHost>, model: &Path, ir: Option<
     state_ext
         .load(&handle, &mut state_bytes.as_slice())
         .expect("state load must succeed");
+    // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
     let shared = unsafe { &*test_util::extract_shared(instance) };
     test_util::drain_async_model_loading(instance, shared);
 }

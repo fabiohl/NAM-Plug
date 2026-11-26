@@ -35,7 +35,7 @@ impl HostHandlers for TestHost {
 fn create_plugin_instance() -> PluginInstance<TestHost> {
     let artifact = super::artifact_validator::TestedArtifact::resolve_and_hash();
 
-    // SAFETY: Dynamic plugin loading from the build artifact.
+    // SAFETY: `PluginEntry::load` dynamically loads the just-built CLAP artifact and initializes its entry point; the test host keeps the artifact path and returned entry alive for the plugin lifetime and only calls through that validated entry.
     let entry = unsafe {
         PluginEntry::load(&artifact.path).expect("Failed to load plugin entry from build artifact")
     };

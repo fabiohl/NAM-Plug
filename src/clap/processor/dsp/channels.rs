@@ -349,6 +349,9 @@ mod tests {
         }];
 
         let (ol, or) = {
+            // SAFETY: `raw_inputs`/`raw_outputs` point into the stack arrays
+            // above, which stay alive for this scope, and `N` matches their
+            // channel capacity.
             let mut audio = unsafe {
                 clack_plugin::process::Audio::from_raw_buffers(
                     &raw_inputs,

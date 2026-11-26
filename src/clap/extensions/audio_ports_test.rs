@@ -146,6 +146,7 @@ fn test_audio_ports_config_declarations_and_switching() {
 #[test]
 fn test_audio_ports_config_rejected_while_active() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut instance) };
 
     // Simulate active processing state
@@ -188,6 +189,7 @@ fn test_audio_ports_config_rejected_while_active() {
 #[test]
 fn test_audio_ports_activation_and_f64_rejection() {
     let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut instance) };
 
     // Initially both input and output are active.
@@ -195,6 +197,7 @@ fn test_audio_ports_activation_and_f64_rejection() {
     assert!(shared.cold.port_output_active.load(Ordering::Relaxed));
 
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -202,6 +205,7 @@ fn test_audio_ports_activation_and_f64_rejection() {
         )
         .expect("main thread pointer")
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*main_thread };
 
     // 1. Deactivating port 0 input via Float32 succeeds and updates atomic.

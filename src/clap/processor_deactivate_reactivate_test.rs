@@ -293,6 +293,7 @@ mod tests {
         test_util::load_plugin_state(&mut plugin_instance, &params);
 
         let config = audio_config(SR_48K, N as u32);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         // Cycle 1

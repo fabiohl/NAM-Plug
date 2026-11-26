@@ -80,6 +80,9 @@ pub fn make_test_plugin() -> (PluginEntry, HostInfo, PluginInstance<TestHost>) {
 pub fn make_test_plugin_dynamic(
     so_path: &std::path::Path,
 ) -> (PluginEntry, HostInfo, PluginInstance<TestHost>) {
+    // SAFETY: `so_path` is a test fixture produced by the local build; loading
+    // it runs its code in-process, which is sound because the fixture is a
+    // trusted CLAP plugin built from this repository (never untrusted input).
     let entry = unsafe { PluginEntry::load(so_path) }.expect("Failed to load PluginEntry from .so");
 
     let host_info = HostInfo::new("Test", "Test", "Test", "0.1.0").unwrap();
@@ -222,6 +225,9 @@ pub fn extract_shared<H: HostHandlers>(
     instance: &mut PluginInstance<H>,
 ) -> *const crate::clap::plugin::NamClapShared {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` belongs to the live `instance`; `handle` runs the
+    // closure synchronously while the instance is borrowed, and the returned
+    // shared pointer is only dereferenced by the caller while it stays alive.
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<NamClapPlugin>::handle(
             raw_ptr,

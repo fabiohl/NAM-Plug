@@ -67,6 +67,7 @@ mod tests {
         StartedPluginAudioProcessor<crate::clap::host_harness::CompleteHost>,
     ) {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let mode = match os_factor {
@@ -89,6 +90,7 @@ mod tests {
         let mut started = stopped.start_processing().expect("start_processing");
 
         let mt_ptr = extract_plugin_main_thread(&mut instance);
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*mt_ptr };
 
         let model_file = crate::clap::test_util::model_path(model_name);
@@ -313,6 +315,7 @@ mod tests {
     fn test_oversize_block_sets_contract_flag_and_continuous_state() {
         let (mut instance, _state, mut started) =
             setup_instance_with_model("lstm.nam", OversampleFactor::Off, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         assert!(
@@ -354,6 +357,7 @@ mod tests {
     fn test_oversize_block_events_across_slices() {
         let (mut instance, _state, mut started) =
             setup_instance_with_model("lstm.nam", OversampleFactor::Off, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let block_size = 2 * MAX_FRAMES as usize;
@@ -417,10 +421,12 @@ mod tests {
     fn test_oversize_block_sample_accurate_gain_in_second_slice() {
         let (mut instance_a, _state_a, mut started_a) =
             setup_instance_with_model("lstm.nam", OversampleFactor::Off, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared_a = unsafe { &*extract_plugin_shared(&mut instance_a) };
 
         let (mut instance_b, _state_b, mut started_b) =
             setup_instance_with_model("lstm.nam", OversampleFactor::Off, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared_b = unsafe { &*extract_plugin_shared(&mut instance_b) };
 
         let block_size = 2 * MAX_FRAMES as usize; // 512
@@ -534,10 +540,12 @@ mod tests {
     fn test_oversize_block_sample_accurate_bypass_in_second_slice() {
         let (mut instance_a, _state_a, mut started_a) =
             setup_instance_with_model("lstm.nam", OversampleFactor::Off, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared_a = unsafe { &*extract_plugin_shared(&mut instance_a) };
 
         let (mut instance_b, _state_b, mut started_b) =
             setup_instance_with_model("lstm.nam", OversampleFactor::Off, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared_b = unsafe { &*extract_plugin_shared(&mut instance_b) };
 
         let block_size = 2 * MAX_FRAMES as usize; // 512
@@ -642,10 +650,12 @@ mod tests {
     fn test_oversize_block_sample_accurate_gain_with_oversampling_2x() {
         let (mut instance_a, _state_a, mut started_a) =
             setup_instance_with_model("lstm.nam", OversampleFactor::X2, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared_a = unsafe { &*extract_plugin_shared(&mut instance_a) };
 
         let (mut instance_b, _state_b, mut started_b) =
             setup_instance_with_model("lstm.nam", OversampleFactor::X2, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared_b = unsafe { &*extract_plugin_shared(&mut instance_b) };
 
         let block_size = 2 * MAX_FRAMES as usize; // 512
@@ -750,6 +760,7 @@ mod tests {
     fn test_oversize_block_no_events_no_timing_anomaly() {
         let (mut instance, _state, mut started) =
             setup_instance_with_model("lstm.nam", OversampleFactor::Off, None);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let block_size = 3 * MAX_FRAMES as usize + 17;

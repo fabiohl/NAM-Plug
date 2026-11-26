@@ -100,6 +100,7 @@ fn process_mono_block(
 #[test]
 fn test_cabsim_stereo_asymmetric_inputs_channels_independent() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     // Select Stereo audio ports configuration while deactivated.
@@ -241,6 +242,7 @@ fn test_cabsim_stereo_asymmetric_inputs_channels_independent() {
 #[test]
 fn test_cabsim_mono_input_bit_exact_with_reference() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     // Explicitly verify Mono configuration (Config 0, default).

@@ -136,6 +136,7 @@ mod tests {
     #[test]
     fn test_cabsim_tail_rearms_across_impulse_silence_impulse_silence() {
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let stopped = instance
@@ -144,6 +145,7 @@ mod tests {
         let started = stopped.start_processing().expect("start_processing");
 
         // First IR load (0 → partition latency) is staged + host restart.
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("t42_rearm");
         mt.load_cabsim(&ir).expect("load decay IR");
@@ -210,6 +212,7 @@ mod tests {
         use crate::clap::test_util::{StereoTestBuffers, process_stereo_block_prealloc};
 
         let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
         let stopped = instance
@@ -217,6 +220,7 @@ mod tests {
             .expect("activate");
         let started = stopped.start_processing().expect("start_processing");
 
+        // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
         let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
         let ir = write_decay_ir("rearm_zalloc");
         mt.load_cabsim(&ir).expect("load decay IR");

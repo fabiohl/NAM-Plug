@@ -68,6 +68,7 @@ fn process_harness_block(
 #[test]
 fn test_tail_notification_staged_ir_install_and_clear_across_restart() {
     let (_entry, _host_info, mut instance, state) = make_test_plugin_with_harness();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*extract_plugin_shared(&mut instance) };
 
     // 1. Initial activation with no IR
@@ -109,6 +110,7 @@ fn test_tail_notification_staged_ir_install_and_clear_across_restart() {
     );
 
     let mt_ptr = extract_plugin_main_thread(&mut instance);
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*mt_ptr };
     assert!(
         mt.staged_restore.borrow().is_some(),

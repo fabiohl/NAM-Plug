@@ -29,6 +29,7 @@ mod tests {
         let n = 64;
         let mut bufs = StereoTestBuffers::new(n, 0.0, 0.0);
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let rt_status = &shared.cold.rt_status;
@@ -303,6 +304,7 @@ mod tests {
         let n = 64;
         let mut bufs = StereoTestBuffers::new(n, 0.0, 0.0);
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let _shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         // Swap models multiple times without calling housekeeping/drain on main thread
@@ -385,6 +387,7 @@ mod tests {
         let n = 64;
         let mut bufs = StereoTestBuffers::new(n, 0.0, 0.0);
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         let rt_status = &shared.cold.rt_status;
 

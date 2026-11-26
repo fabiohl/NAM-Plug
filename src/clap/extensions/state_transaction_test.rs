@@ -729,6 +729,7 @@ fn main_thread_ptr(
     instance: &mut clack_host::plugin::PluginInstance<crate::clap::test_util::TestHost>,
 ) -> *const crate::clap::plugin::NamClapMainThread<'static> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -769,6 +770,7 @@ fn test_corrupted_states_10000_heap_stable() {
 
     let (_entry, _host_info, mut plugin_instance) = crate::clap::test_util::make_test_plugin();
     let blobs = corrupted_state_blobs();
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread = unsafe { &*main_thread_ptr(&mut plugin_instance) };
 
     let _guard = TrackingGuard::new();

@@ -222,6 +222,7 @@ mod tests {
         ensure_isolated_crash_dir();
         let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
         let shared_ptr = test_util::extract_shared(&mut instance);
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*shared_ptr };
         let stopped = instance
             .activate(|_, _| (), audio_config_64())

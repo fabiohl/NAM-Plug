@@ -573,15 +573,24 @@ fn notify_preset_error(
     message: &str,
 ) {
     if let Some(preset_load) = host.get_extension::<HostPresetLoad>() {
-        let msg_cstr = std::ffi::CString::new(message);
-        let msg_ref = msg_cstr.as_deref().ok();
+        let msg_cstr = preset_error_cstring(message);
         preset_load.on_error(
             host,
             location.as_clap_location(),
             load_key,
             os_error,
-            msg_ref,
+            Some(msg_cstr.as_c_str()),
         );
         log::error!("Host notified: preset load failed (os_error={os_error})");
     }
 }
+
+/// Converts a preset-error message for the host, replacing any embedded NUL with
+/// U+FFFD instead of dropping the whole message.
+fn preset_error_cstring(message: &str) -> std::ffi::CString {
+    crate::clap::plugin::main_thread::lossy_cstring(message)
+}
+
+#[cfg(test)]
+#[path = "pending_loads_test.rs"]
+mod tests;

@@ -42,6 +42,7 @@ fn fake_gui_worker_thread(
 /// staged slots reachable without `&mut`.
 fn main_thread_mut(instance: &mut PluginInstance<test_util::TestHost>) -> &NamClapMainThread<'_> {
     let raw_ptr = instance.plugin_handle().as_raw_ptr();
+    // SAFETY: `raw_ptr` is the live plugin handle owned by this test's instance; `PluginWrapper::handle` runs the closure synchronously while that instance is alive, and the returned raw pointer is only dereferenced while the instance remains in scope.
     let ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::plugin::NamClapPlugin>::handle(
             raw_ptr,

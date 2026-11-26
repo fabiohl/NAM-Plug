@@ -31,6 +31,7 @@ fn test_integration_16_instances_log_and_diagnostic_isolation() {
 
     for _ in 0..CONCURRENT_INSTANCES {
         let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
         let shared = unsafe { &*test_util::extract_shared(&mut instance) };
         let inst_id = shared.cold.instance_id;
 
@@ -105,6 +106,7 @@ fn test_integration_16_instances_log_and_diagnostic_isolation() {
 
     // Assert diagnostic bundle isolation
     for (idx, (mut instance, inst_id)) in instances.into_iter().enumerate() {
+        // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
         let shared = unsafe { &*nam_plug::clap::test_util::extract_shared(&mut instance) };
         let model_basename = format!("Test_Profile_{:02}.nam", idx);
 

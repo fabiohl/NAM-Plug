@@ -109,6 +109,7 @@ fn test_file_picker_alive_fence_and_timeout() {
         match rx.recv_timeout(std::time::Duration::from_millis(50)) {
             Ok(path_opt) => {
                 if alive_fence.load(Ordering::Relaxed) {
+                    // SAFETY: `shared_addr` is the address of the live `Arc<NamClapShared>` held by `shared` for the whole test; the `alive_fence` guard is checked first and the reference is only used through atomics/interior-mutable locks, with no mutable alias alive.
                     let shared_ref = unsafe { &*(shared_addr as *const NamClapShared) };
                     if let Some(path) = path_opt
                         && let Ok(mut pending_guard) = shared_ref.cold.pending_model_requests.lock()
@@ -155,6 +156,7 @@ fn test_file_picker_alive_fence_and_timeout() {
             Ok(path_opt) => {
                 if alive_fence.load(Ordering::Relaxed) {
                     // If it entered here, it would be an error (illegal access to freed address)
+                    // SAFETY: `shared_addr` is the address of the live `Arc<NamClapShared>` held by `shared` for the whole test; the `alive_fence` guard is checked first and the reference is only used through atomics/interior-mutable locks, with no mutable alias alive.
                     let shared_ref = unsafe { &*(shared_addr as *const NamClapShared) };
                     if let Some(path) = path_opt
                         && let Ok(mut pending_guard) = shared_ref.cold.pending_model_requests.lock()
@@ -198,6 +200,7 @@ fn test_file_picker_alive_fence_and_timeout() {
             Err(_) => {
                 // Timeout occurred
                 if alive_fence.load(Ordering::Relaxed) {
+                    // SAFETY: `shared_addr` is the address of the live `Arc<NamClapShared>` held by `shared` for the whole test; the `alive_fence` guard is checked first and the reference is only used through atomics/interior-mutable locks, with no mutable alias alive.
                     let shared_ref = unsafe { &*(shared_addr as *const NamClapShared) };
                     shared_ref
                         .cold
@@ -224,6 +227,7 @@ fn test_per_instance_hugepage_synced() {
     let raw_ptr1 = plugin_instance1.plugin_handle().as_raw_ptr();
     let raw_ptr2 = plugin_instance2.plugin_handle().as_raw_ptr();
 
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread1_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr1,
@@ -231,6 +235,7 @@ fn test_per_instance_hugepage_synced() {
         )
         .unwrap()
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread2_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr2,
@@ -239,7 +244,9 @@ fn test_per_instance_hugepage_synced() {
         .unwrap()
     };
 
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt1 = unsafe { &*main_thread1_ptr };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt2 = unsafe { &*main_thread2_ptr };
 
     assert!(
@@ -277,6 +284,7 @@ fn test_gui_event_backpressure_warning_emitted() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     shared

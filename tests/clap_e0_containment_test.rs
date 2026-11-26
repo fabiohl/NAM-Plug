@@ -81,6 +81,7 @@ fn process_block(
 #[test]
 fn test_cabsim_loaded_and_applied_to_audio() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let partition_size: usize = 256;
@@ -183,6 +184,7 @@ fn test_cabsim_loaded_and_applied_to_audio() {
 #[test]
 fn test_state_restore_with_missing_model_fails_and_keeps_old_dsp() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let model_a = model_fixture("lstm.nam");
@@ -318,6 +320,7 @@ fn test_offline_realtime_restores_activation_precision() {
     use neural_amp_modeler_rs::common::params::ActivationPrecision;
 
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let render_ext = plugin_instance
@@ -433,6 +436,7 @@ fn test_bypass_responds_to_host_events() {
     use nam_plug::clap::extensions::params::{PARAM_BYPASS, bypass_bool_to_u32};
 
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+    // SAFETY: `extract_shared` returns a pointer into the live plugin instance owned by this integration test; the instance is kept alive and unmoved for the borrow, access is through atomics/interior-mutable locks, and no `&mut` to the shared state is live.
     let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
     let audio_config = PluginAudioConfiguration {

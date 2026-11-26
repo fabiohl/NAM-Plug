@@ -105,6 +105,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let models = ["wavenet_a1_standard.nam", "lstm.nam", "a2_example.nam"];
@@ -499,6 +500,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         let rt_status = &shared.cold.rt_status;
         #[cfg(debug_assertions)]
@@ -578,6 +580,7 @@ mod tests {
         let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
         let mut started_processor = stopped_processor.start_processing().unwrap();
 
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
         let rt_status = &shared.cold.rt_status;
 
@@ -701,6 +704,7 @@ mod tests {
             let params = test_util::make_default_params(Some(path));
             test_util::load_plugin_state(&mut plugin_instance, &params);
 
+            // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
             let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
             let rt_status = &shared.cold.rt_status;
             assert!(

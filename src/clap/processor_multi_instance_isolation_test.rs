@@ -20,6 +20,7 @@ fn test_sixteen_concurrent_plugin_instances_have_unique_ids() {
     for _ in 0..CONCURRENT_COUNT {
         let handle = thread::spawn(|| {
             let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+            // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
             let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
             shared.cold.instance_id
         });
@@ -57,6 +58,7 @@ fn test_sixteen_concurrent_instances_log_isolation_and_sink_routing() {
 
     for _ in 0..INSTANCES {
         let (_entry, host_info, mut instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut instance) };
         let inst_id = shared.cold.instance_id;
 
@@ -127,6 +129,7 @@ fn test_sixteen_concurrent_instances_diagnostic_bundle_isolation() {
     for _ in 0..INSTANCES {
         let handle = thread::spawn(move || {
             let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
+            // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
             let shared = unsafe { &*test_util::extract_shared(&mut instance) };
             let inst_id = shared.cold.instance_id;
 
@@ -197,6 +200,7 @@ fn test_rapid_multi_instance_lifecycle_contention_free() {
         let handle = thread::spawn(|| {
             for _ in 0..CYCLES_PER_THREAD {
                 let (_entry, _host_info, mut instance) = test_util::make_test_plugin();
+                // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
                 let shared = unsafe { &*test_util::extract_shared(&mut instance) };
                 let _scope = scope_instance(shared.cold.instance_id);
                 log::info!("Rapid cycle log instance {}", shared.cold.instance_id);

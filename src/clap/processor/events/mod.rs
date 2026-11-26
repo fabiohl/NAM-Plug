@@ -11,9 +11,8 @@ pub(crate) use command_handler::ClapCommandSwapHandler;
 pub(crate) use slimmable_handler::SlimmableSwapHandler;
 
 use super::{CMD_SWAP_TUNABLES, NamClapProcessor, SLIMMABLE_SWAP_TUNABLES};
-use clack_extensions::tail::HostTail;
 use clack_plugin::prelude::OutputEvents;
-use neural_amp_modeler_rs::common::params::{ActivationPrecision, AdaptiveComputeMode};
+use neural_amp_modeler_rs::common::params::AdaptiveComputeMode;
 use neural_amp_modeler_rs::common::spsc::{RtSwapHandler, SwapBudget};
 use std::sync::atomic::Ordering;
 
@@ -75,13 +74,8 @@ impl<'a> NamClapProcessor<'a> {
         if render_mode != self.last_render_mode {
             self.last_render_mode = render_mode;
             if render_mode == crate::clap::plugin::RENDER_MODE_OFFLINE {
-                self.realtime_activation = self.params.activation_precision;
                 self.adaptive_compute
                     .set_mode(AdaptiveComputeMode::Off, &self.rt_status);
-                self.params.activation_precision = ActivationPrecision::Standard;
-                neural_amp_modeler_rs::math::activations::set_activation_tls(
-                    ActivationPrecision::Standard,
-                );
             } else {
                 let user_mode = AdaptiveComputeMode::from_f32(
                     self.shared
@@ -90,11 +84,13 @@ impl<'a> NamClapProcessor<'a> {
                         .load(Ordering::Relaxed) as f32,
                 );
                 self.adaptive_compute.set_mode(user_mode, &self.rt_status);
-                self.params.activation_precision = self.realtime_activation;
-                neural_amp_modeler_rs::math::activations::set_activation_tls(
-                    self.realtime_activation,
-                );
             }
+            // Offline rendering is always Standard; the user choice lives in
+            // `realtime_activation` and is restored when the mode returns.
+            let effective =
+                crate::clap::processor::effective_activation(render_mode, self.realtime_activation);
+            self.params.activation_precision = effective;
+            neural_amp_modeler_rs::math::activations::set_activation_tls(effective);
         }
         if render_mode == crate::clap::plugin::RENDER_MODE_OFFLINE
             && self.adaptive_compute.mode() != AdaptiveComputeMode::Off
@@ -164,7 +160,7 @@ impl<'a> NamClapProcessor<'a> {
                 .cold
                 .last_reported_tail_samples
                 .store(current_tail, Ordering::Relaxed);
-            if let Some(tail_ext) = self.host.get_extension::<HostTail>() {
+            if let Some(tail_ext) = self.host_tail {
                 tail_ext.changed(&mut self.host);
             }
         }
@@ -192,6 +188,7 @@ macro_rules! command_swap_parts {
                 cab_dry_delay: &mut $s.cab_dry_delay,
                 max_frames_count: $s.max_frames_count,
                 params: &mut $s.params,
+                realtime_activation: &mut $s.realtime_activation,
                 applied_os_factor: &mut $s.applied_os_factor,
                 cal_config: &mut $s.cal_config,
                 model_cal_meta: &mut $s.model_cal_meta,
@@ -209,6 +206,7 @@ macro_rules! command_swap_parts {
                 gate_dirty: &mut $s.gate_dirty,
                 gate_mode: &mut $s.gate_mode,
                 musical_gate: &mut $s.musical_gate,
+                silence_hyst: &mut $s.silence_hyst,
                 prewarm_pending: &mut $s.prewarm_pending,
                 prewarm_cost_ns_per_sample: &mut $s.prewarm_cost_ns_per_sample,
                 prewarm_zero_budget_count: &mut $s.prewarm_zero_budget_count,
@@ -216,6 +214,7 @@ macro_rules! command_swap_parts {
                 rt_status: &$s.rt_status,
                 gain_lut: $s.gain_lut,
                 host: &mut $s.host,
+                host_tail: $s.host_tail,
                 box_gc: $crate::clap::plugin::retired_box::RetiredBoxSink {
                     producer: &mut $s.box_gc_tx,
                     parking_lot: &mut $s.box_parking_lot,

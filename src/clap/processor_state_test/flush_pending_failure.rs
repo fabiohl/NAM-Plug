@@ -23,6 +23,7 @@ fn test_flush_pending_failure_retains_model_and_signals_error() {
     let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
 
     let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -30,6 +31,7 @@ fn test_flush_pending_failure_retains_model_and_signals_error() {
         )
         .unwrap()
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*main_thread_ptr };
 
     // Defer a model: pre-activation (buffer_size == 0) defers to pending_model.

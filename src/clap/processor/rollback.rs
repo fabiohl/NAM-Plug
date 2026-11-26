@@ -36,6 +36,10 @@ pub(crate) struct ActivateRollbackGuard<'a> {
     pub(crate) slimmable_rx: Option<Consumer<Box<SlimmableRebuild>>>,
     pub(crate) deactivated: Option<DeactivatedDspState>,
     pub(crate) pending_restart_os_factor: Option<PendingRestartOs>,
+    /// When `activate()` consumed a pending oversampling restart, the request
+    /// also cleared `restart_wanted`. If activation fails, both must be
+    /// restored so the host is asked to retry the restart.
+    pub(crate) restart_wanted_restore: bool,
 }
 
 /// Resources extracted from `ColdShared` during `activate()`.
@@ -57,6 +61,7 @@ impl<'a> ActivateRollbackGuard<'a> {
             slimmable_rx: None,
             deactivated: None,
             pending_restart_os_factor: None,
+            restart_wanted_restore: false,
         }
     }
 
@@ -82,6 +87,7 @@ impl<'a> ActivateRollbackGuard<'a> {
             .ok_or_else(|| PluginError::Message("slimmable_rx must be set before defuse"))?;
         self.deactivated = None;
         self.pending_restart_os_factor = None;
+        self.restart_wanted_restore = false;
         Ok(ActivatedResources {
             param_rx: rx,
             gc_tx: tx,
@@ -103,6 +109,14 @@ impl Drop for ActivateRollbackGuard<'_> {
                 .cold
                 .pending_restart_os_factor
                 .store(restart.encode(), Ordering::Release);
+        }
+        // Restore the request latch after the factor is visible, so the next
+        // `maybe_request_restart` observes a coherent (factor, wanted) pair.
+        if std::mem::take(&mut self.restart_wanted_restore) {
+            self.shared
+                .cold
+                .restart_wanted
+                .store(true, Ordering::Release);
         }
         if let Some(rx) = self.slimmable_rx.take() {
             *self
@@ -200,10 +214,9 @@ impl Drop for ActivateRollbackGuard<'_> {
             // The drained commands were consumed from the ring. Account for
             // them so a main-thread `wait_for_ack` does not stall on sequence
             // numbers that this rollback has already resolved.
-            self.shared
-                .cold
-                .cmd_last_ack
-                .fetch_add(drained, Ordering::Release);
+            let last_ack = &self.shared.cold.cmd_last_ack;
+            let processed_seq = last_ack.load(Ordering::Acquire).saturating_add(drained);
+            crate::clap::plugin::command_scheduler::ack_processed(last_ack, processed_seq);
 
             *self
                 .shared
@@ -285,6 +298,42 @@ mod tests {
         assert!(shared.cold.gc_tx.lock().unwrap().is_some());
         assert!(shared.cold.box_gc_tx.lock().unwrap().is_some());
         assert!(shared.cold.slimmable_rx.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_drop_rollback_restores_restart_wanted_after_consumed_pending() {
+        use neural_amp_modeler_rs::dsp::oversample::OversampleFactor;
+
+        let shared = make_test_shared();
+        let pending = PendingRestartOs::Pending(OversampleFactor::X4);
+        shared
+            .cold
+            .pending_restart_os_factor
+            .store(pending.encode(), Ordering::Release);
+        // Simulate `activate()` consuming the request: it takes the factor and
+        // clears the latch before any fallible stage runs.
+        let consumed =
+            PendingRestartOs::take(&shared.cold.pending_restart_os_factor, Ordering::Acquire);
+        shared.cold.restart_wanted.store(false, Ordering::Release);
+        assert_eq!(consumed, pending);
+
+        {
+            let mut guard = ActivateRollbackGuard::new(&shared);
+            guard.pending_restart_os_factor = Some(consumed);
+            guard.restart_wanted_restore = true;
+            // Dropping the guard simulates an `activate()` failure before
+            // `defuse()`.
+        }
+
+        assert_eq!(
+            PendingRestartOs::load(&shared.cold.pending_restart_os_factor, Ordering::Acquire),
+            pending,
+            "the pending factor must be restored for the next activation"
+        );
+        assert!(
+            shared.cold.restart_wanted.load(Ordering::Acquire),
+            "the host restart request must be re-raised after a failed activation"
+        );
     }
 
     #[test]

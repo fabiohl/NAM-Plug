@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Fábio Henrique de Lima Silva (fhl.bsb@gmail.com) All rights reserved.
-// SAFETY: FFI call, host pointer transmute, or raw graphics context access with verified lifetimes.
-#![warn(clippy::undocumented_unsafe_blocks)]
-
 //! Implementation of the main graphical user interface window.
 
 /// Dialog state for asynchronous file dialogs.

@@ -28,6 +28,7 @@ fn test_model_retained_on_spsc_full_no_ui_desync() {
 
     // Access the main thread to drive load_model directly.
     let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -35,6 +36,7 @@ fn test_model_retained_on_spsc_full_no_ui_desync() {
         )
         .unwrap()
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*main_thread_ptr };
 
     // Saturate the SPSC command ring (capacity 256).
@@ -109,6 +111,7 @@ fn test_spsc_full_retry_publishes_full_ui_commit() {
         )
         .unwrap();
 
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut plugin_instance) };
 
     // Seed a stale error: a later success must clear it (F-UX-06 contract).
@@ -186,6 +189,7 @@ fn test_cabsim_retained_on_spsc_full_no_ui_desync() {
     let _stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
 
     let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -193,6 +197,7 @@ fn test_cabsim_retained_on_spsc_full_no_ui_desync() {
         )
         .unwrap()
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*main_thread_ptr };
 
     // Under strict host restart policy: the *first* IR load (0 → partition latency)

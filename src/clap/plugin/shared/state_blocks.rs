@@ -368,6 +368,12 @@ pub struct ColdShared {
     pub last_applied_generation: AtomicU64,
     /// Pending restart oversampling request (`PendingRestartOs` encoding).
     pub pending_restart_os_factor: AtomicU32,
+    /// Set by every writer of `pending_restart_os_factor` that runs while the
+    /// plugin is active. The orchestrator consumes it at the end of the
+    /// callback (and `flush_inner` at its end) to issue exactly one
+    /// `request_restart()` per callback, even when the factor was published
+    /// before the callback began (GUI sync / SPSC drain).
+    pub restart_wanted: AtomicBool,
     /// Last tail length in samples reported to the host via `HostTail::changed`.
     pub last_reported_tail_samples: AtomicU32,
     /// In-flight parameter snapshot retained when SPSC push saturates.
@@ -411,6 +417,9 @@ pub struct ColdShared {
     /// Test-only per-instance hook to inject a panic inside `reset()`.
     #[cfg(any(test, feature = "testing"))]
     pub test_reset_panic_injection: AtomicBool,
+    /// Test-only per-instance hook to inject a panic inside the audio-thread `flush()`.
+    #[cfg(any(test, feature = "testing"))]
+    pub test_flush_panic_injection: AtomicBool,
 }
 
 impl ColdShared {
@@ -626,6 +635,7 @@ impl ColdShared {
             recovered_commands: Mutex::new(RecoveredCommands::new()),
             last_applied_generation: AtomicU64::new(0),
             pending_restart_os_factor: AtomicU32::new(0),
+            restart_wanted: AtomicBool::new(false),
             last_reported_tail_samples: AtomicU32::new(0),
             in_flight_params: Mutex::new(None),
             in_flight_calibration: Mutex::new(None),
@@ -650,6 +660,8 @@ impl ColdShared {
             test_panic_injection: AtomicBool::new(false),
             #[cfg(any(test, feature = "testing"))]
             test_reset_panic_injection: AtomicBool::new(false),
+            #[cfg(any(test, feature = "testing"))]
+            test_flush_panic_injection: AtomicBool::new(false),
         }
     }
 

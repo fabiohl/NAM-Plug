@@ -221,9 +221,6 @@ pub struct NamClapProcessor<'a> {
     /// 1. Copy of host input (variable sample_rate)
     pub(crate) buf_host_l: AlignedVec<f32>,
     pub(crate) buf_host_r: AlignedVec<f32>,
-    /// 2. Post-resampler input / Pre-model (f32 @ 48kHz)
-    pub(crate) buf_mid_l: AlignedVec<f32>,
-    pub(crate) buf_mid_r: AlignedVec<f32>,
     /// 3. Post-resampler output / Final (variable sample_rate)
     pub(crate) buf_out_l: AlignedVec<f32>,
     pub(crate) buf_out_r: AlignedVec<f32>,
@@ -268,6 +265,9 @@ pub struct NamClapProcessor<'a> {
     pub(crate) buf_cab_dry_r: AlignedVec<f32>,
     pub(crate) buf_cab_nam_in_l: AlignedVec<f32>,
     pub(crate) buf_cab_nam_in_r: AlignedVec<f32>,
+    /// Immutable all-zero source fed to the cabinet engine for its silent /
+    /// tail-drain input. Allocated zeroed in `activate()` and never written
+    /// afterwards, so `reset()` has nothing to clear.
     pub(crate) buf_cab_zero_l: AlignedVec<f32>,
     pub(crate) buf_cab_zero_r: AlignedVec<f32>,
     /// 6. WaveNet crossfade scratch buffers (motor 0.5.0 `run_inference`):
@@ -417,6 +417,9 @@ pub struct NamClapProcessor<'a> {
     /// Host audio processor handle. Used for `host.request_restart()` when
     /// structural latency changes are pending.
     pub(crate) host: HostAudioProcessorHandle<'a>,
+    /// Host `tail` extension resolved at activation (`None` when the host does not
+    /// implement it). Cached so the RT path never performs an extension lookup.
+    pub(crate) host_tail: Option<clack_extensions::tail::HostTail>,
     /// Processor failure containment latch.
     /// Latched to true when a panic occurs during audio processing or reset.
     /// In the poisoned state, process() silences audio and returns immediately with O(1) determinism,
@@ -472,6 +475,12 @@ pub struct NamClapProcessor<'a> {
     pub(crate) cached_inv_budget_permille: f32,
     /// Pre-calculated discrete EWMA smoothing coefficient (1.0 - exp(-dt / 0.250)).
     pub(crate) cached_ewma_alpha: f32,
+    /// Cached block sample count for RMS EWMA smoothing coefficient lookup.
+    pub(crate) cached_rms_samples: u32,
+    /// Cached effective sample rate for RMS EWMA smoothing coefficient lookup.
+    pub(crate) cached_rms_sample_rate: u32,
+    /// Pre-calculated discrete RMS EWMA smoothing coefficient (1.0 - exp(-dt / 0.300)).
+    pub(crate) cached_rms_ewma_alpha: f32,
     /// Pre-calculated 85% overload budget threshold in nanoseconds.
     pub(crate) cached_threshold_ns: u64,
     /// Pre-calculated block budget in microseconds for adaptive compute.

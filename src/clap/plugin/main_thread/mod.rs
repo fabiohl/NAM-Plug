@@ -11,6 +11,7 @@
 mod housekeeping;
 pub(crate) mod load;
 mod logging;
+pub(crate) use logging::lossy_cstring;
 pub(crate) mod model_loader;
 
 use super::command_scheduler::{CommandProducer, PushError};
@@ -496,56 +497,15 @@ impl<'a> NamClapMainThread<'a> {
     /// before serialisation. Shared by `state.rs` and `state_context.rs`.
     pub(crate) fn snapshot_params(&self) {
         let mut params = self.params.borrow_mut();
-        params.input_gain_db = f32::from_bits(
-            self.shared
-                .ui_to_rt
-                .param_input_gain
-                .load(std::sync::atomic::Ordering::Relaxed),
-        );
-        params.output_gain_db = f32::from_bits(
-            self.shared
-                .ui_to_rt
-                .param_output_gain
-                .load(std::sync::atomic::Ordering::Relaxed),
-        );
-        params.gate_threshold_db = f32::from_bits(
-            self.shared
-                .ui_to_rt
-                .param_gate_thresh
-                .load(std::sync::atomic::Ordering::Relaxed),
-        );
-        params.bypass = super::super::extensions::params::bypass_u32_to_bool(
-            self.shared
-                .ui_to_rt
-                .param_bypass
-                .load(std::sync::atomic::Ordering::Relaxed),
-        );
-        params.adaptive_compute =
-            neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(
-                self.shared
-                    .ui_to_rt
-                    .param_adaptive_compute
-                    .load(std::sync::atomic::Ordering::Relaxed) as f32,
-            );
-        params.slim_override = neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(
-            self.shared
-                .ui_to_rt
-                .param_slim_override
-                .load(std::sync::atomic::Ordering::Relaxed) as f32,
-        );
-        params.oversample = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(
-            self.shared
-                .ui_to_rt
-                .param_oversample
-                .load(std::sync::atomic::Ordering::Relaxed) as f32,
-        );
-        params.activation_precision =
-            neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(
-                self.shared
-                    .ui_to_rt
-                    .param_activation
-                    .load(std::sync::atomic::Ordering::Relaxed) as f32,
-            );
+        let snapshot = self.shared.processing_params_from_atomics();
+        params.input_gain_db = snapshot.input_gain_db;
+        params.output_gain_db = snapshot.output_gain_db;
+        params.gate_threshold_db = snapshot.gate_threshold_db;
+        params.bypass = snapshot.bypass;
+        params.adaptive_compute = snapshot.adaptive_compute;
+        params.slim_override = snapshot.slim_override;
+        params.oversample = snapshot.oversample;
+        params.activation_precision = snapshot.activation_precision;
         params.ir_path = lock_cold(&self.shared.cold.ir_path, "ir_path")
             .as_ref()
             .map(std::path::PathBuf::from);

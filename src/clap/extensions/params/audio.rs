@@ -35,9 +35,21 @@ impl PluginAudioProcessorParams for NamClapProcessor<'_> {
     fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
         // Isolate panics from this instance to protect the host.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(any(test, feature = "testing"))]
+            if self
+                .shared
+                .cold
+                .test_flush_panic_injection
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                panic!("Test injected audio flush panic");
+            }
             self.flush_inner(input, output);
         }));
         if let Err(err) = result {
+            // Same containment as `process()`: a panic on the audio thread latches
+            // the poisoned state so the host restart path takes over.
+            self.latch_poisoned();
             drop(err);
         }
     }
@@ -80,31 +92,9 @@ impl NamClapProcessor<'_> {
                 };
                 let id = clap_id.get();
                 let val = mod_event.amount() as f32;
-                let amount = if val.is_finite() { val } else { 0.0 };
-
-                match id {
-                    PARAM_INPUT_GAIN => {
-                        self.mod_input_gain = amount;
-                        self.smoother_in.set_target(
-                            self.gain_lut
-                                .db_to_linear(self.params.input_gain_db + amount),
-                        );
-                        param_changed = true;
-                    }
-                    PARAM_OUTPUT_GAIN => {
-                        self.mod_output_gain = amount;
-                        self.smoother_out.set_target(
-                            self.gain_lut
-                                .db_to_linear(self.params.output_gain_db + amount),
-                        );
-                        param_changed = true;
-                    }
-                    PARAM_GATE_THRESH => {
-                        self.mod_gate_thresh = amount;
-                        self.gate_dirty = true;
-                        param_changed = true;
-                    }
-                    _ => continue,
+                if matches!(id, PARAM_INPUT_GAIN | PARAM_OUTPUT_GAIN | PARAM_GATE_THRESH) {
+                    let _ = self.param_target().apply(id, val, true, true);
+                    param_changed = true;
                 }
             }
         }
@@ -124,5 +114,9 @@ impl NamClapProcessor<'_> {
         }
 
         self.check_tail_changed();
+        // A GUI/SPSC oversampling change applied here has no DSP block to
+        // reach the orchestrator's block-boundary hook, so consume the restart
+        // latch on this off-DSP flush path too.
+        self.maybe_request_restart();
     }
 }

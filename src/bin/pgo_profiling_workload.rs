@@ -321,9 +321,15 @@ fn iso8601_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as libc::time_t;
+    // SAFETY: `libc::tm` is a plain C struct for which the all-zero bit
+    // pattern is valid.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: `secs` is a valid `time_t` and `&mut tm` points to initialized
+    // storage that `gmtime_r` fills; it returns no aliasing pointer we retain.
     unsafe { libc::gmtime_r(&secs, &mut tm) };
     let mut buf = [0u8; 32];
+    // SAFETY: `buf` is a writable 32-byte array, the format string is a static
+    // NUL-terminated C literal, and `&tm` is initialized by `gmtime_r`.
     let len = unsafe {
         libc::strftime(
             buf.as_mut_ptr() as *mut libc::c_char,

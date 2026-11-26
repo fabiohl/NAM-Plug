@@ -39,6 +39,7 @@ fn test_model_load_rescan_includes_values_and_text() {
         )
         .expect("activate failed");
 
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*extract_plugin_main_thread(&mut instance) };
     mt.load_model(&model_file).expect("load_model failed");
 

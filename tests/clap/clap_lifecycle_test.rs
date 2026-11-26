@@ -32,7 +32,7 @@ impl HostHandlers for MyHost {
 fn test_clap_lifecycle() {
     let artifact = super::artifact_validator::TestedArtifact::resolve_and_hash();
 
-    // SAFETY: Loading a CLAP plugin is inherently unsafe because it executes code from a dynamic library.
+    // SAFETY: `PluginEntry::load` dynamically loads the just-built CLAP artifact and initializes its entry point; the test host keeps the artifact path and returned entry alive for the plugin lifetime and only calls through that validated entry.
     let entry = unsafe { PluginEntry::load(&artifact.path).expect("Failed to load plugin entry") };
     let host_info = HostInfo::new(
         "NAM-Plug Test Host",

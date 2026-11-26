@@ -103,8 +103,8 @@ fn test_multi_instance_rt_priority() {
         Vec::with_capacity(INSTANCE_COUNT);
 
     for _i in 0..INSTANCE_COUNT {
-        // SAFETY: Dynamic plugin loading.
         let entry =
+            // SAFETY: `PluginEntry::load` dynamically loads the just-built CLAP artifact and initializes its entry point; the test host keeps the artifact path/entry alive for the plugin lifetime and only calls through the returned validated entry.
             unsafe { PluginEntry::load(&artifact.path).expect("Failed to load plugin entry") };
 
         let mut plugin_instance = PluginInstance::<MultiHost>::new(
@@ -119,6 +119,7 @@ fn test_multi_instance_rt_priority() {
         .expect("Failed to create plugin instance");
 
         let raw_plugin_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+        // SAFETY: `raw_plugin_ptr` is the live plugin handle from this test's instance; `PluginWrapper::handle` invokes the closure synchronously while the instance stays alive, and the returned raw pointer is only dereferenced while that instance remains in scope.
         let shared_ptr = unsafe {
             clack_plugin::extensions::wrapper::PluginWrapper::<
                 nam_plug::clap::plugin::NamClapPlugin,
@@ -158,6 +159,7 @@ fn test_multi_instance_rt_priority() {
     }
 
     for (i, shared_ptr) in shared_refs.iter().enumerate() {
+        // SAFETY: `shared_ptr` points to the live plugin instance's shared state; the instance outlives these assertions and the dereference is read-only through interior-mutable fields.
         let shared = unsafe { &**shared_ptr };
         let priority = shared.cold.rt_status.rt_priority.load(Ordering::Relaxed);
         assert_ne!(
@@ -195,8 +197,8 @@ fn test_multi_instance_heap_audit_stress() {
         .map(|i| {
             let path = artifact_path.clone();
             std::thread::spawn(move || {
-                // SAFETY: Dynamic plugin loading.
                 let entry =
+                    // SAFETY: `PluginEntry::load` dynamically loads the just-built CLAP artifact and initializes its entry point; the test host keeps the artifact path/entry alive for the plugin lifetime and only calls through the returned validated entry.
                     unsafe { PluginEntry::load(&path).expect("Failed to load plugin entry") };
 
                 let host_info = HostInfo::new(

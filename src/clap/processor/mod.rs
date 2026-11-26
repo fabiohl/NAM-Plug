@@ -22,6 +22,21 @@
 
 mod activate;
 mod deactivated;
+
+/// Resolves the activation precision actually in effect for a render mode:
+/// offline rendering always uses `Standard`, while live mode preserves the
+/// user-selected `realtime` precision.
+#[inline]
+pub(crate) fn effective_activation(
+    render_mode: u32,
+    realtime: neural_amp_modeler_rs::common::params::ActivationPrecision,
+) -> neural_amp_modeler_rs::common::params::ActivationPrecision {
+    if render_mode == crate::clap::plugin::RENDER_MODE_OFFLINE {
+        neural_amp_modeler_rs::common::params::ActivationPrecision::Standard
+    } else {
+        realtime
+    }
+}
 mod dsp;
 #[cfg(any(test, feature = "testing"))]
 pub(crate) use dsp::orchestrator::audio_loop;
@@ -31,6 +46,23 @@ mod gc;
 #[cfg(feature = "heap-audit")]
 pub(crate) mod heap_audit;
 mod params;
+mod prewarm;
+mod reset;
+pub use prewarm::MAX_PLAUSIBLE_ELAPSED_NS;
+#[cfg(test)]
+pub(crate) use prewarm::PREWARM_STEP_SAMPLES_PER_CALLBACK;
+#[cfg(any(test, feature = "testing"))]
+pub(crate) use prewarm::TEST_PREWARM_ELAPSED_NS;
+
+use crate::clap::plugin::errors;
+use crate::clap::plugin::{NamClapMainThread, NamClapShared};
+use clack_plugin::prelude::*;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use neural_amp_modeler_rs::common::tsc::rdtsc_nanos;
+use neural_amp_modeler_rs::dsp::gate::GateParams;
+use neural_amp_modeler_rs::models::NamModel;
+use std::sync::atomic::Ordering;
+
 pub(crate) mod prewarm_policy;
 mod rollback;
 mod state;
@@ -74,52 +106,6 @@ pub(crate) static TEST_TELEMETRY_STALL_TARGET_INSTANCE: std::sync::atomic::Atomi
 /// concurrently running test.
 #[cfg(test)]
 pub(crate) static TEST_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Maximum plausible duration for an audio callback measurement or prewarm step (1 second).
-///
-/// Defense-in-depth against clock jumps, uncalibrated-to-calibrated flips, or timer anomalies.
-/// Measurements exceeding this threshold are discarded: they are not recorded in histograms,
-/// do not increment overload counters, and do not update prewarm cost or adaptive compute.
-pub const MAX_PLAUSIBLE_ELAPSED_NS: u64 = 1_000_000_000;
-
-/// Test-only hook to inject a prewarm step elapsed duration.
-#[cfg(any(test, feature = "testing"))]
-pub(crate) static TEST_PREWARM_ELAPSED_NS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-use crate::clap::plugin::errors;
-use crate::clap::plugin::{NamClapMainThread, NamClapShared};
-use clack_plugin::prelude::*;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use neural_amp_modeler_rs::common::tsc::rdtsc_nanos;
-use neural_amp_modeler_rs::dsp::gate::GateParams;
-use neural_amp_modeler_rs::models::NamModel;
-use std::sync::atomic::Ordering;
-
-/// Zeroed-sample stabilization budget drained per audio callback by the
-/// two-phase reset amortization window.
-///
-/// Sized so the worst-case post-reset callback — `reset()` phase zero +
-/// `NamModel::prewarm_step(k)` + a 64-frame block — stays under the audio
-/// callback deadline (1.33 ms @ 48 kHz; design target < 1.0 ms with 25%
-/// margin), measured per fixture on a pinned isolated core:
-///
-/// // Measured: 2026-10-06, release profile, pinned core 8, N=250 @ 48 kHz,
-/// // Block=64 (`test_reset_wall_clock_time_within_contract`, 4 runs):
-/// // k=1024 keeps the amortized window inside the 1.33 ms callback budget
-/// // for every family as measured — window `prewarm_step(k)` + contained
-/// // 64-frame dry block p50 ≈ 69 µs (LSTM), ≈ 48 µs (WaveNet A1 one-shot),
-/// // ≈ 0.87–0.93 ms (A2: chained cascade inference ≈ 0.87 µs/sample,
-/// // structural engine cost). The A2 *phase-zero* `prewarm_reset` zeroes the
-/// // cascade layer buffers in place (measured ≈ 2.0–2.2 ms p50) and is covered
-/// // by the budget scoped to LSTM/A1 (A2 carried by its own measured envelope —
-/// // a synchronous integral reset was 3.29 ms p50 + 55.7 µs block, so the
-/// // two-phase split still lowers the worst-case callback for A2 as well).
-///
-/// Multiple of 64 by contract (matches the engine's `WAVENET_MAX_NUM_FRAMES`
-/// and LSTM 512-sample chunking with no straggler partial chunks).
-#[cfg(test)]
-pub(crate) const PREWARM_STEP_SAMPLES_PER_CALLBACK: usize = prewarm_policy::PREWARM_STEP_MAX;
 
 /// Converts a panic payload into `PluginError` for `catch_unwind` guards.
 ///
@@ -171,6 +157,18 @@ fn silence_audio_ports(audio: &mut Audio) {
 /// Note: the entire `PluginAudioProcessor` impl must live in a single block
 /// (Rust E0119 — trait impls cannot be split across modules).
 impl<'a> NamClapProcessor<'a> {
+    /// Latches the poisoned containment state after a panic caught on the audio
+    /// thread: later callbacks take the O(1) silence path, the status flag lets the
+    /// main-thread watchdog request a restart, and the host is called back so the
+    /// restart is serviced promptly. Every containment site routes through here so
+    /// no panic path can silently continue processing.
+    pub(crate) fn latch_poisoned(&mut self) {
+        self.poisoned = true;
+        self.rt_status
+            .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
+        self.host.request_callback();
+    }
+
     /// One-shot RT-thread setup for the *current* audio thread.
     ///
     /// Runs from [`PluginAudioProcessor::start_processing`] (the CLAP
@@ -185,9 +183,9 @@ impl<'a> NamClapProcessor<'a> {
     ///    hot path;
     /// 3. applies DAZ/FTZ denormal flushing for the thread.
     ///
-    /// Idempotent and allocation-free: `stop_processing()` (and `reset()`)
-    /// re-arm the latch so a host that migrates the audio thread re-runs this
-    /// setup on the new thread before any further block is processed.
+    /// Idempotent and allocation-free: `stop_processing()` re-arms the latch so a
+    /// host that migrates the audio thread re-runs this setup on the new thread
+    /// before any further block is processed. `reset()` never re-arms it.
     pub(crate) fn apply_rt_thread_setup(&mut self) {
         self.rt_thread_setup_done = true;
         self.shared
@@ -285,10 +283,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             if let Err(err) = result {
                 // Processor poisoning containment: latch poisoned state and signal to main
                 // thread via atomic status flag.
-                self.poisoned = true;
-                self.rt_status
-                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
-                self.host.request_callback();
+                self.latch_poisoned();
                 drop(err);
             }
         }
@@ -533,10 +528,7 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
             Ok(r) => r,
             Err(err) => {
                 // Processor poisoning containment: Latch poisoned state and signal to main thread via atomic status flag.
-                self.poisoned = true;
-                self.rt_status
-                    .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
-                self.host.request_callback();
+                self.latch_poisoned();
                 silence_audio_ports(&mut audio);
                 Err(panic_to_error(err))
             }
@@ -544,318 +536,11 @@ impl<'a> PluginAudioProcessor<'a, NamClapShared, NamClapMainThread<'a>> for NamC
     }
 
     fn reset(&mut self) {
-        // If already poisoned, avoid running DSP reset state transitions.
-        if self.poisoned {
-            return;
-        }
-
-        // Full in-place, zero-alloc DSP state reset on timeline discontinuity
-        // (seek / loop relocation, `steady_time` regression).
-        //
-        // Reset target: "a freshly-initialized instance with the same
-        // configuration". Every *temporal* state (filter/delay-line history,
-        // phases, FIFOs, gate/adaptive FSM state, smoothers, scratch buffers)
-        // is cleared in place; every *configuration* (model, IR, params,
-        // applied oversampling factor, latency, preset) is preserved — nothing
-        // is deallocated or recreated on the audio thread.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            #[cfg(any(test, feature = "testing"))]
-            if self
-                .shared
-                .cold
-                .test_reset_panic_injection
-                .swap(false, Ordering::Relaxed)
-            {
-                panic!("Test injected reset panic");
-            }
-
-            // 1. Recurrent/FIR neural model state (WaveNet / LSTM / ConvNet /
-            //    Linear / Container): two-phase reset, phase zero —
-            //    `NamModel::prewarm_reset` clears the temporal state to the
-            //    freshly-built condition WITHOUT the stabilization feed
-            //    (ring/cepstral clearing only: in-place, zero-alloc, O(state);
-            //    the integral prewarm's inline zero feed measured 1.81 ms p99
-            //    for LSTM and 4.18 ms p99 for WaveNet A2 — moves
-            //    off the audio callback into the per-callback amortization
-            //    window below `process()`). The latch arms that window: every
-            //    following callback drains a fixed zeroed-sample budget and
-            //    holds its block on the latency-compensated dry path until
-            //    the model reports convergence, then resumes normal wet
-            //    processing with the first wet block equal to a fresh
-            //    instance's first block (engine split-vs-integral bit-exact
-            //    guarantee). Rate/buffer bookkeeping (`sample_rate`,
-            //    `max_buffer_size`) is session-constant while active, so the
-            //    integral reset's config re-statement is a no-op here.
-            if let Some(model) = &mut self.model_l {
-                model.prewarm_reset();
-                self.prewarm_pending = true;
-            }
-            let is_stereo_config = self
-                .shared
-                .cold
-                .selected_port_config
-                .load(Ordering::Relaxed)
-                == crate::clap::plugin::CONFIG_ID_STEREO;
-            if is_stereo_config && let Some(model) = &mut self.model_r {
-                model.prewarm_reset();
-                self.prewarm_pending = true;
-            }
-            if self.prewarm_pending {
-                self.shared
-                    .rt_to_ui
-                    .prewarm_pending
-                    .store(true, Ordering::Relaxed);
-            }
-            self.prewarm_zero_budget_count = 0;
-
-            // 2. Streaming resample adapter: clears its FIFOs, resets the
-            //    inner resampler and re-arms the priming budget — post-reset
-            //    cardinality matches a fresh activation.
-            self.stream.reset();
-
-            // 3. Polyphase resampler: clears phase accumulators and delay
-            //    lines (keeps host/model rates — config).
-            self.resampler.reset();
-
-            // 4. Oversampling engines (L/R): clears every half-band delay line,
-            //    phase counter and inter-stage scratch (keeps the applied
-            //    factor — config).
-            self.os_l.reset();
-            self.os_r.reset();
-
-            // 5. Cabinet slot (WAV IR convolution or neural NAM model): WAV IRs
-            //    clear FDL/FIFO memory synchronously in place, whereas neural
-            //    NAM slots never run `prewarm_reset`/`prewarm_step` in RT —
-            //    if dirty, RT latches `cab_needs_reset` and requests a fresh
-            //    off-RT converged slot while holding delayed dry.
-            match &mut self.cab_slot {
-                Some(cab @ crate::clap::extensions::cabinet::CabSlotDsp::WavIr(_)) => {
-                    cab.reset_wav_ir();
-                    self.cab_needs_reset = false;
-                }
-                Some(crate::clap::extensions::cabinet::CabSlotDsp::NamModel(_))
-                    if self.cab_nam_dirty =>
-                {
-                    self.cab_needs_reset = true;
-                    if !self.cab_bypass && !self.cab_nam_rebuild_in_flight {
-                        self.cab_nam_generation = self.cab_nam_generation.wrapping_add(1);
-                        self.shared
-                            .cold
-                            .cab_nam_rebuild_req
-                            .store((self.cab_nam_generation << 1) | 1, Ordering::Release);
-                        self.cab_nam_rebuild_in_flight = true;
-                    }
-                }
-                Some(crate::clap::extensions::cabinet::CabSlotDsp::NamModel(_)) | None => {
-                    self.cab_needs_reset = false;
-                }
-            }
-            self.cab_bypass_xfade = BypassCrossfader::new(self.cab_bypass);
-            self.cab_dry_delay.reset();
-
-            // 6. Noise-gate hysteresis FSMs back to the initial Open state
-            //    (unity multiplier, no ramp).
-            self.silence_hyst.reset();
-            self.mono_hyst.reset();
-
-            // 7. Adaptive compute FSM back to Full, aborting any in-flight
-            //    crossfade; preserves the user mode/override/slimmable config.
-            self.adaptive_compute.reset(&self.rt_status);
-
-            // 8. Parameter smoothers snap to their current target — the
-            //    current params are reapplied without a ramp that originates
-            //    in pre-reset state.
-            self.smoother_in.snap_to_target();
-            self.smoother_out.snap_to_target();
-            self.smoother_cal_in.snap_to_target();
-            self.smoother_cal_out.snap_to_target();
-
-            // 9. Bypass crossfader snaps to the current bypass state (no
-            //    mid-ramp blend left over from the pre-reset timeline).
-            self.bypass_xfade = BypassCrossfader::new(self.params.bypass);
-
-            // 10. Dry delay ring: clears pre-reset history while keeping the
-            //     current applied delay (`cached_effective_latency` did not
-            //     change — no resource was swapped).
-            self.dry_delay.reset();
-
-            // 11. Intermediate/scratch buffers zeroed so no pre-reset sample
-            //     survives in a stale slot.
-            self.buf_host_l.fill(0.0);
-            self.buf_host_r.fill(0.0);
-            self.buf_mid_l.fill(0.0);
-            self.buf_mid_r.fill(0.0);
-            self.buf_out_l.fill(0.0);
-            self.buf_out_r.fill(0.0);
-            self.buf_os_in_l.fill(0.0);
-            self.buf_os_in_r.fill(0.0);
-            self.buf_os_model_l.fill(0.0);
-            self.buf_os_model_r.fill(0.0);
-            self.buf_xfade_dry_l.fill(0.0);
-            self.buf_xfade_dry_r.fill(0.0);
-            self.buf_xfd_scratch_l.fill(0.0);
-            self.buf_xfd_scratch_r.fill(0.0);
-            self.buf_cab_dry_l.fill(0.0);
-            self.buf_cab_dry_r.fill(0.0);
-            self.buf_cab_nam_in_l.fill(0.0);
-            self.buf_cab_nam_in_r.fill(0.0);
-            self.buf_cab_zero_l.fill(0.0);
-            self.buf_cab_zero_r.fill(0.0);
-
-            // 12. Per-block caches a fresh activation starts with: gate cache
-            //     invalidated (recomputed from the preserved params on the
-            //     next block), modulation offsets zeroed, mono flag at the
-            //     default, telemetry cycle counter re-zeroed and the one-shot
-            //     RT-thread setup re-armed (re-runs on the next block via the
-            //     `process()` fallback, refreshing priority/CPU telemetry and
-            //     re-applying FTZ/DAZ on this thread).
-            self.scheduled_events.clear();
-            self.process_mono = true;
-            self.mod_input_gain = 0.0;
-            self.mod_output_gain = 0.0;
-            self.mod_gate_thresh = 0.0;
-            self.cached_threshold_open_sq = 0.0;
-            self.cached_threshold_close_sq = 0.0;
-            self.cached_gate_params = GateParams::default();
-            self.gate_dirty = true;
-            self.musical_gate.reset();
-            self.rt_thread_setup_done = false;
-        }));
-        if let Err(err) = result {
-            // Latch poisoned state and signal via atomic status flag.
-            self.poisoned = true;
-            self.rt_status
-                .set_flag(neural_amp_modeler_rs::common::spsc::RT_STATUS_PROCESSOR_POISONED);
-            self.host.request_callback();
-            drop(err);
-        }
+        self.reset_state();
     }
 }
 
 #[cfg(test)]
-#[path = "../processor_bypass_test.rs"]
-mod processor_bypass_test;
-
+mod tests;
 #[cfg(test)]
-#[path = "../processor_dual_mono_test.rs"]
-mod processor_dual_mono_test;
-
-#[cfg(test)]
-#[path = "../processor_stress_test.rs"]
-mod processor_stress_test;
-
-#[cfg(test)]
-#[path = "../processor_streaming_cardinality_test.rs"]
-mod processor_streaming_cardinality_test;
-
-#[cfg(test)]
-#[path = "../processor_gui_test.rs"]
-mod processor_gui_test;
-
-#[cfg(test)]
-#[path = "../processor_state_test.rs"]
-mod processor_state_test;
-
-#[cfg(test)]
-#[path = "../processor_heap_audit_test.rs"]
-mod processor_heap_audit_test;
-
-#[cfg(test)]
-#[path = "../processor_clip_test.rs"]
-mod processor_clip_test;
-
-#[cfg(test)]
-#[path = "../processor_gc_stress_test.rs"]
-mod processor_gc_stress_test;
-
-#[cfg(test)]
-#[path = "../processor_calibration_test.rs"]
-mod processor_calibration_test;
-
-#[cfg(test)]
-#[path = "../processor_automation_test.rs"]
-mod processor_automation_test;
-
-#[cfg(test)]
-#[path = "../processor_deactivate_reactivate_test.rs"]
-mod processor_deactivate_reactivate_test;
-
-#[cfg(test)]
-#[path = "../processor_restart_test.rs"]
-mod processor_restart_test;
-
-#[cfg(test)]
-#[path = "../processor_events_test.rs"]
-mod processor_events_test;
-
-#[cfg(test)]
-#[path = "../processor_slimmable_generation_test.rs"]
-mod processor_slimmable_generation_test;
-
-#[cfg(test)]
-#[path = "../processor_command_budget_test.rs"]
-mod processor_command_budget_test;
-
-#[cfg(all(test, feature = "heap-audit"))]
-#[path = "../processor_drain_latency_test.rs"]
-mod processor_drain_latency_test;
-
-#[cfg(test)]
-#[path = "../processor_swap_handler_test.rs"]
-mod processor_swap_handler_test;
-
-#[cfg(test)]
-#[path = "../processor_recovered_replay_test.rs"]
-mod processor_recovered_replay_test;
-
-#[cfg(test)]
-#[path = "../processor_latency_policy_test.rs"]
-mod processor_latency_policy_test;
-
-#[cfg(test)]
-#[path = "../processor_dry_delay_test.rs"]
-mod processor_dry_delay_test;
-
-#[cfg(test)]
-#[path = "../processor_tail_rearm_test.rs"]
-mod processor_tail_rearm_test;
-
-#[cfg(test)]
-#[path = "../processor_cabsim_block_test.rs"]
-mod processor_cabsim_block_test;
-
-#[cfg(test)]
-#[path = "../processor_reset_test.rs"]
-mod processor_reset_test;
-
-#[cfg(test)]
-#[path = "../processor_diagnostics_logging_test.rs"]
-mod processor_diagnostics_logging_test;
-
-#[cfg(test)]
-#[path = "../processor_multi_instance_isolation_test.rs"]
-mod processor_multi_instance_isolation_test;
-
-#[cfg(test)]
-#[path = "../processor_temporal_validation_test.rs"]
-mod processor_temporal_validation_test;
-
-#[cfg(test)]
-#[path = "../processor_rt_thread_test.rs"]
-mod processor_rt_thread_test;
-
-#[cfg(test)]
-#[path = "../processor_ftz_guard_test.rs"]
-mod processor_ftz_guard_test;
-
-#[cfg(test)]
-#[path = "../processor_telemetry_test.rs"]
-mod processor_telemetry_test;
-
-#[cfg(test)]
-#[path = "../processor_poisoning_test.rs"]
-mod processor_poisoning_test;
-
-#[cfg(test)]
-#[path = "../processor_oversize_block_test.rs"]
-mod processor_oversize_block_test;
+pub(crate) use tests::processor_poisoning_test;

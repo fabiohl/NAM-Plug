@@ -14,6 +14,7 @@ use crate::clap::plugin::shared::{LoadModelPayload, RestoreTxn};
 use crate::clap::plugin::{ClapParamPayload, NamClapShared, StructuralKind};
 use crate::clap::processor::dsp::dry_delay::DryDelayLine;
 use crate::clap::processor::dsp::musical_gate::MusicalNoiseGate;
+use crate::clap::processor::dsp::orchestrator::worker::apply_gate_mode_change;
 use crate::clap::processor::state::BypassCrossfader;
 use clack_extensions::tail::HostTail;
 use clack_plugin::host::HostAudioProcessorHandle;
@@ -48,6 +49,8 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     pub(in crate::clap::processor) cab_dry_delay: &'p mut DryDelayLine,
     pub(in crate::clap::processor) max_frames_count: usize,
     pub(in crate::clap::processor) params: &'p mut RtProcessingParams,
+    pub(in crate::clap::processor) realtime_activation:
+        &'p mut neural_amp_modeler_rs::common::params::ActivationPrecision,
     pub(in crate::clap::processor) applied_os_factor: &'p mut OversampleFactor,
     pub(in crate::clap::processor) cal_config: &'p mut CalibrationConfig,
     pub(in crate::clap::processor) model_cal_meta: &'p mut ModelCalibrationMeta,
@@ -65,6 +68,8 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     pub(in crate::clap::processor) gate_dirty: &'p mut bool,
     pub(in crate::clap::processor) gate_mode: &'p mut GateMode,
     pub(in crate::clap::processor) musical_gate: &'p mut MusicalNoiseGate,
+    pub(in crate::clap::processor) silence_hyst:
+        &'p mut neural_amp_modeler_rs::dsp::gate::DynamicHysteresis,
     pub(in crate::clap::processor) prewarm_pending: &'p mut bool,
     pub(in crate::clap::processor) prewarm_cost_ns_per_sample: &'p mut Option<f32>,
     pub(in crate::clap::processor) prewarm_zero_budget_count: &'p mut u32,
@@ -72,7 +77,11 @@ pub(crate) struct ClapCommandSwapHandler<'p, 'a> {
     pub(in crate::clap::processor) rt_status: &'p RtStatusFlags,
     pub(in crate::clap::processor) gain_lut: &'static GainLUT,
     pub(in crate::clap::processor) host: &'p mut HostAudioProcessorHandle<'a>,
+    pub(in crate::clap::processor) host_tail: Option<HostTail>,
     pub(in crate::clap::processor) box_gc: RetiredBoxSink<'p>,
+    /// Commands installed or discarded by this handler instance (one per
+    /// `process` callback). Starts at `0`, so an idle callback proves
+    /// "nothing drained" and skips the ack atomics entirely.
     pub(in crate::clap::processor) resolved: u64,
 }
 
@@ -94,7 +103,7 @@ impl RtSwapHandler for ClapCommandSwapHandler<'_, '_> {
 
     #[cold]
     fn install(&mut self, mut payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
-        self.resolved += 1;
+        self.resolved = self.resolved.wrapping_add(1);
         let taken = std::mem::replace(
             payload.as_mut(),
             ClapParamPayload::Params(RtProcessingParams::default()),
@@ -105,7 +114,7 @@ impl RtSwapHandler for ClapCommandSwapHandler<'_, '_> {
 
     #[cold]
     fn discard(&mut self, mut payload: Box<Self::Payload>, gc: &mut GcSink<'_>) {
-        self.resolved += 1;
+        self.resolved = self.resolved.wrapping_add(1);
         let taken = std::mem::replace(
             payload.as_mut(),
             ClapParamPayload::Params(RtProcessingParams::default()),
@@ -115,14 +124,17 @@ impl RtSwapHandler for ClapCommandSwapHandler<'_, '_> {
     }
 
     fn after_drain(&mut self, _gc: &mut GcSink<'_>) {
+        // Idle callback: zero atomic load and zero `fetch_max` RMW.
         if self.resolved == 0 {
             return;
         }
-        let last_ack = &self.shared.cold.cmd_last_ack;
-        last_ack.store(
-            last_ack.load(Ordering::Acquire) + self.resolved,
-            Ordering::Release,
-        );
+        let seq = self
+            .shared
+            .cold
+            .cmd_last_ack
+            .load(Ordering::Acquire)
+            .wrapping_add(self.resolved);
+        crate::clap::plugin::command_scheduler::ack_processed(&self.shared.cold.cmd_last_ack, seq);
     }
 }
 
@@ -141,11 +153,13 @@ impl ClapCommandSwapHandler<'_, '_> {
                 }
             }
             ClapParamPayload::GateMode(mode) => {
-                if mode != *self.gate_mode {
-                    *self.gate_mode = mode;
-                    self.musical_gate.reset();
-                    *self.gate_dirty = true;
-                }
+                apply_gate_mode_change(
+                    mode,
+                    self.gate_mode,
+                    self.musical_gate,
+                    self.silence_hyst,
+                    self.gate_dirty,
+                );
             }
             ClapParamPayload::CabBypass(bypass) => {
                 if bypass != *self.cab_bypass {
@@ -313,15 +327,10 @@ impl ClapCommandSwapHandler<'_, '_> {
 
         self.shared.cold.cancel_slimmable_request();
 
-        match self.model_l.as_ref() {
-            Some(model) if matches!(model.as_ref(), StaticModel::WavenetDyn(_)) => {
-                if let StaticModel::WavenetDyn(w) = model.as_ref() {
-                    self.adaptive_compute
-                        .set_wavenet_full_ch_rt(w.ch(), model.is_slimmable_capable());
-                }
-            }
-            _ => self.adaptive_compute.clear_wavenet_registration_rt(),
-        }
+        crate::clap::processor::dsp::install::on_model_installed(
+            self.model_l.as_deref(),
+            self.adaptive_compute,
+        );
 
         self.recompute_effective_latency();
     }
@@ -394,7 +403,7 @@ impl ClapCommandSwapHandler<'_, '_> {
                 .cold
                 .last_reported_tail_samples
                 .store(current_tail, Ordering::Relaxed);
-            if let Some(tail_ext) = self.host.get_extension::<HostTail>() {
+            if let Some(tail_ext) = self.host_tail {
                 tail_ext.changed(self.host);
             }
         }
@@ -451,11 +460,14 @@ impl ClapCommandSwapHandler<'_, '_> {
     #[cold]
     fn cold_apply_restore_txn(&mut self, txn: RestoreTxn, gc: &mut GcSink<'_>) {
         *self.cal_config = txn.calibration.sanitized();
-        if *self.gate_mode != txn.gate_mode {
-            *self.gate_mode = txn.gate_mode;
-            self.musical_gate.reset();
-            *self.gate_dirty = true;
-        } else if txn.model.is_some() {
+        let mode_changed = apply_gate_mode_change(
+            txn.gate_mode,
+            self.gate_mode,
+            self.musical_gate,
+            self.silence_hyst,
+            self.gate_dirty,
+        );
+        if !mode_changed && txn.model.is_some() {
             self.musical_gate.reset();
         }
         if let Some(model) = txn.model {

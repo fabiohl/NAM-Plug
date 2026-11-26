@@ -24,6 +24,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         // Create a fresh SPSC channel pair and populate it with 70 commands before activation.
@@ -109,6 +110,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let audio_config = PluginAudioConfiguration {
@@ -192,6 +194,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let audio_config = PluginAudioConfiguration {
@@ -257,6 +260,7 @@ mod tests {
     #[test]
     fn test_event_at_exact_boundary_clamped_and_flag_set() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let audio_config = PluginAudioConfiguration {
@@ -302,6 +306,7 @@ mod tests {
     #[test]
     fn test_in_order_events_do_not_set_timing_anomaly_flag() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let audio_config = PluginAudioConfiguration {
@@ -361,6 +366,7 @@ mod tests {
     #[test]
     fn test_empty_audio_fallback_drains_events() {
         let (_entry, _host_info, mut plugin_instance) = test_util::make_test_plugin();
+        // SAFETY: `extract_plugin_shared`/`extract_shared` returns a pointer into the live plugin instance owned by this test; the instance is kept alive and unmoved for the borrow, access goes through atomics/interior-mutable fields, and no `&mut` to the same shared state is alive.
         let shared = unsafe { &*test_util::extract_shared(&mut plugin_instance) };
 
         let audio_config = PluginAudioConfiguration {

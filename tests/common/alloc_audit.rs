@@ -55,6 +55,10 @@ pub struct CountingAllocator;
 pub use neural_amp_modeler_rs::common::alloc_audit::CountingAllocator;
 
 #[cfg(not(feature = "heap-audit"))]
+// SAFETY: `CountingAllocator` forwards every operation verbatim to `System`
+// with the caller-supplied layout/pointer and only bumps per-thread counters;
+// it owns no memory and imposes no additional invariants, so it upholds the
+// `GlobalAlloc` contract exactly as `System` does.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if is_tracking_active() {
@@ -62,6 +66,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
                 count.set(count.get() + 1);
             });
         }
+        // SAFETY: this trait method forwards the exact pointer/layout/new-size supplied by Rust's allocator contract to `System`; the wrapper only increments per-thread counters and never dereferences the pointer.
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -70,6 +75,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
                 count.set(count.get() + 1);
             });
         }
+        // SAFETY: this trait method forwards the exact pointer/layout/new-size supplied by Rust's allocator contract to `System`; the wrapper only increments per-thread counters and never dereferences the pointer.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -81,6 +87,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
                 count.set(count.get() + 1);
             });
         }
+        // SAFETY: this trait method forwards the exact pointer/layout/new-size supplied by Rust's allocator contract to `System`; the wrapper only increments per-thread counters and never dereferences the pointer.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }

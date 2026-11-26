@@ -1415,6 +1415,7 @@ fn bench_worstcase_remaining(c: &mut Criterion) {
                     out_l.iter().all(|s| s.is_finite()) && out_r.iter().all(|s| s.is_finite()),
                     "crossfade validation block was not fully rewritten with finite samples"
                 );
+                // SAFETY: `shared_ptr` points to the live benchmark plugin instance's shared state; the instance is alive for the whole measurement and the reference is only used through atomics.
                 let shared = unsafe { &*shared_ptr };
                 let actual = shared
                     .ui_to_rt

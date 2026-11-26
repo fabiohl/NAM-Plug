@@ -6,6 +6,7 @@
 
 pub mod channels;
 pub mod dry_delay;
+pub(crate) mod install;
 pub mod musical_gate;
 pub mod orchestrator;
 pub mod peaks;

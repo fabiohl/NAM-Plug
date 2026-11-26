@@ -377,6 +377,8 @@ fn apply_bench_affinity(core: usize) -> Result<usize, String> {
     // CPU index is the documented libc API. `sched_setaffinity` is called for
     // pid 0 (current thread) with the exact size of the set.
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is an initialized bitset, `core` is bounds-checked above,
+    // and both calls target pid 0 (current thread) with the set's exact size.
     unsafe {
         libc::CPU_ZERO(&mut set);
         libc::CPU_SET(core, &mut set);

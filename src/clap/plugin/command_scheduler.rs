@@ -38,6 +38,11 @@ use rtrb::{Consumer, Producer};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[inline]
+pub(crate) fn ack_processed(last_ack: &AtomicU64, processed_seq: u64) {
+    last_ack.fetch_max(processed_seq, Ordering::AcqRel);
+}
+
 /// Default capacity for the command SPSC ring buffer.
 /// 256 was chosen to safely handle parameter automation bursts
 /// while keeping memory footprint minimal (~8 KiB for pointers).
@@ -588,18 +593,18 @@ impl<'a> CommandConsumer<'a> {
     }
 
     /// Records that all commands up to sequence `seq` have been
-    /// processed (Release store).
+    /// processed (monotonic `fetch_max`, AcqRel).
     #[cfg(test)]
     pub fn ack_up_to(&self, seq: u64) {
-        self.last_ack.store(seq, Ordering::Release);
+        ack_processed(self.last_ack, seq);
     }
 
     /// Acknowledges the exact sequence number of the last command popped
-    /// by this consumer (Release store). Unlike the previous `ack_latest`,
+    /// by this consumer (monotonic `fetch_max`, AcqRel). Unlike the previous `ack_latest`,
     /// this never acks commands still queued in the ring — only those
     /// actually consumed.
     pub fn ack_processed(&self) {
-        self.last_ack.store(self.processed_seq, Ordering::Release);
+        ack_processed(self.last_ack, self.processed_seq);
     }
 
     /// Returns the inner SPSC consumer for channel restoration

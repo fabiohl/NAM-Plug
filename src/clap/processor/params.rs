@@ -19,15 +19,81 @@ use crate::clap::extensions::params::{
     PARAM_ACTIVATION, PARAM_ADAPTIVE_COMPUTE, PARAM_BYPASS, PARAM_CAB_BYPASS,
     PARAM_CALIBRATE_INPUT, PARAM_GATE_MODE, PARAM_GATE_THRESH, PARAM_INPUT_CALIBRATION_LEVEL,
     PARAM_INPUT_GAIN, PARAM_OUTPUT_GAIN, PARAM_OUTPUT_MODE, PARAM_OVERSAMPLE, PARAM_SLIM_OVERRIDE,
-    bypass_bool_to_u32, bypass_f32_to_bool, bypass_u32_to_bool, sanitize_param_value,
+    bypass_u32_to_bool, sanitize_param_value,
 };
 use crate::clap::plugin::PendingRestartOs;
-use crate::clap::processor::events::{ClapCommandSwapHandler, command_swap_parts};
+use crate::clap::processor::dsp::orchestrator::worker::ParamTarget;
+use crate::clap::processor::events::ClapCommandSwapHandler;
 use neural_amp_modeler_rs::common::params::RtProcessingParams;
-use neural_amp_modeler_rs::common::spsc::RT_STATUS_NEEDS_OS_REBUILD;
 use std::sync::atomic::Ordering;
 
 impl<'a> NamClapProcessor<'a> {
+    #[inline]
+    pub(crate) fn param_target(&mut self) -> ParamTarget<'_> {
+        ParamTarget {
+            params: &mut self.params,
+            cab_bypass: &mut self.cab_bypass,
+            cal_config: &mut self.cal_config,
+            model_cal_meta: &self.model_cal_meta,
+            model_input_mult_adj: &mut self.model_input_mult_adj,
+            model_output_mult_adj: &mut self.model_output_mult_adj,
+            smoother_in: &mut self.smoother_in,
+            smoother_out: &mut self.smoother_out,
+            smoother_cal_in: &mut self.smoother_cal_in,
+            smoother_cal_out: &mut self.smoother_cal_out,
+            gate_dirty: &mut self.gate_dirty,
+            gate_mode: &mut self.gate_mode,
+            musical_gate: &mut self.musical_gate,
+            mod_input_gain: &mut self.mod_input_gain,
+            mod_output_gain: &mut self.mod_output_gain,
+            mod_gate_thresh: &mut self.mod_gate_thresh,
+            adaptive_compute: &mut self.adaptive_compute,
+            rt_status: &self.rt_status,
+            ui_to_rt: &self.shared.ui_to_rt,
+            gain_lut: self.gain_lut,
+            buffer_size: self.shared.cold.buffer_size.load(Ordering::Relaxed),
+            pending_restart_os_factor: &self.shared.cold.pending_restart_os_factor,
+            restart_wanted: &self.shared.cold.restart_wanted,
+            render_mode: &self.shared.cold.render_mode,
+            realtime_activation: &mut self.realtime_activation,
+            silence_hyst: &mut self.silence_hyst,
+        }
+    }
+
+    /// Issues at most one `request_restart()` for an oversampling change
+    /// latched during this callback (or already pending before it began).
+    ///
+    /// The latch is published by every writer of
+    /// `pending_restart_os_factor` while active and consumed here with a
+    /// single `swap`, so GUI sync and the SPSC drain — both of which run
+    /// before the DSP block — can no longer be masked by a before/after
+    /// comparison inside the same callback.
+    #[inline]
+    pub(crate) fn maybe_request_restart(&self) {
+        // Fast path: no restart latched means zero RMW on the hot path. Only
+        // when a writer published `restart_wanted` do we pay for the swap.
+        if !self.shared.cold.restart_wanted.load(Ordering::Relaxed) {
+            return;
+        }
+        if !self
+            .shared
+            .cold
+            .restart_wanted
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        // Pair with the `Release` that latched the factor: consume the request
+        // first, then read the factor it refers to with `Acquire`.
+        let pending = PendingRestartOs::load(
+            &self.shared.cold.pending_restart_os_factor,
+            Ordering::Acquire,
+        );
+        if pending != PendingRestartOs::None {
+            self.host.request_restart();
+        }
+    }
+
     // ── Write helpers (Host Events path) ──────────────────────────
 
     /// Sets the input gain in decibels.
@@ -38,14 +104,7 @@ impl<'a> NamClapProcessor<'a> {
     /// and recalculates the linear input smoother target via `gain_lut` including
     /// any active host parameter modulation.
     pub(crate) fn set_input_gain(&mut self, db: f32) {
-        let db = sanitize_param_value(PARAM_INPUT_GAIN, db);
-        self.params.input_gain_db = db;
-        self.shared
-            .ui_to_rt
-            .param_input_gain
-            .store(db.to_bits(), Ordering::Relaxed);
-        self.smoother_in
-            .set_target(self.gain_lut.db_to_linear(db + self.mod_input_gain));
+        let _ = self.param_target().apply(PARAM_INPUT_GAIN, db, false, true);
     }
 
     /// Sets the output gain in decibels.
@@ -56,14 +115,9 @@ impl<'a> NamClapProcessor<'a> {
     /// and recalculates the linear output smoother target via `gain_lut` including
     /// any active host parameter modulation.
     pub(crate) fn set_output_gain(&mut self, db: f32) {
-        let db = sanitize_param_value(PARAM_OUTPUT_GAIN, db);
-        self.params.output_gain_db = db;
-        self.shared
-            .ui_to_rt
-            .param_output_gain
-            .store(db.to_bits(), Ordering::Relaxed);
-        self.smoother_out
-            .set_target(self.gain_lut.db_to_linear(db + self.mod_output_gain));
+        let _ = self
+            .param_target()
+            .apply(PARAM_OUTPUT_GAIN, db, false, true);
     }
 
     /// Sets the noise gate threshold in decibels.
@@ -73,13 +127,9 @@ impl<'a> NamClapProcessor<'a> {
     /// `Ordering::Relaxed`, and marks `gate_dirty = true` to trigger lazy
     /// recalculation of gate envelope coefficients and linear threshold.
     pub(crate) fn set_gate_threshold(&mut self, db: f32) {
-        let db = sanitize_param_value(PARAM_GATE_THRESH, db);
-        self.params.gate_threshold_db = db;
-        self.shared
-            .ui_to_rt
-            .param_gate_thresh
-            .store(db.to_bits(), Ordering::Relaxed);
-        self.gate_dirty = true;
+        let _ = self
+            .param_target()
+            .apply(PARAM_GATE_THRESH, db, false, true);
     }
 
     /// Sets the plugin processing bypass state.
@@ -88,24 +138,14 @@ impl<'a> NamClapProcessor<'a> {
     /// to boolean, updates processor params, and stores the atomic state in
     /// `ui_to_rt.param_bypass` with `Ordering::Relaxed`.
     pub(crate) fn set_bypass(&mut self, val: f32) {
-        let val = sanitize_param_value(PARAM_BYPASS, val);
-        let bypass = bypass_f32_to_bool(val);
-        self.params.bypass = bypass;
-        self.shared
-            .ui_to_rt
-            .param_bypass
-            .store(bypass_bool_to_u32(bypass), Ordering::Relaxed);
+        let _ = self.param_target().apply(PARAM_BYPASS, val, false, true);
     }
 
     /// Sets the independent cabinet bypass state (`PARAM_CAB_BYPASS`).
     pub(crate) fn set_cab_bypass(&mut self, val: f32) {
-        let val = sanitize_param_value(PARAM_CAB_BYPASS, val);
-        let bypass = bypass_f32_to_bool(val);
-        self.cab_bypass = bypass;
-        self.shared
-            .ui_to_rt
-            .param_cab_bypass
-            .store(bypass_bool_to_u32(bypass), Ordering::Relaxed);
+        let _ = self
+            .param_target()
+            .apply(PARAM_CAB_BYPASS, val, false, true);
     }
 
     /// Sets the adaptive compute mode.
@@ -115,14 +155,9 @@ impl<'a> NamClapProcessor<'a> {
     /// `Ordering::Relaxed`, and updates the adaptive compute controller while
     /// binding real-time status reporting.
     pub(crate) fn set_adaptive_compute(&mut self, val: f32) {
-        let val = sanitize_param_value(PARAM_ADAPTIVE_COMPUTE, val);
-        let mode = neural_amp_modeler_rs::common::params::AdaptiveComputeMode::from_f32(val);
-        self.params.adaptive_compute = mode;
-        self.shared
-            .ui_to_rt
-            .param_adaptive_compute
-            .store(mode as u32, Ordering::Relaxed);
-        self.adaptive_compute.set_mode(mode, &self.rt_status);
+        let _ = self
+            .param_target()
+            .apply(PARAM_ADAPTIVE_COMPUTE, val, false, true);
     }
 
     /// Sets the slimmable neural model layer override.
@@ -131,123 +166,54 @@ impl<'a> NamClapProcessor<'a> {
     /// `Half`, `Quarter`), publishes to `ui_to_rt.param_slim_override` with
     /// `Ordering::Relaxed`, and updates the controller.
     pub(crate) fn set_slim_override(&mut self, val: f32) {
-        let val = sanitize_param_value(PARAM_SLIM_OVERRIDE, val);
-        let ov = neural_amp_modeler_rs::dsp::adaptive::SlimOverride::from_f32(val);
-        self.params.slim_override = ov;
-        self.shared
-            .ui_to_rt
-            .param_slim_override
-            .store(ov as u32, Ordering::Relaxed);
-        self.adaptive_compute.set_slim_override(ov);
+        let _ = self
+            .param_target()
+            .apply(PARAM_SLIM_OVERRIDE, val, false, true);
     }
 
     /// Sets the DSP oversampling factor (`Off`, `2x`, `4x`).
-    ///
-    /// Sanitizes the float value and converts to `OversampleFactor`. If the factor
-    /// differs from current configuration, updates processor params, stores the
-    /// atomic value in `ui_to_rt.param_oversample` with `Ordering::Relaxed`, and
-    /// invokes `apply_oversample` to enforce CLAP latency and restart policies.
     pub(crate) fn set_oversample(&mut self, val: f32) {
-        let val = sanitize_param_value(PARAM_OVERSAMPLE, val);
-        let factor = neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(val);
-        if factor != self.params.oversample {
-            self.params.oversample = factor;
-            self.shared
-                .ui_to_rt
-                .param_oversample
-                .store(factor.to_f32() as u32, Ordering::Relaxed);
-            self.apply_oversample(factor);
-        }
+        let _ = self
+            .param_target()
+            .apply(PARAM_OVERSAMPLE, val, false, true);
     }
 
     /// Sets the neural network activation function precision (`Fast` or `Accurate`).
     ///
-    /// Sanitizes the float value and converts to `ActivationPrecision`. If changed,
-    /// updates processor params, publishes to `ui_to_rt.param_activation` with
-    /// `Ordering::Relaxed`, and configures the thread-local storage activation mode.
+    /// Sanitizes the float value and converts to `ActivationPrecision`. The
+    /// user choice is stored in `realtime_activation`; the effective precision
+    /// applied to the DSP is `Standard` while rendering offline, so automation
+    /// can never change an offline render's arithmetic.
     pub(crate) fn set_activation(&mut self, val: f32) {
-        let val = sanitize_param_value(PARAM_ACTIVATION, val);
-        let mode = neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(val);
-        if mode != self.params.activation_precision {
-            self.params.activation_precision = mode;
-            self.shared
-                .ui_to_rt
-                .param_activation
-                .store(mode as u32, Ordering::Relaxed);
-            neural_amp_modeler_rs::math::activations::set_activation_tls(mode);
-        }
+        let _ = self
+            .param_target()
+            .apply(PARAM_ACTIVATION, val, false, true);
     }
 
     /// Enables or disables input level calibration prior to the neural model.
     pub(crate) fn set_calibrate_input(&mut self, val: f32) {
-        let sanitized = sanitize_param_value(PARAM_CALIBRATE_INPUT, val);
-        let enabled = sanitized >= 0.5;
-        if enabled != self.cal_config.calibrate_input {
-            self.cal_config.calibrate_input = enabled;
-            self.shared
-                .ui_to_rt
-                .param_calibrate_input
-                .store(u32::from(enabled), Ordering::Relaxed);
-            self.retarget_calibration_smoothers();
-        }
+        let _ = self
+            .param_target()
+            .apply(PARAM_CALIBRATE_INPUT, val, false, true);
     }
 
     /// Sets the converter 0 dBFS input calibration reference level in dBu (`[-60, 60]`).
     pub(crate) fn set_input_calibration_level(&mut self, val: f32) {
-        let sanitized = sanitize_param_value(PARAM_INPUT_CALIBRATION_LEVEL, val);
-        if (sanitized - self.cal_config.input_calibration_level_dbu).abs() > f32::EPSILON {
-            self.cal_config.input_calibration_level_dbu = sanitized;
-            self.shared
-                .ui_to_rt
-                .param_input_calibration_level
-                .store(sanitized.to_bits(), Ordering::Relaxed);
-            self.retarget_calibration_smoothers();
-        }
+        let _ = self
+            .param_target()
+            .apply(PARAM_INPUT_CALIBRATION_LEVEL, val, false, true);
     }
 
     /// Sets the neural amp model output compensation mode (`Raw`, `Normalized`, `Calibrated`).
     pub(crate) fn set_output_mode(&mut self, val: f32) {
-        let sanitized = sanitize_param_value(PARAM_OUTPUT_MODE, val);
-        let mode = crate::clap::extensions::calibration::OutputMode::from_f32(sanitized);
-        if mode != self.cal_config.output_mode {
-            self.cal_config.output_mode = mode;
-            self.shared
-                .ui_to_rt
-                .param_output_mode
-                .store(mode.to_u32(), Ordering::Relaxed);
-            self.retarget_calibration_smoothers();
-        }
+        let _ = self
+            .param_target()
+            .apply(PARAM_OUTPUT_MODE, val, false, true);
     }
 
     /// Sets the noise gate operating mode (`Silence` legacy vs `Musical` expander).
     pub(crate) fn set_gate_mode(&mut self, val: f32) {
-        let sanitized = sanitize_param_value(PARAM_GATE_MODE, val);
-        let mode = GateMode::from_f32(sanitized);
-        if mode != self.gate_mode {
-            self.gate_mode = mode;
-            self.shared
-                .ui_to_rt
-                .param_gate_mode
-                .store(mode.to_u32(), Ordering::Relaxed);
-            self.musical_gate.reset();
-            self.silence_hyst.reset();
-            self.gate_dirty = true;
-        }
-    }
-
-    // ── SPSC full-apply ───────────────────────────────────────────
-
-    /// Applies an oversampling factor change (host-event or SPSC snapshot).
-    ///
-    /// Thin adapter: the actual latency policy lives on
-    /// [`ClapCommandSwapHandler::apply_oversample`]; this processor view
-    /// exists for the host-event path (`set_oversample`) and the GUI sync.
-    pub(crate) fn apply_oversample(
-        &mut self,
-        factor: neural_amp_modeler_rs::dsp::oversample::OversampleFactor,
-    ) {
-        let (mut handler, _gc) = command_swap_parts!(self);
-        handler.apply_oversample(factor);
+        let _ = self.param_target().apply(PARAM_GATE_MODE, val, false, true);
     }
 
     // ── GUI sync helpers ──────────────────────────────────────────
@@ -269,8 +235,9 @@ impl<'a> NamClapProcessor<'a> {
         if shared_db != self.params.input_gain_db
             || (self.smoother_in.target_value() - target).abs() > 1e-6
         {
-            self.params.input_gain_db = shared_db;
-            self.smoother_in.set_target(target);
+            let _ = self
+                .param_target()
+                .apply_synced(PARAM_INPUT_GAIN, shared_db, false, true);
         }
     }
 
@@ -291,8 +258,9 @@ impl<'a> NamClapProcessor<'a> {
         if shared_db != self.params.output_gain_db
             || (self.smoother_out.target_value() - target).abs() > 1e-6
         {
-            self.params.output_gain_db = shared_db;
-            self.smoother_out.set_target(target);
+            let _ = self
+                .param_target()
+                .apply_synced(PARAM_OUTPUT_GAIN, shared_db, false, true);
         }
     }
 
@@ -310,8 +278,9 @@ impl<'a> NamClapProcessor<'a> {
         );
         let shared_db = sanitize_param_value(PARAM_GATE_THRESH, raw_db);
         if shared_db != self.params.gate_threshold_db {
-            self.params.gate_threshold_db = shared_db;
-            self.gate_dirty = true;
+            let _ = self
+                .param_target()
+                .apply_synced(PARAM_GATE_THRESH, shared_db, false, true);
         }
     }
 
@@ -323,7 +292,12 @@ impl<'a> NamClapProcessor<'a> {
         let shared_bypass =
             bypass_u32_to_bool(self.shared.ui_to_rt.param_bypass.load(Ordering::Relaxed));
         if shared_bypass != self.params.bypass {
-            self.params.bypass = shared_bypass;
+            let _ = self.param_target().apply_synced(
+                PARAM_BYPASS,
+                if shared_bypass { 1.0 } else { 0.0 },
+                false,
+                true,
+            );
         }
     }
 
@@ -336,7 +310,12 @@ impl<'a> NamClapProcessor<'a> {
                 .load(Ordering::Relaxed),
         );
         if shared_bypass != self.cab_bypass {
-            self.cab_bypass = shared_bypass;
+            let _ = self.param_target().apply_synced(
+                PARAM_CAB_BYPASS,
+                if shared_bypass { 1.0 } else { 0.0 },
+                false,
+                true,
+            );
         }
     }
 
@@ -356,9 +335,9 @@ impl<'a> NamClapProcessor<'a> {
         if shared_adaptive != self.params.adaptive_compute
             || shared_adaptive != self.adaptive_compute.mode()
         {
-            self.params.adaptive_compute = shared_adaptive;
-            self.adaptive_compute
-                .set_mode(shared_adaptive, &self.rt_status);
+            let _ =
+                self.param_target()
+                    .apply_synced(PARAM_ADAPTIVE_COMPUTE, sanitized, false, true);
         }
     }
 
@@ -378,8 +357,9 @@ impl<'a> NamClapProcessor<'a> {
         if shared_override != self.params.slim_override
             || shared_override != self.adaptive_compute.slim_override()
         {
-            self.params.slim_override = shared_override;
-            self.adaptive_compute.set_slim_override(shared_override);
+            let _ = self
+                .param_target()
+                .apply_synced(PARAM_SLIM_OVERRIDE, sanitized, false, true);
         }
     }
 
@@ -397,8 +377,9 @@ impl<'a> NamClapProcessor<'a> {
         let shared_factor =
             neural_amp_modeler_rs::dsp::oversample::OversampleFactor::from_f32(sanitized);
         if shared_factor != self.params.oversample {
-            self.params.oversample = shared_factor;
-            self.apply_oversample(shared_factor);
+            let _ = self
+                .param_target()
+                .apply_synced(PARAM_OVERSAMPLE, sanitized, false, true);
         }
     }
 
@@ -415,32 +396,39 @@ impl<'a> NamClapProcessor<'a> {
         let sanitized = sanitize_param_value(PARAM_ACTIVATION, raw);
         let shared_mode =
             neural_amp_modeler_rs::common::params::ActivationPrecision::from_f32(sanitized);
-        if shared_mode != self.params.activation_precision {
-            self.params.activation_precision = shared_mode;
-            neural_amp_modeler_rs::math::activations::set_activation_tls(shared_mode);
+        if shared_mode != self.realtime_activation {
+            let _ = self
+                .param_target()
+                .apply_synced(PARAM_ACTIVATION, sanitized, false, true);
         }
-    }
-
-    /// Recomputes and retargets the calibration smoothers from the active model
-    /// calibration metadata and `self.cal_config`.
-    pub(crate) fn retarget_calibration_smoothers(&mut self) {
-        let (in_mult, out_mult) =
-            crate::clap::extensions::calibration::compute_calibration_multipliers(
-                self.model_cal_meta,
-                self.cal_config,
-            );
-        self.model_input_mult_adj = in_mult;
-        self.model_output_mult_adj = out_mult;
-        self.smoother_cal_in.set_target(in_mult);
-        self.smoother_cal_out.set_target(out_mult);
     }
 
     /// Synchronizes input calibration and output mode configuration from `UiToRt`.
     pub(super) fn sync_calibration_from_gui(&mut self) {
         let shared_cal = self.shared.calibration_config();
-        if shared_cal != self.cal_config {
-            self.cal_config = shared_cal;
-            self.retarget_calibration_smoothers();
+        if shared_cal.calibrate_input != self.cal_config.calibrate_input {
+            let _ = self.param_target().apply_synced(
+                PARAM_CALIBRATE_INPUT,
+                if shared_cal.calibrate_input { 1.0 } else { 0.0 },
+                false,
+                true,
+            );
+        }
+        if shared_cal.input_calibration_level_dbu != self.cal_config.input_calibration_level_dbu {
+            let _ = self.param_target().apply_synced(
+                PARAM_INPUT_CALIBRATION_LEVEL,
+                shared_cal.input_calibration_level_dbu,
+                false,
+                true,
+            );
+        }
+        if shared_cal.output_mode != self.cal_config.output_mode {
+            let _ = self.param_target().apply_synced(
+                PARAM_OUTPUT_MODE,
+                shared_cal.output_mode.to_f32(),
+                false,
+                true,
+            );
         }
     }
 
@@ -448,10 +436,12 @@ impl<'a> NamClapProcessor<'a> {
     pub(super) fn sync_gate_mode_from_gui(&mut self) {
         let shared_mode = self.shared.gate_mode();
         if shared_mode != self.gate_mode {
-            self.gate_mode = shared_mode;
-            self.musical_gate.reset();
-            self.silence_hyst.reset();
-            self.gate_dirty = true;
+            let _ = self.param_target().apply_synced(
+                PARAM_GATE_MODE,
+                shared_mode.to_f32(),
+                false,
+                true,
+            );
         }
     }
 
@@ -522,29 +512,13 @@ impl ClapCommandSwapHandler<'_, '_> {
         &mut self,
         factor: neural_amp_modeler_rs::dsp::oversample::OversampleFactor,
     ) {
-        let buffer_size = self.shared.cold.buffer_size.load(Ordering::Relaxed);
-        if buffer_size > 0 {
-            let prev = PendingRestartOs::load(
-                &self.shared.cold.pending_restart_os_factor,
-                Ordering::Relaxed,
-            );
-            if prev != PendingRestartOs::Pending(factor) {
-                PendingRestartOs::Pending(factor).store(
-                    &self.shared.cold.pending_restart_os_factor,
-                    Ordering::Release,
-                );
-                // Note: The orchestrator at block boundaries is the single owner of
-                // self.host.request_restart() (F-PLUG-06 / T-07.3), coalescing multiple
-                // changes within the same block to avoid duplicate restart requests.
-            }
-        } else {
-            // Plugin is not active yet — safe to flag the main thread for
-            // an immediate rebuild (allocate off-RT, deliver via SPSC).
-            self.rt_status
-                .requested_os_factor
-                .store(factor.to_f32() as u32, Ordering::Relaxed);
-            self.rt_status.set_flag_release(RT_STATUS_NEEDS_OS_REBUILD);
-        }
+        crate::clap::processor::dsp::orchestrator::worker::latch_oversample_restart(
+            factor,
+            self.shared.cold.buffer_size.load(Ordering::Relaxed),
+            &self.shared.cold.pending_restart_os_factor,
+            &self.shared.cold.restart_wanted,
+            self.rt_status,
+        );
     }
 
     /// Applies a full parameter snapshot delivered over the command ring
@@ -565,10 +539,18 @@ impl ClapCommandSwapHandler<'_, '_> {
         let adaptive_changed = self.params.adaptive_compute != new_params.adaptive_compute;
         let slim_override_changed = self.params.slim_override != new_params.slim_override;
         let oversample_changed = self.params.oversample != new_params.oversample;
-        let activation_changed =
-            self.params.activation_precision != new_params.activation_precision;
+        let activation_changed = *self.realtime_activation != new_params.activation_precision;
         let gate_changed = self.params.gate_threshold_db != new_params.gate_threshold_db;
+        let requested_activation = new_params.activation_precision;
         *self.params = new_params;
+        if activation_changed {
+            *self.realtime_activation = requested_activation;
+        }
+        let effective_activation = crate::clap::processor::effective_activation(
+            self.shared.cold.render_mode.load(Ordering::Acquire),
+            *self.realtime_activation,
+        );
+        self.params.activation_precision = effective_activation;
         self.smoother_in.set_target(
             self.gain_lut
                 .db_to_linear(self.params.input_gain_db + *self.mod_input_gain),
@@ -589,9 +571,7 @@ impl ClapCommandSwapHandler<'_, '_> {
             self.apply_oversample(self.params.oversample);
         }
         if activation_changed {
-            neural_amp_modeler_rs::math::activations::set_activation_tls(
-                self.params.activation_precision,
-            );
+            neural_amp_modeler_rs::math::activations::set_activation_tls(effective_activation);
         }
         if gate_changed {
             *self.gate_dirty = true;

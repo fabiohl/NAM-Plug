@@ -990,3 +990,59 @@ fn test_sequence_ack_gapless_under_deferral() {
     assert!(!drain.has_deferred(), "the parked command must be resolved");
     assert!(drain.is_empty(), "the ring must be fully drained");
 }
+
+#[test]
+fn test_concurrent_ack_writers_are_monotonic_and_lossless() {
+    const WRITERS: usize = 8;
+    const PER_WRITER: u64 = 10_000;
+    let total = WRITERS as u64 * PER_WRITER;
+    let last_ack = Arc::new(AtomicU64::new(0));
+    let next_seq = Arc::new(AtomicU64::new(0));
+    let start = Arc::new(std::sync::Barrier::new(WRITERS + 1));
+    let done = Arc::new(std::sync::Barrier::new(WRITERS + 1));
+
+    let stale_ack = {
+        let ack = Arc::clone(&last_ack);
+        let start = Arc::clone(&start);
+        let done = Arc::clone(&done);
+        thread::spawn(move || {
+            let stale_seq = ack.load(Ordering::Acquire);
+            start.wait();
+            done.wait();
+            ack_processed(&ack, stale_seq);
+        })
+    };
+
+    let mut handles = Vec::new();
+    for _ in 0..WRITERS {
+        let ack = Arc::clone(&last_ack);
+        let next_seq = Arc::clone(&next_seq);
+        let start = Arc::clone(&start);
+        let done = Arc::clone(&done);
+        handles.push(thread::spawn(move || {
+            start.wait();
+            for _ in 0..PER_WRITER {
+                let seq = next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                ack_processed(&ack, seq);
+            }
+            done.wait();
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("ack writer thread panicked");
+    }
+    stale_ack.join().expect("stale ack writer thread panicked");
+
+    assert_eq!(
+        last_ack.load(Ordering::Acquire),
+        total,
+        "every resolved sequence must be acknowledged exactly once"
+    );
+
+    ack_processed(&last_ack, 1);
+    assert_eq!(
+        last_ack.load(Ordering::Acquire),
+        total,
+        "an older absolute ack must never lower the monotonic watermark"
+    );
+}

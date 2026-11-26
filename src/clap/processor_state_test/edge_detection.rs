@@ -17,6 +17,7 @@ fn test_model_load_failed_edge_detection() {
     };
 
     let raw_ptr = plugin_instance.plugin_handle().as_raw_ptr();
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let main_thread_ptr = unsafe {
         clack_plugin::extensions::wrapper::PluginWrapper::<crate::clap::NamClapPlugin>::handle(
             raw_ptr,
@@ -24,6 +25,7 @@ fn test_model_load_failed_edge_detection() {
         )
         .unwrap()
     };
+    // SAFETY: the main-thread pointer is obtained from the live plugin instance's wrapper; the instance outlives this borrow, the main thread is accessed through `&self` with interior mutability, and no `&mut` to it is alive.
     let mt = unsafe { &*main_thread_ptr };
 
     let stopped_processor = plugin_instance.activate(|_, _| (), audio_config).unwrap();
